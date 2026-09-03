@@ -190,8 +190,8 @@ fn test_run_window_finer_than_partition_grid_rejected_for_daily_revenue() {
     let err = smelt_cli::temporal::validate_run_window_against_partition_grid(
         DAILY_REVENUE_SQL,
         &ts,
-        start,
-        end,
+        smelt_runtime::windowing::PartitionPoint::Date(start),
+        smelt_runtime::windowing::PartitionPoint::Date(end),
     )
     .expect_err("hourly run window against day-partitioned revenue_date must be rejected");
     assert!(
@@ -218,8 +218,8 @@ fn test_run_window_ge_partition_grid_passes_for_daily_revenue() {
     smelt_cli::temporal::validate_run_window_against_partition_grid(
         DAILY_REVENUE_SQL,
         &ts,
-        start,
-        end,
+        smelt_runtime::windowing::PartitionPoint::Date(start),
+        smelt_runtime::windowing::PartitionPoint::Date(end),
     )
     .expect("Day run granularity should satisfy g_run >= g_part (Day) for revenue_date");
 }

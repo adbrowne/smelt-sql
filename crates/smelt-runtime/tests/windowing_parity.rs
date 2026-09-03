@@ -7,7 +7,8 @@
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 use smelt_runtime::windowing::{
-    compute_incremental_windows, compute_incremental_windows_ordered, validate_run_window_alignment,
+    compute_incremental_windows, compute_incremental_windows_ordered,
+    validate_run_window_alignment, PartitionAxis,
 };
 use smelt_runtime::TimeRange;
 use std::collections::HashMap;
@@ -58,9 +59,18 @@ fn test_multi_source_bound_aware_windows() {
     let range = make_range("2026-03-20", "2026-03-22");
 
     // data_latency_days=2; SQL has 3-period lookback; sum=5
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 2, &range, None, false)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        2,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .unwrap();
 
     // FullyBatchSafe batch (bounded 3-day context → ~9–90 day chunks → one batch for 2-day range)
     assert!(!windows.batches.is_empty(), "expected at least one batch");
@@ -84,9 +94,18 @@ fn test_lookback_widens_filter_window() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 3, &range, None, false)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        3,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .unwrap();
 
     assert!(!windows.batches.is_empty(), "expected at least one batch");
     let b = &windows.batches[0];
@@ -113,9 +132,18 @@ fn test_per_partition_override() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        true,
+    )
+    .unwrap();
 
     // 2 days → 2 per-day batches
     assert_eq!(windows.batches.len(), 2, "expected 2 per-day batches");
@@ -146,6 +174,7 @@ fn test_batch_size_days_override() {
         &no_dep_timeseries(),
         0,
         &range,
+        PartitionAxis::Calendar,
         Some(2),
         false,
     )
@@ -220,9 +249,18 @@ fn test_per_partition_monthly_calendar_aligned() {
     // 24 months: 2025-01-01 to 2027-01-01
     let range = make_range("2025-01-01", "2027-01-01");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        true,
+    )
+    .unwrap();
 
     // Must be exactly 24 batches
     assert_eq!(
@@ -234,16 +272,22 @@ fn test_per_partition_monthly_calendar_aligned() {
 
     // Every batch must start and end on the 1st of a month (true calendar alignment)
     use chrono::Datelike;
+    fn as_date(p: smelt_runtime::windowing::PartitionPoint) -> chrono::NaiveDate {
+        match p {
+            smelt_runtime::windowing::PartitionPoint::Date(d) => d,
+            other => panic!("expected a calendar PartitionPoint, got {other:?}"),
+        }
+    }
     for (i, b) in windows.batches.iter().enumerate() {
         assert_eq!(
-            b.partition_start.day(),
+            as_date(b.partition_start).day(),
             1,
             "batch {} start {} is not the 1st of a month",
             i,
             b.partition_start
         );
         assert_eq!(
-            b.partition_end.day(),
+            as_date(b.partition_end).day(),
             1,
             "batch {} end {} is not the 1st of a month",
             i,
@@ -266,11 +310,15 @@ fn test_per_partition_monthly_calendar_aligned() {
     use chrono::NaiveDate;
     assert_eq!(
         windows.batches[0].partition_start,
-        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+        )
     );
     assert_eq!(
         windows.batches[23].partition_end,
-        NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+        )
     );
 }
 
@@ -283,37 +331,58 @@ fn test_per_partition_monthly_feb_boundary() {
     // Jan-Mar 2024 (Feb has 29 days — leap year)
     let range = make_range("2024-01-01", "2024-04-01");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        true,
+    )
+    .unwrap();
 
     assert_eq!(windows.batches.len(), 3);
     use chrono::NaiveDate;
     assert_eq!(
         windows.batches[0].partition_start,
-        NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        )
     );
     assert_eq!(
         windows.batches[0].partition_end,
-        NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()
+        )
     );
     // Feb 1 → Mar 1 (29 days in a leap year)
     assert_eq!(
         windows.batches[1].partition_start,
-        NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()
+        )
     );
     assert_eq!(
         windows.batches[1].partition_end,
-        NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()
+        )
     );
     // Mar 1 → Apr 1 (31 days)
     assert_eq!(
         windows.batches[2].partition_start,
-        NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()
+        )
     );
     assert_eq!(
         windows.batches[2].partition_end,
-        NaiveDate::from_ymd_opt(2024, 4, 1).unwrap()
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 4, 1).unwrap()
+        )
     );
 }
 
@@ -326,9 +395,18 @@ fn test_per_partition_quarterly_calendar_aligned() {
     // 4 quarters: 2025-01-01 to 2026-01-01
     let range = make_range("2025-01-01", "2026-01-01");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        true,
+    )
+    .unwrap();
 
     assert_eq!(
         windows.batches.len(),
@@ -339,16 +417,32 @@ fn test_per_partition_quarterly_calendar_aligned() {
 
     use chrono::NaiveDate;
     let expected_starts = [
-        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2025, 10, 1).unwrap(),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 10, 1).unwrap(),
+        ),
     ];
     let expected_ends = [
-        NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2025, 10, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 10, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        ),
     ];
     for (i, b) in windows.batches.iter().enumerate() {
         assert_eq!(b.partition_start, expected_starts[i], "batch {} start", i);
@@ -365,9 +459,18 @@ fn test_per_partition_yearly_calendar_aligned() {
     // 3 years: 2023-01-01 to 2026-01-01
     let range = make_range("2023-01-01", "2026-01-01");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        true,
+    )
+    .unwrap();
 
     assert_eq!(
         windows.batches.len(),
@@ -378,14 +481,26 @@ fn test_per_partition_yearly_calendar_aligned() {
 
     use chrono::NaiveDate;
     let expected_starts = [
-        NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+        ),
     ];
     let expected_ends = [
-        NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+        ),
+        smelt_runtime::windowing::PartitionPoint::Date(
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        ),
     ];
     for (i, b) in windows.batches.iter().enumerate() {
         assert_eq!(b.partition_start, expected_starts[i], "batch {} start", i);
@@ -409,6 +524,7 @@ fn test_per_partition_daily_and_weekly_unchanged() {
         &no_dep_timeseries(),
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         true,
     )
@@ -425,6 +541,7 @@ fn test_per_partition_daily_and_weekly_unchanged() {
         &no_dep_timeseries(),
         0,
         &range_w,
+        PartitionAxis::Calendar,
         None,
         true,
     )
@@ -444,9 +561,18 @@ fn test_wide_single_batch_warns() {
     // 90 days > 30-period threshold
     let range = make_range("2026-01-01", "2026-04-01");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, false)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .unwrap();
 
     // FullyBatchSafe → single batch
     assert_eq!(
@@ -474,9 +600,18 @@ fn test_narrow_single_batch_no_warn() {
     let inc = make_inc();
     let range = make_range("2026-01-01", "2026-01-08"); // 7 days
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, false)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .unwrap();
 
     assert!(
         windows.wide_batch_warning.is_none(),
@@ -493,9 +628,18 @@ fn test_per_partition_no_wide_batch_warn() {
     let inc = make_inc();
     let range = make_range("2026-01-01", "2026-04-01"); // 90 days
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        true,
+    )
+    .unwrap();
 
     assert!(
         windows.wide_batch_warning.is_none(),
@@ -519,6 +663,7 @@ fn test_batch_size_override_no_wide_batch_warn() {
         &no_dep_timeseries(),
         0,
         &range,
+        PartitionAxis::Calendar,
         Some(30),
         false,
     )
@@ -541,9 +686,18 @@ fn test_no_lookback_no_widening() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, false)
-            .unwrap();
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .unwrap();
 
     let b = &windows.batches[0];
     assert_eq!(
@@ -586,8 +740,18 @@ fn test_fully_batch_safe_single_pair_for_60_day_range() {
     let range = make_range("2026-01-01", "2026-03-02"); // 60 days
     let deps = one_source_dep("silver.events", "d");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false)
-        .expect("FullyBatchSafe model should not be refused");
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &deps,
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .expect("FullyBatchSafe model should not be refused");
 
     assert_eq!(
         windows.batches.len(),
@@ -611,8 +775,18 @@ fn test_bounded_safe_yields_subranges_clamped_to_its_own_max_chunk_days() {
     let range = make_range("2026-01-01", "2026-04-11"); // 100 days
     let deps = one_source_dep("silver.events", "d");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false)
-        .expect("BoundedSafe model should not be refused");
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &deps,
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .expect("BoundedSafe model should not be refused");
 
     assert!(
         windows.batches.len() > 1,
@@ -620,7 +794,7 @@ fn test_bounded_safe_yields_subranges_clamped_to_its_own_max_chunk_days() {
         windows.batches.len()
     );
     for b in &windows.batches {
-        let span_days = (b.partition_end - b.partition_start).num_days();
+        let span_days = b.partition_start.units_between(&b.partition_end);
         assert!(
             span_days <= 30,
             "each BoundedSafe sub-range must be clamped to its own max_chunk_days (30), got {span_days}"
@@ -647,8 +821,18 @@ fn test_per_partition_only_yields_one_partition_per_iteration() {
     let range = make_range("2026-01-01", "2026-01-06"); // 5 days
     let deps = one_source_dep("silver.events", "d");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false)
-        .expect("PerPartitionOnly model should not be refused");
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &deps,
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .expect("PerPartitionOnly model should not be refused");
 
     assert_eq!(
         windows.batches.len(),
@@ -656,7 +840,7 @@ fn test_per_partition_only_yields_one_partition_per_iteration() {
         "PerPartitionOnly should yield one partition per iteration (5 daily batches)"
     );
     for (i, b) in windows.batches.iter().enumerate() {
-        let span_days = (b.partition_end - b.partition_start).num_days();
+        let span_days = b.partition_start.units_between(&b.partition_end);
         assert_eq!(
             span_days, 1,
             "batch {i} should be exactly one partition wide"
@@ -676,7 +860,17 @@ fn test_not_derivable_source_bound_is_a_hard_refusal_not_an_approximate_chunk() 
     let range = make_range("2026-01-01", "2026-03-02");
     let deps = one_source_dep("silver.events", "d");
 
-    let result = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false);
+    let result = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &deps,
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    );
 
     let err = result.expect_err("a NotDerivable source bound must refuse, not chunk");
     assert!(
@@ -704,8 +898,18 @@ fn test_not_derivable_is_not_masked_by_per_partition_or_batch_size_override() {
     let range = make_range("2026-01-01", "2026-01-06");
     let deps = one_source_dep("silver.events", "d");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, true)
-        .expect("per_partition=true bypasses batch-safety derivation entirely");
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &deps,
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        true,
+    )
+    .expect("per_partition=true bypasses batch-safety derivation entirely");
     assert_eq!(windows.batches.len(), 5);
 }
 
@@ -744,6 +948,7 @@ fn test_no_self_edge_is_unaffected_keeps_batch_safety_auto_chunking() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )
@@ -782,6 +987,7 @@ fn test_convergent_self_edge_is_ordered_forces_strictly_sequential_single_partit
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false, // no explicit per_partition override — Ordered must force it anyway
     )
@@ -825,6 +1031,7 @@ fn test_ordered_forces_single_partition_even_with_explicit_batch_size_override()
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         Some(5), // explicit override asking for the whole range in one batch
         false,
     )
@@ -859,6 +1066,7 @@ fn test_non_convergent_self_edge_refuses_fail_closed_naming_the_model() {
         &no_dep_timeseries(),
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )

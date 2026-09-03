@@ -42,7 +42,7 @@ use smelt_maintenance_testkit::link_c_harness::SqlCapturingReporter;
 use smelt_runtime::execute::{BackendFactory, BackendFuture};
 use smelt_runtime::execute_project;
 use smelt_runtime::types::ExecuteRequest;
-use smelt_runtime::windowing::compute_incremental_windows;
+use smelt_runtime::windowing::{compute_incremental_windows, PartitionAxis, PartitionPoint};
 use smelt_runtime::TimeRange;
 use tokio_util::sync::CancellationToken;
 
@@ -893,20 +893,29 @@ fn identity_model_windows_unchanged() {
         end: "2026-04-12".to_string(),
     };
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &Default::default(), 0, &range, None, false)
-            .expect("identity model must not be refused");
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &Default::default(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .expect("identity model must not be refused");
 
     assert_eq!(windows.batches.len(), 1, "expected a single batch");
     let b = &windows.batches[0];
     assert_eq!(
         b.partition_start,
-        NaiveDate::parse_from_str("2026-04-10", "%Y-%m-%d").unwrap(),
+        PartitionPoint::Date(NaiveDate::parse_from_str("2026-04-10", "%Y-%m-%d").unwrap()),
         "identity model's DELETE/clamp range must start at the run window verbatim"
     );
     assert_eq!(
         b.partition_end,
-        NaiveDate::parse_from_str("2026-04-12", "%Y-%m-%d").unwrap(),
+        PartitionPoint::Date(NaiveDate::parse_from_str("2026-04-12", "%Y-%m-%d").unwrap()),
         "identity model's DELETE/clamp range must end at the run window verbatim"
     );
 }

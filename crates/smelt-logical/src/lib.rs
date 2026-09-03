@@ -15,6 +15,7 @@ pub use analysis::monotonicity::{
     Offset,
 };
 pub use analysis::output_delta::{derive_output_delta, OutputDelta, OutputDeltaFacts};
+pub use analysis::partition_axis::{partition_axis_for_type, PartitionAxis};
 pub use analysis::source_bounds::{BoundContext, BoundResult, InjectionPoint, Seconds};
 pub use analysis::temporal::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days,

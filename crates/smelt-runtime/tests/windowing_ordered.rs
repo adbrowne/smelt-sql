@@ -22,7 +22,7 @@
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 use smelt_logical::analysis::source_bounds::{Seconds, Skew};
-use smelt_runtime::windowing::compute_incremental_windows_ordered;
+use smelt_runtime::windowing::{compute_incremental_windows_ordered, PartitionAxis};
 use smelt_runtime::TimeRange;
 use std::collections::HashMap;
 
@@ -108,6 +108,7 @@ fn test_ordered_self_edge_alone_is_never_a_skew_anchor() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )
@@ -149,6 +150,7 @@ fn test_ordered_genuine_form_b_relation_still_derives_skew() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )
@@ -180,7 +182,7 @@ fn test_ordered_genuine_form_b_relation_still_derives_skew() {
         "rebase must reach one day later than the requested end"
     );
     for batch in &windows.batches {
-        let span_days = (batch.partition_end - batch.partition_start).num_days();
+        let span_days = batch.partition_start.units_between(&batch.partition_end);
         assert_eq!(
             span_days, 1,
             "Ordered must still force single-partition batches over the rebased range"
@@ -225,6 +227,7 @@ fn test_ordered_alias_reuse_in_subquery_keeps_the_genuine_relation() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )
@@ -279,6 +282,7 @@ fn same_partition_self_read_is_not_eligible_for_batched_execution() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )

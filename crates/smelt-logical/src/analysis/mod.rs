@@ -16,6 +16,7 @@ pub mod model_diff;
 pub mod monotonicity;
 pub mod not_null;
 pub mod output_delta;
+pub mod partition_axis;
 pub mod presentation;
 pub mod skeleton_closure;
 pub mod source_bounds;

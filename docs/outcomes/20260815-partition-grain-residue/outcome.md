@@ -71,7 +71,7 @@ fixture.
 | 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | done |
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | done |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | done |
-| 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | planned |
+| 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | done |
 | 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | pending |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
@@ -194,6 +194,24 @@ fixture.
   which makes chunk shape depend on live data. Day-typed widening inputs
   (`data_latency`, seconds-domain lookback/skew) have no conversion into the unit
   grid and are refused fail-closed rather than coerced.
+- 2026-09-04 — Phase 5a implemented: `PartitionAxis`/`PartitionPoint` land in
+  `smelt-logical`/`smelt-runtime::windowing`; `compute_incremental_windows{,_ordered}`
+  take an axis and dispatch to a calendar branch (byte-identical to before) or a new
+  unit-step integer branch with a fail-closed day-typed-widening refusal;
+  `execute.rs` resolves each selected model's `partition_column` type via the same
+  `resolved_model_schema` read `UpstreamSchemas::from_database` already performs,
+  falling back to the axis implied by the run-window literal's form when the type is
+  unresolvable. All standing gates (`statement_parity`, `rebuild_dry_run`,
+  `maintenance_conformance`) stay green — calendar-axis output is unchanged.
+  `probe_integer_partition_column_run` stays red as designed, but did **not** move
+  off the DELETE-literal `INT32` error: the probe fixture's `batch_id` column
+  resolves to `Unknown(Dynamic)` through `resolved_model_schema` (a `VALUES`-literal
+  column threaded through one `smelt.ref()` hop with no metadata sidecar), so axis
+  resolution falls back to the literal-implied axis, which happens to read as
+  `Calendar` for the probe's `2026-01-01`-shaped bound. Verified the mechanism
+  itself is correct by adding an explicit `CAST(... AS INTEGER)` to the fixture,
+  which does trigger the intended fail-loud refusal
+  (`docs/outcomes/20260815-partition-grain-residue/phases/05a-summary.md`).
 
 ## Blocked
 

@@ -120,6 +120,7 @@ A `grain: key` model (the shape profile detailed in `incremental_shapes.md` §"T
 6. **`week_start` requires `granularity: week` and must be `monday` or `sunday`.** Setting `week_start` on any other granularity, or setting it to a weekday other than `monday` or `sunday`, is `MalformedTimeseries`.
 7. **Partition / pruning columns must be NOT NULL.** `partition_column` must be NOT NULL on the model's output (or declared `nullable: false` on the source's columns). When `event_time_column` drives pruning (it differs from `partition_column` and is the column a downstream rule filters on), it must be NOT NULL too. A NULL partition value silently escapes the half-open `>= start AND < end` pruning window — it is never deleted or re-inserted — which is a correctness hole for incremental execution. A nullable partition/pruning column is `MalformedTimeseries`.
 8. **Sub-day granularity requires a timestamp-resolution partition type.** When `granularity` is `hour` (a sub-day unit), `partition_column` must be a timestamp-resolution type (timestamp or timestamp-with-timezone), not a plain `date` — a `DATE` cannot represent hour boundaries, so hour-granularity pruning against a `DATE` partition silently coarsens to whole days. A sub-day granularity paired with a `date` (or otherwise day-resolution) partition type is `MalformedTimeseries`.
+9. **Partition axis domain.** `partition_column`'s resolved type places the partition axis in one of two domains: **calendar** when the type is date or timestamp, and a **unit-step integer grid** when the type is an integer type (one partition is one integer value). `granularity` keeps its role as the declared propagation grain (grain alignment, graph edges) on both axes; on an integer axis it is not the chunking step — the chunking step is one partition unit (see "Granularity arithmetic" below and `incremental_shapes.md` §"The partition grain").
 
 ### LSP surface
 
@@ -129,9 +130,11 @@ A `grain: key` model (the shape profile detailed in `incremental_shapes.md` §"T
 
 ### Granularity arithmetic
 
-A run window `[start, end)` is aligned to `granularity` boundaries: `end - start` must be a positive integer multiple of `granularity`, and both `start` and `end` must fall on `granularity` unit boundaries. Partial-unit windows are rejected. The CLI and any planner rule that consumes a run window enforces this rule.
+This section describes the calendar axis (validation rule 9, "Partition axis domain"). A run window `[start, end)` is aligned to `granularity` boundaries: `end - start` must be a positive integer multiple of `granularity`, and both `start` and `end` must fall on `granularity` unit boundaries. Partial-unit windows are rejected. The CLI and any planner rule that consumes a run window enforces this rule.
 
 For `granularity: week`, the boundary depends on `week_start`. Default Monday.
+
+On an integer axis, granularity-boundary alignment does not apply — the only run-window requirement is a positive span (`end > start`); there is no boundary or multiple-of-`granularity` check, since a unit-step integer grid has no calendar boundaries to align to.
 
 ## Design
 

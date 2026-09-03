@@ -13,6 +13,7 @@
 //! `docs/specs/incremental_shapes.md` §"Run window vs partition granularity".
 
 use std::collections::HashMap;
+use std::fmt;
 
 use chrono::{Datelike, Duration, NaiveDate};
 
@@ -21,6 +22,7 @@ use smelt_core::{Granularity, PartitionGrainConfig};
 use smelt_logical::analysis::source_bounds::{Seconds, Skew};
 use smelt_logical::analysis::walk::{model_partition_skew, model_partition_skew_excluding_self};
 use smelt_logical::analysis::window_independence::{window_independence, WindowIndependence};
+pub use smelt_logical::PartitionAxis;
 use smelt_planner::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days, BatchSafety,
 };
@@ -30,18 +32,132 @@ pub use smelt_planner::EffectiveWindow;
 use crate::compile::batch_safety_for_model;
 use crate::transformer::TimeRange;
 
+/// A single point on a partition axis (`docs/specs/timeseries.md` §Semantics
+/// "Partition axis domain") — either a calendar date or a bare integer on a
+/// unit-step integer grid. Every [`IncrementalBatch`] bound is one of these;
+/// which variant appears is fixed by the model's resolved `partition_column`
+/// type, never mixed within one batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PartitionPoint {
+    /// A calendar date. `Display` renders exactly `%Y-%m-%d` — byte-identical
+    /// to the pre-axis-typing behavior, so calendar-axis output is unchanged.
+    Date(NaiveDate),
+    /// A bare integer on a unit-step integer grid.
+    Integer(i64),
+}
+
+impl fmt::Display for PartitionPoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PartitionPoint::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
+            PartitionPoint::Integer(i) => write!(f, "{i}"),
+        }
+    }
+}
+
+impl PartitionPoint {
+    /// This point's axis.
+    pub fn axis(&self) -> PartitionAxis {
+        match self {
+            PartitionPoint::Date(_) => PartitionAxis::Calendar,
+            PartitionPoint::Integer(_) => PartitionAxis::Integer,
+        }
+    }
+
+    /// Render as a SQL literal in this point's domain — quoted for a
+    /// calendar date, bare for an integer. No call site consumes this yet
+    /// this phase (emission is a later phase's work); it exists so that
+    /// later wiring has a single owned rendering to call rather than
+    /// re-deriving quoting rules at the call site.
+    pub fn sql_literal(&self) -> String {
+        match self {
+            PartitionPoint::Date(d) => format!("'{}'", d.format("%Y-%m-%d")),
+            PartitionPoint::Integer(i) => i.to_string(),
+        }
+    }
+
+    /// Parse a run-window bound string in the given axis. `Err` (fail-closed)
+    /// when the string's form contradicts the axis — a calendar-shaped
+    /// string on an integer axis, or vice versa — rather than a silent
+    /// coercion between domains (`docs/specs/incremental_shapes.md`
+    /// §"The partition grain" rule 8a).
+    pub fn parse_in_axis(s: &str, axis: PartitionAxis) -> Result<PartitionPoint, String> {
+        match axis {
+            PartitionAxis::Calendar => NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(PartitionPoint::Date)
+                .map_err(|_| {
+                    format!(
+                        "expected a calendar date (YYYY-MM-DD) for a calendar-axis partition \
+                         column, got '{s}'"
+                    )
+                }),
+            PartitionAxis::Integer => s.parse::<i64>().map(PartitionPoint::Integer).map_err(|_| {
+                format!("expected a bare integer for a unit-step integer partition axis, got '{s}'")
+            }),
+        }
+    }
+
+    /// Advance to the start of the next partition, one unit-step. On the
+    /// calendar axis this is [`calendar_next_partition_start`] (a true
+    /// calendar step for Month/Quarter/Year, fixed-day for Day/Week/Hour);
+    /// `granularity` is not consulted on the integer axis — the step is
+    /// always exactly one unit (`docs/specs/timeseries.md` §"Validation
+    /// rules" rule 9).
+    pub fn next_partition_start(&self, granularity: &Granularity) -> PartitionPoint {
+        match self {
+            PartitionPoint::Date(d) => {
+                PartitionPoint::Date(calendar_next_partition_start(*d, granularity))
+            }
+            PartitionPoint::Integer(i) => PartitionPoint::Integer(i + 1),
+        }
+    }
+
+    /// Advance by `units` partition steps (days for the calendar axis,
+    /// integer units for the integer axis).
+    pub fn advance_units(&self, units: i64) -> PartitionPoint {
+        match self {
+            PartitionPoint::Date(d) => PartitionPoint::Date(*d + Duration::days(units)),
+            PartitionPoint::Integer(i) => PartitionPoint::Integer(i + units),
+        }
+    }
+
+    /// The number of partition units between `self` and `other`
+    /// (`other - self`; days for the calendar axis, integer difference for
+    /// the integer axis). Mismatched variants are unreachable once the axis
+    /// is threaded correctly from [`compute_incremental_windows`] — this is
+    /// an internal invariant, not a user-facing error path, so it
+    /// `debug_assert`s rather than returning `Result`.
+    pub fn units_between(&self, other: &PartitionPoint) -> i64 {
+        match (self, other) {
+            (PartitionPoint::Date(a), PartitionPoint::Date(b)) => (*b - *a).num_days(),
+            (PartitionPoint::Integer(a), PartitionPoint::Integer(b)) => b - a,
+            _ => {
+                debug_assert!(
+                    false,
+                    "PartitionPoint::units_between called across mismatched axes \
+                     ({self:?}, {other:?}) — unreachable once the axis is threaded \
+                     correctly from compute_incremental_windows"
+                );
+                0
+            }
+        }
+    }
+}
+
 /// One batch in an incremental run.
 ///
 /// `partition_start/end` is the unwidened batch window — used for manifest
 /// recording. `filter_start/end` is widened by the effective lookback/lookahead —
 /// used for both the time-filter WHERE clause and the DELETE partition range
-/// (DELETE must cover exactly what the INSERT writes).
+/// (DELETE must cover exactly what the INSERT writes). All four fields share
+/// one [`PartitionPoint`] variant per batch — the model's resolved
+/// `partition_column` axis, never mixed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncrementalBatch {
-    pub partition_start: NaiveDate,
-    pub partition_end: NaiveDate,
-    pub filter_start: NaiveDate,
-    pub filter_end: NaiveDate,
+    pub partition_start: PartitionPoint,
+    pub partition_end: PartitionPoint,
+    pub filter_start: PartitionPoint,
+    pub filter_end: PartitionPoint,
 }
 
 /// The full set of incremental batches for a run, plus the effective temporal window.
@@ -120,6 +236,7 @@ pub fn compute_incremental_windows(
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,
     full_range: &TimeRange,
+    axis: PartitionAxis,
     batch_size_days: Option<u32>,
     per_partition: bool,
 ) -> Result<IncrementalWindows, String> {
@@ -130,6 +247,7 @@ pub fn compute_incremental_windows(
         dep_timeseries,
         data_latency_days,
         full_range,
+        axis,
         batch_size_days,
         per_partition,
         None,
@@ -158,6 +276,46 @@ pub fn compute_incremental_windows(
 fn compute_incremental_windows_impl(
     timeseries: &TimeseriesConfig,
     _inc_config: &PartitionGrainConfig,
+    sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+    data_latency_days: u32,
+    full_range: &TimeRange,
+    axis: PartitionAxis,
+    batch_size_days: Option<u32>,
+    per_partition: bool,
+    skew_override: Option<Skew>,
+) -> Result<IncrementalWindows, String> {
+    match axis {
+        PartitionAxis::Calendar => compute_calendar_windows(
+            timeseries,
+            sql,
+            dep_timeseries,
+            data_latency_days,
+            full_range,
+            batch_size_days,
+            per_partition,
+            skew_override,
+        ),
+        PartitionAxis::Integer => compute_integer_windows(
+            timeseries,
+            sql,
+            dep_timeseries,
+            data_latency_days,
+            full_range,
+            batch_size_days,
+            per_partition,
+            skew_override,
+        ),
+    }
+}
+
+/// The calendar-axis branch of [`compute_incremental_windows_impl`] — the
+/// original `chrono::NaiveDate`-based chunker, unchanged in behavior (byte-
+/// identical DELETE/scan literals for every existing calendar-axis model;
+/// the standing `statement_parity`/`rebuild_dry_run` gates check this).
+#[allow(clippy::too_many_arguments)]
+fn compute_calendar_windows(
+    timeseries: &TimeseriesConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,
@@ -203,7 +361,12 @@ fn compute_incremental_windows_impl(
     // `g_run >= g_part` against the partition column's own derived grid unit.
     // Must run before any batching/widening below — a misaligned or
     // sub-`g_part` window is refused outright, never silently coarsened.
-    validate_run_window_against_partition_grid(sql, timeseries, start_date, end_date)?;
+    validate_run_window_against_partition_grid(
+        sql,
+        timeseries,
+        PartitionPoint::Date(start_date),
+        PartitionPoint::Date(end_date),
+    )?;
 
     // Analyze temporal dependencies to compute effective window.
     let stripped = smelt_parser::strip_frontmatter(sql);
@@ -310,10 +473,173 @@ fn compute_incremental_windows_impl(
         let filter_start = batch_start - Duration::days(filter_lookback as i64);
         let filter_end = batch_end + Duration::days(filter_lookahead as i64);
         batches.push(IncrementalBatch {
-            partition_start: batch_start,
-            partition_end: batch_end,
-            filter_start,
-            filter_end,
+            partition_start: PartitionPoint::Date(batch_start),
+            partition_end: PartitionPoint::Date(batch_end),
+            filter_start: PartitionPoint::Date(filter_start),
+            filter_end: PartitionPoint::Date(filter_end),
+        });
+        batch_start = batch_end;
+    }
+
+    Ok(IncrementalWindows {
+        batches,
+        effective_window,
+        wide_batch_warning,
+        skew,
+    })
+}
+
+/// The integer-axis branch of [`compute_incremental_windows_impl`] — a unit-
+/// step integer grid (`docs/specs/timeseries.md` §"Validation rules" rule 9,
+/// `docs/specs/incremental_shapes.md` §"The partition grain" rule 8a). One
+/// partition is one integer value; the chunk step is one unit (or
+/// `--batch-size N` units), never `timeseries.granularity` (that stays the
+/// declared propagation grain only). Day-typed widening inputs — a nonzero
+/// `data_latency_days`, a nonzero SQL-inferred lookback/lookahead, or a
+/// nonzero derived partition-column skew — have no conversion into integer
+/// units and are refused fail-closed (`Err`) rather than silently zeroed or
+/// coerced 1:1 into "N units".
+#[allow(clippy::too_many_arguments)]
+fn compute_integer_windows(
+    timeseries: &TimeseriesConfig,
+    sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+    data_latency_days: u32,
+    full_range: &TimeRange,
+    batch_size_days: Option<u32>,
+    per_partition: bool,
+    skew_override: Option<Skew>,
+) -> Result<IncrementalWindows, String> {
+    let start_i = match full_range.start.parse::<i64>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(IncrementalWindows {
+                batches: vec![],
+                effective_window: zero_effective_window(),
+                wide_batch_warning: None,
+                skew: Skew::ZERO,
+            })
+        }
+    };
+    let end_i = match full_range.end.parse::<i64>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(IncrementalWindows {
+                batches: vec![],
+                effective_window: zero_effective_window(),
+                wide_batch_warning: None,
+                skew: Skew::ZERO,
+            })
+        }
+    };
+
+    if start_i >= end_i {
+        return Ok(IncrementalWindows {
+            batches: vec![],
+            effective_window: zero_effective_window(),
+            wide_batch_warning: None,
+            skew: Skew::ZERO,
+        });
+    }
+
+    // The only run-window validity requirement on an integer axis is a
+    // positive span — no granularity-boundary alignment, no `g_run >=
+    // g_part` comparison (`derive_partition_grid_unit` is a calendar-only
+    // concept and is not consulted here).
+    validate_run_window_against_partition_grid(
+        sql,
+        timeseries,
+        PartitionPoint::Integer(start_i),
+        PartitionPoint::Integer(end_i),
+    )?;
+
+    let stripped = smelt_parser::strip_frontmatter(sql);
+    let temporal_dep = analyze_temporal_dependencies(&stripped);
+    // `period_days` only scales a day-domain SQL-inferred bound into whole
+    // granularity periods — on an integer axis any nonzero result here is
+    // refused below regardless of scaling, so the calendar period constant
+    // is fine to reuse as-is.
+    let period_days = granularity_period_days(&timeseries.granularity);
+    let effective_window = compute_effective_window(&temporal_dep, data_latency_days, period_days);
+
+    let skew = skew_override
+        .unwrap_or_else(|| model_partition_skew(&stripped, &timeseries.partition_column));
+
+    // Fail-closed day-typed-widening refusal (`docs/specs/incremental_shapes.md`
+    // §"The partition grain" rule 8a) — never coerced 1:1 into "N units".
+    if data_latency_days != 0 {
+        return Err(format!(
+            "partition column '{}' resolves to an integer partition axis, but a nonzero \
+             data_latency ({data_latency_days} day(s)) is declared on the event-time column; \
+             day-typed widening has no conversion into an integer axis and is refused rather \
+             than coerced into partition units",
+            timeseries.partition_column,
+        ));
+    }
+    if !effective_window.is_unbounded
+        && (effective_window.lookback_days != 0 || effective_window.lookahead_days != 0)
+    {
+        return Err(format!(
+            "partition column '{}' resolves to an integer partition axis, but the model's SQL \
+             implies a nonzero seconds/day-domain lookback or lookahead ({} lookback day(s), \
+             {} lookahead day(s)); day-typed widening has no conversion into an integer axis \
+             and is refused rather than coerced into partition units",
+            timeseries.partition_column,
+            effective_window.lookback_days,
+            effective_window.lookahead_days,
+        ));
+    }
+    if skew.before.0 != 0 || skew.after.0 != 0 {
+        return Err(format!(
+            "partition column '{}' resolves to an integer partition axis, but the model \
+             declares a nonzero partition-column skew (before={}s, after={}s); day-typed \
+             widening has no conversion into an integer axis and is refused rather than \
+             coerced into partition units",
+            timeseries.partition_column, skew.before.0, skew.after.0,
+        ));
+    }
+
+    let mut wide_batch_warning: Option<String> = None;
+
+    let batch_units: i64 = if per_partition {
+        1
+    } else if let Some(override_units) = batch_size_days {
+        override_units.max(1) as i64
+    } else {
+        // Mirrors the calendar branch's batch-safety-derived chunk sizing —
+        // `n` is rendered in the partition column's own unit
+        // (`docs/specs/incremental_shapes.md` §"Batch safety classification"),
+        // which on this axis is already "partition units", no conversion
+        // needed.
+        let safety = batch_safety_for_model(&stripped, dep_timeseries)?;
+        match &safety {
+            BatchSafety::FullyBatchSafe => {
+                let total_units = end_i - start_i;
+                if total_units > WIDE_BATCH_PERIOD_THRESHOLD as i64 {
+                    wide_batch_warning = Some(format!(
+                        "model spans {} partition unit{} in a single batch; \
+                         consider `--per-partition` or `--batch-size` to reduce memory usage",
+                        total_units,
+                        if total_units == 1 { "" } else { "s" },
+                    ));
+                }
+                total_units
+            }
+            BatchSafety::BoundedSafe { max_chunk_days, .. } => *max_chunk_days as i64,
+            BatchSafety::PerPartitionOnly { .. } => 1,
+        }
+    }
+    .max(1);
+
+    let mut batches = Vec::new();
+    let mut batch_start = start_i;
+    while batch_start < end_i {
+        let batch_end = (batch_start + batch_units).min(end_i);
+        batches.push(IncrementalBatch {
+            partition_start: PartitionPoint::Integer(batch_start),
+            partition_end: PartitionPoint::Integer(batch_end),
+            filter_start: PartitionPoint::Integer(batch_start),
+            filter_end: PartitionPoint::Integer(batch_end),
         });
         batch_start = batch_end;
     }
@@ -361,6 +687,7 @@ pub fn compute_incremental_windows_ordered(
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,
     full_range: &TimeRange,
+    axis: PartitionAxis,
     batch_size_days: Option<u32>,
     per_partition: bool,
 ) -> Result<IncrementalWindows, String> {
@@ -408,10 +735,16 @@ pub fn compute_incremental_windows_ordered(
         dep_timeseries,
         data_latency_days,
         full_range,
+        axis,
         batch_size_days,
         forced_per_partition,
         skew_override,
     )
+    // Fail-loud refusals from the impl (domain mismatch, day-typed widening
+    // on an integer axis) name the offending column/input but not the
+    // model — add that context here, the one place in the windowing module
+    // that always has a model name to hand.
+    .map_err(|e| format!("model '{model_name}': {e}"))
 }
 
 /// Validate that a run window `[start, end)` is aligned to the model's granularity.
@@ -573,30 +906,62 @@ fn derive_partition_grid_unit(sql: &str, partition_column: &str) -> Option<Granu
 /// Called from [`compute_incremental_windows`] — the single real driver both
 /// `smelt-cli` and `smelt-ui` runs go through (`execute_project`) — so both
 /// consumers get this refusal for free.
+///
+/// Branches on the axis carried by `start`/`end` themselves — a
+/// [`PartitionPoint::Date`] pair runs the calendar-axis checks above
+/// unchanged; a [`PartitionPoint::Integer`] pair runs only the positive-span
+/// check (`docs/specs/timeseries.md` §"Validation rules" rule 9): no
+/// granularity-boundary alignment, and [`derive_partition_grid_unit`] (a
+/// calendar-only concept) is not consulted. A mismatched pair (one `Date`,
+/// one `Integer`) is unreachable in production — both call sites always
+/// parse both bounds through the same resolved axis — but is refused rather
+/// than panicking, naming both domains, as a defensive belt for a caller
+/// that constructs `PartitionPoint`s by hand (as the direct unit tests do).
 pub fn validate_run_window_against_partition_grid(
     sql: &str,
     timeseries: &TimeseriesConfig,
-    start: NaiveDate,
-    end: NaiveDate,
+    start: PartitionPoint,
+    end: PartitionPoint,
 ) -> Result<(), String> {
-    validate_run_window_alignment(start, end, &timeseries.granularity)?;
+    match (start, end) {
+        (PartitionPoint::Date(start), PartitionPoint::Date(end)) => {
+            validate_run_window_alignment(start, end, &timeseries.granularity)?;
 
-    let Some(g_part) = derive_partition_grid_unit(sql, &timeseries.partition_column) else {
-        return Ok(());
-    };
+            let Some(g_part) = derive_partition_grid_unit(sql, &timeseries.partition_column) else {
+                return Ok(());
+            };
 
-    if timeseries.granularity < g_part {
-        return Err(format!(
-            "run window granularity ({}) is finer than partition column '{}''s derived \
-             granularity ({}); the minimum run window for this model is one {}",
-            granularity_display(&timeseries.granularity),
+            if timeseries.granularity < g_part {
+                return Err(format!(
+                    "run window granularity ({}) is finer than partition column '{}''s derived \
+                     granularity ({}); the minimum run window for this model is one {}",
+                    granularity_display(&timeseries.granularity),
+                    timeseries.partition_column,
+                    granularity_display(&g_part),
+                    granularity_display(&g_part),
+                ));
+            }
+
+            Ok(())
+        }
+        (PartitionPoint::Integer(start), PartitionPoint::Integer(end)) => {
+            if end <= start {
+                return Err(format!(
+                    "Run window end ({end}) must be after start ({start})"
+                ));
+            }
+            Ok(())
+        }
+        (start, end) => Err(format!(
+            "run window bounds for partition column '{}' must both be in the same domain \
+             (a calendar date or a bare integer) — got {} ({:?}) and {} ({:?})",
             timeseries.partition_column,
-            granularity_display(&g_part),
-            granularity_display(&g_part),
-        ));
+            start,
+            start.axis(),
+            end,
+            end.axis(),
+        )),
     }
-
-    Ok(())
 }
 
 /// Advance `current` by exactly one partition step for the given granularity.

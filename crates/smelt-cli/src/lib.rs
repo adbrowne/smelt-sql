@@ -44,7 +44,8 @@ pub use smelt_runtime::{
 };
 pub use temporal::{
     compute_incremental_windows, validate_run_window_against_partition_grid,
-    validate_run_window_alignment, IncrementalBatch, IncrementalWindows,
+    validate_run_window_alignment, IncrementalBatch, IncrementalWindows, PartitionAxis,
+    PartitionPoint,
 };
 pub use test_compiler::{
     compile_whole_model_test_with_fns, extract_ctes, find_cte_ref_in_body,

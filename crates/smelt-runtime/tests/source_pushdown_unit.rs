@@ -12,7 +12,7 @@
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
-use smelt_runtime::windowing::compute_incremental_windows;
+use smelt_runtime::windowing::{compute_incremental_windows, PartitionAxis};
 use smelt_runtime::{build_source_bound_map, inject_source_filters, SourceBound, TimeRange};
 use std::collections::HashMap;
 
@@ -177,9 +177,18 @@ fn skewed_batch_scan_sized_from_output_window() {
         end: "2026-04-11".to_string(),
     };
 
-    let windows =
-        compute_incremental_windows(&ts, &inc, sql, &HashMap::new(), 0, &range, None, false)
-            .expect("sessions-shaped model must not be refused");
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &HashMap::new(),
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .expect("sessions-shaped model must not be refused");
 
     assert_eq!(windows.batches.len(), 1, "expected a single batch");
     let batch = &windows.batches[0];
@@ -199,8 +208,8 @@ fn skewed_batch_scan_sized_from_output_window() {
     // pushdown is the batch's own [partition_start, partition_end), the
     // output-window batch itself, never the original [D, D+1) run window.
     let run_range = TimeRange {
-        start: batch.partition_start.format("%Y-%m-%d").to_string(),
-        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+        start: batch.partition_start.to_string(),
+        end: batch.partition_end.to_string(),
     };
     let mut source_bounds: HashMap<String, SourceBound> = HashMap::new();
     source_bounds.insert(

@@ -1087,10 +1087,22 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
    columns are not equivalent (§"Per-partition equivalence").
 7. **Idempotence under fixed input:** re-running the same run window on unchanged sources
    converges to the same output state.
-8. **Granularity is closed under partition arithmetic.** Run windows align to whole granularity
-   units; the declared granularity must be at least as coarse as the derived partition grid
-   (`g_run >= g_part`); violations reject, never silently widen (§"Run window vs partition
-   granularity").
+8. **Granularity is closed under partition arithmetic on the calendar axis.** Run windows align
+   to whole granularity units; the declared granularity must be at least as coarse as the
+   derived partition grid (`g_run >= g_part`); violations reject, never silently widen (§"Run
+   window vs partition granularity"). On an integer axis (rule 8a) neither check applies.
+8a. **The run window is supplied in the partition axis's own domain.** `partition_column`'s
+   resolved type (`timeseries.md` §"Validation rules" rule 9, "Partition axis domain") fixes
+   whether run-window bounds are calendar dates (`YYYY-MM-DD`) or bare integers on a unit-step
+   integer grid. A bound whose form contradicts the resolved type is a hard refusal, naming both
+   the offending bound and the resolved column type — never coerced between domains. On an
+   integer axis `--batch-size N` counts `N` partition units (not calendar days), and the only
+   run-window validity requirement is a positive span (`end > start`) — no granularity-boundary
+   alignment, matching rule 8's carve-out. Day-typed widening inputs — a per-column
+   `data_latency`, a seconds-domain SQL-inferred lookback/lookahead, or a derived
+   partition-column skew — have no conversion into an integer axis's units; if any of them would
+   be nonzero for an integer-axis model, that is a hard refusal (fail-closed), never silently
+   zeroed or coerced 1:1 into "N units".
 9. **Safety-check overrides are explicit.** A `safety_overrides` entry names the specific check
    it bypasses; there is no global disable.
 10. **No silent downgrade to full refresh.** A rejected or `NotDerivable` model is refused at

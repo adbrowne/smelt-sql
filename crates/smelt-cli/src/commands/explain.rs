@@ -877,6 +877,13 @@ fn build_derived_window(
         end: end.clone(),
     };
 
+    // `smelt explain` doesn't yet resolve the model's schema to pick the
+    // axis (`docs/specs/incremental_shapes.md` §"The partition grain" Known
+    // Divergences — per-source clamp observability); hardcode the calendar
+    // axis for now, matching every existing (calendar-axis) `explain`
+    // fixture byte-for-byte. Making this axis-aware is future work, not
+    // in scope for the windowing/chunking-math phase this call site was
+    // mechanically updated for.
     let windows = smelt_runtime::windowing::compute_incremental_windows(
         &ts,
         &inc,
@@ -884,6 +891,7 @@ fn build_derived_window(
         &dep_ts,
         data_latency_days,
         &full_range,
+        smelt_logical::PartitionAxis::Calendar,
         None,
         false,
     )
@@ -901,8 +909,8 @@ fn build_derived_window(
     let scan_bounds = smelt_runtime::build_model_source_bounds(model, source_timeseries, canonical);
 
     Ok(Some(smelt_cli::explain::DerivedWindow {
-        output_start: output_start.format("%Y-%m-%d").to_string(),
-        output_end: output_end.format("%Y-%m-%d").to_string(),
+        output_start: output_start.to_string(),
+        output_end: output_end.to_string(),
         scan_bounds,
         skew: windows.skew,
         run_start: chrono::Utc::now(),

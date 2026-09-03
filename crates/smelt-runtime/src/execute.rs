@@ -627,6 +627,19 @@ pub async fn execute_project(
     let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
     let source_key_recurrence = build_source_key_recurrence_map(&source_infos);
 
+    // Each selected model's `partition_column` axis (`docs/specs/timeseries.md`
+    // §"Validation rules" rule 9), resolved from its output schema — reuses
+    // the same `resolved_model_schema` Salsa read `UpstreamSchemas::from_database`
+    // performs, rather than building a second `UpstreamSchemas`. A model
+    // missing from this map (unresolvable type) falls back inside
+    // `build_model_plans` to the axis implied by the run-window literal's
+    // own form.
+    let partition_axes = {
+        let db_guard = db.lock().await;
+        let db_ref: &smelt_db::Database = &db_guard;
+        resolve_partition_axes(db_ref, &selected, &graph_lock, &config)
+    };
+
     let (model_plans, total_batches) = build_model_plans(
         &selected,
         &graph_lock,
@@ -636,6 +649,7 @@ pub async fn execute_project(
         start_date,
         end_date,
         &request,
+        &partition_axes,
     )?;
 
     // ── Dry-run: build PlanSummary, compile models, and return without any backend call ──────
@@ -912,8 +926,8 @@ pub async fn execute_project(
                         None => (None, None, None),
                     };
                 for (batch_idx, batch) in inc.batches.iter().enumerate() {
-                    let start = batch.partition_start.format("%Y-%m-%d").to_string();
-                    let end = batch.partition_end.format("%Y-%m-%d").to_string();
+                    let start = batch.partition_start.to_string();
+                    let end = batch.partition_end.to_string();
                     let run_range = TimeRange {
                         start: start.clone(),
                         end: end.clone(),
@@ -3641,8 +3655,8 @@ pub async fn execute_project(
                     // window so the source scan tracks the partition being produced,
                     // not the potentially wider DELETE range.
                     let run_range = TimeRange {
-                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
-                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                        start: batch.partition_start.to_string(),
+                        end: batch.partition_end.to_string(),
                     };
 
                     // Two-layer widened-scan + exact output clamp
@@ -3703,8 +3717,8 @@ pub async fn execute_project(
                             "{}.{} batch [{}, {})",
                             schema,
                             plan.model_file.db_name_owned(),
-                            batch.partition_start.format("%Y-%m-%d"),
-                            batch.partition_end.format("%Y-%m-%d"),
+                            batch.partition_start,
+                            batch.partition_end,
                         ),
                         plan.model_file.metadata.as_deref(),
                         Some(&inc_plan.timeseries),
@@ -3741,8 +3755,8 @@ pub async fn execute_project(
                                 "{}.{} batch [{}, {})",
                                 schema,
                                 plan.model_file.db_name_owned(),
-                                batch.partition_start.format("%Y-%m-%d"),
-                                batch.partition_end.format("%Y-%m-%d"),
+                                batch.partition_start,
+                                batch.partition_end,
                             ),
                             &plan.model_file,
                             source_infos,
@@ -3793,8 +3807,8 @@ pub async fn execute_project(
                                 "{}.{} batch [{}, {})",
                                 schema,
                                 plan.model_file.db_name_owned(),
-                                batch.partition_start.format("%Y-%m-%d"),
-                                batch.partition_end.format("%Y-%m-%d"),
+                                batch.partition_start,
+                                batch.partition_end,
                             ),
                             &plan.model_file,
                             plan.model_file.metadata.as_deref(),
@@ -3855,8 +3869,8 @@ pub async fn execute_project(
                                 "{}.{} batch [{}, {})",
                                 schema,
                                 plan.model_file.db_name_owned(),
-                                batch.partition_start.format("%Y-%m-%d"),
-                                batch.partition_end.format("%Y-%m-%d"),
+                                batch.partition_start,
+                                batch.partition_end,
                             ),
                             plan.model_file.metadata.as_deref(),
                         );
@@ -3896,8 +3910,8 @@ pub async fn execute_project(
                     // own — silently corrupting it.
                     let partition = PartitionRange {
                         column: inc_plan.timeseries.partition_column.clone(),
-                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
-                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                        start: batch.partition_start.to_string(),
+                        end: batch.partition_end.to_string(),
                     };
 
                     // T3: re-checked per batch (not hoisted with
@@ -3983,8 +3997,9 @@ pub async fn execute_project(
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
                             }
                             crate::maintenance_driver::ColumnMergeDispatch::Clamped(scan) => {
-                                let batch_width_days = (batch.partition_end - batch.partition_start)
-                                    .num_days()
+                                let batch_width_days = batch
+                                    .partition_start
+                                    .units_between(&batch.partition_end)
                                     .max(0)
                                     as u64;
                                 let batch_width =
@@ -4002,7 +4017,7 @@ pub async fn execute_project(
                                 // not a second, independent re-derivation.
                                 let contribution =
                                     smelt_logical::analysis::join_shape::ContributionVerdict::Monotone;
-                                let conv_ts = batch.partition_end.format("%Y-%m-%d").to_string();
+                                let conv_ts = batch.partition_end.to_string();
                                 crate::maintenance_driver::execute_column_scoped_merge(
                                     backend,
                                     schema,
@@ -5119,17 +5134,165 @@ pub async fn execute_project(
 fn parse_run_window(request: &ExecuteRequest) -> Result<(Option<NaiveDate>, Option<NaiveDate>)> {
     match (request.start.as_deref(), request.end.as_deref()) {
         (Some(s), Some(e)) => {
-            let sd = NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .with_context(|| format!("Invalid start date: {s}"))?;
-            let ed = NaiveDate::parse_from_str(e, "%Y-%m-%d")
-                .with_context(|| format!("Invalid end date: {e}"))?;
-            if sd >= ed {
-                anyhow::bail!("Start date must be before end date");
+            match (
+                NaiveDate::parse_from_str(s, "%Y-%m-%d"),
+                NaiveDate::parse_from_str(e, "%Y-%m-%d"),
+            ) {
+                (Ok(sd), Ok(ed)) => {
+                    if sd >= ed {
+                        anyhow::bail!("Start date must be before end date");
+                    }
+                    Ok((Some(sd), Some(ed)))
+                }
+                // Not calendar-shaped — the run window may still be valid on
+                // an integer partition axis (`docs/specs/timeseries.md`
+                // §"Validation rules" rule 9). This function only serves the
+                // calendar-axis-only consumers of `start_date`/`end_date`
+                // (key-grain dispatch, `PartitionRange` construction, etc.);
+                // `build_model_plans` re-resolves the raw `request.start`/
+                // `request.end` strings per model against that model's own
+                // resolved axis (`resolve_partition_axes`), so returning
+                // `(None, None)` here for a bare-integer pair does not lose
+                // the window for those integer-axis models — it just means
+                // this global NaiveDate view has nothing to say about it.
+                // A pair that is neither calendar-shaped nor a valid
+                // increasing integer pair is still a hard, fail-loud error.
+                _ => match (s.parse::<i64>(), e.parse::<i64>()) {
+                    (Ok(si), Ok(ei)) if si < ei => Ok((None, None)),
+                    (Ok(_), Ok(_)) => {
+                        anyhow::bail!("Start must be before end (got start={s}, end={e})")
+                    }
+                    _ => {
+                        anyhow::bail!(
+                            "Invalid time range bounds '{s}'/'{e}': expected both to be \
+                             calendar dates (YYYY-MM-DD) or both to be bare integers (for an \
+                             integer partition axis)"
+                        )
+                    }
+                },
             }
-            Ok((Some(sd), Some(ed)))
         }
         (None, None) => Ok((None, None)),
         _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
+    }
+}
+
+/// Parse `request.start`/`request.end` (raw strings) against a specific
+/// model's resolved partition axis — the generalization of
+/// [`parse_run_window`] task 7 calls for. Unlike `parse_run_window` (which
+/// serves every calendar-only consumer of the global `start_date`/`end_date`
+/// pair), this is called once per selected partition-grain model inside
+/// [`build_model_plans`], so a run mixing a calendar-axis model and an
+/// integer-axis model resolves each bound correctly for its own model
+/// rather than forcing one global domain.
+fn parse_run_window_in_axis(
+    request: &ExecuteRequest,
+    axis: smelt_logical::PartitionAxis,
+) -> Result<
+    Option<(
+        crate::windowing::PartitionPoint,
+        crate::windowing::PartitionPoint,
+    )>,
+> {
+    match (request.start.as_deref(), request.end.as_deref()) {
+        (Some(s), Some(e)) => {
+            let start = crate::windowing::PartitionPoint::parse_in_axis(s, axis)
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+            let end = crate::windowing::PartitionPoint::parse_in_axis(e, axis)
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+            Ok(Some((start, end)))
+        }
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
+    }
+}
+
+/// Resolve each selected model's `partition_column` axis from its output
+/// schema (`docs/specs/timeseries.md` §"Validation rules" rule 9). Reuses
+/// the same `smelt_db::resolved_model_schema` Salsa read
+/// `UpstreamSchemas::from_database` performs, rather than building a second
+/// `UpstreamSchemas` — the schema this reads is the same one that read
+/// would compute. A model absent from the returned map means the type
+/// could not be resolved (no `timeseries:`, unresolved column, or
+/// `Unknown` type); `build_model_plans` falls back for that model to the
+/// axis implied by the run-window literal's own form, with a
+/// `tracing::warn!` — an undecidable type is not a positive disproof of
+/// either domain, matching the existing fail-open posture of
+/// `derive_partition_grid_unit`.
+fn resolve_partition_axes(
+    db: &smelt_db::Database,
+    selected: &[String],
+    graph_lock: &DependencyGraph,
+    config: &Config,
+) -> HashMap<String, smelt_logical::PartitionAxis> {
+    let mut out = HashMap::new();
+    let Some(workspace) = smelt_db::Workspace::try_get(db) else {
+        return out;
+    };
+    for model_name in selected {
+        let Ok(model) = graph_lock.get_model(model_name) else {
+            continue;
+        };
+        let metadata = model.metadata.as_deref();
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+        let Some(ts) = ts_config else {
+            continue;
+        };
+        let Some(file) = db.source_file(&model.path) else {
+            continue;
+        };
+        let resolved = smelt_db::resolved_model_schema(db, workspace, file);
+        let Some(col) = resolved
+            .columns
+            .iter()
+            .find(|c| c.name == ts.partition_column)
+        else {
+            continue;
+        };
+        let Some(typed) = &col.data_type else {
+            continue;
+        };
+        if let Some(axis) = smelt_logical::partition_axis_for_type(&typed.data_type) {
+            out.insert(model_name.clone(), axis);
+        }
+    }
+    out
+}
+
+/// Resolve the effective run-window bounds for one model's axis. Calendar
+/// axis reads the already-globally-parsed `start_date`/`end_date`
+/// (unchanged — every existing calendar-axis model resolves its window
+/// exactly as before parse_run_window's leniency was added). Integer axis
+/// re-parses `request.start`/`request.end` (the raw strings) directly
+/// against that axis, since the global calendar-only parse in
+/// [`parse_run_window`] returns `(None, None)` for a non-calendar-shaped
+/// pair. `None` means no run window was supplied for this model at all;
+/// `Err` means one was supplied but doesn't parse in this model's axis
+/// (fail-closed, `docs/specs/incremental_shapes.md` §"The partition grain"
+/// rule 8a).
+fn window_for_axis(
+    axis: smelt_logical::PartitionAxis,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    request: &ExecuteRequest,
+) -> Result<
+    Option<(
+        crate::windowing::PartitionPoint,
+        crate::windowing::PartitionPoint,
+    )>,
+> {
+    match axis {
+        smelt_logical::PartitionAxis::Calendar => Ok(match (start_date, end_date) {
+            (Some(s), Some(e)) => Some((
+                crate::windowing::PartitionPoint::Date(s),
+                crate::windowing::PartitionPoint::Date(e),
+            )),
+            _ => None,
+        }),
+        smelt_logical::PartitionAxis::Integer => parse_run_window_in_axis(request, axis),
     }
 }
 
@@ -5151,6 +5314,7 @@ fn build_model_plans(
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
     request: &ExecuteRequest,
+    partition_axes: &HashMap<String, smelt_logical::PartitionAxis>,
 ) -> Result<(Vec<ModelPlan>, usize)> {
     let mut model_plans: Vec<ModelPlan> = Vec::new();
     let mut total_batches: usize = 0;
@@ -5171,8 +5335,59 @@ fn build_model_plans(
 
         let refresh = config.get_refresh_with_metadata(model_name, metadata);
 
-        match (inc_config, ts_config, start_date, end_date) {
-            (Some(inc), Some(ts), Some(start_date), Some(end_date)) => {
+        // Resolve this model's partition axis (`docs/specs/timeseries.md`
+        // §"Validation rules" rule 9) and, in that axis's domain, the
+        // effective run-window bounds — `None` when no run window was
+        // supplied, or the run-window literal doesn't parse in this
+        // model's resolved axis (`window_for_axis`, which itself is `Err`
+        // for a malformed-but-present window).
+        type AxisWindow<'a> = (
+            smelt_logical::PartitionAxis,
+            &'a smelt_core::config::TimeseriesConfig,
+            Option<(
+                crate::windowing::PartitionPoint,
+                crate::windowing::PartitionPoint,
+            )>,
+        );
+        let axis_and_window: Option<AxisWindow> = match &ts_config {
+            None => None,
+            Some(ts) => {
+                let axis = partition_axes.get(model_name).copied().unwrap_or_else(|| {
+                    // Undecidable type — not a positive disproof of either
+                    // domain (same fail-open posture as
+                    // `derive_partition_grid_unit`). Fall back to the axis
+                    // implied by the run-window literal's own form so a
+                    // first-run without a resolvable schema still works for
+                    // the common calendar case.
+                    let implied = request
+                        .start
+                        .as_deref()
+                        .and_then(|s| {
+                            if NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
+                                Some(smelt_logical::PartitionAxis::Calendar)
+                            } else if s.parse::<i64>().is_ok() {
+                                Some(smelt_logical::PartitionAxis::Integer)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(smelt_logical::PartitionAxis::Calendar);
+                    warn!(
+                        "model '{model_name}': partition column '{}' type could not be \
+                         resolved from the output schema; falling back to the axis implied \
+                         by the run-window literal's form ({:?})",
+                        ts.partition_column, implied
+                    );
+                    implied
+                });
+                let window = window_for_axis(axis, start_date, end_date, request)?;
+                Some((axis, ts, window))
+            }
+        };
+
+        match (inc_config, axis_and_window) {
+            (Some(inc), Some((axis, ts, Some((window_start, window_end))))) => {
+                let ts = ts.clone();
                 // Resolve data latency from model column metadata for the event-time column.
                 let data_latency_days = metadata
                     .and_then(|m| m.columns.get(&ts.event_time_column))
@@ -5185,34 +5400,49 @@ fn build_model_plans(
                 // (`contract:`)"): narrows the requested range's start to
                 // `end - H`, never widens. The pure transform is single-owned
                 // in `smelt-logical`; this call site only converts dates to
-                // the day-count unit it operates on.
-                let clamped_start_date = metadata
-                    .and_then(|m| m.contract.as_ref())
-                    .and_then(|c| c.frozen_horizon.as_ref())
-                    .and_then(|fh| {
-                        let h_days = fh.to_days() as i64;
-                        let start_days = start_date.num_days_from_ce() as i64;
-                        let end_days = end_date.num_days_from_ce() as i64;
-                        let clamped_days = smelt_logical::clamp_frozen_horizon_write_range(
-                            start_days, end_days, h_days,
-                        );
-                        if clamped_days > start_days {
-                            info!(
-                                "model '{model_name}': frozen_horizon ({} days) narrows the \
-                                 requested write range start to {}",
-                                h_days,
+                // the day-count unit it operates on. Calendar axis only —
+                // `frozen_horizon` interaction with an integer partition
+                // axis is out of scope this phase (no test/fixture exercises
+                // the combination; deferred alongside the rest of integer-
+                // axis emission).
+                let full_range = match (window_start, window_end) {
+                    (
+                        crate::windowing::PartitionPoint::Date(start_date),
+                        crate::windowing::PartitionPoint::Date(end_date),
+                    ) => {
+                        let clamped_start_date = metadata
+                            .and_then(|m| m.contract.as_ref())
+                            .and_then(|c| c.frozen_horizon.as_ref())
+                            .and_then(|fh| {
+                                let h_days = fh.to_days() as i64;
+                                let start_days = start_date.num_days_from_ce() as i64;
+                                let end_days = end_date.num_days_from_ce() as i64;
+                                let clamped_days = smelt_logical::clamp_frozen_horizon_write_range(
+                                    start_days, end_days, h_days,
+                                );
+                                if clamped_days > start_days {
+                                    info!(
+                                        "model '{model_name}': frozen_horizon ({} days) narrows the \
+                                         requested write range start to {}",
+                                        h_days,
+                                        NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
+                                            .map(|d| d.format("%Y-%m-%d").to_string())
+                                            .unwrap_or_default()
+                                    );
+                                }
                                 NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
-                                    .map(|d| d.format("%Y-%m-%d").to_string())
-                                    .unwrap_or_default()
-                            );
-                        }
-                        NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
-                    })
-                    .unwrap_or(start_date);
+                            })
+                            .unwrap_or(start_date);
 
-                let full_range = TimeRange {
-                    start: clamped_start_date.format("%Y-%m-%d").to_string(),
-                    end: end_date.format("%Y-%m-%d").to_string(),
+                        TimeRange {
+                            start: clamped_start_date.format("%Y-%m-%d").to_string(),
+                            end: end_date.format("%Y-%m-%d").to_string(),
+                        }
+                    }
+                    (start, end) => TimeRange {
+                        start: start.to_string(),
+                        end: end.to_string(),
+                    },
                 };
 
                 // Use bound-aware windowing: SQL temporal dependencies + data latency
@@ -5259,6 +5489,7 @@ fn build_model_plans(
                     &dep_ts,
                     data_latency_days,
                     &full_range,
+                    axis,
                     request.batch_size_days,
                     request.per_partition,
                 )
@@ -5296,9 +5527,10 @@ fn build_model_plans(
                     refresh: refresh.clone(),
                 });
             }
-            (Some(_inc), Some(_ts), _, _) => {
-                // Incremental config present but no time window. Fall back to
-                // full refresh; the model still compiles and executes.
+            (Some(_inc), Some((_axis, _ts, None))) => {
+                // Incremental config present but no time window resolved for
+                // this model's axis. Fall back to full refresh; the model
+                // still compiles and executes.
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),
                     sql: model.content.clone(),
@@ -5308,7 +5540,7 @@ fn build_model_plans(
                     refresh: refresh.clone(),
                 });
             }
-            (Some(_inc), None, _, _) => {
+            (Some(_inc), None) => {
                 warn!(
                     "model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
                 );
@@ -5321,7 +5553,7 @@ fn build_model_plans(
                     refresh: refresh.clone(),
                 });
             }
-            (None, _, _, _) => {
+            (None, _) => {
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),
                     sql: model.content.clone(),
@@ -6187,6 +6419,58 @@ mod tests {
     use super::*;
     use crate::reporter::RunReporter;
     use std::sync::Mutex;
+
+    /// `docs/outcomes/20260815-partition-grain-residue/phases/05a-plan.md`
+    /// §Tests — `parse_run_window_in_axis` (the generalization of
+    /// `parse_run_window` task 7 calls for) parses `--event-time-start 1
+    /// --event-time-end 4` into two `PartitionPoint::Integer`s when the
+    /// resolved axis is `Integer`.
+    fn test_request(start: &str, end: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            target: "dev".to_string(),
+            select: vec![],
+            exclude: vec![],
+            start: Some(start.to_string()),
+            end: Some(end.to_string()),
+            batch_size_days: None,
+            per_partition: false,
+            full_refresh: false,
+            dry_run: true,
+            enforce_safety: false,
+            allow_column_removal: false,
+            allow_full_refresh: false,
+            ephemeral_seed_ctes: vec![],
+            run_checks: false,
+            checks: vec![],
+            jobs: None,
+            retry_max: None,
+            retry_backoff_ms: None,
+            resume: false,
+            technique_overrides: vec![],
+        }
+    }
+
+    #[test]
+    fn parse_run_window_accepts_integer_bounds() {
+        let request = test_request("1", "4");
+        let (start, end) =
+            parse_run_window_in_axis(&request, smelt_logical::PartitionAxis::Integer)
+                .expect("integer bounds must parse")
+                .expect("both bounds supplied");
+        assert_eq!(start, crate::windowing::PartitionPoint::Integer(1));
+        assert_eq!(end, crate::windowing::PartitionPoint::Integer(4));
+    }
+
+    #[test]
+    fn parse_run_window_in_axis_refuses_calendar_bounds_on_integer_axis() {
+        let request = test_request("2026-01-01", "2026-01-04");
+        let err = parse_run_window_in_axis(&request, smelt_logical::PartitionAxis::Integer)
+            .expect_err("a calendar-shaped bound must be refused on an integer axis");
+        assert!(
+            err.to_string().contains("bare integer"),
+            "error must explain the axis mismatch, got: {err}"
+        );
+    }
 
     /// `(run_id, model, structure, dialect, consequence)` — one captured
     /// `state_structure_unavailable` call.
