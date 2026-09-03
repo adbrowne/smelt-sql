@@ -17,13 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
+
+      - name: Add rust components
+        run: rustup component add clippy rustfmt
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -57,11 +58,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -71,11 +72,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
 
       - name: Build frontend
         run: cd ui && npm ci && npm run build
@@ -158,8 +154,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Setup mise (rust nightly)
+        uses: jdx/mise-action@v2
+        env:
+          MISE_RUST_VERSION: nightly
 
       - name: Cache fuzz build
         uses: actions/cache@v5
@@ -173,7 +171,7 @@ jobs:
       - name: Build fuzz targets
         run: |
           cd crates/smelt-parser
-          cargo +nightly fuzz build
+          cargo fuzz build
 
   docker-changes:
     name: Detect Docker-relevant changes

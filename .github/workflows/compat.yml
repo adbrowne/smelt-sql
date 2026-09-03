@@ -60,11 +60,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -96,11 +96,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -139,11 +139,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -189,11 +189,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -228,11 +228,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -271,11 +271,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -322,11 +322,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -376,11 +376,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
@@ -449,11 +449,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
@@ -518,11 +518,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -549,11 +549,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Setup DuckDB system library
         uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5

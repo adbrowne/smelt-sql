@@ -23,8 +23,8 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
 
       - name: Cache cargo
         uses: actions/cache@v5

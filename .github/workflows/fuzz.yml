@@ -36,8 +36,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
       
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Setup mise (rust nightly)
+        uses: jdx/mise-action@v2
+        env:
+          MISE_RUST_VERSION: nightly
       
       - name: Cache cargo registry
         uses: actions/cache@v5
