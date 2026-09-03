@@ -461,6 +461,25 @@ pub enum Refusal {
     /// column addition outright. Reported as a Warning
     /// (`MaintenanceColumnAddNotBackfillable`), never an Error.
     DefinitionChangeNotBackfillable { columns: Vec<String>, why: String },
+    /// A `grain: key` model folds a retractable enrichment-join contribution
+    /// (`analysis::join_shape::join_contribution_monotone` refuses it — a
+    /// fanned-out or otherwise non-monotone join feeding a combiner that
+    /// cannot undo a retraction) into a source whose repair admission
+    /// (`repair::admit_per_group_recompute`) also cannot cover that
+    /// retraction with a per-group recompute — the
+    /// `KeyedRetractableContribution` diagnostic
+    /// (`incremental_shapes.md` §"Enrichment joins"). Names the source, the
+    /// affected fold column(s), and why (the join-contribution reason plus
+    /// the failing repair obligation, verbatim). Always pushed alongside the
+    /// pre-existing `NoAdmissibleTechnique` + `RepairKeysNotDiscoverable`/
+    /// `RepairSliceUnbounded` refusals for the same trigger — additive, not
+    /// a replacement. Steers toward `refresh: materialized_view` or
+    /// composing the enrichment as a separate model.
+    KeyedRetractableContribution {
+        source: String,
+        columns: Vec<String>,
+        why: String,
+    },
 }
 
 /// The admitted key-temporal-locality verdict for a `grain: key` model that

@@ -2825,6 +2825,20 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         columns.join(", "),
                     ),
                 ),
+                crate::queries::maintenance::MaintenanceRefusal::KeyedRetractableContribution {
+                    source,
+                    columns,
+                    why,
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::KeyedRetractableContribution,
+                    format!(
+                        "enrichment join against '{source}' feeds a retractable contribution to \
+                         column(s) {}: {why} — use `refresh: materialized_view`, or compose the \
+                         enrichment as a separate model",
+                        columns.join(", "),
+                    ),
+                ),
             };
             DiagnosticAcc(Diagnostic {
                 severity,

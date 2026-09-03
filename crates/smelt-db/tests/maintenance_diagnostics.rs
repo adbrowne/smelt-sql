@@ -1176,6 +1176,86 @@ GROUP BY user_id, pay_date
     );
 }
 
+/// `KeyedRetractableContribution` (`docs/specs/incremental_shapes.md`
+/// §"Enrichment joins", §Diagnostics): a `grain: key` model folds `SUM` over
+/// a value read off a JOINed `mutable_snapshot` dimension that declares no
+/// `unique_key` — the join's fan-out cannot be proven one-to-one, and `SUM`
+/// is a decrementing aggregate, so the enrichment contribution is
+/// retractable. The same missing `unique_key` also makes repair's
+/// affected-key discovery fail, so the technique-admission refusal fires
+/// too — this diagnostic is additive alongside it, never a replacement.
+#[test]
+fn keyed_retractable_contribution_is_an_error_diagnostic() {
+    let orders_source = r#"
+description: Orders, append-only, unclocked.
+mutation_profile: append_only
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: customer_id, type: INTEGER, nullable: false }
+"#;
+    let customers_source = r#"
+description: Customer dimension, mutable snapshot, no declared unique_key.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: discount, type: DOUBLE, nullable: false }
+"#;
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: [customer_id]
+---
+SELECT
+    o.customer_id,
+    SUM(c.discount) AS total_discount
+FROM smelt.sources.orders o
+JOIN smelt.sources.customers c ON o.customer_id = c.customer_id
+GROUP BY o.customer_id
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/orders.yml", orders_source),
+            ("models/sources/customers.yml", customers_source),
+            ("models/customer_totals.sql", model),
+        ],
+        "customer_totals",
+    );
+
+    let retractable: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::KeyedRetractableContribution))
+        .collect();
+    assert_eq!(
+        retractable.len(),
+        1,
+        "expected exactly one KeyedRetractableContribution, got {diags:?}"
+    );
+    assert_eq!(
+        retractable[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "KeyedRetractableContribution must be an Error, never silent"
+    );
+    assert!(
+        retractable[0].message.contains("customers"),
+        "message must name the failing source, got: {}",
+        retractable[0].message
+    );
+    assert!(
+        retractable[0].message.contains("materialized_view"),
+        "message must steer toward refresh: materialized_view or DAG composition, got: {}",
+        retractable[0].message
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique)),
+        "the pre-existing MaintenanceNoAdmissibleTechnique refusal must still fire, got {diags:?}"
+    );
+}
+
 fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {

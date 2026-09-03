@@ -1200,8 +1200,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   project's state mode supports it; the runtime only creates the ledger table for
   additive-graded models, so a fully idempotent model has no merge record for `--auto` to
   consult. Decision record: `docs/research/20260816-open-questions-triage.md`.
-- **`KeyedRetractableContribution` has no implementation (Open Question)** — the code is
-  specified but no classifier, diagnostic variant, or test produces it.
 - **The reconciliation ledger's fold is transactional on DuckDB only (Open Question)** — the
   default `Backend::fold_ledger_delta` is best-effort check-then-act across separate
   statements; only the DuckDB backend overrides it with a real transaction.

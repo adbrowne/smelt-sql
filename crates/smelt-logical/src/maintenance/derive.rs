@@ -20,13 +20,16 @@ use super::{
 use crate::analysis::definition_change::{
     classify_definition_change, DefinitionChangeClass, DefinitionChangeCtx,
 };
+use crate::analysis::discriminants::combiner_discriminants;
 use crate::analysis::faithful_fold::{faithful_fold, ConditionVerdict, FaithfulFold};
 use crate::analysis::fingerprint::fingerprint_projection;
 use crate::analysis::footprint::{reflect_footprint, FootprintResult};
 use crate::analysis::input_delta::{
     input_delta_discovery, MutationProfile as DeltaMutationProfile, SourceShape,
 };
-use crate::analysis::join_shape::JoinContext;
+use crate::analysis::join_shape::{
+    self, join_contribution_monotone, ContributionVerdict, JoinContext,
+};
 use crate::analysis::locality_projection::{locality_verdict, LocalityVerdict};
 use crate::analysis::model_diff::ColumnDef;
 use crate::analysis::output_delta::OutputDelta;
@@ -1372,14 +1375,81 @@ fn derive_new_data(
                                 fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
                             ),
                         });
-                        plan.refusals.push(match refusal {
-                            repair::RepairRefusal::KeysNotDiscoverable { source, why } => {
-                                Refusal::RepairKeysNotDiscoverable { source, why }
-                            }
+                        let (repair_why, repair_refusal) = match refusal {
+                            repair::RepairRefusal::KeysNotDiscoverable { source, why } => (
+                                why.clone(),
+                                Refusal::RepairKeysNotDiscoverable { source, why },
+                            ),
                             repair::RepairRefusal::SliceUnbounded { source, why } => {
-                                Refusal::RepairSliceUnbounded { source, why }
+                                (why.clone(), Refusal::RepairSliceUnbounded { source, why })
                             }
-                        });
+                        };
+                        plan.refusals.push(repair_refusal);
+
+                        // `KeyedRetractableContribution`
+                        // (`incremental_shapes.md` §"Enrichment joins"): the
+                        // repair family just failed to cover this source's
+                        // retraction (the arm we're already in) — test
+                        // whether the failure is specifically a retractable
+                        // ENRICHMENT-JOIN contribution, composing the
+                        // already-derived join cardinality with each fed
+                        // fold column's combiner algebra
+                        // (`join_shape::join_contribution_monotone`), mirroring
+                        // `dimension_join_contribution`'s own ctx-building
+                        // (keyed on the join's resolved ALIAS, never the bare
+                        // source name — a join condition qualifies columns
+                        // by alias). Never fires on join spelling alone:
+                        // `join_alias_for_source` returning `None` (no join
+                        // against `source` at all) pushes nothing, matching
+                        // `dimension_join_contribution`'s "never on join
+                        // spelling alone" guarantee; an empty declared
+                        // `unique_key` leaves the `JoinContext` with no entry
+                        // for the alias, which `fan_out` already treats as
+                        // fail-closed `OneToMany` (never an optimistic
+                        // empty-key-set match).
+                        if let Some(alias) = join_shape::join_alias_for_source(inputs.sql, source) {
+                            let mut join_ctx = JoinContext::new();
+                            if !facts.unique_key.is_empty() {
+                                let key_cols: Vec<&str> =
+                                    facts.unique_key.iter().map(String::as_str).collect();
+                                join_ctx = join_ctx.with_composite_unique_key(&alias, &key_cols);
+                            }
+                            let mut retractable_columns = Vec::new();
+                            let mut contribution_reason: Option<String> = None;
+                            for (column, combiner) in &fold.add_columns {
+                                let column_sensitive_to_source =
+                                    inputs.column_groups.iter().any(|g| {
+                                        g.mutation_sensitivity.contains(source)
+                                            && g.columns.contains(column)
+                                    });
+                                if !column_sensitive_to_source {
+                                    continue;
+                                }
+                                let Some(cardinality) = join_shape::source_join_cardinality(
+                                    inputs.sql, source, &join_ctx,
+                                ) else {
+                                    continue;
+                                };
+                                let discriminants = combiner_discriminants(*combiner, false);
+                                if let ContributionVerdict::Refused(reason) =
+                                    join_contribution_monotone(cardinality, &discriminants)
+                                {
+                                    retractable_columns.push(column.clone());
+                                    contribution_reason.get_or_insert(reason);
+                                }
+                            }
+                            if !retractable_columns.is_empty() {
+                                plan.refusals.push(Refusal::KeyedRetractableContribution {
+                                    source: source.to_string(),
+                                    columns: retractable_columns,
+                                    why: format!(
+                                        "{}; the repair family also cannot admit a per-group \
+                                         recompute for the retraction: {repair_why}",
+                                        contribution_reason.unwrap_or_default()
+                                    ),
+                                });
+                            }
+                        }
                     }
                 }
                 return;

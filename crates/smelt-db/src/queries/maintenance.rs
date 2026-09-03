@@ -904,6 +904,14 @@ pub enum MaintenanceRefusal {
         columns: Vec<String>,
         why: String,
     },
+    /// `KeyedRetractableContribution` — a retractable enrichment-join
+    /// contribution the repair family cannot admit a per-group recompute
+    /// for (`incremental_shapes.md` §"Enrichment joins").
+    KeyedRetractableContribution {
+        source: String,
+        columns: Vec<String>,
+        why: String,
+    },
 }
 
 /// A Salsa-friendly (`PartialEq`) projection of a
@@ -1388,19 +1396,27 @@ pub fn maintenance_plan_diagnostics(
             }
             // The repair family's two obligation refusals
             // (`MaintenanceRepairKeysNotDiscoverable`/
-            // `MaintenanceRepairSliceUnbounded`). Not yet produced by any
-            // wired derivation — `derive_repair_cell` is standalone,
-            // callable machinery this phase, not yet consulted by
-            // `derive_maintenance_plan` — and has no `DiagnosticCode`
-            // variant yet. Left unmapped exactly as `ReachNotDerivable`
-            // above, for the same reason: a future phase's own diagnostic
-            // lands it.
+            // `MaintenanceRepairSliceUnbounded`) — `derive_new_data`
+            // (`smelt-logical/src/maintenance/derive.rs`) already pushes
+            // both when `repair::admit_per_group_recompute` refuses, but
+            // neither has a `DiagnosticCode` variant yet. Left unmapped
+            // exactly as `ReachNotDerivable` above, for the same reason: a
+            // future phase's own diagnostic lands it.
             smelt_logical::maintenance::Refusal::RepairKeysNotDiscoverable { .. } => None,
             smelt_logical::maintenance::Refusal::RepairSliceUnbounded { .. } => None,
             smelt_logical::maintenance::Refusal::DefinitionChangeNotBackfillable {
                 columns,
                 why,
             } => Some(MaintenanceRefusal::DefinitionChangeNotBackfillable {
+                columns: columns.clone(),
+                why: why.clone(),
+            }),
+            smelt_logical::maintenance::Refusal::KeyedRetractableContribution {
+                source,
+                columns,
+                why,
+            } => Some(MaintenanceRefusal::KeyedRetractableContribution {
+                source: source.clone(),
                 columns: columns.clone(),
                 why: why.clone(),
             }),

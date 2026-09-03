@@ -10,7 +10,8 @@
 //! unclassified combiner never yields an optimistic verdict.
 
 use crate::analysis::discriminants::{Discriminants, Monotone};
-use smelt_parser::{Expr, JoinClause, JoinCondition, JoinType};
+use crate::analysis::source_bounds::resolve_table_ref_source_name;
+use smelt_parser::{Expr, File, JoinClause, JoinCondition, JoinType};
 use std::collections::{HashMap, HashSet};
 
 /// Whether a join multiplies rows against the target's existing cardinality,
@@ -243,6 +244,80 @@ pub fn join_contribution_monotone(
     ContributionVerdict::Monotone
 }
 
+/// Find the top-level join clause (plus the alias, or bare identifier when
+/// unaliased, `fan_out`'s `JoinContext` lookup keys on) whose `smelt.<path>`
+/// table ref resolves to `source` in `sql`'s outermost query scope. `None`
+/// when `sql` doesn't parse, has no top-level `SELECT`/`FROM`, or `source` is
+/// not the target of a join there (e.g. it is the `FROM`-clause driving
+/// table, or is not referenced in this scope at all).
+fn find_join_for_source(sql: &str, source: &str) -> Option<(JoinClause, String)> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let file = File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let from = select.from_clause()?;
+    for join in from.joins() {
+        let table_ref = join.table_ref()?;
+        let Some(resolved) = resolve_table_ref_source_name(&table_ref) else {
+            continue;
+        };
+        let matches = resolved == source
+            || resolved
+                .strip_prefix("sources.")
+                .is_some_and(|bare| bare == source);
+        if matches {
+            // No explicit `AS alias`: a `smelt.<path>` ref's implicit name is
+            // its own last path segment (`table_ref.identifier()`/`alias()`
+            // only see direct-child tokens, never a nested `SmeltPathRef`/
+            // `SmeltPathCall` node's own segments — the same fallback
+            // `meta_eval`/`maintenance::emit` already use for this exact
+            // shape).
+            let alias = table_ref
+                .alias()
+                .or_else(|| {
+                    table_ref
+                        .smelt_path_ref()
+                        .and_then(|p| p.segments().last().cloned())
+                })
+                .or_else(|| {
+                    table_ref
+                        .smelt_path_call()
+                        .and_then(|p| p.segments().last().cloned())
+                })
+                .or_else(|| table_ref.identifier())?;
+            return Some((join, alias));
+        }
+    }
+    None
+}
+
+/// Resolve the alias (or bare identifier, when unaliased) `fan_out`'s
+/// `JoinContext` lookup keys on for the top-level join whose `smelt.<path>`
+/// table ref resolves to `source` (`sources.`-prefix optional, matching
+/// [`resolve_table_ref_source_name`]'s convention). `None` when `source` is
+/// not joined in `sql`'s outermost query scope at all.
+///
+/// Moved from `smelt-runtime::maintenance_driver::find_join_alias` (this
+/// crate's [`dimension_join_contribution`]-equivalent proofs are the only
+/// production consumers of a join's resolved alias, and `smelt-runtime` may
+/// not itself scan SQL for join shape — `architecture.md` §"Property
+/// composition walk rule").
+pub fn join_alias_for_source(sql: &str, source: &str) -> Option<String> {
+    find_join_for_source(sql, source).map(|(_, alias)| alias)
+}
+
+/// Resolve `source`'s own top-level join `Cardinality` in `sql` against
+/// `ctx`'s declared unique keys ([`fan_out`]), or `None` when `source` is not
+/// joined in `sql`'s outermost query scope at all — the same "no join at
+/// all" case [`dimension_join_contribution`] refuses outright, left to the
+/// caller to interpret (a derivation site composing this with a downstream
+/// combiner's algebra has its own "nothing new to push" reading of `None`,
+/// distinct from `dimension_join_contribution`'s hard refusal).
+pub fn source_join_cardinality(sql: &str, source: &str, ctx: &JoinContext) -> Option<Cardinality> {
+    let (join, _alias) = find_join_for_source(sql, source)?;
+    Some(fan_out(&join, ctx))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +455,35 @@ mod tests {
         };
         let verdict = join_contribution_monotone(cardinality, &discriminants);
         assert!(!verdict.is_monotone());
+    }
+
+    #[test]
+    fn join_alias_for_source_resolves_an_aliased_join() {
+        let sql = "SELECT o.customer_id FROM smelt.sources.orders o \
+                    JOIN smelt.sources.customers c ON o.customer_id = c.customer_id";
+        assert_eq!(
+            join_alias_for_source(sql, "customers"),
+            Some("c".to_string())
+        );
+    }
+
+    #[test]
+    fn join_alias_for_source_resolves_an_unaliased_join() {
+        let sql = "SELECT o.customer_id FROM smelt.sources.orders o \
+                    JOIN smelt.sources.customers ON o.customer_id = customers.customer_id";
+        assert_eq!(
+            join_alias_for_source(sql, "customers"),
+            Some("customers".to_string())
+        );
+    }
+
+    #[test]
+    fn join_alias_for_source_is_none_when_not_joined() {
+        let sql = "SELECT o.customer_id FROM smelt.sources.orders o \
+                    JOIN smelt.sources.customers c ON o.customer_id = c.customer_id";
+        // `orders` is the driving FROM table, not the target of a join.
+        assert_eq!(join_alias_for_source(sql, "orders"), None);
+        // A source not referenced at all.
+        assert_eq!(join_alias_for_source(sql, "nonexistent"), None);
     }
 }

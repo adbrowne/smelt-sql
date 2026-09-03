@@ -988,6 +988,18 @@ pub enum DiagnosticCode {
     /// text, which names the construct and suggests the portable spelling.
     /// Anchored at the offending expression. Error severity.
     UnsupportedOnBackend,
+
+    /// Emitted (Error) when a `grain: key` model folds a retractable
+    /// enrichment-join contribution — a join whose per-key contribution
+    /// feeds a decrementing aggregate or a value that must be un-seen — and
+    /// the repair family cannot admit a per-group recompute for the
+    /// retraction (`incremental_shapes.md` §"Enrichment joins",
+    /// `incremental_models.md` §"The repair family"). Names the failing
+    /// repair obligation. Never fires on join spelling alone — only a
+    /// genuinely retractable contribution is refused; steers to
+    /// `refresh: materialized_view` or DAG composition. Anchored at the
+    /// model SQL body start.
+    KeyedRetractableContribution,
 }
 
 /// Structured metadata attached to diagnostics for code actions

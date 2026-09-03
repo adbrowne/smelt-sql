@@ -61,7 +61,7 @@ changes stated behaviour, not just fills a gap).
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | planned |
+| 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | pending |
 | 3 | Transactional ledger fold on every shipped backend | pending |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | pending |
@@ -77,6 +77,13 @@ changes stated behaviour, not just fills a gap).
   `KeyedRetractableContribution`'s stated firing condition (a retractable enrichment-join
   contribution; a repair family that cannot admit a per-group recompute) are already computed, so
   no new admission rule is invented.
+- 2026-09-03 — Phase 1 implemented and closed out (all green:
+  `.claude/scripts/verify-phase.sh`, `repair_wiring`, `maintenance_diagnostics`,
+  `statement_parity`, `technique_lowering`, `maintenance_conformance`, `join_shape` unit tests).
+  Discovered (not fixed, out of scope for this phase): `repair::admit_per_group_recompute` always
+  passes an empty `JoinContext` to affected-key discovery and never projects a join's own `ON`
+  columns, so per-group repair can never admit for a source reached only through a JOIN — flagged
+  for the next planner as a candidate follow-up phase.
 
 ## Blocked
 

@@ -4779,7 +4779,8 @@ pub async fn execute_column_scoped_merge(
 /// Fail-closed: a dimension with no declared `unique_key` cannot license a
 /// one-to-one proof at all and refuses outright, as does a model whose
 /// outermost `FROM`/`JOIN` carries no join against `dimension_source` at all
-/// ([`find_join_alias`] — a leaf-level parse of exactly the join clause this
+/// ([`smelt_logical::analysis::join_shape::join_alias_for_source`] — a
+/// leaf-level parse of exactly the join clause this
 /// proof cares about, never a re-derivation of admission).
 pub fn dimension_join_contribution(
     sql: &str,
@@ -4793,7 +4794,9 @@ pub fn dimension_join_contribution(
              cannot be proven to fold into the target without needing an inverse"
         ));
     }
-    let Some(alias) = find_join_alias(sql, dimension_source) else {
+    let Some(alias) =
+        smelt_logical::analysis::join_shape::join_alias_for_source(sql, dimension_source)
+    else {
         return ContributionVerdict::Refused(format!(
             "no top-level join against '{dimension_source}' found in the model's own outermost \
              SELECT — the join's cardinality cannot be proven one-to-one, so the mutated \
@@ -4816,35 +4819,6 @@ pub fn dimension_join_contribution(
                 .to_string(),
         ),
     }
-}
-
-/// Find the alias (or bare identifier, when unaliased) `join_shape::fan_out`
-/// keys its `JoinContext` lookup on for the top-level join whose
-/// `smelt.<path>` table ref resolves to `dimension_source` (the bare,
-/// `sources.`-stripped name `SourceFacts::name`/`resolve_live_column_scoped_cell`
-/// use).
-fn find_join_alias(sql: &str, dimension_source: &str) -> Option<String> {
-    let stripped = smelt_parser::strip_frontmatter(sql);
-    let parse = smelt_parser::parse(&stripped);
-    let file = smelt_parser::File::cast(parse.syntax())?;
-    let select = file.select_stmt()?;
-    let from = select.from_clause()?;
-    for join in from.joins() {
-        let table_ref = join.table_ref()?;
-        let Some(resolved) =
-            smelt_logical::analysis::source_bounds::resolve_table_ref_source_name(&table_ref)
-        else {
-            continue;
-        };
-        let matches = resolved == dimension_source
-            || resolved
-                .strip_prefix("sources.")
-                .is_some_and(|bare| bare == dimension_source);
-        if matches {
-            return table_ref.alias().or_else(|| table_ref.identifier());
-        }
-    }
-    None
 }
 
 /// Which physical column-scoped-MERGE corner (MP11,
