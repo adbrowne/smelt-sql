@@ -2103,6 +2103,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#modeldefoverriderequiresincremental" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ModelDefOverrideRequiresIncremental
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#mapapiargtypemismatch" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4952,6 +4963,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#modeldefoverriderequiresincremental" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ModelDefOverrideRequiresIncremental
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#mapapiargtypemismatch" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -5775,9 +5797,21 @@
 <td>No</td>
 <td><code>""</code></td>
 </tr>
+<tr>
+<td><code>timeseries</code></td>
+<td><code>Record{event_time_column: Text, partition_column: Text, granularity: Text, week_start: Text?, assert_monotonic: Bool?}</code></td>
+<td>No</td>
+<td>inherits the generator file's frontmatter <code>timeseries:</code> block</td>
+</tr>
+<tr>
+<td><code>safety_overrides</code></td>
+<td><code>Record{allow_window_functions: Bool?, allow_having: Bool?, allow_limit: Bool?, allow_subqueries: Bool?, allow_nondeterministic: Bool?, allow_distinct: Bool?}</code></td>
+<td>No</td>
+<td>inherits the generator file's frontmatter <code>safety_overrides:</code> block</td>
+</tr>
 </tbody>
 </table>
-<p>Constructing a <code>ModelDef</code> literal outside a generator file body emits <code>ModelDefOutsideGeneratorFile</code>.</p>
+<p>Constructing a <code>ModelDef</code> literal outside a generator file body emits <code>ModelDefOutsideGeneratorFile</code>. <code>timeseries</code> / <code>safety_overrides</code>, when present, <strong>replace</strong> the generator file's corresponding frontmatter block in full for that emission only (not a key-level merge), and are valid only when <code>materialization</code> is <code>'incremental'</code> — otherwise <code>ModelDefOverrideRequiresIncremental</code> fires.</p>
 <p><strong>Example:</strong>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="c1">---</span>
 <a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a><span class="n">generates</span><span class="p">:</span><span class="w"> </span><span class="n">models</span>
@@ -5787,7 +5821,26 @@
 <a id="__codelineno-30-6" name="__codelineno-30-6" href="#__codelineno-30-6"></a><span class="w">  </span><span class="n">ModelDef</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;users&#39;</span><span class="p">,</span><span class="w">   </span><span class="n">body</span><span class="p">:</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span><span class="w"> </span><span class="err">}</span>
 <a id="__codelineno-30-7" name="__codelineno-30-7" href="#__codelineno-30-7"></a><span class="p">]</span>
 </code></pre></div></p>
-<p><strong>Editor support:</strong> hover on the opening <code>{</code> of a <code>ModelDef</code> literal shows the emitted smelt path (when <code>name</code> is statically known); completion at <code>ModelDef { &lt;cursor&gt;</code> offers the five fields, required fields first.</p>
+<p><strong>Per-cohort override example</strong> — two incremental emissions from one generator, each with its own event-time column:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="c1">---</span>
+<a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a><span class="n">generates</span><span class="p">:</span><span class="w"> </span><span class="n">models</span>
+<a id="__codelineno-31-3" name="__codelineno-31-3" href="#__codelineno-31-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-31-4" name="__codelineno-31-4" href="#__codelineno-31-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
+<a id="__codelineno-31-5" name="__codelineno-31-5" href="#__codelineno-31-5"></a><span class="c1">---</span>
+<a id="__codelineno-31-6" name="__codelineno-31-6" href="#__codelineno-31-6"></a><span class="p">[</span>
+<a id="__codelineno-31-7" name="__codelineno-31-7" href="#__codelineno-31-7"></a><span class="w">  </span><span class="n">ModelDef</span><span class="w"> </span><span class="err">{</span>
+<a id="__codelineno-31-8" name="__codelineno-31-8" href="#__codelineno-31-8"></a><span class="w">    </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;us_west&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">body</span><span class="p">:</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">orders_us</span><span class="p">,</span>
+<a id="__codelineno-31-9" name="__codelineno-31-9" href="#__codelineno-31-9"></a><span class="w">    </span><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;incremental&#39;</span><span class="p">,</span>
+<a id="__codelineno-31-10" name="__codelineno-31-10" href="#__codelineno-31-10"></a><span class="w">    </span><span class="n">timeseries</span><span class="p">:</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;order_ts&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;order_ts&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;day&#39;</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-31-11" name="__codelineno-31-11" href="#__codelineno-31-11"></a><span class="w">  </span><span class="err">}</span><span class="p">,</span>
+<a id="__codelineno-31-12" name="__codelineno-31-12" href="#__codelineno-31-12"></a><span class="w">  </span><span class="n">ModelDef</span><span class="w"> </span><span class="err">{</span>
+<a id="__codelineno-31-13" name="__codelineno-31-13" href="#__codelineno-31-13"></a><span class="w">    </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;eu&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">body</span><span class="p">:</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">orders_eu</span><span class="p">,</span>
+<a id="__codelineno-31-14" name="__codelineno-31-14" href="#__codelineno-31-14"></a><span class="w">    </span><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;incremental&#39;</span><span class="p">,</span>
+<a id="__codelineno-31-15" name="__codelineno-31-15" href="#__codelineno-31-15"></a><span class="w">    </span><span class="n">timeseries</span><span class="p">:</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;created_at&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;created_at&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;day&#39;</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-31-16" name="__codelineno-31-16" href="#__codelineno-31-16"></a><span class="w">  </span><span class="err">}</span>
+<a id="__codelineno-31-17" name="__codelineno-31-17" href="#__codelineno-31-17"></a><span class="p">]</span>
+</code></pre></div>
+<p><strong>Editor support:</strong> hover on the opening <code>{</code> of a <code>ModelDef</code> literal shows the emitted smelt path (when <code>name</code> is statically known); completion at <code>ModelDef { &lt;cursor&gt;</code> offers the seven fields, required fields first.</p>
 <p>See <a href="../generators/">Generator Files</a> for the full multi-model production surface.</p>
 <hr />
 <h2 id="modelref-closed-meta-record-type-for-model-reflection"><code>ModelRef</code> — closed meta record type for model reflection<a class="headerlink" href="#modelref-closed-meta-record-type-for-model-reflection" title="Permanent link">&para;</a></h2>
@@ -5827,11 +5880,11 @@
 <p>Access fields with dot-notation inside a HOF lambda. Any other field name emits <code>ModelRefFieldUnknown</code>. <code>ModelRef</code> is not user-constructible — values originate only from <code>smelt.models.*</code> accessors.</p>
 <p><strong>Subtyping:</strong> <code>ModelRef &lt;: TableExpr</code>. Pass a <code>ModelRef</code> anywhere a <code>TableExpr</code> is required (e.g. <code>smelt.columns_of</code>, <code>reduce(..., union_all)</code>) without explicit projection.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="c1">-- Collect the name of every model tagged &#39;cohort&#39;</span>
-<a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;cohort&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
-<a id="__codelineno-31-3" name="__codelineno-31-3" href="#__codelineno-31-3"></a>
-<a id="__codelineno-31-4" name="__codelineno-31-4" href="#__codelineno-31-4"></a><span class="c1">-- m.columns is equivalent to smelt.columns_of(m)</span>
-<a id="__codelineno-31-5" name="__codelineno-31-5" href="#__codelineno-31-5"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;cohort&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">columns</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a><span class="c1">-- Collect the name of every model tagged &#39;cohort&#39;</span>
+<a id="__codelineno-32-2" name="__codelineno-32-2" href="#__codelineno-32-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;cohort&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
+<a id="__codelineno-32-3" name="__codelineno-32-3" href="#__codelineno-32-3"></a>
+<a id="__codelineno-32-4" name="__codelineno-32-4" href="#__codelineno-32-4"></a><span class="c1">-- m.columns is equivalent to smelt.columns_of(m)</span>
+<a id="__codelineno-32-5" name="__codelineno-32-5" href="#__codelineno-32-5"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;cohort&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">columns</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on a <code>ModelRef</code>-typed binding shows <code>ModelRef</code> and the closed field list with each field's type; completion at <code>m.&lt;cursor&gt;</code> offers <code>path</code>, <code>name</code>, <code>tags</code>, <code>columns</code>.</p>
 <p>See <a href="../reflection/#modelref">Reflection — <code>ModelRef</code></a> for the closed-field contract, subtyping rules, and diagnostic codes.</p>
@@ -5839,13 +5892,13 @@
 <h2 id="or_any-boolean-or-reducer"><code>or_any</code> — Boolean OR reducer<a class="headerlink" href="#or_any-boolean-or-reducer" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> contextual reducer (closed registry); use as the second argument to <code>reduce</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a>reduce(xs: List&lt;Expr&lt;Boolean&gt;&gt;, or_any) -&gt; Expr&lt;Boolean&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a>reduce(xs: List&lt;Expr&lt;Boolean&gt;&gt;, or_any) -&gt; Expr&lt;Boolean&gt;
 </code></pre></div></p>
 <p><strong>Empty-list identity:</strong> <code>FALSE</code></p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a><span class="c1">-- reduce([is_admin, is_moderator], or_any) → is_admin OR is_moderator</span>
-<a id="__codelineno-33-2" name="__codelineno-33-2" href="#__codelineno-33-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-33-3" name="__codelineno-33-3" href="#__codelineno-33-3"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">reduce</span><span class="p">([</span><span class="n">is_admin</span><span class="p">,</span><span class="w"> </span><span class="n">is_moderator</span><span class="p">],</span><span class="w"> </span><span class="n">or_any</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="c1">-- reduce([is_admin, is_moderator], or_any) → is_admin OR is_moderator</span>
+<a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<a id="__codelineno-34-3" name="__codelineno-34-3" href="#__codelineno-34-3"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">reduce</span><span class="p">([</span><span class="n">is_admin</span><span class="p">,</span><span class="w"> </span><span class="n">is_moderator</span><span class="p">],</span><span class="w"> </span><span class="n">or_any</span><span class="p">)</span>
 </code></pre></div></p>
 <p>See <a href="../reducers/#or_any">Reducers — <code>or_any</code></a> for full details.</p>
 <hr />
@@ -5857,24 +5910,24 @@
 <h2 id="plus_chain-numeric-addition-reducer"><code>plus_chain</code> — numeric addition reducer<a class="headerlink" href="#plus_chain-numeric-addition-reducer" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> contextual reducer (closed registry); use as the second argument to <code>reduce</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a>reduce(xs: List&lt;Expr&lt;Numeric&gt;&gt;, plus_chain) -&gt; Expr&lt;Numeric&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a>reduce(xs: List&lt;Expr&lt;Numeric&gt;&gt;, plus_chain) -&gt; Expr&lt;Numeric&gt;
 </code></pre></div></p>
 <p><strong>Empty-list identity:</strong> <code>0</code> cast to the LUB element type.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">reduce</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">plus_chain</span><span class="p">)</span>
-<a id="__codelineno-35-2" name="__codelineno-35-2" href="#__codelineno-35-2"></a><span class="c1">-- Engine sees: SELECT 1 + 2 + 3</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">reduce</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">plus_chain</span><span class="p">)</span>
+<a id="__codelineno-36-2" name="__codelineno-36-2" href="#__codelineno-36-2"></a><span class="c1">-- Engine sees: SELECT 1 + 2 + 3</span>
 </code></pre></div></p>
 <p>See <a href="../reducers/#plus_chain">Reducers — <code>plus_chain</code></a> for full details.</p>
 <hr />
 <h2 id="reduce-hof-fold-a-list-into-a-single-fragment"><code>reduce</code> — HOF: fold a list into a single fragment<a class="headerlink" href="#reduce-hof-fold-a-list-into-a-single-fragment" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> built-in higher-order function; reserved name.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a>reduce(xs: List&lt;T&gt;, r) -&gt; OutputSort
+<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a>reduce(xs: List&lt;T&gt;, r) -&gt; OutputSort
 </code></pre></div></p>
 <p>where <code>r</code> is a bare reducer identifier from the closed registry and <code>OutputSort</code> is the reducer's declared output sort.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">reduce</span><span class="p">([</span><span class="k">true</span><span class="p">,</span><span class="w"> </span><span class="k">false</span><span class="p">,</span><span class="w"> </span><span class="k">true</span><span class="p">],</span><span class="w"> </span><span class="n">and_all</span><span class="p">)</span>
-<a id="__codelineno-37-2" name="__codelineno-37-2" href="#__codelineno-37-2"></a><span class="c1">-- Engine sees: SELECT true AND false AND true</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">reduce</span><span class="p">([</span><span class="k">true</span><span class="p">,</span><span class="w"> </span><span class="k">false</span><span class="p">,</span><span class="w"> </span><span class="k">true</span><span class="p">],</span><span class="w"> </span><span class="n">and_all</span><span class="p">)</span>
+<a id="__codelineno-38-2" name="__codelineno-38-2" href="#__codelineno-38-2"></a><span class="c1">-- Engine sees: SELECT true AND false AND true</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on the reducer name shows its input element type, output sort, and empty-list identity.</p>
 <p>See <a href="../hofs/#reduce">Higher-Order Functions — <code>reduce</code></a> and <a href="../reducers/">Reducers</a> for full details.</p>
@@ -5882,13 +5935,13 @@
 <h2 id="smeltcolumns_of-compile-time-column-list-accessor"><code>smelt.columns_of</code> — compile-time column list accessor<a class="headerlink" href="#smeltcolumns_of-compile-time-column-list-accessor" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> built-in meta-only accessor; returns <code>List&lt;ColumnRef&gt;</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>smelt.columns_of(t: TableExpr) -&gt; List&lt;ColumnRef&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>smelt.columns_of(t: TableExpr) -&gt; List&lt;ColumnRef&gt;
 </code></pre></div></p>
 <p>Returns the column list of a <code>TableExpr</code>-valued argument as a <code>List&lt;ColumnRef&gt;</code>, preserving declared column order. Must be called with exactly one positional argument; named arguments emit <code>ColumnsOfNamedArgument</code>. The argument must be <code>TableExpr</code>-typed; mismatches emit <code>ColumnsOfRequiresTableExpr</code>.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">columns_of</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">orders</span><span class="p">)</span>
-<a id="__codelineno-39-2" name="__codelineno-39-2" href="#__codelineno-39-2"></a><span class="w">  </span><span class="o">|&gt;</span><span class="w"> </span><span class="n">filter</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">is_numeric</span><span class="p">)</span>
-<a id="__codelineno-39-3" name="__codelineno-39-3" href="#__codelineno-39-3"></a><span class="w">  </span><span class="o">|&gt;</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">COALESCE</span><span class="p">(</span><span class="k">c</span><span class="p">.</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">columns_of</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">orders</span><span class="p">)</span>
+<a id="__codelineno-40-2" name="__codelineno-40-2" href="#__codelineno-40-2"></a><span class="w">  </span><span class="o">|&gt;</span><span class="w"> </span><span class="n">filter</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">is_numeric</span><span class="p">)</span>
+<a id="__codelineno-40-3" name="__codelineno-40-3" href="#__codelineno-40-3"></a><span class="w">  </span><span class="o">|&gt;</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">COALESCE</span><span class="p">(</span><span class="k">c</span><span class="p">.</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on <code>smelt.columns_of(t)</code> shows <code>List&lt;ColumnRef&gt;</code> and, when <code>t</code>'s schema is statically resolvable, the resolved column count plus the first five column names; completion at the argument position offers in-scope <code>TableExpr</code>-valued names.</p>
 <p>See <a href="../reflection/">Reflection</a> for the full surface, body-check vs expansion-time semantics, and worked example.</p>
@@ -5896,11 +5949,11 @@
 <h2 id="smeltconfigload_json-json-file-loader"><code>smelt.config.load_json</code> — JSON file loader<a class="headerlink" href="#smeltconfigload_json-json-file-loader" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> built-in compile-time loader; returns the schema type.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>smelt.config.load_json(path: Text, schema: Schema) -&gt; Schema
+<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a>smelt.config.load_json(path: Text, schema: Schema) -&gt; Schema
 </code></pre></div></p>
 <p>Loads the JSON file at <code>path</code> (workspace-relative string literal) and validates its contents against <code>schema</code>. <code>Schema</code> must be an inline record type, a named <code>smelt.record</code> name, <code>List&lt;S&gt;</code>, or <code>Map&lt;Text, S&gt;</code>. Supports per-target overlays via <code>&lt;basename&gt;.&lt;target&gt;.json</code> sibling files.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_json</span><span class="p">(</span><span class="s1">&#39;configs/settings.json&#39;</span><span class="p">,</span><span class="w"> </span><span class="err">{</span><span class="n">debug</span><span class="p">:</span><span class="w"> </span><span class="nb">Boolean</span><span class="p">,</span><span class="w"> </span><span class="n">timeout</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="err">}</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_json</span><span class="p">(</span><span class="s1">&#39;configs/settings.json&#39;</span><span class="p">,</span><span class="w"> </span><span class="err">{</span><span class="n">debug</span><span class="p">:</span><span class="w"> </span><span class="nb">Boolean</span><span class="p">,</span><span class="w"> </span><span class="n">timeout</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="err">}</span><span class="p">)</span>
 </code></pre></div></p>
 <p>See <a href="../config-loaders/">Config Loaders</a> for path rules, schema authoring, per-target overlay, and diagnostic codes.</p>
 <hr />
@@ -5912,13 +5965,13 @@
 <h2 id="smeltconfigload_yaml-yaml-file-loader"><code>smelt.config.load_yaml</code> — YAML file loader<a class="headerlink" href="#smeltconfigload_yaml-yaml-file-loader" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> built-in compile-time loader; returns the schema type.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a>smelt.config.load_yaml(path: Text, schema: Schema) -&gt; Schema
+<div class="highlight"><pre><span></span><code><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a>smelt.config.load_yaml(path: Text, schema: Schema) -&gt; Schema
 </code></pre></div></p>
 <p>Loads the YAML file at <code>path</code> (workspace-relative string literal) and validates its contents against <code>schema</code>. <code>Schema</code> must be an inline record type, a named <code>smelt.record</code> name, <code>List&lt;S&gt;</code>, or <code>Map&lt;Text, S&gt;</code>. Supports per-target overlays via <code>&lt;basename&gt;.&lt;target&gt;.yaml</code> sibling files.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">region</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
-<a id="__codelineno-43-2" name="__codelineno-43-2" href="#__codelineno-43-2"></a>
-<a id="__codelineno-43-3" name="__codelineno-43-3" href="#__codelineno-43-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_yaml</span><span class="p">(</span><span class="s1">&#39;configs/cohorts.yaml&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">List</span><span class="o">&lt;</span><span class="n">Cohort</span><span class="o">&gt;</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-44-1" name="__codelineno-44-1" href="#__codelineno-44-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">region</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-44-2" name="__codelineno-44-2" href="#__codelineno-44-2"></a>
+<a id="__codelineno-44-3" name="__codelineno-44-3" href="#__codelineno-44-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_yaml</span><span class="p">(</span><span class="s1">&#39;configs/cohorts.yaml&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">List</span><span class="o">&lt;</span><span class="n">Cohort</span><span class="o">&gt;</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover shows the resolved file path and entry count; goto-definition on the path literal resolves to the loaded file; completion at the path argument offers workspace YAML files.</p>
 <p>See <a href="../config-loaders/">Config Loaders</a> for path rules, schema authoring, per-target overlay, and diagnostic codes.</p>
@@ -5926,12 +5979,12 @@
 <h2 id="smeltconfigvar-compile-time-variable-lookup"><code>smelt.config.var</code> — compile-time variable lookup<a class="headerlink" href="#smeltconfigvar-compile-time-variable-lookup" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> built-in compile-time function; returns <code>Text</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-44-1" name="__codelineno-44-1" href="#__codelineno-44-1"></a>smelt.config.var(name: Text) -&gt; Text
+<div class="highlight"><pre><span></span><code><a id="__codelineno-45-1" name="__codelineno-45-1" href="#__codelineno-45-1"></a>smelt.config.var(name: Text) -&gt; Text
 </code></pre></div></p>
 <p>Reads <code>name</code> from the <code>vars:</code> block of <code>smelt.yml</code>. The argument must be a string literal.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-45-1" name="__codelineno-45-1" href="#__codelineno-45-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">var</span><span class="p">(</span><span class="s1">&#39;region&#39;</span><span class="p">)</span>
-<a id="__codelineno-45-2" name="__codelineno-45-2" href="#__codelineno-45-2"></a><span class="c1">-- Resolves to: SELECT &#39;us-west-2&#39;  (when smelt.yml declares vars: {region: us-west-2})</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-46-1" name="__codelineno-46-1" href="#__codelineno-46-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">var</span><span class="p">(</span><span class="s1">&#39;region&#39;</span><span class="p">)</span>
+<a id="__codelineno-46-2" name="__codelineno-46-2" href="#__codelineno-46-2"></a><span class="c1">-- Resolves to: SELECT &#39;us-west-2&#39;  (when smelt.yml declares vars: {region: us-west-2})</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover shows <code>Text</code> and the variable's resolved value; goto-definition resolves to the <code>vars.name:</code> line in <code>smelt.yml</code>.</p>
 <p>See <a href="../config-vars/">Config Variables</a> for YAML scalar coercion rules, diagnostic codes, and worked examples.</p>
@@ -5939,12 +5992,12 @@
 <h2 id="smeltmodelsall-all-workspace-models"><code>smelt.models.all</code> — all workspace models<a class="headerlink" href="#smeltmodelsall-all-workspace-models" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> compile-time workspace accessor; returns <code>List&lt;ModelRef&gt;</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-46-1" name="__codelineno-46-1" href="#__codelineno-46-1"></a>smelt.models.all() -&gt; List&lt;ModelRef&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-47-1" name="__codelineno-47-1" href="#__codelineno-47-1"></a>smelt.models.all() -&gt; List&lt;ModelRef&gt;
 </code></pre></div></p>
 <p>Returns every model in the workspace, sorted by workspace-relative path (byte-lexicographic, <code>/</code> separator). Takes no arguments; any argument emits <code>WideReflectionUnexpectedArgument</code>.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-47-1" name="__codelineno-47-1" href="#__codelineno-47-1"></a><span class="c1">-- All model paths in the workspace</span>
-<a id="__codelineno-47-2" name="__codelineno-47-2" href="#__codelineno-47-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="k">all</span><span class="p">(),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">path</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-48-1" name="__codelineno-48-1" href="#__codelineno-48-1"></a><span class="c1">-- All model paths in the workspace</span>
+<a id="__codelineno-48-2" name="__codelineno-48-2" href="#__codelineno-48-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="k">all</span><span class="p">(),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">path</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on <code>smelt.models.all()</code> shows <code>List&lt;ModelRef&gt;</code> and the resolved model count; completion offers <code>smelt.models.all</code> in <code>smelt.models.&lt;cursor&gt;</code> context.</p>
 <p>See <a href="../reflection/#wide-reflection-workspace-introspection">Reflection — Wide reflection</a> for full details, argument rules, and diagnostic codes.</p>
@@ -5952,12 +6005,12 @@
 <h2 id="smeltmodelswith_tag-workspace-models-filtered-by-tag"><code>smelt.models.with_tag</code> — workspace models filtered by tag<a class="headerlink" href="#smeltmodelswith_tag-workspace-models-filtered-by-tag" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> compile-time workspace accessor; returns <code>List&lt;ModelRef&gt;</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-48-1" name="__codelineno-48-1" href="#__codelineno-48-1"></a>smelt.models.with_tag(tag: Text) -&gt; List&lt;ModelRef&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-49-1" name="__codelineno-49-1" href="#__codelineno-49-1"></a>smelt.models.with_tag(tag: Text) -&gt; List&lt;ModelRef&gt;
 </code></pre></div></p>
 <p>Returns all workspace models whose tag set contains <code>tag</code>, sorted by workspace-relative path. Argument must be a single positional compile-time string literal. Named arguments emit <code>WithTagNamedArgument</code>; non-literal arguments emit <code>WithTagRequiresText</code>.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-49-1" name="__codelineno-49-1" href="#__codelineno-49-1"></a><span class="c1">-- All models tagged &#39;cohort&#39;, sorted by path</span>
-<a id="__codelineno-49-2" name="__codelineno-49-2" href="#__codelineno-49-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;cohort&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-50-1" name="__codelineno-50-1" href="#__codelineno-50-1"></a><span class="c1">-- All models tagged &#39;cohort&#39;, sorted by path</span>
+<a id="__codelineno-50-2" name="__codelineno-50-2" href="#__codelineno-50-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">models</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;cohort&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on <code>smelt.models.with_tag(...)</code> shows <code>List&lt;ModelRef&gt;</code> and the resolved model count for the given tag; completion offers <code>smelt.models.with_tag</code> in <code>smelt.models.&lt;cursor&gt;</code> context.</p>
 <p>See <a href="../reflection/#wide-reflection-workspace-introspection">Reflection — Wide reflection</a> for full details, argument rules, and diagnostic codes.</p>
@@ -5965,15 +6018,15 @@
 <h2 id="smeltrecord-named-record-type-declaration"><code>smelt.record</code> — named record-type declaration<a class="headerlink" href="#smeltrecord-named-record-type-declaration" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> top-level workspace-scoped declaration; introduces a named meta record type.</p>
 <p><strong>Syntax:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-50-1" name="__codelineno-50-1" href="#__codelineno-50-1"></a>smelt.record TypeName = { field1: Type1, field2: Type2, … }
+<div class="highlight"><pre><span></span><code><a id="__codelineno-51-1" name="__codelineno-51-1" href="#__codelineno-51-1"></a>smelt.record TypeName = { field1: Type1, field2: Type2, … }
 </code></pre></div></p>
 <p>Declares a named record type at workspace scope. The name must be unique workspace-wide; a second declaration of the same name emits <code>SmeltRecordRedefinition</code>. Field types may be scalar <code>DataType</code> literals, <code>List&lt;T&gt;</code>, <code>Map&lt;Text, V&gt;</code>, inline record types <code>{…}</code>, or previously declared <code>smelt.record</code> names. Reflection witnesses (<code>ColumnRef</code>, <code>ModelRef</code>, <code>SourceRef</code>) are not valid field types and emit <code>RecordFieldTypeForbidden</code>.</p>
 <p>After declaration, <code>TypeName</code> is usable as a type in any type-annotation position — loader schema arguments, field types of other records, <code>Map&lt;Text, TypeName&gt;</code> value types.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-51-1" name="__codelineno-51-1" href="#__codelineno-51-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">region</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
-<a id="__codelineno-51-2" name="__codelineno-51-2" href="#__codelineno-51-2"></a>
-<a id="__codelineno-51-3" name="__codelineno-51-3" href="#__codelineno-51-3"></a><span class="c1">-- Use as a loader schema</span>
-<a id="__codelineno-51-4" name="__codelineno-51-4" href="#__codelineno-51-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_yaml</span><span class="p">(</span><span class="s1">&#39;configs/cohorts.yaml&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">List</span><span class="o">&lt;</span><span class="n">Cohort</span><span class="o">&gt;</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-52-1" name="__codelineno-52-1" href="#__codelineno-52-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">region</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-52-2" name="__codelineno-52-2" href="#__codelineno-52-2"></a>
+<a id="__codelineno-52-3" name="__codelineno-52-3" href="#__codelineno-52-3"></a><span class="c1">-- Use as a loader schema</span>
+<a id="__codelineno-52-4" name="__codelineno-52-4" href="#__codelineno-52-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_yaml</span><span class="p">(</span><span class="s1">&#39;configs/cohorts.yaml&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">List</span><span class="o">&lt;</span><span class="n">Cohort</span><span class="o">&gt;</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on a <code>smelt.record</code> name shows the full field list; goto-definition on any usage resolves to the declaration site; completion at record-literal and field-projection positions offers the declared field set.</p>
 <p>See <a href="../records/">Records</a> for inline record types, record literals, field projection, width subtyping, and diagnostic codes.</p>
@@ -5981,12 +6034,12 @@
 <h2 id="smeltsourcesall-all-workspace-sources"><code>smelt.sources.all</code> — all workspace sources<a class="headerlink" href="#smeltsourcesall-all-workspace-sources" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> compile-time workspace accessor; returns <code>List&lt;SourceRef&gt;</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-52-1" name="__codelineno-52-1" href="#__codelineno-52-1"></a>smelt.sources.all() -&gt; List&lt;SourceRef&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-53-1" name="__codelineno-53-1" href="#__codelineno-53-1"></a>smelt.sources.all() -&gt; List&lt;SourceRef&gt;
 </code></pre></div></p>
 <p>Returns every declared source in the workspace, sorted by workspace-relative path (byte-lexicographic, <code>/</code> separator). Takes no arguments; any argument emits <code>WideReflectionUnexpectedArgument</code>.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-53-1" name="__codelineno-53-1" href="#__codelineno-53-1"></a><span class="c1">-- All source paths in the workspace</span>
-<a id="__codelineno-53-2" name="__codelineno-53-2" href="#__codelineno-53-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="k">all</span><span class="p">(),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">path</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-54-1" name="__codelineno-54-1" href="#__codelineno-54-1"></a><span class="c1">-- All source paths in the workspace</span>
+<a id="__codelineno-54-2" name="__codelineno-54-2" href="#__codelineno-54-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="k">all</span><span class="p">(),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">path</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on <code>smelt.sources.all()</code> shows <code>List&lt;SourceRef&gt;</code> and the resolved source count; completion offers <code>smelt.sources.all</code> in <code>smelt.sources.&lt;cursor&gt;</code> context.</p>
 <p>See <a href="../reflection/#wide-reflection-workspace-introspection">Reflection — Wide reflection</a> for full details, argument rules, and diagnostic codes.</p>
@@ -5994,12 +6047,12 @@
 <h2 id="smeltsourceswith_tag-workspace-sources-filtered-by-tag"><code>smelt.sources.with_tag</code> — workspace sources filtered by tag<a class="headerlink" href="#smeltsourceswith_tag-workspace-sources-filtered-by-tag" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> compile-time workspace accessor; returns <code>List&lt;SourceRef&gt;</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-54-1" name="__codelineno-54-1" href="#__codelineno-54-1"></a>smelt.sources.with_tag(tag: Text) -&gt; List&lt;SourceRef&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-55-1" name="__codelineno-55-1" href="#__codelineno-55-1"></a>smelt.sources.with_tag(tag: Text) -&gt; List&lt;SourceRef&gt;
 </code></pre></div></p>
 <p>Returns all workspace sources whose tag set contains <code>tag</code>, sorted by workspace-relative path. Argument must be a single positional compile-time string literal. Named arguments emit <code>WithTagNamedArgument</code>; non-literal arguments emit <code>WithTagRequiresText</code>.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-55-1" name="__codelineno-55-1" href="#__codelineno-55-1"></a><span class="c1">-- All sources tagged &#39;audit&#39;</span>
-<a id="__codelineno-55-2" name="__codelineno-55-2" href="#__codelineno-55-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;audit&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-56-1" name="__codelineno-56-1" href="#__codelineno-56-1"></a><span class="c1">-- All sources tagged &#39;audit&#39;</span>
+<a id="__codelineno-56-2" name="__codelineno-56-2" href="#__codelineno-56-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;audit&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on <code>smelt.sources.with_tag(...)</code> shows <code>List&lt;SourceRef&gt;</code> and the resolved source count for the given tag; completion offers <code>smelt.sources.with_tag</code> in <code>smelt.sources.&lt;cursor&gt;</code> context.</p>
 <p>See <a href="../reflection/#wide-reflection-workspace-introspection">Reflection — Wide reflection</a> for full details, argument rules, and diagnostic codes.</p>
@@ -6041,8 +6094,8 @@
 <p>Access fields with dot-notation inside a HOF lambda. Any other field name emits <code>SourceRefFieldUnknown</code>. <code>SourceRef</code> is not user-constructible — values originate only from <code>smelt.sources.*</code> accessors.</p>
 <p><strong>Subtyping:</strong> <code>SourceRef &lt;: TableExpr</code>. Pass a <code>SourceRef</code> anywhere a <code>TableExpr</code> is required without explicit projection.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-56-1" name="__codelineno-56-1" href="#__codelineno-56-1"></a><span class="c1">-- Collect the name of every source tagged &#39;audit&#39;</span>
-<a id="__codelineno-56-2" name="__codelineno-56-2" href="#__codelineno-56-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;audit&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-57-1" name="__codelineno-57-1" href="#__codelineno-57-1"></a><span class="c1">-- Collect the name of every source tagged &#39;audit&#39;</span>
+<a id="__codelineno-57-2" name="__codelineno-57-2" href="#__codelineno-57-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">with_tag</span><span class="p">(</span><span class="s1">&#39;audit&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">name</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover on a <code>SourceRef</code>-typed binding shows <code>SourceRef</code> and the closed field list with each field's type; completion at <code>s.&lt;cursor&gt;</code> offers <code>path</code>, <code>name</code>, <code>tags</code>, <code>columns</code>.</p>
 <p>See <a href="../reflection/#sourceref">Reflection — <code>SourceRef</code></a> for the closed-field contract, subtyping rules, and diagnostic codes.</p>
@@ -6050,21 +6103,21 @@
 <h2 id="union_all-table-union-all-reducer"><code>union_all</code> — table UNION ALL reducer<a class="headerlink" href="#union_all-table-union-all-reducer" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> contextual reducer (closed registry); use as the second argument to <code>reduce</code>.</p>
 <p><strong>Signature:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-57-1" name="__codelineno-57-1" href="#__codelineno-57-1"></a>reduce(xs: List&lt;TableExpr&gt;, union_all) -&gt; TableExpr
+<div class="highlight"><pre><span></span><code><a id="__codelineno-58-1" name="__codelineno-58-1" href="#__codelineno-58-1"></a>reduce(xs: List&lt;TableExpr&gt;, union_all) -&gt; TableExpr
 </code></pre></div></p>
 <p><strong>Empty-list identity:</strong> none — <code>ReducerEmptyNoIdentity</code> on an empty list.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-58-1" name="__codelineno-58-1" href="#__codelineno-58-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">reduce</span><span class="p">(</span>
-<a id="__codelineno-58-2" name="__codelineno-58-2" href="#__codelineno-58-2"></a><span class="w">    </span><span class="p">[</span><span class="n">smelt</span><span class="p">.</span><span class="k">ref</span><span class="p">(</span><span class="s1">&#39;orders_2024&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="k">ref</span><span class="p">(</span><span class="s1">&#39;orders_2025&#39;</span><span class="p">)],</span>
-<a id="__codelineno-58-3" name="__codelineno-58-3" href="#__codelineno-58-3"></a><span class="w">    </span><span class="n">union_all</span>
-<a id="__codelineno-58-4" name="__codelineno-58-4" href="#__codelineno-58-4"></a><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-59-1" name="__codelineno-59-1" href="#__codelineno-59-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">reduce</span><span class="p">(</span>
+<a id="__codelineno-59-2" name="__codelineno-59-2" href="#__codelineno-59-2"></a><span class="w">    </span><span class="p">[</span><span class="n">smelt</span><span class="p">.</span><span class="k">ref</span><span class="p">(</span><span class="s1">&#39;orders_2024&#39;</span><span class="p">),</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="k">ref</span><span class="p">(</span><span class="s1">&#39;orders_2025&#39;</span><span class="p">)],</span>
+<a id="__codelineno-59-3" name="__codelineno-59-3" href="#__codelineno-59-3"></a><span class="w">    </span><span class="n">union_all</span>
+<a id="__codelineno-59-4" name="__codelineno-59-4" href="#__codelineno-59-4"></a><span class="p">)</span>
 </code></pre></div></p>
 <p>See <a href="../reducers/#union_all">Reducers — <code>union_all</code></a> for full details.</p>
 <hr />
 <h2 id="xs-spread-operator"><code>...xs</code> — spread operator<a class="headerlink" href="#xs-spread-operator" title="Permanent link">&para;</a></h2>
 <p><strong>Type:</strong> consumes <code>List&lt;T&gt;</code>; materialises <code>T</code> elements into the surrounding comma-separated grammar position.</p>
 <p><strong>Syntax:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-59-1" name="__codelineno-59-1" href="#__codelineno-59-1"></a>...expr
+<div class="highlight"><pre><span></span><code><a id="__codelineno-60-1" name="__codelineno-60-1" href="#__codelineno-60-1"></a>...expr
 </code></pre></div></p>
 <p>where <code>expr</code> evaluates to a <code>List&lt;T&gt;</code>.</p>
 <p><strong>Valid positions:</strong> SELECT lists.</p>
@@ -6072,25 +6125,25 @@
 <p><strong>Empty-list behaviour:</strong> <code>...[]</code> elides itself and adjacent commas silently.</p>
 <p><strong>Hover:</strong> hovering over <code>...xs</code> in the editor shows the type of the source list, e.g. <code>List&lt;Expr&lt;INTEGER&gt;&gt;</code>.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-60-1" name="__codelineno-60-1" href="#__codelineno-60-1"></a><span class="c1">-- Spread two column references into SELECT</span>
-<a id="__codelineno-60-2" name="__codelineno-60-2" href="#__codelineno-60-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">...[</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-60-3" name="__codelineno-60-3" href="#__codelineno-60-3"></a><span class="c1">-- Engine sees: SELECT id, name, email FROM ...</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-61-1" name="__codelineno-61-1" href="#__codelineno-61-1"></a><span class="c1">-- Spread two column references into SELECT</span>
+<a id="__codelineno-61-2" name="__codelineno-61-2" href="#__codelineno-61-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">...[</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<a id="__codelineno-61-3" name="__codelineno-61-3" href="#__codelineno-61-3"></a><span class="c1">-- Engine sees: SELECT id, name, email FROM ...</span>
 </code></pre></div></p>
 <p>See <a href="../lists/#spread-operator-xs">Lists &amp; Spread — Spread operator</a> for full details and forbidden-position examples.</p>
 <hr />
 <h2 id="field-record-field-projection"><code>.field</code> — record field projection<a class="headerlink" href="#field-record-field-projection" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> meta-world infix operator; navigates a record-typed value to a named field.</p>
 <p><strong>Syntax:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-61-1" name="__codelineno-61-1" href="#__codelineno-61-1"></a>expr.fieldname
+<div class="highlight"><pre><span></span><code><a id="__codelineno-62-1" name="__codelineno-62-1" href="#__codelineno-62-1"></a>expr.fieldname
 </code></pre></div></p>
 <p>where <code>expr</code> evaluates to a record type (named or inline) and <code>fieldname</code> is a declared field of that type.</p>
 <p><strong>Recursive projection:</strong> <code>r.outer.inner</code> projects <code>outer</code> then <code>inner</code>. Each step type-checks independently. Projecting through a non-record-typed intermediate emits <code>RecordFieldNotProjectable</code>.</p>
 <p><strong>Width subtyping:</strong> projection on a value of type <code>{a: T, b: U}</code> succeeds for both <code>r.a</code> and <code>r.b</code>. The static type governs the closed field set; projecting a field not declared on the static type emits <code>RecordFieldUnknown</code> even if the runtime value carries that field.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-62-1" name="__codelineno-62-1" href="#__codelineno-62-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">region</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
-<a id="__codelineno-62-2" name="__codelineno-62-2" href="#__codelineno-62-2"></a>
-<a id="__codelineno-62-3" name="__codelineno-62-3" href="#__codelineno-62-3"></a><span class="c1">-- r.name : Text, r.threshold : Integer</span>
-<a id="__codelineno-62-4" name="__codelineno-62-4" href="#__codelineno-62-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">cohorts</span><span class="p">,</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;: &#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">r</span><span class="p">.</span><span class="n">threshold</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">))</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-63-1" name="__codelineno-63-1" href="#__codelineno-63-1"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">region</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-63-2" name="__codelineno-63-2" href="#__codelineno-63-2"></a>
+<a id="__codelineno-63-3" name="__codelineno-63-3" href="#__codelineno-63-3"></a><span class="c1">-- r.name : Text, r.threshold : Integer</span>
+<a id="__codelineno-63-4" name="__codelineno-63-4" href="#__codelineno-63-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">cohorts</span><span class="p">,</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">&#39;: &#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">r</span><span class="p">.</span><span class="n">threshold</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">))</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> completion at <code>r.&lt;cursor&gt;</code> offers the closed field list; hover shows the projected field's declared type; goto-definition resolves to the field in the <code>smelt.record</code> declaration.</p>
 <p>See <a href="../records/#field-projection">Records — Field projection</a> for the full projection contract and diagnostic codes.</p>
@@ -6098,16 +6151,16 @@
 <h2 id="list-literal"><code>[…]</code> — list literal<a class="headerlink" href="#list-literal" title="Permanent link">&para;</a></h2>
 <p><strong>Type:</strong> <code>List&lt;T&gt;</code> where <code>T</code> is the LUB of element types.</p>
 <p><strong>Syntax:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-63-1" name="__codelineno-63-1" href="#__codelineno-63-1"></a>[ expr, expr, … ]          -- one or more elements
-<a id="__codelineno-63-2" name="__codelineno-63-2" href="#__codelineno-63-2"></a>[ expr, expr, …, ]         -- trailing comma allowed
-<a id="__codelineno-63-3" name="__codelineno-63-3" href="#__codelineno-63-3"></a>[ expr ]                   -- singleton
-<a id="__codelineno-63-4" name="__codelineno-63-4" href="#__codelineno-63-4"></a>[]                         -- empty (requires inferable target sort)
+<div class="highlight"><pre><span></span><code><a id="__codelineno-64-1" name="__codelineno-64-1" href="#__codelineno-64-1"></a>[ expr, expr, … ]          -- one or more elements
+<a id="__codelineno-64-2" name="__codelineno-64-2" href="#__codelineno-64-2"></a>[ expr, expr, …, ]         -- trailing comma allowed
+<a id="__codelineno-64-3" name="__codelineno-64-3" href="#__codelineno-64-3"></a>[ expr ]                   -- singleton
+<a id="__codelineno-64-4" name="__codelineno-64-4" href="#__codelineno-64-4"></a>[]                         -- empty (requires inferable target sort)
 </code></pre></div></p>
 <p><strong>Disambiguation:</strong> the same <code>[…]</code> token sequence may resolve to a meta <code>List&lt;T&gt;</code> or a data-world <code>Array&lt;U&gt;</code> depending on the surrounding context. When both readings are valid, meta wins.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-64-1" name="__codelineno-64-1" href="#__codelineno-64-1"></a><span class="c1">-- List&lt;Expr&lt;INTEGER&gt;&gt; spliced into a SELECT list</span>
-<a id="__codelineno-64-2" name="__codelineno-64-2" href="#__codelineno-64-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-64-3" name="__codelineno-64-3" href="#__codelineno-64-3"></a><span class="c1">-- Engine sees: SELECT 1, 2, 3 FROM ...</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-65-1" name="__codelineno-65-1" href="#__codelineno-65-1"></a><span class="c1">-- List&lt;Expr&lt;INTEGER&gt;&gt; spliced into a SELECT list</span>
+<a id="__codelineno-65-2" name="__codelineno-65-2" href="#__codelineno-65-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<a id="__codelineno-65-3" name="__codelineno-65-3" href="#__codelineno-65-3"></a><span class="c1">-- Engine sees: SELECT 1, 2, 3 FROM ...</span>
 </code></pre></div></p>
 <p>See <a href="../lists/#list-literal-syntax-a-b-c">Lists &amp; Spread — List literal syntax</a> for full details.</p>
 <hr />
@@ -6123,26 +6176,26 @@
 </ol>
 <p><strong>Width subtyping applies to both:</strong> <code>{a: T, b: U}</code> is a subtype of <code>{a: T}</code> (the wider record is the subtype).</p>
 <p><strong>Example (type position):</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-65-1" name="__codelineno-65-1" href="#__codelineno-65-1"></a><span class="c1">-- {name: Text, threshold: Integer} is an inline record schema</span>
-<a id="__codelineno-65-2" name="__codelineno-65-2" href="#__codelineno-65-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_yaml</span><span class="p">(</span><span class="s1">&#39;configs/cohorts.yaml&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">List</span><span class="o">&lt;</span><span class="err">{</span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="err">}</span><span class="o">&gt;</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-66-1" name="__codelineno-66-1" href="#__codelineno-66-1"></a><span class="c1">-- {name: Text, threshold: Integer} is an inline record schema</span>
+<a id="__codelineno-66-2" name="__codelineno-66-2" href="#__codelineno-66-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">load_yaml</span><span class="p">(</span><span class="s1">&#39;configs/cohorts.yaml&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">List</span><span class="o">&lt;</span><span class="err">{</span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="err">}</span><span class="o">&gt;</span><span class="p">)</span>
 </code></pre></div></p>
 <p><strong>Example (value position):</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-66-1" name="__codelineno-66-1" href="#__codelineno-66-1"></a><span class="c1">-- {name: &#39;eu&#39;, threshold: 50} is a record literal</span>
-<a id="__codelineno-66-2" name="__codelineno-66-2" href="#__codelineno-66-2"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
-<a id="__codelineno-66-3" name="__codelineno-66-3" href="#__codelineno-66-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="err">{</span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;eu&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="err">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-67-1" name="__codelineno-67-1" href="#__codelineno-67-1"></a><span class="c1">-- {name: &#39;eu&#39;, threshold: 50} is a record literal</span>
+<a id="__codelineno-67-2" name="__codelineno-67-2" href="#__codelineno-67-2"></a><span class="n">smelt</span><span class="p">.</span><span class="n">record</span><span class="w"> </span><span class="n">Cohort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="nb">Text</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="nb">Integer</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-67-3" name="__codelineno-67-3" href="#__codelineno-67-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="err">{</span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;eu&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="err">}</span>
 </code></pre></div></p>
 <p>See <a href="../records/">Records</a> for inline record types, record literals, width subtyping, and diagnostic codes.</p>
 <hr />
 <h2 id="pipe-operator"><code>|&gt;</code> — pipe operator<a class="headerlink" href="#pipe-operator" title="Permanent link">&para;</a></h2>
 <p><strong>Kind:</strong> meta-world binary operator; purely syntactic sugar desugared before type-checking.</p>
 <p><strong>Semantics:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-67-1" name="__codelineno-67-1" href="#__codelineno-67-1"></a>LHS |&gt; f(args...)   ≡   f(LHS, args...)
+<div class="highlight"><pre><span></span><code><a id="__codelineno-68-1" name="__codelineno-68-1" href="#__codelineno-68-1"></a>LHS |&gt; f(args...)   ≡   f(LHS, args...)
 </code></pre></div></p>
 <p>Left-associative, lowest meta-language precedence. RHS must be a call expression.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-68-1" name="__codelineno-68-1" href="#__codelineno-68-1"></a><span class="c1">-- examples/meta_hofs/models/pipe_rewrite.sql</span>
-<a id="__codelineno-68-2" name="__codelineno-68-2" href="#__codelineno-68-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="o">|&gt;</span><span class="w"> </span><span class="n">filter</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">|&gt;</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
-<a id="__codelineno-68-3" name="__codelineno-68-3" href="#__codelineno-68-3"></a><span class="c1">-- desugars to: map(filter([1, 2, 3], fn c =&gt; c &gt; 0), fn c =&gt; c * 2)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-69-1" name="__codelineno-69-1" href="#__codelineno-69-1"></a><span class="c1">-- examples/meta_hofs/models/pipe_rewrite.sql</span>
+<a id="__codelineno-69-2" name="__codelineno-69-2" href="#__codelineno-69-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="o">|&gt;</span><span class="w"> </span><span class="n">filter</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">|&gt;</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
+<a id="__codelineno-69-3" name="__codelineno-69-3" href="#__codelineno-69-3"></a><span class="c1">-- desugars to: map(filter([1, 2, 3], fn c =&gt; c &gt; 0), fn c =&gt; c * 2)</span>
 </code></pre></div></p>
 <p><strong>Editor support:</strong> hover shows the result type of the equivalent un-piped call.</p>
 <p>See <a href="../pipes/">Pipe Operator</a> for full details and diagnostic codes.</p>
@@ -6377,6 +6430,12 @@
 <p><strong>Fix:</strong> move the <code>ModelDef</code> literal into a generator file (frontmatter <code>generates: models</code>).</p>
 <p>See <a href="../generators/">Generator Files</a>.</p>
 <hr />
+<h3 id="modeldefoverriderequiresincremental"><code>ModelDefOverrideRequiresIncremental</code><a class="headerlink" href="#modeldefoverriderequiresincremental" title="Permanent link">&para;</a></h3>
+<p><strong>When:</strong> A <code>ModelDef</code> literal's <code>timeseries</code> or <code>safety_overrides</code> field is present but <code>materialization</code> is not <code>'incremental'</code>.</p>
+<p><strong>Message:</strong> <code>ModelDef.{field} is only valid when materialization is 'incremental'</code></p>
+<p><strong>Fix:</strong> set <code>materialization: 'incremental'</code>, or remove the <code>timeseries</code>/<code>safety_overrides</code> field.</p>
+<p>See <a href="../generators/">Generator Files</a>.</p>
+<hr />
 <h3 id="mapapiargtypemismatch"><code>MapApiArgTypeMismatch</code><a class="headerlink" href="#mapapiargtypemismatch" title="Permanent link">&para;</a></h3>
 <p><strong>When:</strong> <code>m.get(k)</code> or <code>m.has(k)</code> is called with an argument whose type is not assignable to the map's key type <code>K</code>.</p>
 <p><strong>Message:</strong> <code>Map.{method} expects key of type {expected}; found {actual}</code></p>
@@ -6424,10 +6483,10 @@
 <p><strong>Message:</strong> <code>cannot infer element type for empty list literal</code></p>
 <p><strong>Fires at:</strong> the <code>[]</code> CST span.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-69-1" name="__codelineno-69-1" href="#__codelineno-69-1"></a><span class="k">SELECT</span>
-<a id="__codelineno-69-2" name="__codelineno-69-2" href="#__codelineno-69-2"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-69-3" name="__codelineno-69-3" href="#__codelineno-69-3"></a><span class="w">    </span><span class="p">[]</span><span class="w">   </span><span class="c1">-- MetaListEmptyTypeUnknown</span>
-<a id="__codelineno-69-4" name="__codelineno-69-4" href="#__codelineno-69-4"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-70-1" name="__codelineno-70-1" href="#__codelineno-70-1"></a><span class="k">SELECT</span>
+<a id="__codelineno-70-2" name="__codelineno-70-2" href="#__codelineno-70-2"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
+<a id="__codelineno-70-3" name="__codelineno-70-3" href="#__codelineno-70-3"></a><span class="w">    </span><span class="p">[]</span><span class="w">   </span><span class="c1">-- MetaListEmptyTypeUnknown</span>
+<a id="__codelineno-70-4" name="__codelineno-70-4" href="#__codelineno-70-4"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
 </code></pre></div></p>
 <p><strong>Fix:</strong> provide elements so the type can be inferred; use <code>...[]</code> (spread of an empty list) for silent elision; or annotate a <code>smelt.define</code> parameter with the expected <code>List&lt;T&gt;</code> type so the empty literal has a target sort.</p>
 <hr />
@@ -6436,8 +6495,8 @@
 <p><strong>Message:</strong> <code>list elements have incompatible types: {T0}, {Tk}</code></p>
 <p><strong>Fires at:</strong> the offending list literal CST span.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-70-1" name="__codelineno-70-1" href="#__codelineno-70-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;hello&#39;</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-70-2" name="__codelineno-70-2" href="#__codelineno-70-2"></a><span class="c1">--              ^^^^^^^^^^^  MetaListHeterogeneous: INTEGER vs TEXT</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-71-1" name="__codelineno-71-1" href="#__codelineno-71-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;hello&#39;</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<a id="__codelineno-71-2" name="__codelineno-71-2" href="#__codelineno-71-2"></a><span class="c1">--              ^^^^^^^^^^^  MetaListHeterogeneous: INTEGER vs TEXT</span>
 </code></pre></div></p>
 <p><strong>Fix:</strong> ensure all elements share a compatible type. Numeric mixed precision is promoted automatically (<code>[1, 2.5]</code> infers <code>DECIMAL</code>). For truly incompatible types, cast all elements to a common type or split into separate lists.</p>
 <hr />
@@ -6446,9 +6505,9 @@
 <p><strong>Message:</strong> <code>spread is not allowed in {position name}</code></p>
 <p><strong>Fires at:</strong> the <code>...</code> CST span.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-71-1" name="__codelineno-71-1" href="#__codelineno-71-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span>
-<a id="__codelineno-71-2" name="__codelineno-71-2" href="#__codelineno-71-2"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-71-3" name="__codelineno-71-3" href="#__codelineno-71-3"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="p">...</span><span class="n">preds</span><span class="w">  </span><span class="c1">-- MetaSpreadInForbiddenPosition</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-72-1" name="__codelineno-72-1" href="#__codelineno-72-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span>
+<a id="__codelineno-72-2" name="__codelineno-72-2" href="#__codelineno-72-2"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<a id="__codelineno-72-3" name="__codelineno-72-3" href="#__codelineno-72-3"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="p">...</span><span class="n">preds</span><span class="w">  </span><span class="c1">-- MetaSpreadInForbiddenPosition</span>
 </code></pre></div></p>
 <p><strong>Fix:</strong> move the spread to a SELECT list. For WHERE-clause predicate lists, use the <code>and_all</code> reducer.</p>
 <hr />
@@ -6457,8 +6516,8 @@
 <p><strong>Message:</strong> <code>spread expects List&lt;T&gt;; found {actual type}</code></p>
 <p><strong>Fires at:</strong> the <code>...</code> CST span.</p>
 <p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-72-1" name="__codelineno-72-1" href="#__codelineno-72-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="n">some_integer</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-72-2" name="__codelineno-72-2" href="#__codelineno-72-2"></a><span class="c1">--         ^^^^^^^^^^^^^^  MetaSpreadOnNonList: INTEGER is not List&lt;T&gt;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-73-1" name="__codelineno-73-1" href="#__codelineno-73-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="n">some_integer</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<a id="__codelineno-73-2" name="__codelineno-73-2" href="#__codelineno-73-2"></a><span class="c1">--         ^^^^^^^^^^^^^^  MetaSpreadOnNonList: INTEGER is not List&lt;T&gt;</span>
 </code></pre></div></p>
 <p><strong>Fix:</strong> wrap the value in a list literal (<code>...[some_integer]</code>) to splice a single element, or verify that the binding supplying the value actually has type <code>List&lt;T&gt;</code>.</p>
 <hr />
