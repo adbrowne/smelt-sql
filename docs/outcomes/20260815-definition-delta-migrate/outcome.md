@@ -339,13 +339,24 @@ open — not that the excluded bullets themselves are gone.
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | done |
 | 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | done |
 | 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | done |
-| 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | planned |
+| 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | done |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
 
+- **2026-09-03, phase 28c — `change_feed` sources get an `UpstreamMutation` cell, clamped to
+  full-input re-derivation.** Added `MutationProfile::ChangeFeed` to the plan layer with a
+  single-owner `is_mutable()` predicate; `derive_triggers` derives the cell unconditionally from
+  the declaration (no `explicitly_mutable` gate needed, unlike `mutable_snapshot`); the cell's
+  technique is clamped to `RecomputeRegion`/`DeleteInsert` (no column-scoped merge); the
+  fold-repair narrowing branch refuses fail-loud for a `ChangeFeed` posture rather than attempting
+  a fingerprint-sidecar discovery that doesn't exist for a feed. `repair::discovery_posture` now
+  returns `Option` so that non-existence is a typed, checked case, not a silent default. The Known
+  Divergences bullet narrows from "does not yet get a cell" to "always re-derives from the full
+  input" — the honestly-open residue (live fold over the feed's delta shape) stays in §Future
+  Extensions, unchanged.
 - **2026-09-03, phase 28b — merged-group region-recompute rule enforced, not just declared.**
   `derive_mutation` was calling the corner/technique choice per source alone, so a column group
   value-sensitive to two mutation-capable inputs got two independent `ColumnScopedMerge` cells —

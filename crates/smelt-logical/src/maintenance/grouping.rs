@@ -72,7 +72,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{ColumnGroup, MutationProfile, SourceFacts};
+#[cfg(test)]
+use super::MutationProfile;
+use super::{ColumnGroup, SourceFacts};
 use crate::analysis::expr_util::{collect_column_refs, split_top_level_conjuncts};
 use crate::analysis::join_shape::JoinContext;
 use crate::analysis::skeleton_closure::{enrichment_join_alias, skeleton_source_closure};
@@ -369,9 +371,10 @@ fn classify_arm(
             referenced_sources.insert(bare.clone());
             match source_by_name.get(bare.as_str()) {
                 Some(facts) => {
-                    let contributes = match facts.mutation {
-                        MutationProfile::MutableSnapshot => true,
-                        MutationProfile::AppendOnly => is_aggregate,
+                    let contributes = if facts.mutation.is_mutable() {
+                        true
+                    } else {
+                        is_aggregate
                     };
                     if contributes {
                         sensitivity.insert(facts.name.clone());
@@ -718,7 +721,7 @@ fn scan_scope_membership(
                 .unwrap_or(leaf.relation.as_str())
                 .to_string();
             match source_by_name.get(bare.as_str()) {
-                Some(facts) if facts.mutation == MutationProfile::MutableSnapshot => {
+                Some(facts) if facts.mutation.is_mutable() => {
                     if pruned_source == Some(bare.as_str()) {
                         // Closure-pruned (`model_properties.md` §"Semantics"):
                         // this join's own ON-equality read of a proven-Closed
@@ -829,7 +832,7 @@ fn closure_pruned_source(
         .unwrap_or(resolved.as_str())
         .to_string();
     let facts = source_by_name.get(bare.as_str())?;
-    if facts.mutation != MutationProfile::MutableSnapshot {
+    if !facts.mutation.is_mutable() {
         return None;
     }
     if skeleton_source_closure(cs.sql, &bare, None, cs.ctx).is_closed() {

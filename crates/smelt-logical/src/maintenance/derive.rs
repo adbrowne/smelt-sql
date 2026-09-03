@@ -145,6 +145,11 @@ pub fn derive_triggers(
         });
         let gets_mutation_cell = match s.mutation {
             MutationProfile::MutableSnapshot => explicitly_mutable.contains(&s.name),
+            // A change feed can only arise from an explicit declaration —
+            // there is no fail-closed default it could be silently
+            // conflated with — so the declaration alone suffices, unlike
+            // `MutableSnapshot`'s `explicitly_mutable` gate.
+            MutationProfile::ChangeFeed => true,
             MutationProfile::AppendOnly => column_groups
                 .iter()
                 .any(|g| g.mutation_sensitivity.contains(&s.name)),
@@ -177,17 +182,14 @@ fn same_key_set(a: &[String], b: &[String]) -> bool {
 /// clocked source's own partition column stands in for
 /// `SourceShape::has_clock` (`SourceFacts::partition_col`'s doc comment: "the
 /// source's partition column, when it is clocked"), and the plan-layer
-/// [`MutationProfile`] maps onto the analysis-layer one 1:1 (v0 has no
-/// `ChangeFeed` source in the plan layer yet — `sources.md`'s structured
-/// `mutation_profile` kind is consumed at the `MutationProfile::AppendOnly`/
-/// `MutableSnapshot` granularity here; a `change_feed` source is out of scope
-/// for this phase, per `incremental_models.md` §Known Divergences).
+/// [`MutationProfile`] maps onto the analysis-layer one 1:1.
 fn source_shape(facts: &SourceFacts) -> SourceShape {
     SourceShape {
         has_clock: facts.partition_col.is_some(),
         mutation_profile: Some(match facts.mutation {
             MutationProfile::AppendOnly => DeltaMutationProfile::AppendOnly,
             MutationProfile::MutableSnapshot => DeltaMutationProfile::Mutable,
+            MutationProfile::ChangeFeed => DeltaMutationProfile::ChangeFeed,
         }),
     }
 }
@@ -1285,6 +1287,7 @@ fn derive_new_data(
             let posture = match facts.mutation {
                 MutationProfile::AppendOnly => DeltaMutationProfile::AppendOnly,
                 MutationProfile::MutableSnapshot => DeltaMutationProfile::Mutable,
+                MutationProfile::ChangeFeed => DeltaMutationProfile::ChangeFeed,
             };
             let representative = fold
                 .add_columns
@@ -1308,6 +1311,24 @@ fn derive_new_data(
                 // `NoAdmissibleTechnique` refusal is still pushed, and the
                 // repair refusal is pushed alongside it naming the failing
                 // obligation — additive, not a replacement.
+                //
+                // A `ChangeFeed` source has no fingerprint-sidecar to diff
+                // (`repair::discovery_posture` has no `SidecarDiff` arm for
+                // it — the feed's delta shape isn't consumed yet,
+                // `incremental_models.md` §Known Divergences), so the repair
+                // family is refused here, loud and named, rather than
+                // attempted against a discovery posture that doesn't exist.
+                if facts.mutation == MutationProfile::ChangeFeed {
+                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                        trigger: format!("{trigger:?}"),
+                        why: format!(
+                            "fold over '{source}' fails the faithful-fold source-posture \
+                             condition: {reason}, and the repair family has no fingerprint-\
+                             sidecar discovery for a change_feed source",
+                        ),
+                    });
+                    return;
+                }
                 let delta = repair::delta_shape_for_source(inputs.sql, facts);
                 match repair::admit_per_group_recompute(
                     inputs.sql,
@@ -1618,7 +1639,15 @@ fn derive_mutation(
             .union(&group.membership_sensitivity)
             .filter(|s| covered_by_mutation.contains(*s))
             .count();
-        let (corner, technique) = if membership_sensitive || mutation_capable_inputs >= 2 {
+        // A `ChangeFeed` source's cell is clamped to full-input
+        // re-derivation, the same forcing shape the merged-group guard
+        // above uses: no column-scoped merge or fold realisation exists
+        // for a posture whose delta shape is never read
+        // (`incremental_models.md` §Known Divergences).
+        let (corner, technique) = if facts.mutation == MutationProfile::ChangeFeed
+            || membership_sensitive
+            || mutation_capable_inputs >= 2
+        {
             (Corner::RecomputeRegion, Technique::DeleteInsert)
         } else {
             (Corner::ColumnMerge, Technique::ColumnScopedMerge)
@@ -2065,4 +2094,30 @@ pub fn group_columns(groups: &[ColumnGroup]) -> BTreeSet<String> {
         .iter()
         .flat_map(|g| g.columns.iter().cloned())
         .collect()
+}
+
+#[cfg(test)]
+mod source_shape_tests {
+    use super::*;
+
+    /// Phase 28c: `source_shape` maps the plan-layer `MutationProfile::
+    /// ChangeFeed` onto the analysis-layer `DeltaMutationProfile::
+    /// ChangeFeed` 1:1, the same mapping `AppendOnly`/`MutableSnapshot`
+    /// already get — closing the "no `ChangeFeed` in the plan layer" gap
+    /// this function's own doc comment used to record.
+    #[test]
+    fn change_feed_source_shape_maps_to_change_feed_delta_profile() {
+        let facts = SourceFacts {
+            name: "feed".to_string(),
+            mutation: MutationProfile::ChangeFeed,
+            partition_col: None,
+            unique_key: vec![],
+            allow_full_scan: false,
+        };
+        let shape = source_shape(&facts);
+        assert_eq!(
+            shape.mutation_profile,
+            Some(DeltaMutationProfile::ChangeFeed)
+        );
+    }
 }

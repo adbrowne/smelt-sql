@@ -971,15 +971,20 @@ an unrecognised construct refuses, never defaults). The obligations, each with i
    (`MaintenanceRepairKeysNotDiscoverable`).
 
 **Which changed inputs get a mutation cell.** A source gets an `UpstreamMutation` cell iff it
-**explicitly declares** `mutation_profile: mutable_snapshot` (the fail-closed admission default
-alone never synthesises one — an undeclared source is not silently treated as mutable), **or**
-it is `append_only` and named in some column group's value-sensitivity set (a late append into an
-already-written region changes stored values, so that region is maintained, not left stale). The
-source's clock is not part of this rule: whether the resulting cell's scan can be clamped to the
-output partition axis is a downstream admission question (obligation 4 above), not a derivation-
-time gate. A clocked mutable source whose scan cannot be clamped surfaces the ordinary
-`MaintenanceScanUnbounded` refusal — escapable by `allow_full_scan` / `scan_bounds.on_violation:
-warn` — the same loud path an unclocked one already takes, never a silently-dropped cell.
+**explicitly declares** `mutation_profile: mutable_snapshot` or `mutation_profile: change_feed`
+(the fail-closed admission default alone never synthesises one — an undeclared source is not
+silently treated as mutable), **or** it is `append_only` and named in some column group's
+value-sensitivity set (a late append into an already-written region changes stored values, so
+that region is maintained, not left stale). Unlike `mutable_snapshot`, a `change_feed` cell needs
+no value-sensitivity check to qualify: a change feed can only arise from an explicit declaration,
+so there is no fail-closed default it could be silently conflated with. The resulting cell is
+admitted as full-input re-derivation over the source's current contents — the feed's own delta
+rows are not read (§Known Divergences). The source's clock is not part of this rule: whether the
+resulting cell's scan can be clamped to the output partition axis is a downstream admission
+question (obligation 4 above), not a derivation-time gate. A clocked mutable source whose scan
+cannot be clamped surfaces the ordinary `MaintenanceScanUnbounded` refusal — escapable by
+`allow_full_scan` / `scan_bounds.on_violation: warn` — the same loud path an unclocked one already
+takes, never a silently-dropped cell.
 
 **When a mutation cell dispatches.** An `UpstreamMutation` cell that is otherwise live does not
 unconditionally dispatch on every run: a run compares the source's recorded content fingerprint
@@ -2097,11 +2102,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   so that branch is proven only at resolver level; `smelt bakeoff` measures technique-family
   cost only, not the write-suppression dimension; whether a future cost model needs
   region-level change-ratio statistics from prior observed deltas is open.
-- **`change_feed` sources do not yet get an `UpstreamMutation` cell** — every other
-  mutation-sensitive posture receives one, and a change feed must too; today none is derived,
-  and even where the posture is threaded through, only full-input re-derivation is admitted
-  (live fold machinery for a change feed's delta shape is §Future Extensions, blocked on the
-  retention point).
+- **A `change_feed` source's mutation cell always re-derives from the full input** — a
+  `change_feed`-declared source gets an `UpstreamMutation` cell (§"Which changed inputs get a
+  mutation cell"), but the cell never reads the feed's own delta rows; live fold machinery over
+  a change feed's delta shape (retractions, `delta_identity`) remains §Future Extensions, blocked
+  on the retention point.
 - **Conditional-maintenance gaps**: a target whose `BackendCapabilities::supports_fingerprint_sidecar`
   is `false` keeps the widened-scan recompute for a mutation-sensitive cell driven by an external
   `mutable_snapshot` source (`multi_backend.md` §"The fingerprint sidecar capability" — DuckDB

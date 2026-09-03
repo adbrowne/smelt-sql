@@ -95,10 +95,9 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
         .map(|m| m.kind)
     {
         Some(SourceMutationKind::AppendOnly) => PlanMutationProfile::AppendOnly,
-        // `ChangeFeed` has no plan-layer representation yet
-        // (`incremental_models.md` §Known Divergences); undeclared and
-        // `Mutable` both fail closed to the stricter posture rather than
-        // assume append-only.
+        Some(SourceMutationKind::ChangeFeed) => PlanMutationProfile::ChangeFeed,
+        // Undeclared and `Mutable` both fail closed to the stricter
+        // posture rather than assume append-only.
         _ => PlanMutationProfile::MutableSnapshot,
     };
     // The source's own declared `unique_key:` (`sources.md` §"Row
@@ -1411,6 +1410,47 @@ mod tests {
             mutation_sensitivity: sensitivity.iter().map(|s| s.to_string()).collect(),
             membership_sensitivity: BTreeSet::new(),
         }
+    }
+
+    fn source_info_with_mutation(kind: Option<SourceMutationKind>) -> SourceInfo {
+        SourceInfo {
+            path: std::path::PathBuf::from("/tmp/s.yml"),
+            address_segments: vec!["sources".to_string(), "s".to_string()],
+            columns: vec![],
+            description: None,
+            name_override: None,
+            tags: vec![],
+            timeseries: None,
+            mutation_profile: kind.map(smelt_core::sources::SourceMutationProfile::from_kind),
+            source_lateness: None,
+            watermark: None,
+            unique_key: None,
+            retention: None,
+            referential_integrity: None,
+        }
+    }
+
+    /// Phase 28c: a declared `mutation_profile: change_feed` source facts to
+    /// `PlanMutationProfile::ChangeFeed` — while undeclared and `mutable_snapshot`
+    /// both still fail closed to the stricter `MutableSnapshot` posture.
+    #[test]
+    fn source_facts_maps_declared_change_feed() {
+        let feed = source_info_with_mutation(Some(SourceMutationKind::ChangeFeed));
+        assert_eq!(
+            source_facts("feed", Some(&feed), true).mutation,
+            PlanMutationProfile::ChangeFeed
+        );
+
+        let mutable = source_info_with_mutation(Some(SourceMutationKind::Mutable));
+        assert_eq!(
+            source_facts("mutable", Some(&mutable), true).mutation,
+            PlanMutationProfile::MutableSnapshot
+        );
+
+        assert_eq!(
+            source_facts("undeclared", None, true).mutation,
+            PlanMutationProfile::MutableSnapshot
+        );
     }
 
     #[test]

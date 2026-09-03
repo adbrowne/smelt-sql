@@ -287,11 +287,18 @@ pub enum RepairDiscoveryPosture {
 }
 
 /// Derive [`RepairDiscoveryPosture`] from a source's declared
-/// [`MutationProfile`].
-pub fn discovery_posture(mutation: MutationProfile) -> RepairDiscoveryPosture {
+/// [`MutationProfile`]. `None` for [`MutationProfile::ChangeFeed`] — no
+/// fingerprint-sidecar diff exists for a change feed's delta shape yet
+/// (`incremental_models.md` §Known Divergences), so a repair cell over a
+/// `ChangeFeed` source is refused upstream at derivation time
+/// (`derive::derive_new_data`) and never reaches this function; a caller
+/// that somehow does see `None` here must refuse loud, never silently pick
+/// a discovery posture that doesn't apply.
+pub fn discovery_posture(mutation: MutationProfile) -> Option<RepairDiscoveryPosture> {
     match mutation {
-        MutationProfile::MutableSnapshot => RepairDiscoveryPosture::SidecarDiff,
-        MutationProfile::AppendOnly => RepairDiscoveryPosture::ClampedScan,
+        MutationProfile::MutableSnapshot => Some(RepairDiscoveryPosture::SidecarDiff),
+        MutationProfile::AppendOnly => Some(RepairDiscoveryPosture::ClampedScan),
+        MutationProfile::ChangeFeed => None,
     }
 }
 
@@ -303,12 +310,17 @@ mod tests {
     fn discovery_posture_is_sidecar_only_for_mutable_snapshot() {
         assert_eq!(
             discovery_posture(MutationProfile::MutableSnapshot),
-            RepairDiscoveryPosture::SidecarDiff
+            Some(RepairDiscoveryPosture::SidecarDiff)
         );
         assert_eq!(
             discovery_posture(MutationProfile::AppendOnly),
-            RepairDiscoveryPosture::ClampedScan
+            Some(RepairDiscoveryPosture::ClampedScan)
         );
+    }
+
+    #[test]
+    fn discovery_posture_is_none_for_change_feed() {
+        assert_eq!(discovery_posture(MutationProfile::ChangeFeed), None);
     }
 
     #[test]

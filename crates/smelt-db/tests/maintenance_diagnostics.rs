@@ -1925,3 +1925,80 @@ fn clocked_mutable_source_with_no_derivable_clamp_refuses_scan_unbounded() {
         result.plan.refusals
     );
 }
+
+/// Phase 28c end-to-end: `examples/source_mutation_profile_declared`'s
+/// `raw_events` source already declares `mutation_profile: change_feed`
+/// (that fixture is smoke-tested for diagnostics/build only). This mirrors
+/// its exact source declaration and model SQL, adding the `refresh:
+/// incremental` frontmatter an incremental maintenance plan needs, and
+/// asserts through the same production Salsa path `file_diagnostics` uses
+/// that the model now carries an `UpstreamMutation` cell for `raw_events`,
+/// clamped to full-input re-derivation (`Corner::RecomputeRegion`,
+/// `Technique::DeleteInsert`) — never a column-scoped merge.
+#[test]
+fn change_feed_declared_source_derives_upstream_mutation_cell() {
+    let raw_events_source = r#"
+description: Raw event feed exposing a change-data feed; smelt reads only rows changed since the last run.
+mutation_profile: change_feed
+source_lateness: '2 hours'
+columns:
+  - { name: event_id, type: INTEGER,   nullable: false }
+  - { name: user_id,  type: INTEGER,   nullable: true }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+  - { name: amount,   type: DOUBLE,    nullable: true }
+"#;
+    let events_model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  partition_column: event_ts
+  event_time_column: event_ts
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      raw_events:
+        allow_full_scan: true
+---
+SELECT
+    event_id,
+    user_id,
+    event_ts,
+    amount
+FROM smelt.sources.raw_events
+"#;
+    let files = vec![
+        ("smelt.yml", SMELT_YML),
+        ("models/sources/raw_events.yml", raw_events_source),
+        ("models/events.sql", events_model),
+    ];
+
+    let result = plan_for(&files, "events");
+    assert!(
+        result.plan.refusals.is_empty(),
+        "expected the change_feed cell to be admitted, got refusals {:?}",
+        result.plan.refusals
+    );
+    let cell = result
+        .plan
+        .cells
+        .iter()
+        .find(|c| {
+            matches!(&c.trigger, smelt_logical::maintenance::Trigger::UpstreamMutation { source } if source == "raw_events")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an UpstreamMutation cell for raw_events, got cells {:?}",
+                result.plan.cells
+            )
+        });
+    assert_eq!(
+        cell.corner,
+        smelt_logical::maintenance::Corner::RecomputeRegion
+    );
+    assert_eq!(
+        cell.technique,
+        smelt_logical::maintenance::Technique::DeleteInsert
+    );
+}

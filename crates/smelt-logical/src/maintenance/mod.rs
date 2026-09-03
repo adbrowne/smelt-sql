@@ -55,6 +55,26 @@ pub enum MutationProfile {
     /// The table is a mutable snapshot: rows may be updated or deleted in
     /// place with no change history.
     MutableSnapshot,
+    /// The source exposes its own change-data feed (CDC/CDF), declared
+    /// explicitly (`sources.md` §"`mutation_profile` — the structured
+    /// block"). Admitted conservatively as full-input re-derivation — no
+    /// live fold over the feed's own delta rows exists yet
+    /// (`incremental_models.md` §Known Divergences).
+    ChangeFeed,
+}
+
+impl MutationProfile {
+    /// Single-owner answer to "is this posture mutable?" — every plan-layer
+    /// site that widens a value/membership-sensitivity set or a repair
+    /// posture to cover both `MutableSnapshot` and `ChangeFeed` consults
+    /// this rather than restating the two-variant comparison at each call
+    /// site.
+    pub fn is_mutable(self) -> bool {
+        matches!(
+            self,
+            MutationProfile::MutableSnapshot | MutationProfile::ChangeFeed
+        )
+    }
 }
 
 /// The facts about one input source that admission consults.

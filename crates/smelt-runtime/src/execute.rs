@@ -4380,7 +4380,11 @@ pub async fn execute_project(
                                     smelt_logical::maintenance::MutationProfile::AppendOnly => {
                                         SourceMutationPosture::AppendOnly
                                     }
-                                    smelt_logical::maintenance::MutationProfile::MutableSnapshot => {
+                                    smelt_logical::maintenance::MutationProfile::MutableSnapshot
+                                    // A change feed has no interval representation
+                                    // either — its landed delta is recorded the same
+                                    // whole-table way a mutable snapshot's is.
+                                    | smelt_logical::maintenance::MutationProfile::ChangeFeed => {
                                         SourceMutationPosture::MutableSnapshot
                                     }
                                 }

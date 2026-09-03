@@ -674,13 +674,19 @@ pub fn build_maintenance_plan_report(
                                 false,
                             );
                             let mechanism = match discovery_posture(src_facts.mutation) {
-                                RepairDiscoveryPosture::ClampedScan => {
+                                Some(RepairDiscoveryPosture::ClampedScan) => {
                                     "clamped current-source scan"
                                 }
-                                RepairDiscoveryPosture::SidecarDiff => {
+                                Some(RepairDiscoveryPosture::SidecarDiff) => {
                                     "group-grain fingerprint-sidecar diff (mutable_snapshot, \
                                      obligation 7)"
                                 }
+                                // A repair cell is never admitted over a
+                                // change_feed source (`derive::
+                                // derive_new_data` refuses it upstream), so
+                                // this arm should be unreachable for any
+                                // cell `smelt explain` actually renders.
+                                None => "(no discovery posture — unexpected change_feed source)",
                             };
                             let _ = writeln!(out, "      affected-key discovery: {mechanism}");
                         }

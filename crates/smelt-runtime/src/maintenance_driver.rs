@@ -2303,26 +2303,41 @@ pub fn resolve_live_per_group_recompute_cell(
                 // source"): a source with no native change feed and no
                 // tombstone/change history needs the group-grain sidecar
                 // diff to witness a wholly-deleted group; every other
-                // posture keeps the ordinary clamped current-source scan.
-                let discovery =
-                    if discovery_posture(facts.mutation) == RepairDiscoveryPosture::SidecarDiff {
-                        if dialect != SqlDialect::DuckDB {
-                            return Err(BackendError::unsupported(
-                                dialect.name(),
-                                "group-grain fingerprint-sidecar affected-key discovery for a \
+                // posture keeps the ordinary clamped current-source scan. A
+                // `ChangeFeed` source has no discovery posture at all — the
+                // repair family is refused for it upstream at derivation
+                // time (`derive::derive_new_data`), so a live cell here
+                // should never carry one; a `None` posture bails loud
+                // rather than silently defaulting to a scan that may drop
+                // rows.
+                let Some(posture) = discovery_posture(facts.mutation) else {
+                    bail!(
+                        "MaintenanceRepairDiscoveryPostureMissing: a Technique::\
+                         PerGroupRecompute cell for group '{}' resolved a change_feed source \
+                         '{}' — the repair family has no fingerprint-sidecar discovery for a \
+                         change feed and should never have admitted this cell",
+                        cell.group,
+                        facts.name,
+                    );
+                };
+                let discovery = if posture == RepairDiscoveryPosture::SidecarDiff {
+                    if dialect != SqlDialect::DuckDB {
+                        return Err(BackendError::unsupported(
+                            dialect.name(),
+                            "group-grain fingerprint-sidecar affected-key discovery for a \
                              mutable_snapshot repair source (P9)",
-                            )
-                            .into());
-                        }
-                        let digest_columns: Vec<String> =
-                            match cell.fingerprint_projections.get(&facts.name) {
-                                Some(FingerprintProjection::Columns(cols)) => {
-                                    cols.iter().cloned().collect()
-                                }
-                                _ => Vec::new(),
-                            };
-                        if digest_columns.is_empty() {
-                            bail!(
+                        )
+                        .into());
+                    }
+                    let digest_columns: Vec<String> =
+                        match cell.fingerprint_projections.get(&facts.name) {
+                            Some(FingerprintProjection::Columns(cols)) => {
+                                cols.iter().cloned().collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                    if digest_columns.is_empty() {
+                        bail!(
                             "MaintenanceRepairDigestColumnsMissing: a Technique::PerGroupRecompute \
                              cell for group '{}' resolved a MutableSnapshot delta posture on \
                              source '{}' with no P4 fingerprint projection columns — the \
@@ -2330,11 +2345,11 @@ pub fn resolve_live_per_group_recompute_cell(
                             cell.group,
                             facts.name,
                         );
-                        }
-                        RepairDiscovery::SidecarDiff { digest_columns }
-                    } else {
-                        RepairDiscovery::ClampedScan
-                    };
+                    }
+                    RepairDiscovery::SidecarDiff { digest_columns }
+                } else {
+                    RepairDiscovery::ClampedScan
+                };
                 return Ok(Some((
                     facts.name.clone(),
                     cell.clone(),
