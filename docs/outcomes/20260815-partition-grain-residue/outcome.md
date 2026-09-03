@@ -72,7 +72,7 @@ fixture.
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | done |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | done |
 | 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | done |
-| 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | pending |
+| 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | planned |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
@@ -212,6 +212,22 @@ fixture.
   itself is correct by adding an explicit `CAST(... AS INTEGER)` to the fixture,
   which does trigger the intended fail-loud refusal
   (`docs/outcomes/20260815-partition-grain-residue/phases/05a-summary.md`).
+
+- 2026-09-04 — Phase 5b planned. No phase row added, split, or reordered. Two
+  findings from the 5a summary were absorbed into 5b rather than deferred:
+  (i) `contract.frozen_horizon` on an integer axis is today *silently
+  unclamped* (5a's `(Date, Date)` match arm just skips it) — a fail-loud-
+  discipline gap in code this phase already touches, so 5b turns it into a
+  refusal; (ii) the probe fixture's `batch_id` resolving to `Unknown(Dynamic)`
+  is handled by option (b) of the 5a summary — the fixture gains an explicit
+  `CAST(... AS INTEGER)` so axis resolution is real rather than literal-implied.
+  Option (a), fixing the underlying inference of a `VALUES`-literal column
+  crossing one `smelt.ref()` hop, is a pre-existing type-inference limitation
+  that no success criterion depends on and is not folded in; the summary
+  records it. `smelt explain` gains axis-awareness from the `--period`
+  literal's own form (it has no Salsa handle to resolve a schema), which is the
+  same fail-open posture `build_model_plans` already uses, hoisted into one
+  shared helper rather than duplicated.
 
 ## Blocked
 
