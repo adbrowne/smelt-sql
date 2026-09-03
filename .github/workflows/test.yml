@@ -23,9 +23,6 @@ jobs:
       - name: Setup mise (rust, node)
         uses: jdx/mise-action@v2
 
-      - name: Add rust components
-        run: rustup component add clippy rustfmt
-
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -149,6 +146,10 @@ jobs:
   fuzz-build:
     name: Fuzz Targets Build Check
     runs-on: ubuntu-latest
+    env:
+      # Job-level, not step-level: mise's shims re-resolve the tool version
+      # from env on every invocation, so a later step needs this visible too.
+      MISE_RUST_VERSION: nightly
 
     steps:
       - name: Checkout code
@@ -156,8 +157,6 @@ jobs:
 
       - name: Setup mise (rust nightly)
         uses: jdx/mise-action@v2
-        env:
-          MISE_RUST_VERSION: nightly
 
       - name: Cache fuzz build
         uses: actions/cache@v5
