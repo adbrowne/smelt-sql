@@ -295,6 +295,11 @@ open — not that the excluded bullets themselves are gone.
   a product owner is ready to decide them, rather than folding a design pass into an
   implementation-only outcome.
 
+- **Broader backbuild statement-parity coverage** (the D2/B5/B6/E1/E2/E4/F1/F2/C1 techniques
+  phase 30 left unexercised by real-fixture parity tests). The single-ownership rule is enforced
+  structurally for every technique by the scan; per-technique executed-vs-emitted fixtures are
+  breadth, not a success criterion, and each needs its own staged workspace.
+
 ## Phases
 
 | # | Phase | Status |
@@ -342,7 +347,7 @@ open — not that the excluded bullets themselves are gone.
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | done |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | done |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | done |
-| 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | pending |
+| 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | planned |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
@@ -1253,6 +1258,18 @@ open — not that the excluded bullets themselves are gone.
   structural scan's crate list unchanged (`smelt-backend*`, `smelt-runtime`, `smelt-logical`)
   and widens only its *shape* list to the backbuild families; 30b owns the crate-list widening
   plus the unification, so a large refactor cannot silently expand phase 30.
+
+**2026-09-03 (phase 30b planning).** Resolved 30b's stated either/or in favour of the
+*justified per-dialect exception*, not routing through `backbuild::emit`:
+`incremental_models.md` §"Statement emission (single owner)" already places schema-evolution DDL
+outside the maintenance/backbuild emitter rule, and `smelt-state`'s DDL layer is multi-dialect
+(DuckDB/Spark/BigQuery) with struct-field, nested-widening and nullability operations the
+DuckDB-test-grade backbuild emitters have no forms for. The residual defect is real but *inside*
+`smelt-state`: `schema_tracking::generate_migration_sql` authors its own inline DuckDB DDL beside
+`ddl_duckdb`, so 30b collapses that second author and widens the structural scan to
+`smelt-state/src` with the three `ddl_<dialect>.rs` modules as declared owners. No phase rows
+added or removed; phase 30's suggestion of per-technique backbuild parity fixtures declined and
+recorded under "## Out of scope".
 
 ## Blocked
 
