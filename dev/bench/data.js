@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788432743179,
+  "lastUpdate": 1788434921643,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -187,6 +187,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.365486,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0de6608eec1fb0d859121a855346e90b3ba44f7f",
+          "message": "CI: use mise for Rust/Node toolchain setup instead of separate actions\n\nReplaces dtolnay/rust-toolchain and actions/setup-node with jdx/mise-action\neverywhere, including the nightly fuzz jobs (via MISE_RUST_VERSION=nightly),\nso CI now installs the exact versions pinned in mise.toml — the same ones\na local `mise install` gives a developer. DuckDB setup runs before mise in\nevery job so mise's dynamic DUCKDB_LIB_DIR detection resolves correctly.\nrustup target/component flags move to explicit `rustup target/component add`\nsteps since mise-action doesn't take rust-toolchain's `with:` inputs.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T21:23:56+10:00",
+          "tree_id": "e3db7539c211f46d445a76f0eb202cd78f940c44",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0de6608eec1fb0d859121a855346e90b3ba44f7f"
+        },
+        "date": 1788434919881,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 64.829942,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 61.74846,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.555554,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.769992,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.397505,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1158.006124,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 6.596638,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 5.212505,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 5.896445999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.469302,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 984.301968,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 9.23199,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 35.687850000000005,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 14.265003,
             "unit": "ms"
           }
         ]
