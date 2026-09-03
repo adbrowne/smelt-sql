@@ -57,12 +57,18 @@ conservative v1, self-referential keyed models, and run-pinning alignment for `N
 in keyed models (today a deliberate hard refusal, `KeyedForbidsNondeterministic` — relaxing it
 changes stated behaviour, not just fills a gap).
 
+Also out of scope, discovered by phase 1: `repair::admit_per_group_recompute` passes an empty
+`JoinContext` and never projects a join's own `ON` columns, so per-group repair can never admit
+for a source reached only through a JOIN. It is a real limitation, but it belongs to the repair
+family's admission width (`docs/outcomes/20260809-repair-family`), not to any of this outcome's
+six success criteria — criterion 1 is already met end-to-end without it.
+
 ## Phases
 
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
-| 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | pending |
+| 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | planned |
 | 3 | Transactional ledger fold on every shipped backend | pending |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | pending |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | pending |
@@ -84,6 +90,16 @@ changes stated behaviour, not just fills a gap).
   passes an empty `JoinContext` to affected-key discovery and never projects a join's own `ON`
   columns, so per-group repair can never admit for a source reached only through a JOIN — flagged
   for the next planner as a candidate follow-up phase.
+
+- 2026-09-03 — Phase 2 planned. No reshape of the remaining rows: phase 1's summary surfaced one
+  new limitation (empty `JoinContext` in per-group repair admission), which serves none of the
+  six success criteria and is recorded under "## Out of scope" pointing at the repair-family
+  outcome. Phase 2's design was fixed to generalising the existing
+  `execute_conditional_write_and_record_observed_delta` backend seam into
+  `execute_write_with_bookkeeping` (one transactional implementation) rather than adding a
+  parallel ledger-write method, and to writing the bookkeeping record with **no** `state.mode`
+  gate — `state.md` §"`state.mode` and what each posture provides" already places correctness
+  structures in every posture.
 
 ## Blocked
 
