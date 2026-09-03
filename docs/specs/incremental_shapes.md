@@ -566,7 +566,13 @@ via `smelt.<self>`) still executes as partition DELETE+INSERT — the same state
 spine separating the two grains: stateful-ordered in execution, yet keeping the partition-grain
 shape — but its windows build sequentially in strict temporal order, its backfill may not be
 parallelised or reordered, and an edge the planner cannot prove converges
-partition-by-partition is refused at planning time. A Form B skew anchored on a *non-self*
+partition-by-partition is refused at planning time. Proving convergence requires the
+self-reference to read no forward margin *and* a strictly positive backward reach over the
+declared partition axis: a self-read confined to the current partition (zero backward reach) is
+circular, not convergent — the partition's own output would have to exist before it is written
+— and is refused identically to a forward read, by the same derivation the propagation graph
+uses to admit a time-unrolled self-edge (`incremental_models.md` §"Time-unrolled self-edges"). A
+Form B skew anchored on a *non-self*
 source rebases an `Ordered` model's write window exactly as a window-independent model's; the
 self-edge itself is never a skew anchor — its own bounding relation is a distinct convergence
 mechanism, even sharing the `partition_column` name.

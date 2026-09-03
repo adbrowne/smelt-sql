@@ -289,3 +289,56 @@ fn clockless_keyed_upstream_is_walkable_on_the_real_graph() {
     deltas.insert("agg".to_string(), vec![PartitionInterval::new(1, 2)]);
     propagate(&edges, &deltas).expect("an admitted keyed edge must propagate without refusing");
 }
+
+/// A self-referential model whose only self-join condition equates its own
+/// current partition to itself (`before == 0`, `after == 0`) is circular,
+/// not convergent — the graph layer must refuse it at the same call site
+/// (`propagation.rs`'s `self_edge_clamp` use, before any edge is even built),
+/// carrying the derivation's own reason — not `propagate.rs`'s later
+/// "no derivable backward bound" text, since the two layers now share one
+/// refusal point.
+#[test]
+fn same_partition_self_edge_refuses_at_the_clamp_call_site() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: acct_id\n  type: INTEGER\n- name: amount\n  \
+         type: DOUBLE\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/running_balance.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT bal.d AS d, bal.balance + t.amount AS balance \
+         FROM smelt.running_balance bal \
+         JOIN smelt.running_balance cur ON cur.d = bal.d \
+         JOIN smelt.sources.bronze t ON bal.acct_id = t.acct_id\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let err = build_forward_graph(&models, &source_infos)
+        .expect_err("a same-partition self-read must be refused before any edge is built");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("MaintenanceGraphUnsupportedNode"),
+        "must carry the graph-layer refusal marker: {msg}"
+    );
+    assert!(
+        msg.contains("running_balance"),
+        "reason must name the model: {msg}"
+    );
+    assert!(
+        !msg.contains("no derivable backward bound"),
+        "must carry the derivation's own reason, not propagate.rs's later \
+         generic self_edges refusal text: {msg}"
+    );
+}

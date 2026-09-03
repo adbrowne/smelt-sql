@@ -215,16 +215,16 @@ fn model_delta_origin_propagates_to_downstreams_without_rerunning_origin() {
 
 /// A self-referential model whose self-read carries no backward margin (a
 /// same-partition self-read — reads exactly the window it is itself
-/// writing, not strictly time-backward) still refuses fail-loud —
-/// `MaintenanceGraphUnsupportedNode` — but the refusal now happens at
-/// `propagate`/`required_inputs` time (`self_edges`'s `before_seconds <= 0`
-/// gate), not at `build_forward_graph` — a **provably backward-bounded**
-/// self-edge (`before_seconds > 0`) is a real day-unrolled edge
-/// (`incremental_models.md` §"Time-unrolled self-edges"), so
-/// `build_forward_graph` itself no longer refuses every self-reference on
-/// sight; it defers the strictly-time-backward check to the shared
-/// [`smelt_logical::maintenance::propagate::propagate`]/`required_inputs`
-/// gate both directions share.
+/// writing, not strictly time-backward) refuses fail-loud —
+/// `MaintenanceGraphUnsupportedNode` — at `build_forward_graph` itself: a
+/// same-partition read is circular, not convergent, so the shared derivation
+/// (`window_independence.rs`'s `self_edge_bound_days`) that
+/// `self_edge_clamp` calls refuses it before any edge is even assembled,
+/// carrying its own reason rather than deferring to `propagate`/
+/// `required_inputs`'s later, more generic `self_edges` gate. A **provably
+/// backward-bounded** self-edge (`before_seconds > 0`) remains a real
+/// day-unrolled edge (`incremental_models.md` §"Time-unrolled self-edges"),
+/// so `build_forward_graph` still admits every other self-reference shape.
 #[test]
 fn same_partition_self_referential_model_refuses() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -242,24 +242,8 @@ fn same_partition_self_referential_model_refuses() {
     let models = discovery.discover_models().expect("discover models");
     let source_infos = discover_source_infos(root, &["models".to_string()]);
 
-    let edges = build_forward_graph(&models, &source_infos)
-        .expect("build_forward_graph itself only refuses a non-time-backward self-edge later");
-    assert!(
-        edges
-            .iter()
-            .any(|e| e.upstream == "rolling" && e.downstream == "rolling"),
-        "expected a self-edge to have been assembled: {edges:?}"
-    );
-
-    let deltas = vec![SourceDelta {
-        source: "rolling".to_string(),
-        landed: smelt_logical::maintenance::propagate::PartitionInterval::new(
-            smelt_logical::maintenance::propagate::day_start(10),
-            smelt_logical::maintenance::propagate::day_start(11),
-        ),
-    }];
-    let err = plan_since_upstream(&models, &source_infos, &["rolling".to_string()], &deltas)
-        .expect_err("a same-partition (before_seconds == 0) self-edge must still refuse");
+    let err = build_forward_graph(&models, &source_infos)
+        .expect_err("a same-partition (before_seconds == 0) self-edge must refuse fail-loud");
     assert!(err.to_string().contains("MaintenanceGraphUnsupportedNode"));
     assert!(err.to_string().contains("rolling"));
 }

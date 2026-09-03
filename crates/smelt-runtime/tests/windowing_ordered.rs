@@ -249,3 +249,43 @@ fn test_ordered_alias_reuse_in_subquery_keeps_the_genuine_relation() {
         "2026-01-05"
     );
 }
+
+/// A self-join confined to the current partition (no backward reach at all)
+/// is circular, not convergent — the partition's own output would have to
+/// exist before it is written. `compute_incremental_windows_ordered` must
+/// refuse it, not silently force per-partition windows the way it would for
+/// a genuine `Ordered` self-edge.
+#[test]
+fn same_partition_self_read_is_not_eligible_for_batched_execution() {
+    let ts = make_ts("d", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-01-06");
+    let deps = one_source_dep("silver.transactions", "d");
+    let refs = vec![
+        "marts.running_balance".to_string(),
+        "silver.transactions".to_string(),
+    ];
+    let sql = "SELECT bal.d AS d, bal.balance + t.amount AS balance \
+         FROM smelt.marts.running_balance bal \
+         JOIN smelt.marts.running_balance cur ON cur.d = bal.d \
+         JOIN smelt.silver.transactions t ON bal.acct_id = t.acct_id";
+
+    let err = compute_incremental_windows_ordered(
+        "marts.running_balance",
+        &refs,
+        &ts,
+        &inc,
+        sql,
+        &deps,
+        0,
+        &range,
+        None,
+        false,
+    )
+    .expect_err("a same-partition self-read must not be eligible for batched execution");
+
+    assert!(
+        err.contains("marts.running_balance"),
+        "error must name the model: {err}"
+    );
+}

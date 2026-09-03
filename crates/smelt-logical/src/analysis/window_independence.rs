@@ -8,10 +8,11 @@
 //! (`WindowIndependent`). A model with a self-edge — it reads its own prior
 //! output via `smelt.<self>` — must build its windows strictly in temporal
 //! order (`Ordered`), but only when the self-reference provably converges
-//! partition-by-partition (a backward-bounded read of prior partitions,
-//! never a forward read or an unbounded/whole-history scan). This is a
-//! signal only: the ordered-backfill chunker that consumes it is
-//! batched-local (L4).
+//! partition-by-partition (a backward-bounded read of prior partitions with
+//! no forward margin and a strictly positive backward reach — never a
+//! forward read, an unbounded/whole-history scan, or a same-partition
+//! (zero-backward, circular) read). This is a signal only: the
+//! ordered-backfill chunker that consumes it is batched-local (L4).
 
 use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult, Seconds};
 
@@ -26,9 +27,10 @@ pub enum WindowIndependence {
     /// built strictly in temporal order.
     Ordered,
     /// A self-edge exists but does not provably converge
-    /// partition-by-partition (a forward read, an unbounded/whole-history
-    /// scan, or an underivable bound). Fail-closed: never silently treated
-    /// as `Ordered`.
+    /// partition-by-partition (a forward read, a same-partition/circular
+    /// read with no backward reach, an unbounded/whole-history scan, or an
+    /// underivable bound). Fail-closed: never silently treated as
+    /// `Ordered`.
     Refused { reason: String },
 }
 
@@ -81,10 +83,11 @@ pub fn self_edge_clamp(
 }
 
 /// `None` when `refs` carries no self-edge at all; `Some(Ok(before_days))`
-/// for a proven backward-bounded self-edge (whole days, ceiled outward);
-/// `Some(Err(reason))` for every other case — no declared partition column,
-/// a forward read, an unbounded/whole-history scan, or an underivable
-/// bound.
+/// for a proven backward-bounded self-edge (whole days, ceiled outward, with
+/// a strictly positive backward reach); `Some(Err(reason))` for every other
+/// case — no declared partition column, a forward read, a same-partition
+/// (zero-backward, circular) read, an unbounded/whole-history scan, or an
+/// underivable bound.
 fn self_edge_bound_days(
     model_name: &str,
     refs: &[String],
@@ -108,8 +111,14 @@ fn self_edge_bound_days(
         .unwrap_or(BoundResult::NotDerivable);
 
     Some(match bound {
-        BoundResult::Bounded { after, before, .. } if after == Seconds::ZERO => {
+        BoundResult::Bounded { after, before, .. } if after == Seconds::ZERO && before.0 > 0 => {
             Ok(before.0.div_ceil(86_400) as i64)
+        }
+        BoundResult::Bounded { after, before, .. } if after == Seconds::ZERO && before.0 == 0 => {
+            Err(format!(
+                "model '{model_name}' self-edge reads only its own current partition \
+                 — circular, not convergent partition-by-partition"
+            ))
         }
         BoundResult::Bounded { after, .. } => Err(format!(
             "model '{model_name}' self-edge reads {} forward of the current partition \
@@ -236,6 +245,72 @@ mod tests {
             self_edge_clamp("marts.running_balance", &refs, Some("partition_date"), sql)
                 .expect_err("forward-reading self-edge must not yield a clamp");
         assert_eq!(clamp_err, verdict_reason);
+    }
+
+    #[test]
+    fn same_partition_self_read_is_refused_fail_closed() {
+        let refs = vec!["marts.running_balance".to_string()];
+        let sql = "SELECT bal.balance AS balance \
+                   FROM smelt.marts.running_balance bal \
+                   JOIN smelt.marts.running_balance cur \
+                     ON cur.partition_date = bal.partition_date";
+        let verdict =
+            window_independence("marts.running_balance", &refs, Some("partition_date"), sql);
+        match verdict {
+            WindowIndependence::Refused { reason } => {
+                assert!(
+                    reason.contains("marts.running_balance"),
+                    "reason must name the self-edge: {reason}"
+                );
+                assert!(
+                    reason.contains("current partition") || reason.contains("circular"),
+                    "reason must describe the same-partition (non-convergent) shape: {reason}"
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_edge_clamp_refuses_a_same_partition_self_read_with_the_same_reason() {
+        let refs = vec!["marts.running_balance".to_string()];
+        let sql = "SELECT bal.balance AS balance \
+                   FROM smelt.marts.running_balance bal \
+                   JOIN smelt.marts.running_balance cur \
+                     ON cur.partition_date = bal.partition_date";
+        let verdict =
+            window_independence("marts.running_balance", &refs, Some("partition_date"), sql);
+        let WindowIndependence::Refused {
+            reason: verdict_reason,
+        } = verdict
+        else {
+            panic!("expected Refused");
+        };
+        let clamp_err =
+            self_edge_clamp("marts.running_balance", &refs, Some("partition_date"), sql)
+                .expect_err("same-partition self-read must not yield a clamp");
+        assert_eq!(clamp_err, verdict_reason);
+    }
+
+    #[test]
+    fn sub_day_backward_self_edge_stays_ordered() {
+        let refs = vec![
+            "marts.running_balance".to_string(),
+            "silver.transactions".to_string(),
+        ];
+        let sql = "SELECT bal.balance + t.amount AS balance \
+                   FROM smelt.marts.running_balance bal \
+                   JOIN smelt.silver.transactions t ON bal.acct_id = t.acct_id \
+                   WHERE bal.partition_date >= t.partition_date - INTERVAL '1 hour' \
+                     AND bal.partition_date < t.partition_date";
+        assert_eq!(
+            window_independence("marts.running_balance", &refs, Some("partition_date"), sql),
+            WindowIndependence::Ordered
+        );
+        assert_eq!(
+            self_edge_clamp("marts.running_balance", &refs, Some("partition_date"), sql),
+            Ok(1)
+        );
     }
 
     #[test]

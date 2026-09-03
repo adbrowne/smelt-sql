@@ -347,7 +347,8 @@ fn compute_incremental_windows_impl(
 ///   multi-partition chunks) would read rows that do not exist yet — never
 ///   safe to widen for an ordered model.
 /// - **`Refused`** — the self-edge does not provably converge (a forward
-///   read, an unbounded/whole-history scan, or an underivable bound) — `Err`,
+///   read, a same-partition/circular read with no backward reach, an
+///   unbounded/whole-history scan, or an underivable bound) — `Err`,
 ///   fail-closed, naming the non-convergent self-edge; never silently
 ///   downgraded to `Ordered` or `WindowIndependent`.
 #[allow(clippy::too_many_arguments)]

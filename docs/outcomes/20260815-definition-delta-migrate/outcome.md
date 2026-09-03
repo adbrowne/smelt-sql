@@ -335,7 +335,7 @@ open — not that the excluded bullets themselves are gone.
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | done |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | done |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | done |
-| 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | planned |
+| 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | done |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
@@ -344,6 +344,15 @@ open — not that the excluded bullets themselves are gone.
 
 ## Decision log
 
+- **2026-09-03, phase 27f — same-partition self-read refused as non-convergent.**
+  `self_edge_bound_days` now requires `before.0 > 0` (not just `after == 0`) to admit a
+  self-edge as `Ordered`; a zero-backward self-read is circular, refused with a reason naming
+  the model. `build_forward_graph` now refuses this shape itself at the `self_edge_clamp` call
+  site rather than deferring to `propagate.rs`'s later generic `before_seconds <= 0` gate — the
+  two layers refuse at one place with one reason. Two pre-existing fixtures encoded the old
+  two-layer behavior and were updated in place (`since_upstream.rs`'s
+  `self_referential_node_refuses_fail_loud`, `since_upstream_propagation.rs`'s
+  `same_partition_self_referential_model_refuses`).
 - **2026-09-03, phase 27e — delta-restriction admission consumes an external `mutable_snapshot`
   source's fingerprint-sidecar delta.** `RestrictionDeltaSource` enum generalizes
   `execute_delete_insert_with_delta_restriction` over the model-edge and external-source routes;

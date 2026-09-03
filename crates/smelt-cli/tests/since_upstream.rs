@@ -347,7 +347,15 @@ fn self_referential_node_refuses_fail_loud() {
         stderr.contains("MaintenanceGraphUnsupportedNode"),
         "refusal must name the diagnostic: {stderr}"
     );
-    assert!(stderr.contains("self-referential"), "{stderr}");
+    // Same-partition self-read (`d = d`, no backward reach) is circular, not
+    // convergent — refused by the shared derivation
+    // (`window_independence.rs`'s `self_edge_bound_days`) at the graph
+    // layer's own call site, carrying that derivation's reason rather than
+    // `propagate.rs`'s later generic "no derivable backward bound" text.
+    assert!(
+        stderr.contains("current partition") || stderr.contains("circular"),
+        "{stderr}"
+    );
     assert!(
         !stderr.contains("panicked at"),
         "must be a named error, not a panic: {stderr}"
