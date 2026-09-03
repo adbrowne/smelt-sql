@@ -351,9 +351,21 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
 | 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | done |
 | 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | done |
-| 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | pending |
+| 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | planned |
+| 34 | Persist the `retain_departed` probe outcome on the run manifest: thread the snapshot-reconcile path's pre-write probe through `smelt-runtime`'s `ProbeRecord`/`ModelRunRecord.probes` ledger the `frozen_horizon`/`deferral` probes already use, so the declared lattice point is explain/run-report visible rather than only fail-loud inline (phase 32b summary follow-up) | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 33 plan — reshape.** Two edits. (a) Row 33 is planned, not deferred:
+  investigation for `phases/33-plan.md` found the keyed-fold consumer silently ignores a
+  `technique:`/`prefer:` write-suppression pin (a declared user intent that vanishes — fail-loud
+  discipline says wire it), while the structural first-build half is unreachable on that route
+  because a first build is a `CREATE TABLE … AS`, never a suppressible merge. The residual
+  cost-model clause moves to §Future Extensions. So the bullet is decided in all three parts
+  rather than sent to Out of scope. (b) Added row 34 for phase 32b's named in-scope follow-up
+  (`retain_departed`'s probe is not yet on the persisted `ProbeRecord` ledger, unlike
+  `frozen_horizon`/`deferral`) — it serves the contract-lattice single-ownership invariant this
+  outcome shipped rows 32/32b for, so it gets a row instead of being dropped.
 
 - **2026-09-03, phase 32b implement — the delete leg lands; the declared point's probe
   dispatch is self-contained, not yet on the persisted probe ledger.** `execute_snapshot_
