@@ -350,10 +350,20 @@ open — not that the excluded bullets themselves are gone.
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
 | 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | done |
-| 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | pending |
+| 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | planned |
 | 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 32b plan — no reshape; the delete leg is one phase, and the tombstone
+  *marking* write stays out of it.** Phase 32's summary surfaced nothing needing a new row.
+  Two scoping calls recorded here rather than left implicit: (a) the runtime never writes the
+  tombstone column itself — `retain_departed`'s oracle treats an unmarked departure as a
+  *violation* (`classify_key` → `UnmarkedDeparture`), which is only meaningful if marking is
+  the model author's own SQL and the probe reports the gap; auto-marking would make the
+  declared point unfalsifiable. (b) `smelt explain` needs no threading work — it already routes
+  through `effective_contract`/`render_label`, which phase 32 taught the point, so the summary's
+  "naturally part of 32b" note is already satisfied.
 
 - **2026-09-03, phase 32 implement — `retain_departed`'s declaration-half triple lands.**
   `crates/smelt-logical/src/contract/retain_departed.rs` single-owns posture/tombstone-column
