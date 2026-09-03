@@ -829,6 +829,72 @@ pub fn resolve_cell_write_suppression(
     .map(|(suppression, _reason)| suppression)
 }
 
+/// Whether a region `DeleteInsert` recompute may realise the change-
+/// suppressed staged write (`emit::emit_diff_patch`, `slice_predicate =
+/// region.predicate(...)`, `DeleteLeg::Complete`) instead of unconditionally
+/// rewriting its whole window — the region family's own conditional
+/// variant, mirroring [`WriteSuppression`] for the column-scoped `MERGE`
+/// family (`docs/specs/model_transforms.md` §"Change-suppressed MERGE and
+/// the staged-candidate conditional DELETE+INSERT"). `key` carries the
+/// proven row identity `emit_diff_patch`'s diff join addresses rows by —
+/// `WriteSuppression` has no use for it (a `MERGE`'s `unique_key` already
+/// comes from elsewhere), but the staged-candidate emitter needs it
+/// threaded through explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionWrite {
+    /// The plain unconditional region rewrite — today's byte-identical
+    /// `emit::emit_delete_insert` widened scan.
+    Unconditional { why: String },
+    /// The change-suppressed staged write is admitted and preferred: a
+    /// proven row identity plus a fully comparable column group license
+    /// `emit::emit_diff_patch` over the region's own slice predicate.
+    Suppressed {
+        key: Vec<String>,
+        compared_columns: Vec<String>,
+    },
+}
+
+/// Resolve a region `DeleteInsert` recompute's write variant — composed
+/// entirely from [`resolve_write_suppression`] (the same P2/P3 proof the
+/// column-scoped `MERGE` family already reuses) and [`resolve_write_variant`]
+/// (the same first-build/steady-state posture and override ladder), never a
+/// second proof. `row_identity`'s `RowIdentity::Key` is threaded into the
+/// `Suppressed` verdict for [`emit::emit_diff_patch`]'s diff-join key —
+/// `resolve_write_suppression` already refuses outright (`Unconditional`)
+/// whenever `row_identity` is `WholeRow`, so a `Suppressed` result here is
+/// only ever reached with a proven key.
+pub fn resolve_region_write_variant(
+    group_columns: &[String],
+    comparability: &[ColumnComparability],
+    row_identity: &RowIdentityVerdict,
+    trigger: &Trigger,
+    ledger_catch_up: bool,
+    overrides: &EffectiveOverride,
+) -> Result<RegionWrite, ChoiceRefusal> {
+    let suppression = resolve_write_suppression(group_columns, comparability, row_identity);
+    let (resolved, _reason) =
+        resolve_write_variant(&suppression, trigger, ledger_catch_up, overrides)?;
+    Ok(match resolved {
+        WriteSuppression::Unconditional { why } => RegionWrite::Unconditional { why },
+        WriteSuppression::Suppressed { compared_columns } => {
+            let key = match &row_identity.identity {
+                RowIdentity::Key(key) => key.clone(),
+                RowIdentity::WholeRow => {
+                    unreachable!(
+                        "resolve_write_suppression refuses (Unconditional) whenever \
+                         row_identity is WholeRow — a Suppressed verdict is only ever \
+                         reached with a proven key"
+                    )
+                }
+            };
+            RegionWrite::Suppressed {
+                key,
+                compared_columns,
+            }
+        }
+    })
+}
+
 /// Which physical write mechanism realizes a keyed-fold cell's conditional
 /// write (T1/T2, `docs/plans/20260715-composed-axes-conditional-
 /// maintenance.md` Phase C5): the ordinary keyed `MERGE`
@@ -1449,6 +1515,130 @@ mod write_variant_tests {
                 .expect("soft bias never refuses");
         assert_eq!(resolved, unconditional());
         assert_eq!(reason, VariantReason::NotAdmitted);
+    }
+}
+
+#[cfg(test)]
+mod region_write_variant_tests {
+    use super::*;
+    use crate::maintenance::{RowIdentity, Trigger};
+
+    fn key_identity(cols: &[&str]) -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::Key(cols.iter().map(|s| s.to_string()).collect()),
+            proven_mismatch: None,
+        }
+    }
+
+    fn whole_row_identity() -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        }
+    }
+
+    fn comparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Comparable,
+        }
+    }
+
+    #[test]
+    fn region_write_variant_suppresses_over_a_proven_key_and_comparable_group() {
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = key_identity(&["region_id"]);
+        let trigger = Trigger::NewData {
+            source: "sources.payments".to_string(),
+        };
+
+        let resolved = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &trigger,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("proven key + comparable group over a steady-state trigger admits suppression");
+        assert_eq!(
+            resolved,
+            RegionWrite::Suppressed {
+                key: vec!["region_id".to_string()],
+                compared_columns: vec!["amount".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn region_write_variant_is_unconditional_without_a_proven_key() {
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = whole_row_identity();
+        let trigger = Trigger::NewData {
+            source: "sources.payments".to_string(),
+        };
+
+        let resolved = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &trigger,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert!(matches!(resolved, RegionWrite::Unconditional { .. }));
+    }
+
+    #[test]
+    fn region_write_variant_is_unconditional_on_a_first_build_trigger() {
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = key_identity(&["region_id"]);
+
+        let resolved = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &Trigger::Backfill,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert!(matches!(resolved, RegionWrite::Unconditional { .. }));
+    }
+
+    #[test]
+    fn region_write_variant_propagates_a_refused_suppress_pin() {
+        // No proven row identity — the P2/P3 proof itself refuses. A
+        // `technique: suppress` pin cannot force suppression on over that,
+        // and must surface as a hard `Err`, never a silent `Unconditional`.
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = whole_row_identity();
+        let trigger = Trigger::NewData {
+            source: "sources.payments".to_string(),
+        };
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(CellTechnique::Suppress),
+        };
+
+        let err = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &trigger,
+            false,
+            &overrides,
+        )
+        .expect_err("pinning suppression over a refused P2/P3 proof must refuse");
+        assert_eq!(
+            err.pinned,
+            PinnedRequest::Technique(CellTechnique::Suppress)
+        );
     }
 }
 

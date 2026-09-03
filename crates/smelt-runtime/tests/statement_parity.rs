@@ -3664,6 +3664,7 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
         "silver.fact",
         "2026-07-01",
         "2026-07-02",
+        None,
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -3695,6 +3696,102 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
     assert_eq!(
         group.statements, expected.statements,
         "the executed delta-restricted group must be byte-identical to a direct emitter call \
+         over the same inputs"
+    );
+    assert_eq!(group.transactional, expected.transactional);
+}
+
+/// The region family's own change-suppressed conditional variant
+/// (`RegionWrite::Suppressed`, `docs/outcomes/20260815-definition-delta-
+/// migrate/phases/27b-plan.md`) executes exactly `emit_diff_patch`'s own
+/// output — no delta restriction admitted (`restrict_column: None`), so the
+/// dispatch falls through past the T3 arm straight to the region-write
+/// dimension.
+#[tokio::test]
+async fn region_conditional_write_matches_the_emitted_group_byte_for_byte() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.regions (region_id VARCHAR, region_date DATE, amount INTEGER)",
+        )
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.regions VALUES ('r1', '2026-07-01', 10), ('r2', '2026-07-01', 20)",
+        )
+        .await
+        .expect("seed target table");
+
+    let region = smelt_logical::maintenance::emit::Region {
+        start: "'2026-07-01'".to_string(),
+        end: "'2026-07-02'".to_string(),
+    };
+    let body = "SELECT region_id, region_date, amount FROM (VALUES \
+                ('r1', DATE '2026-07-01', 10), ('r2', DATE '2026-07-01', 25)) \
+                AS t(region_id, region_date, amount)";
+    let region_write = smelt_logical::maintenance::choice::RegionWrite::Suppressed {
+        key: vec!["region_id".to_string()],
+        compared_columns: vec!["amount".to_string()],
+    };
+
+    smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
+        &backend,
+        "main",
+        "regions",
+        "region_date",
+        &region,
+        body,
+        body,
+        None,
+        None,
+        "sources.regions_raw",
+        "2026-07-01",
+        "2026-07-02",
+        Some(&region_write),
+        MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
+    )
+    .await
+    .expect("suppressed region recompute must succeed");
+
+    let groups = backend.recorded_groups();
+    let diff_patch_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| {
+            g.statements[0]
+                .sql
+                .starts_with("CREATE TEMP TABLE __smelt_diff_patch_main_regions")
+        })
+        .collect();
+    assert_eq!(
+        diff_patch_groups.len(),
+        1,
+        "exactly one staged diff_patch group: {groups:?}"
+    );
+    let group = diff_patch_groups[0];
+
+    let slice_predicate = region.predicate(Some("main.regions"), "region_date");
+    let expected = emit_diff_patch(
+        "main.regions",
+        "__smelt_diff_patch_main_regions",
+        &["region_id".to_string()],
+        body,
+        &["amount".to_string()],
+        &slice_predicate,
+        &smelt_logical::maintenance::diff_patch::DeleteLeg::Complete,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements, expected.statements,
+        "the executed region conditional group must be byte-identical to a direct emitter call \
          over the same inputs"
     );
     assert_eq!(group.transactional, expected.transactional);
@@ -3745,6 +3842,7 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
         "silver.fact",
         "2026-07-01",
         "2026-07-02",
+        None,
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),

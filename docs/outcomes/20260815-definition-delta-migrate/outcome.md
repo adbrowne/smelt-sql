@@ -331,7 +331,7 @@ open — not that the excluded bullets themselves are gone.
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | done |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | done |
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | done |
-| 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
+| 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | done |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | planned |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | planned |
@@ -352,6 +352,17 @@ open — not that the excluded bullets themselves are gone.
   override-folding one, since that live path doesn't fold overrides today). Discovered gap for a
   future phase: KeyedFold's live write-suppression resolution ignores override pins and first-build
   posture entirely, unlike `ColumnScopedMerge`'s. See `phases/27a-summary.md`.
+- **2026-09-03, phase 27b — the region DELETE+INSERT family gains its change-suppressed conditional
+  variant, scoped to model-edge-sourced creation cells.** `choice::resolve_region_write_variant`
+  composes the existing P2/P3 proof (no new proof logic); `build_delete_insert_group_dispatched`
+  gained a third dispatch arm calling `emit_diff_patch` over the region's own slice predicate.
+  Wired only inside `DeltaRestrictionFacts`/`resolve_live_delta_restriction_facts` — an
+  external-source-only region `Trigger::NewData` cell executes via a different `Backend` trait
+  method entirely (`execute_model_incremental`) and never reaches `build_delete_insert_group_
+  dispatched`, so it is unaffected and still unconditional (recorded honestly in both specs'
+  Known Divergences, not silently narrowed). `smelt explain --show-sql` is also NOT wired to this
+  dimension for region cells (confirmed by grep — no reference in `explain.rs`), unlike
+  `ColumnScopedMerge`/`KeyedFold`. See `phases/27b-summary.md`.
 
 - **2026-09-03, phase 26b — per-arm `INTERSECT`/`EXCEPT` classification lands.**
   `grouping::derive_column_groups` no longer collapses a set-op model whole-model: a chain of one

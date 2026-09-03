@@ -28,13 +28,15 @@ use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{
     effective_override, resolve_cell_choice, resolve_cell_write_suppression,
-    resolve_recompute_restriction, ChosenTechnique, RecomputeRestriction, WriteSuppression,
+    resolve_recompute_restriction, resolve_region_write_variant, ChoiceRefusal, ChosenTechnique,
+    RecomputeRestriction, RegionWrite, WriteSuppression,
 };
 use smelt_logical::maintenance::derive::SourceReferentialIntegrity;
+use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed,
     emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
-    emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
+    emit_delete_insert_delta_restricted, emit_diff_patch, emit_fingerprint_digest_select,
     emit_fingerprint_sidecar_diff, emit_per_group_recompute, emit_repair_group_digest_select,
     emit_repair_group_sidecar_diff, emit_staged_candidate_conditional_recompute,
     widened_scan_predicate, MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
@@ -3847,6 +3849,18 @@ pub async fn refresh_repair_group_sidecar(
 /// restriction`] then always resolves `Unrestricted`, so a dry-run's
 /// reported text is always the ordinary widened scan (the honest choice:
 /// a dry-run cannot know whether a live run's delta read would restrict).
+///
+/// `region_write` is the region family's own change-suppressed conditional
+/// variant ([`RegionWrite`], `docs/specs/model_transforms.md` §"Change-
+/// suppressed MERGE and the staged-candidate conditional DELETE+INSERT") —
+/// consulted only when the delta-restriction arm above does not apply
+/// (delta restriction narrows the scan itself, strictly cheaper, so it
+/// always wins when both are admitted). A `RegionWrite::Suppressed` verdict
+/// realises [`emit_diff_patch`] over the region's own slice predicate,
+/// `DeleteLeg::Complete` (a region recompute's candidate covers its own
+/// slice by construction — the same grant `resolve_cell_choice` already
+/// makes for this corner); `None`/`Unconditional` falls back to today's
+/// byte-identical widened scan.
 #[allow(clippy::too_many_arguments)]
 pub fn build_delete_insert_group_dispatched(
     table: &str,
@@ -3856,6 +3870,7 @@ pub fn build_delete_insert_group_dispatched(
     restrict_column: Option<&str>,
     skeleton_source_closure: Option<&SkeletonSourceClosure>,
     observed_delta: Option<&[String]>,
+    region_write: Option<&RegionWrite>,
     dialect: MaintenanceDialect,
 ) -> StatementGroup {
     let restriction = resolve_recompute_restriction(skeleton_source_closure, observed_delta);
@@ -3871,7 +3886,32 @@ pub fn build_delete_insert_group_dispatched(
                 dialect,
             )
         }
-        _ => emit_delete_insert(table, partition_col, region, body, dialect),
+        _ => match region_write {
+            Some(RegionWrite::Suppressed {
+                key,
+                compared_columns,
+            }) => {
+                // `table` here is already schema-qualified (`emit_delete_insert`'s
+                // own convention for this function's `table` parameter) —
+                // `diff_patch_staged_relation` assumes a bare table name, so a
+                // qualified name is sanitised inline rather than reused
+                // verbatim: an embedded `.` would otherwise parse as a second
+                // schema qualifier on the staged temp relation's own name.
+                let staged_relation = format!("__smelt_diff_patch_{}", table.replace('.', "_"));
+                let slice_predicate = region.predicate(Some(table), partition_col);
+                emit_diff_patch(
+                    table,
+                    &staged_relation,
+                    key,
+                    body,
+                    compared_columns,
+                    &slice_predicate,
+                    &DeleteLeg::Complete,
+                    dialect,
+                )
+            }
+            _ => emit_delete_insert(table, partition_col, region, body, dialect),
+        },
     }
 }
 
@@ -3909,6 +3949,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
     upstream_model: &str,
     window_start: &str,
     window_end: &str,
+    region_write: Option<&RegionWrite>,
     dialect: MaintenanceDialect,
     retry: &crate::execute::RetryPolicy<'_>,
     probe_policy: &crate::probes::ProbePolicy,
@@ -4019,6 +4060,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
         restrict_column,
         skeleton_source_closure,
         delta.as_deref(),
+        region_write,
         dialect,
     );
     crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group)).await?;
@@ -4043,6 +4085,12 @@ pub struct DeltaRestrictionFacts {
     /// The cell's P1 skeleton-source-closure verdict, carried through
     /// unchanged for [`resolve_recompute_restriction`] to consult.
     pub skeleton_source_closure: Option<SkeletonSourceClosure>,
+    /// The region family's own change-suppressed conditional-write verdict
+    /// ([`RegionWrite`]), resolved from the SAME `Trigger::NewData` cell
+    /// this struct already reads — the T3 delta-restriction arm wins when
+    /// both are admitted ([`build_delete_insert_group_dispatched`]'s own
+    /// match order), so this is consulted only as the fallback dimension.
+    pub region_write: RegionWrite,
 }
 
 /// Resolve [`DeltaRestrictionFacts`] for a model driven (at least in part)
@@ -4069,6 +4117,15 @@ pub struct DeltaRestrictionFacts {
 /// `metadata`'s resolved grain has no partition axis for a model edge to
 /// clamp to — the caller's safe default in every `None` case is the
 /// ordinary widened scan.
+///
+/// The [`RegionWrite`] variant is resolved from the SAME cell via
+/// [`resolve_region_write_variant`] — composed from the shared P2/P3 proof
+/// (`choice::resolve_write_suppression`/`resolve_write_variant`), never a
+/// fresh derivation. A `technique: suppress`/`unconditional` pin on this
+/// cell's own trigger address is consulted the same way every other
+/// dispatch resolver in this module consults it ([`effective_override`]); an
+/// inadmissible hard pin surfaces as a real `Err`, never a silent fallback
+/// to the unconditional widened scan.
 pub fn resolve_live_delta_restriction_facts(
     sql: &str,
     table: &str,
@@ -4076,9 +4133,11 @@ pub fn resolve_live_delta_restriction_facts(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
-) -> Option<DeltaRestrictionFacts> {
-    let driving_edge = model_edges.first()?;
-    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+) -> Result<Option<DeltaRestrictionFacts>, ChoiceRefusal> {
+    let Some(driving_edge) = model_edges.first() else {
+        return Ok(None);
+    };
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql,
         table,
         metadata,
@@ -4098,19 +4157,73 @@ pub fn resolve_live_delta_restriction_facts(
         &[],
         &SourceReferentialIntegrity::new(),
         None,
-    )?;
-    let cell = result.plan.cell_for(&Trigger::NewData {
+    ) else {
+        return Ok(None);
+    };
+    let Some(cell) = result.plan.cell_for(&Trigger::NewData {
         source: driving_edge.name.clone(),
-    })?;
+    }) else {
+        return Ok(None);
+    };
     let restrict_column = match &cell.row_identity.identity {
         RowIdentity::Key(cols) if cols.len() == 1 => Some(cols[0].clone()),
         _ => None,
     };
-    Some(DeltaRestrictionFacts {
+    // A model-edge creation cell's `group` is the literal whole-row
+    // placeholder (`"{*}"`, `append_model_edge_cells`'s own `PlanCell`
+    // construction) — there is no NAMED column group in `result.column_
+    // groups` to look it up by, unlike a mutation-sensitive `UpstreamMutation`
+    // cell's own derived group. The region family's write covers the whole
+    // output row, so its own compared-column set is the model's entire
+    // output projection MINUS the proven row-identity's own key columns
+    // (comparing a join key via `IS DISTINCT FROM` against itself is
+    // vacuous — the diff join already pins it equal for every matched row)
+    // — the same `PropertyVector` this call's own comparability read already
+    // derives, read once and reused for both.
+    let vector = model_property_vector(sql, &JoinContext::new());
+    let key_columns: &[String] = match &cell.row_identity.identity {
+        RowIdentity::Key(cols) => cols,
+        RowIdentity::WholeRow => &[],
+    };
+    let group_columns: Vec<String> = vector
+        .as_ref()
+        .map(|v| {
+            v.columns
+                .iter()
+                .filter(|c| !key_columns.iter().any(|k| k.eq_ignore_ascii_case(c)))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let comparability = vector.map(|v| v.comparability).unwrap_or_default();
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let overrides = effective_override(
+        metadata
+            .maintenance
+            .as_ref()
+            .and_then(|m| m.defaults.as_ref()),
+        cells_cfg,
+        &driving_edge.name,
+        &group_columns,
+    );
+    let region_write = resolve_region_write_variant(
+        &group_columns,
+        &comparability,
+        &cell.row_identity,
+        &cell.trigger,
+        cell.ledger_catch_up,
+        &overrides,
+    )?;
+    Ok(Some(DeltaRestrictionFacts {
         upstream_model: driving_edge.name.clone(),
         restrict_column,
         skeleton_source_closure: cell.skeleton_source_closure.clone(),
-    })
+        region_write,
+    }))
 }
 
 /// Execute one live `ColumnScopedMerge` cell: build the horizon-clamped

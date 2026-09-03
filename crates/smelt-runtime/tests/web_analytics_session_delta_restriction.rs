@@ -176,6 +176,7 @@ async fn a_single_redelivered_then_changed_event_recomputes_only_its_own_row() {
         "silver.events_deduped",
         "2026-07-01",
         "2026-07-02",
+        None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),

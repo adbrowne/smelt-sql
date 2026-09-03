@@ -854,23 +854,32 @@ pub async fn execute_project(
                 let delta_facts_dry = if model_edges_dry.is_empty() {
                     None
                 } else {
-                    model_file.metadata.as_deref().and_then(|metadata| {
-                        let (sources, explicitly_mutable) =
-                            build_maint_source_facts(model_file, &source_infos);
-                        crate::maintenance_driver::resolve_live_delta_restriction_facts(
-                            &clean_sql,
-                            &model_file.db_name_owned(),
-                            metadata,
-                            &sources,
-                            &explicitly_mutable,
-                            &model_edges_dry,
-                        )
-                    })
+                    match model_file.metadata.as_deref() {
+                        Some(metadata) => {
+                            let (sources, explicitly_mutable) =
+                                build_maint_source_facts(model_file, &source_infos);
+                            crate::maintenance_driver::resolve_live_delta_restriction_facts(
+                                &clean_sql,
+                                &model_file.db_name_owned(),
+                                metadata,
+                                &sources,
+                                &explicitly_mutable,
+                                &model_edges_dry,
+                            )
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
+                        None => None,
+                    }
                 };
-                let (restrict_column_dry, skeleton_source_closure_dry) = match delta_facts_dry {
-                    Some(facts) => (facts.restrict_column, facts.skeleton_source_closure),
-                    None => (None, None),
-                };
+                let (restrict_column_dry, skeleton_source_closure_dry, region_write_dry) =
+                    match delta_facts_dry {
+                        Some(facts) => (
+                            facts.restrict_column,
+                            facts.skeleton_source_closure,
+                            Some(facts.region_write),
+                        ),
+                        None => (None, None, None),
+                    };
                 for (batch_idx, batch) in inc.batches.iter().enumerate() {
                     let start = batch.partition_start.format("%Y-%m-%d").to_string();
                     let end = batch.partition_end.format("%Y-%m-%d").to_string();
@@ -904,6 +913,7 @@ pub async fn execute_project(
                         restrict_column_dry.as_deref(),
                         skeleton_source_closure_dry.as_ref(),
                         None,
+                        region_write_dry.as_ref(),
                         dialect,
                     );
                     let chunk = crate::reporter::ChunkInfo {
@@ -3000,16 +3010,20 @@ pub async fn execute_project(
                 let delta_restriction_facts = if model_edges.is_empty() {
                     None
                 } else {
-                    plan.model_file.metadata.as_deref().and_then(|metadata| {
-                        crate::maintenance_driver::resolve_live_delta_restriction_facts(
-                            &sql_for_bounds,
-                            &plan.model_file.db_name_owned(),
-                            metadata,
-                            &maint_source_facts,
-                            &explicitly_mutable,
-                            &model_edges,
-                        )
-                    })
+                    match plan.model_file.metadata.as_deref() {
+                        Some(metadata) => {
+                            crate::maintenance_driver::resolve_live_delta_restriction_facts(
+                                &sql_for_bounds,
+                                &plan.model_file.db_name_owned(),
+                                metadata,
+                                &maint_source_facts,
+                                &explicitly_mutable,
+                                &model_edges,
+                            )
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
+                        None => None,
+                    }
                 };
                 // Live dispatch is licensed only for a DuckDB target running
                 // the creation trigger's `DeleteInsert` strategy — the same
@@ -3752,6 +3766,7 @@ pub async fn execute_project(
                                 &facts.upstream_model,
                                 &partition.start,
                                 &partition.end,
+                                Some(&facts.region_write),
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),

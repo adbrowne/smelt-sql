@@ -15,8 +15,12 @@ use smelt_core::config::{
     MaintenanceDefaults, RefreshStrategy, TechniquePreference, TimeseriesConfig,
 };
 use smelt_core::ModelMetadata;
+use smelt_logical::maintenance::choice::RegionWrite;
+use smelt_logical::maintenance::emit::{emit_delete_insert, MaintenanceDialect, Region};
 use smelt_logical::maintenance::{MutationProfile, SourceFacts};
-use smelt_runtime::maintenance_driver::resolve_incremental_strategy;
+use smelt_runtime::maintenance_driver::{
+    build_delete_insert_group_dispatched, resolve_incremental_strategy,
+};
 
 const SQL: &str = "SELECT user_id, amount, event_date FROM smelt.sources.payments";
 
@@ -171,4 +175,141 @@ fn region_path_unchanged_without_overrides() {
     )
     .expect("a clocked model edge with no overrides must not refuse");
     assert_eq!(edge_strategy, IncrementalStrategy::DeleteInsert);
+}
+
+fn region() -> Region {
+    Region {
+        start: "'2026-07-01'".to_string(),
+        end: "'2026-07-02'".to_string(),
+    }
+}
+
+/// `build_delete_insert_group_dispatched` realises the region family's
+/// change-suppressed conditional variant (`RegionWrite::Suppressed`) via
+/// `emit_diff_patch` — the update leg's `IS DISTINCT FROM` guard and a
+/// complete, region-predicated delete leg — when no delta restriction
+/// applies (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 27b-plan.md`).
+#[test]
+fn region_recompute_emits_the_conditional_staged_write_when_suppressible() {
+    let region_write = RegionWrite::Suppressed {
+        key: vec!["region_id".to_string()],
+        compared_columns: vec!["amount".to_string()],
+    };
+    let group = build_delete_insert_group_dispatched(
+        "main.regions",
+        "region_date",
+        &region(),
+        "SELECT region_id, region_date, amount FROM smelt.sources.payments",
+        None,
+        None,
+        None,
+        Some(&region_write),
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(group.transactional);
+    let sql: Vec<&str> = group.statements.iter().map(|s| s.sql.as_str()).collect();
+    let update_leg = sql
+        .iter()
+        .find(|s| s.starts_with("DELETE FROM main.regions USING"))
+        .expect("update leg present");
+    assert!(
+        update_leg.contains("IS DISTINCT FROM"),
+        "update leg must guard on IS DISTINCT FROM over compared columns: {update_leg}"
+    );
+    let delete_leg = sql
+        .iter()
+        .find(|s| s.starts_with("DELETE FROM main.regions WHERE") && !s.contains("USING"))
+        .expect("complete delete leg present");
+    assert!(
+        delete_leg.contains("region_date >= '2026-07-01'")
+            && delete_leg.contains("region_date < '2026-07-02'"),
+        "delete leg must be region-predicated: {delete_leg}"
+    );
+}
+
+/// Without a proven key (`region_write: None`, or the `Unconditional`
+/// variant), the region family stays byte-identical to today's widened
+/// `emit_delete_insert` scan — the non-regression leg.
+#[test]
+fn region_recompute_keeps_the_widened_scan_without_a_proven_key() {
+    let body = "SELECT region_id, region_date, amount FROM smelt.sources.payments";
+    let expected = emit_delete_insert(
+        "main.regions",
+        "region_date",
+        &region(),
+        body,
+        MaintenanceDialect::DuckDb,
+    );
+
+    let group_none = build_delete_insert_group_dispatched(
+        "main.regions",
+        "region_date",
+        &region(),
+        body,
+        None,
+        None,
+        None,
+        None,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(group_none, expected);
+
+    let unconditional = RegionWrite::Unconditional {
+        why: "no proven row identity".to_string(),
+    };
+    let group_unconditional = build_delete_insert_group_dispatched(
+        "main.regions",
+        "region_date",
+        &region(),
+        body,
+        None,
+        None,
+        None,
+        Some(&unconditional),
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(group_unconditional, expected);
+}
+
+/// Delta restriction (T3) wins over write suppression when both are
+/// admitted: the restricted arm narrows the scan itself, strictly cheaper
+/// than suppression narrowing writes within an unrestricted scan (design
+/// call 2, `docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 27b-plan.md`).
+#[test]
+fn delta_restriction_wins_over_suppression_when_both_admit() {
+    let region_write = RegionWrite::Suppressed {
+        key: vec!["region_id".to_string()],
+        compared_columns: vec!["amount".to_string()],
+    };
+    let closure = smelt_logical::maintenance::SkeletonSourceClosure::Closed {
+        row_preservation: smelt_logical::maintenance::RowPreservation::JoinShape,
+    };
+    let body = "SELECT region_id, region_date, amount FROM smelt.sources.payments";
+    let delta_keys = vec!["region_id_1".to_string()];
+    let group = build_delete_insert_group_dispatched(
+        "main.regions",
+        "region_date",
+        &region(),
+        body,
+        Some("region_id"),
+        Some(&closure),
+        Some(&delta_keys),
+        Some(&region_write),
+        MaintenanceDialect::DuckDb,
+    );
+    let expected = smelt_logical::maintenance::emit::emit_delete_insert_delta_restricted(
+        "main.regions",
+        "region_date",
+        &region(),
+        body,
+        "region_id",
+        &delta_keys,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group, expected,
+        "delta restriction must win over write suppression: {group:?}"
+    );
 }

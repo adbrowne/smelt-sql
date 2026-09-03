@@ -221,6 +221,20 @@ identity) or `EXCEPT ALL` both ways (whole-row identity); `DELETE` the changed-o
 `INSERT` the changed-or-new rows. Byte-equivalent to today's region DELETE+INSERT at fixed `S`,
 with the write physically restricted to the rows whose effect is not the identity.
 
+**The region DELETE+INSERT family's own conditional realisation** takes this same shape,
+scoped by the output region's own slice predicate rather than an affected-key set: the update
+leg guards on `IS DISTINCT FROM` over the compared column group, the delete leg is complete (a
+region recompute's candidate covers its own slice by construction, so nothing is ever omitted
+from it), and the insert leg adds new keys. Admitted by the same P2/P3 proof as every other
+variant in this section — a proven row identity plus a fully comparable column group — and
+falling fail-closed to the unconditional widened scan otherwise: an empty or whole-row identity,
+an incomparable compared column, a first-build/definition-change-backfill trigger with no prior
+state to diff against (`incremental_models.md` §"Windowed maintenance and the horizon" category
+2's first-build posture), or a model with no resolvable delta-restriction facts. Delta
+restriction (T3, `incremental_models.md` §"Upstream model edges") wins over this variant when
+both are admitted for the same cell: restricting the scan itself is strictly cheaper than
+suppressing writes within an unrestricted one.
+
 **Definition-change field-backfill** is the pair of techniques a model gaining
 output fields backfills with (`definition_deltas.md` §"The verdict per column group"), chosen by what the added field reads: a payload field that is a
 *pure function of stored columns* backfills as an **in-place `UPDATE`** (no
@@ -454,15 +468,18 @@ by `docs/plans/20260704-model-updates.md` (design:
   skewing derived `partition_column` can compose with ordered self-referential
   execution at all is undecided; today the combination simply does not widen.
   Tracked in `docs/plans/20260711-derived-output-window.md`.
-- **Change-suppressed MERGE is built for the column-scoped and keyed-fold families; the region
-  DELETE+INSERT family stays unconditional.** The column-scoped `MERGE` emitter
-  (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`) and the keyed-fold
-  `MERGE` emitter (`emit_keyed_fold_suppressed`) both gain a matched-arm `IS DISTINCT FROM`
-  predicate over the cell's comparable columns — the keyed-fold variant compares the stored
-  value against the fold's own combine expression, since a keyed fold's matched arm never copies
-  a delta column verbatim — admitted fail-closed by `maintenance::choice::resolve_write_suppression`
-  over the region row identity (P2) and per-column change comparability (P3) proofs. The region
-  DELETE+INSERT family still rewrites its whole window unconditionally.
+- **Change-suppressed MERGE is built for the column-scoped and keyed-fold families.** The
+  column-scoped `MERGE` emitter (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`)
+  and the keyed-fold `MERGE` emitter (`emit_keyed_fold_suppressed`) both gain a matched-arm
+  `IS DISTINCT FROM` predicate over the cell's comparable columns — the keyed-fold variant compares
+  the stored value against the fold's own combine expression, since a keyed fold's matched arm
+  never copies a delta column verbatim — admitted fail-closed by
+  `maintenance::choice::resolve_write_suppression` over the region row identity (P2) and
+  per-column change comparability (P3) proofs. The region DELETE+INSERT family's own conditional
+  realisation (`smelt_logical::maintenance::choice::resolve_region_write_variant` →
+  `emit::emit_diff_patch`) is wired only for a model-edge-sourced creation cell
+  (`smelt_runtime::maintenance_driver::DeltaRestrictionFacts`); an external-source-only region
+  cell still rewrites its whole window unconditionally.
 - **The staged-candidate conditional DELETE+INSERT is built for the keyed-identity realisation
   only; the whole-row `EXCEPT ALL` realisation remains unbuilt.** `smelt_logical::maintenance::
   emit::emit_staged_candidate_conditional` emits the merge-less keyed-shaped write — stage the
