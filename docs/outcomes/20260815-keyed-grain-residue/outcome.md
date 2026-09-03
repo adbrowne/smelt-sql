@@ -1,7 +1,7 @@
 # Outcome: Close the key grain's implementation-only residues
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** active
 **Source:** `docs/specs/incremental_shapes.md` §"The key grain" §Known Divergences;
 `docs/outcomes/20260815-definition-delta-migrate/outcome.md` §"Out of scope"
 **Spec anchors:** `docs/specs/incremental_shapes.md`, `docs/specs/incremental_models.md`
@@ -61,7 +61,7 @@ changes stated behaviour, not just fills a gap).
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | pending |
+| 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | planned |
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | pending |
 | 3 | Transactional ledger fold on every shipped backend | pending |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | pending |
@@ -69,6 +69,14 @@ changes stated behaviour, not just fills a gap).
 | 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-03 — Outcome activated. Phase 1 planned with no reshape: no prior phase summary exists
+  in this outcome, and the six phase rows still match the success criteria one-for-one. Phase 1's
+  derivation seam was fixed to the key-grain `NewData` handler's repair-refusal arm in
+  `smelt-logical/src/maintenance/derive.rs` — the only site where both halves of
+  `KeyedRetractableContribution`'s stated firing condition (a retractable enrichment-join
+  contribution; a repair family that cannot admit a per-group recompute) are already computed, so
+  no new admission rule is invented.
 
 ## Blocked
 
