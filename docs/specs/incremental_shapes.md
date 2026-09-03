@@ -1129,6 +1129,21 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
     promise); never in `event_time_column`, `partition_column`, a `unique_key` column, or any
     membership/grouping position. Declaring an excluded column `plausible` is a configuration
     error.
+13. **A `partition_column` rename against an already-deployed table is refused.** The declared
+    `timeseries.partition_column` is recorded in the deployed-schema snapshot at deploy time.
+    Changing it on a model whose table already exists is refused with
+    `MaintenancePartitionColumnChanged` (Error), naming both the recorded and the current
+    column — the address every partition-grain maintenance write targets is a world fact, not
+    re-derivable from a column diff alone (a rename that repoints the address at an
+    already-projected column changes no output column, so it is invisible to
+    `MaintenanceSkeletonChanged`). This is a pre-execution analyzer refusal
+    (`architecture.md` §"Diagnostic parity rule (analysis ↔ build)"): the blocking set is every
+    Error-severity diagnostic unconditionally, so no run flag (`--full-refresh`,
+    `--allow-full-refresh`) bypasses it. The remedy is to delete the model's recorded snapshot
+    (`.smelt/targets/<target>/schemas/<model>.json`) and re-run — a snapshot with no recorded
+    `partition_column` (deleted, or written before this field existed) derives no refusal
+    (fail-closed), so the re-run addresses the table under the new column and records a fresh
+    snapshot.
 
 ### Key-grain constraints
 
@@ -1192,9 +1207,7 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   (`docs/research/20260703-model-updates.md` §9.1a).
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
-  Divergences); the residual open question here is a `partition_column` rename, a
-  skeleton-position change whose refusal path has no fixture or diagnostic surfaced ahead of a
-  run.
+  Divergences).
 - **The `PartitionGrainForbidsMetrics` refusal is unimplemented** — §"Functions inside
   partition-grain bodies" refuses `smelt.metric()` in a partition-grain body, but no
   classifier or diagnostic produces the code today, so the combination's behaviour is

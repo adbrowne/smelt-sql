@@ -146,6 +146,7 @@ pub async fn migrate(args: MigrateArgs, _scope: Option<&str>) -> Result<()> {
             &model_name,
             &after_clean,
             deployed.version,
+            deployed.partition_column.as_deref(),
             &inferred,
             &plan,
             &hash,
@@ -210,6 +211,7 @@ async fn apply_plan(
     model_name: &str,
     after_sql: &str,
     deployed_version: u32,
+    partition_column: Option<&str>,
     inferred: &[smelt_state::schema_tracking::DeployedColumn],
     plan: &MigrationPlan,
     hash: &str,
@@ -277,6 +279,7 @@ async fn apply_plan(
         after_sql,
         inferred,
         Some(deployed_version),
+        partition_column,
     )
     .with_context(|| format!("Failed to record the migrated schema for {model_name}"))?;
 

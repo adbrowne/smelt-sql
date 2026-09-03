@@ -85,6 +85,7 @@ fn disagreeing_added_columns_in_one_group_refuse() {
         old_columns: old_columns(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -134,6 +135,7 @@ fn agreeing_added_columns_in_one_group_admit_the_shared_technique() {
         old_columns: old_columns(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -201,6 +203,7 @@ fn declared_unique_key_carries_through_to_every_cells_row_identity() {
         old_columns: old_columns(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,

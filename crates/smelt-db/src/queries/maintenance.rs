@@ -390,6 +390,7 @@ pub fn derive_model_maintenance_plan(
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
     deployed_model_sql: Option<&str>,
+    deployed_partition_column: Option<&str>,
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -621,6 +622,7 @@ pub fn derive_model_maintenance_plan(
         old_columns,
         old_sql: deployed_model_sql,
         keyed_time_axis,
+        old_partition_col: deployed_partition_column,
     };
 
     // Trigger derivation itself is a pure `smelt-logical` function
@@ -698,6 +700,7 @@ pub fn derive_model_maintenance_plan_with_edges(
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
     deployed_model_sql: Option<&str>,
+    deployed_partition_column: Option<&str>,
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -710,6 +713,7 @@ pub fn derive_model_maintenance_plan_with_edges(
         deployed_column_names,
         source_referential_integrity,
         deployed_model_sql,
+        deployed_partition_column,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred). Reads the
@@ -921,6 +925,14 @@ pub enum MaintenanceRefusal {
     /// above — one code, two refusal shapes.
     SkeletonClauseChanged {
         reason: String,
+    },
+    /// `MaintenancePartitionColumnChanged` — the model's declared
+    /// `timeseries.partition_column` differs from the address recorded in
+    /// the deployed-schema snapshot at last deploy
+    /// (`docs/specs/incremental_shapes.md` §"The partition grain").
+    PartitionColumnChanged {
+        from: String,
+        to: String,
     },
     /// `MaintenanceColumnAddNotBackfillable` — a non-skeleton column
     /// addition that cannot be backfilled in place; the run proceeds with a
@@ -1267,6 +1279,7 @@ pub fn maintenance_plan_diagnostics(
     active_backends: &[String],
     deployed_column_names: &[String],
     deployed_model_sql: Option<&str>,
+    deployed_partition_column: Option<&str>,
 ) -> MaintenancePlanDiagnostics {
     let model_scan_bounds = metadata
         .maintenance
@@ -1319,6 +1332,7 @@ pub fn maintenance_plan_diagnostics(
         deployed_column_names,
         &source_referential_integrity,
         deployed_model_sql,
+        deployed_partition_column,
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -1364,6 +1378,7 @@ pub fn maintenance_plan_diagnostics(
             deployed_column_names,
             &source_referential_integrity,
             deployed_model_sql,
+            deployed_partition_column,
         ) {
             result = admitted;
         }
@@ -1393,6 +1408,12 @@ pub fn maintenance_plan_diagnostics(
             smelt_logical::maintenance::Refusal::SkeletonClauseChanged { reason } => {
                 Some(MaintenanceRefusal::SkeletonClauseChanged {
                     reason: reason.clone(),
+                })
+            }
+            smelt_logical::maintenance::Refusal::PartitionColumnChanged { from, to } => {
+                Some(MaintenanceRefusal::PartitionColumnChanged {
+                    from: from.clone(),
+                    to: to.clone(),
                 })
             }
             // An underivable upstream-model clock. Recorded in the plan (and
@@ -1772,6 +1793,7 @@ mod tests {
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
             None,
+            None,
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -1829,6 +1851,7 @@ mod tests {
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
             None,
+            None,
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -1875,6 +1898,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
             None,
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
@@ -1941,6 +1965,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
             None,
         )
         .expect("route 1 must derive a plan");
@@ -2037,6 +2062,7 @@ mod tests {
             &[],
             &real_ri,
             None,
+            None,
         )
         .expect("model must derive a plan");
         let cell = with_real_ri
@@ -2061,6 +2087,7 @@ mod tests {
             &[],
             &[],
             &SourceReferentialIntegrity::new(),
+            None,
             None,
         )
         .expect("model must derive a plan");
@@ -2144,6 +2171,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
             None,
         )
         .expect("route 1 must derive a plan");

@@ -236,6 +236,7 @@ fn explain_reports_skeleton_change_from_deployed_schema() {
         deployed_at: chrono::Utc::now(),
         model_hash: "test-hash".to_string(),
         model_sql: Some(old_sql.to_string()),
+        partition_column: None,
         columns: vec![
             smelt_state::schema_tracking::DeployedColumn {
                 name: "device_id".to_string(),
@@ -307,6 +308,7 @@ fn explain_reports_a_non_backfillable_column_add_as_a_warning() {
         deployed_at: chrono::Utc::now(),
         model_hash: "test-hash".to_string(),
         model_sql: Some("SELECT id, event_date, a FROM smelt.sources.base".to_string()),
+        partition_column: None,
         columns: vec![
             smelt_state::schema_tracking::DeployedColumn {
                 name: "id".to_string(),

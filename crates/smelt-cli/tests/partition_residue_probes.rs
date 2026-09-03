@@ -266,10 +266,10 @@ fn probe_explain_json_run_relative_source_bounds() {
 /// rename, a skeleton-position change whose refusal path has no fixture or
 /// diagnostic surfaced ahead of a run" —
 /// `docs/specs/incremental_shapes.md` §"The partition grain" Known
-/// Divergences. No `docs/plans/*` tracker is cited (schema evolution is
-/// otherwise a `definition_deltas.md` concern); `SkeletonPosition` and any
-/// rename-specific diagnostic do not exist anywhere in the repo. Inverts in
-/// phase 7.
+/// Divergences. LANDED (phase 7, `docs/outcomes/20260815-partition-grain-
+/// residue`): a rename now emits `MaintenancePartitionColumnChanged` at
+/// `smelt check`, and `smelt run --full-refresh` re-addresses the table and
+/// re-records the snapshot, clearing a subsequent `smelt check`.
 #[test]
 fn probe_partition_column_rename_refusal() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -282,20 +282,32 @@ fn probe_partition_column_rename_refusal() {
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
          default_materialization: table\n",
     );
+    // Two date columns are both already projected and grouped on in v1, so
+    // repointing `partition_column` from one to the other in v2 changes
+    // NEITHER the output columns NOR the skeleton clause — the rename would
+    // be entirely invisible to `MaintenanceSkeletonChanged`/
+    // `MaintenanceColumnAddNotBackfillable`, which is exactly why the
+    // declared address needs its own world-fact and its own refusal
+    // (`docs/outcomes/20260815-partition-grain-residue/phases/07-plan.md`
+    // "Why a new code rather than `MaintenanceSkeletonChanged`").
     write_file(
         &root.join("models/seed_dates.sql"),
         "---\nmaterialization: table\n---\n\
-         SELECT DATE '2026-01-01' AS event_date\n",
+         SELECT DATE '2026-01-01' AS event_date, DATE '2026-01-02' AS other_date\n",
     );
-    let model_v1 = "---\n\
+    let model_sql_body = "SELECT event_date, other_date, COUNT(*) AS n FROM smelt.seed_dates \
+         GROUP BY event_date, other_date\n";
+    let model_v1 = format!(
+        "---\n\
          materialization: table\n\
          refresh: incremental\n\
          grain: partition\n\
          timeseries:\n\
          \x20 event_time_column: event_date\n  partition_column: event_date\n  granularity: day\n\
          ---\n\
-         SELECT event_date, COUNT(*) AS n FROM smelt.seed_dates GROUP BY event_date\n";
-    write_file(&root.join("models/renamed_mart.sql"), model_v1);
+         {model_sql_body}"
+    );
+    write_file(&root.join("models/renamed_mart.sql"), &model_v1);
 
     let first = Command::new(smelt_bin())
         .args(["run"])
@@ -309,39 +321,98 @@ fn probe_partition_column_rename_refusal() {
         String::from_utf8_lossy(&first.stderr)
     );
 
-    // Rename the skeleton-position field: `partition_column` from
-    // `event_date` to a differently-named (but equally valid) column.
-    let model_v2 = "---\n\
+    // Repoint the declared `partition_column` at the sibling column already
+    // projected and grouped on — no column added/removed, no skeleton-clause
+    // diff, only the declared address changed.
+    let model_v2 = format!(
+        "---\n\
          materialization: table\n\
          refresh: incremental\n\
          grain: partition\n\
          timeseries:\n\
-         \x20 event_time_column: event_day\n  partition_column: event_day\n  granularity: day\n\
+         \x20 event_time_column: other_date\n  partition_column: other_date\n  granularity: day\n\
          ---\n\
-         SELECT event_date AS event_day, COUNT(*) AS n FROM smelt.seed_dates GROUP BY event_date\n";
-    write_file(&root.join("models/renamed_mart.sql"), model_v2);
+         {model_sql_body}"
+    );
+    write_file(&root.join("models/renamed_mart.sql"), &model_v2);
 
+    // `MaintenancePartitionColumnChanged` is folded into `file_diagnostics()`
+    // and surfaced by the pre-execution diagnostic gate
+    // (`smelt-runtime::gate::gate_diagnostics`) that `smelt run` calls before
+    // compiling any model — NOT by `smelt check` (the data-test-assertion
+    // runner, `smelt-cli::commands::check`, which never calls
+    // `gate_diagnostics`). `smelt run` is the real refusal surface here.
     let second = Command::new(smelt_bin())
-        .args(["check"])
+        .args(["run"])
         .args(["--project-dir", root.to_str().unwrap()])
         .env_remove("RUST_LOG")
         .output()
-        .unwrap_or_else(|e| panic!("failed to spawn `smelt check` (v2): {e}"));
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run` (v2): {e}"));
     let stdout = String::from_utf8_lossy(&second.stdout);
     let stderr = String::from_utf8_lossy(&second.stderr);
+    let combined = format!("{stdout}{stderr}");
 
-    // TODAY: no named diagnostic exists for a `partition_column` rename —
-    // `smelt check` has nothing to say about it (passes clean), so the
-    // refusal path this bullet asks for has no fixture. If a future fix adds
-    // one, this probe should see a non-zero exit / a diagnostic mentioning
-    // `partition_column` and be inverted.
-    let mentions_partition_rename =
-        stdout.contains("partition_column") || stderr.contains("partition_column");
     assert!(
-        !mentions_partition_rename,
-        "smelt check already surfaces a partition_column-rename diagnostic — \
-         this residue is LANDED; invert this probe and update \
-         docs/specs/incremental_shapes.md's Known Divergences entry.\n\
+        !second.status.success(),
+        "smelt run must refuse a partition_column rename, but exited successfully.\n\
          stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        combined.contains("partition_column")
+            || combined.contains("MaintenancePartitionColumnChanged"),
+        "expected the refusal to name partition_column, got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        combined.contains("event_date") && combined.contains("other_date"),
+        "expected the refusal to name both the recorded and current column, got:\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The remedy leg: this is a pre-execution analyzer refusal (the
+    // analyzer gate blocks unconditionally on any Error-severity
+    // diagnostic — no run flag bypasses it, `docs/specs/architecture.md`
+    // §"Diagnostic parity rule (analysis ↔ build)"), so the remedy is to
+    // delete the model's recorded snapshot and re-run — the run then
+    // addresses the table under the new column and re-records the
+    // snapshot, proving it updates rather than being a dead end.
+    let snapshot_path = root.join(".smelt/targets/dev/schemas/renamed_mart.json");
+    assert!(
+        snapshot_path.exists(),
+        "expected a recorded snapshot at {snapshot_path:?}"
+    );
+    std::fs::remove_file(&snapshot_path).expect("remove stale snapshot");
+
+    let third = Command::new(smelt_bin())
+        .args(["run"])
+        .args(["--project-dir", root.to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run` (post-delete): {e}"));
+    assert!(
+        third.status.success(),
+        "smelt run must succeed once the stale snapshot is deleted.\nstderr: {}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    let recorded: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&snapshot_path).expect("read re-recorded snapshot"),
+    )
+    .expect("parse re-recorded snapshot");
+    assert_eq!(
+        recorded["partition_column"], "other_date",
+        "expected the fresh snapshot to record the new partition_column, got {recorded:?}"
+    );
+
+    let fourth = Command::new(smelt_bin())
+        .args(["run"])
+        .args(["--project-dir", root.to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run` (post-remedy): {e}"));
+    assert!(
+        fourth.status.success(),
+        "smelt run must be clean after --full-refresh re-records the snapshot.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&fourth.stdout),
+        String::from_utf8_lossy(&fourth.stderr)
     );
 }

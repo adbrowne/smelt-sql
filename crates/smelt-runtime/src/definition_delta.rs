@@ -385,6 +385,7 @@ mod tests {
             deployed_at: chrono::Utc::now(),
             model_hash: String::new(),
             model_sql: sql.map(|s| s.to_string()),
+            partition_column: None,
             columns,
         };
         file_store.save_schema(&schema).unwrap();

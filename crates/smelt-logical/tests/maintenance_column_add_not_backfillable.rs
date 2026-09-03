@@ -78,6 +78,7 @@ fn column_add_with_unbounded_merge_source_refuses_not_backfillable() {
         old_columns: old_columns(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -129,6 +130,7 @@ fn column_add_not_proven_additive_refuses_not_backfillable() {
         old_columns: old_columns(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -177,6 +179,7 @@ fn skeleton_position_column_add_still_refuses_skeleton_changed() {
         old_columns: old_columns(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -221,6 +224,7 @@ fn admitted_pure_backfill_column_add_still_yields_in_place_update_cell() {
         old_columns: old_columns(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,

@@ -160,6 +160,7 @@ fn cross_axis_source_without_predicate_is_not_local() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];
@@ -349,6 +350,7 @@ fn verdicts_are_per_cell_per_source() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];
@@ -406,6 +408,7 @@ fn keyed_fold_plan(sql: &str) -> smelt_logical::maintenance::MaintenancePlan {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     derive_maintenance_plan(
         &inputs,

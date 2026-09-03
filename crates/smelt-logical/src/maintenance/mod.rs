@@ -404,6 +404,18 @@ pub enum Refusal {
     /// code as [`Refusal::SkeletonChanged`] — one code, two refusal shapes
     /// (`docs/specs/definition_deltas.md` §"Detection").
     SkeletonClauseChanged { reason: String },
+    /// A `grain: partition` model's declared `timeseries.partition_column` —
+    /// the address every partition-grain maintenance write targets — differs
+    /// from the column recorded in the deployed-schema snapshot at last
+    /// deploy. Unlike `SkeletonClauseChanged`, this is not a proof over SQL
+    /// text: the address is a world-fact carried on
+    /// [`super::derive::ModelInputs::old_partition_col`], compared
+    /// case-insensitively against the output's own current
+    /// `partition_col`. Maps onto `MaintenancePartitionColumnChanged`
+    /// (`docs/specs/incremental_shapes.md` §"The partition grain"). Fails
+    /// closed: `old_partition_col: None` (no snapshot, or one written before
+    /// this field existed) derives no refusal.
+    PartitionColumnChanged { from: String, to: String },
     /// The derived scan/footprint cannot be partition-bounded and the K8
     /// guardrail (`require: partition_local`, the ratified default) refuses
     /// rather than shipping a silent full-table operation.

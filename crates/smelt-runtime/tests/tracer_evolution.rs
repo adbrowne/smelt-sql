@@ -218,6 +218,7 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -320,6 +321,7 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -423,6 +425,7 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -537,6 +540,7 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
 
     // Introduction: catch up the added column per partition with the derived

@@ -69,6 +69,7 @@ fn base_inputs(sources: Vec<SourceFacts>, column_groups: Vec<ColumnGroup>) -> Mo
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -188,6 +189,7 @@ fn change_feed_repair_cell_is_refused_not_silently_admitted() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let trigger = Trigger::NewData {
         source: "orders".to_string(),

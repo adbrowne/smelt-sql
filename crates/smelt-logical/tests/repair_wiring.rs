@@ -61,6 +61,7 @@ fn inputs(sql: &'static str, source: SourceFacts) -> ModelInputs<'static> {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -237,6 +238,7 @@ fn enrichment_inputs(
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 

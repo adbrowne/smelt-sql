@@ -74,7 +74,7 @@ fixture.
 | 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | done |
 | 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | done |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | done |
-| 7 | `partition_column` rename: refusal diagnostic + fixture | planned |
+| 7 | `partition_column` rename: refusal diagnostic + fixture | done |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
@@ -282,6 +282,19 @@ fixture.
   invisible to it, so `MaintenancePartitionColumnChanged` is its own catalogue row owned
   by `incremental_shapes.md` §"The partition grain". Scoped to `partition_column` only;
   an `event_time_column`-only rename matches no residue bullet and is not folded in.
+
+- 2026-09-04 — Phase 7 implemented (`phases/07-summary.md`). Landed
+  `DeployedSchema::partition_column`, `ModelInputs::old_partition_col` +
+  `Refusal::PartitionColumnChanged` in `smelt-logical`, and
+  `MaintenancePartitionColumnChanged` (Error) end-to-end through
+  `smelt-db`/`smelt-runtime`. Corrected the plan's own `--full-refresh`
+  remedy claim: verified empirically that the pre-execution analyzer gate
+  blocks unconditionally on any Error diagnostic — no run flag bypasses it —
+  so the real remedy is deleting the model's recorded
+  `.smelt/targets/<target>/schemas/<model>.json` snapshot and re-running;
+  fixed the diagnostic message, the new spec constraint, the diagnostics
+  catalogue row, and the docs-site page to match. Success criterion 7
+  complete. No phase reshape.
 
 ## Blocked
 

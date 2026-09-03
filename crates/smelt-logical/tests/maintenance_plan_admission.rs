@@ -58,6 +58,7 @@ fn inputs(combiner: SqlFunction, mutation: MutationProfile) -> (ModelInputs<'sta
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -209,6 +210,7 @@ fn multi_column_inputs(
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -512,6 +514,7 @@ fn setop_model_admits_a_narrower_cell_than_whole_model_recompute() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let triggers = vec![Trigger::UpstreamMutation {
         source: "mutable_src".to_string(),

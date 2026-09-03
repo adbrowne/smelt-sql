@@ -895,6 +895,15 @@ pub enum DiagnosticCode {
     /// (EX-39, `definition_deltas.md` §"The verdict per column group").
     /// Anchored at the model SQL body start.
     MaintenanceSkeletonChanged,
+    /// Emitted (Error) when a maintained model's declared
+    /// `timeseries.partition_column` differs from the address recorded in
+    /// the deployed-schema snapshot at last deploy — the address every
+    /// partition-grain maintenance write targets
+    /// (`docs/specs/incremental_shapes.md` §"The partition grain"). Names
+    /// both the recorded and current column; the remedy is
+    /// `--full-refresh` or `smelt migrate`. Anchored at the model SQL body
+    /// start.
+    MaintenancePartitionColumnChanged,
     /// Emitted (Warning) when a model's definition-change `Trigger::
     /// ColumnAdded` names a non-skeleton column that cannot be backfilled in
     /// place (unbounded scan, no admissible technique, unresolvable

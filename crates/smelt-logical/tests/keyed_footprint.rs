@@ -49,6 +49,7 @@ fn keyed_fold_plan(
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis,
+        old_partition_col: None,
     };
     derive_maintenance_plan(
         &inputs,
@@ -158,6 +159,7 @@ fn partition_addressed_clamp_carries_the_derived_footprint_numbers() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,

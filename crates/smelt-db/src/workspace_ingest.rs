@@ -159,11 +159,13 @@ pub fn register_deployed_schemas_from_disk(db: &mut Database, project_root: &Pat
             .map(|c| Arc::from(c.name.as_str()))
             .collect();
         let model_sql: Option<Arc<str>> = schema.model_sql.as_deref().map(Arc::from);
+        let partition_column: Option<Arc<str>> = schema.partition_column.as_deref().map(Arc::from);
         db.set_deployed_schema(
             Arc::from(model_name.as_str()),
             project_root.to_path_buf(),
             columns,
             model_sql,
+            partition_column,
         );
     }
 }

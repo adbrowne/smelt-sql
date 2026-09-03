@@ -385,6 +385,7 @@ pub async fn check_and_migrate(
                 deployed_at: Utc::now(),
                 model_hash,
                 model_sql: Some(model_sql.to_string()),
+                partition_column: deployed_schema.partition_column.clone(),
                 columns: inferred_columns.to_vec(),
             };
             file_store
@@ -442,6 +443,7 @@ pub fn save_deployed_schema(
     model_sql: &str,
     columns: &[DeployedColumn],
     existing_version: Option<u32>,
+    partition_column: Option<&str>,
 ) -> Result<()> {
     let model_hash = compute_model_hash(model_sql);
     let schema = DeployedSchema {
@@ -450,6 +452,7 @@ pub fn save_deployed_schema(
         deployed_at: Utc::now(),
         model_hash,
         model_sql: Some(model_sql.to_string()),
+        partition_column: partition_column.map(str::to_string),
         columns: columns.to_vec(),
     };
     file_store
@@ -632,6 +635,7 @@ mod tests {
                 data_type: "INTEGER".to_string(),
                 nullable: false,
             }],
+            None,
             None,
         )
         .expect("save_deployed_schema");

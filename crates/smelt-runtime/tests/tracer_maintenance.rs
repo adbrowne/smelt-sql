@@ -253,6 +253,7 @@ fn ex40_aggregate_column_add_catch_up_then_new_data_equals_full_refresh() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -417,6 +418,7 @@ fn ex24_keyed_fold_of_a_delta_equals_full_refresh_at_the_advanced_s() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,

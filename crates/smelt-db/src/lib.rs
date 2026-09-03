@@ -453,6 +453,14 @@ pub struct DeployedSchemaInput {
     /// (`smelt_logical::maintenance::derive::skeleton_clause_changed`).
     #[returns(ref)]
     pub model_sql: Option<Arc<str>>,
+    /// The model's declared `timeseries.partition_column` at the time this
+    /// schema was deployed — `None` for a snapshot written before
+    /// `DeployedSchema::partition_column` existed, or for a model with no
+    /// partition grain. Consulted only by the partition-column-rename
+    /// refusal check
+    /// (`smelt_logical::maintenance::derive::partition_column_changed`).
+    #[returns(ref)]
+    pub partition_column: Option<Arc<str>>,
 }
 
 // ============================================================================
@@ -680,6 +688,7 @@ impl Database {
         project_root: PathBuf,
         columns: Vec<Arc<str>>,
         model_sql: Option<Arc<str>>,
+        partition_column: Option<Arc<str>>,
     ) -> DeployedSchemaInput {
         let key = (project_root.clone(), model.to_string());
         // invariant: same RwLock poisoning rationale as set_source_file.
@@ -688,10 +697,18 @@ impl Database {
             Some(input) => {
                 input.set_columns(self).to(columns);
                 input.set_model_sql(self).to(model_sql);
+                input.set_partition_column(self).to(partition_column);
                 input
             }
             None => {
-                let input = DeployedSchemaInput::new(self, model, project_root, columns, model_sql);
+                let input = DeployedSchemaInput::new(
+                    self,
+                    model,
+                    project_root,
+                    columns,
+                    model_sql,
+                    partition_column,
+                );
                 self.deployed_schemas.write().unwrap().insert(key, input);
                 if let Some(ws) = Workspace::try_get(self) {
                     let mut current = ws.deployed_schemas(self).to_vec();
@@ -1898,6 +1915,11 @@ pub fn maintenance_plan(
             .as_ref()
             .map(|sql: &Arc<str>| sql.to_string())
     });
+    let deployed_partition_column: Option<String> = deployed_schema.and_then(|s| {
+        s.partition_column(db)
+            .as_ref()
+            .map(|col: &Arc<str>| col.to_string())
+    });
     let full_refresh_schema_evolution = metadata.schema_evolution.as_ref().is_some_and(|se| {
         se.strategy == smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh
     });
@@ -1919,6 +1941,7 @@ pub fn maintenance_plan(
         &active_backends,
         &deployed_column_names,
         deployed_model_sql.as_deref(),
+        deployed_partition_column.as_deref(),
     ))
 }
 
@@ -2070,6 +2093,11 @@ pub fn maintenance_plan_report(
             .as_ref()
             .map(|sql: &Arc<str>| sql.to_string())
     });
+    let deployed_partition_column: Option<String> = deployed_schema.and_then(|s| {
+        s.partition_column(db)
+            .as_ref()
+            .map(|col: &Arc<str>| col.to_string())
+    });
     let full_refresh_schema_evolution = metadata.schema_evolution.as_ref().is_some_and(|se| {
         se.strategy == smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh
     });
@@ -2092,6 +2120,7 @@ pub fn maintenance_plan_report(
         &deployed_column_names,
         &source_referential_integrity,
         deployed_model_sql.as_deref(),
+        deployed_partition_column.as_deref(),
     )?;
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
@@ -2873,6 +2902,22 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         "the model's skeleton clause changed against its deployed schema \
                          snapshot: {reason} — a grain change, never a column backfill (EX-39, \
                          docs/specs/incremental_models.md §\"The definition-change trigger\")",
+                    ),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::PartitionColumnChanged {
+                    from,
+                    to,
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::MaintenancePartitionColumnChanged,
+                    format!(
+                        "declared timeseries.partition_column changed from '{from}' to '{to}' \
+                         since this model was last deployed — the recorded address every \
+                         partition-grain maintenance write targets no longer matches; this is a \
+                         pre-execution refusal that no run flag bypasses (the analyzer gate \
+                         blocks on any Error-severity diagnostic unconditionally), so delete the \
+                         model's recorded snapshot (.smelt/targets/<target>/schemas/<model>.json) \
+                         and re-run `smelt run` to re-address the table under the new column",
                     ),
                 ),
                 crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {

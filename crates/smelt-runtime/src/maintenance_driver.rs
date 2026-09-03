@@ -856,6 +856,7 @@ pub fn resolve_incremental_strategy(
             &[],
             &SourceReferentialIntegrity::new(),
             None,
+            None,
         )
     } else {
         // Edge-aware derivation — the SAME derivation
@@ -871,6 +872,7 @@ pub fn resolve_incremental_strategy(
             &[],
             &[],
             &SourceReferentialIntegrity::new(),
+            None,
             None,
         )
     };
@@ -1077,6 +1079,7 @@ pub fn resolve_fold_deferral(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
         None,
     ) else {
         return no_deferral;
@@ -1338,6 +1341,7 @@ pub fn resolve_live_column_scoped_cell(
         &[],
         &SourceReferentialIntegrity::new(),
         None,
+        None,
     ) else {
         return Ok(None);
     };
@@ -1535,6 +1539,7 @@ pub fn resolve_live_in_place_update_cell(
         deployed_column_names,
         &SourceReferentialIntegrity::new(),
         None,
+        None,
     )?;
     let cell = result
         .plan
@@ -1660,6 +1665,7 @@ pub fn resolve_live_membership_recompute_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
         None,
     ) else {
         return Ok(None);
@@ -2238,6 +2244,7 @@ pub fn resolve_live_per_group_recompute_cell(
         &[],
         &SourceReferentialIntegrity::new(),
         None,
+        None,
     ) else {
         return Ok(None);
     };
@@ -2806,6 +2813,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
         None,
     ) else {
         return Ok(None);
@@ -4527,6 +4535,7 @@ pub fn resolve_live_delta_restriction_facts(
         &[],
         &SourceReferentialIntegrity::new(),
         None,
+        None,
     ) else {
         return Ok(None);
     };
@@ -4678,6 +4687,7 @@ pub fn resolve_live_external_delta_restriction_facts(
         &[],
         &[],
         source_referential_integrity,
+        None,
         None,
     ) else {
         return Ok(None);

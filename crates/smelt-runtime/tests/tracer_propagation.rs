@@ -146,6 +146,7 @@ fn silver_inputs(sql: &str) -> ModelInputs<'_> {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -175,6 +176,7 @@ fn rollup_inputs() -> ModelInputs<'static> {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -525,6 +527,7 @@ fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 

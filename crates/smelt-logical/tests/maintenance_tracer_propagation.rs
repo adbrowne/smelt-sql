@@ -100,6 +100,7 @@ fn derived_conversions_clamp_drives_the_propagation() {
         old_columns: Vec::new(),
         old_sql: None,
         keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,

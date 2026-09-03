@@ -4748,6 +4748,18 @@ pub async fn execute_project(
                             &plan.sql,
                             &inferred_columns,
                             existing_version,
+                            // Read from the model's own declared metadata,
+                            // not `plan.incremental` — a first-ever run of
+                            // a `refresh: incremental` model executes via
+                            // this full-refresh save path (no existing
+                            // table to incrementally build against yet),
+                            // where `plan.incremental` is `None` even
+                            // though the model does declare `timeseries:`.
+                            plan.model_file
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.timeseries.as_ref())
+                                .map(|ts| ts.partition_column.as_str()),
                         ) {
                             tracing::warn!(
                                 "Failed to save deployed schema for '{}': {}",
@@ -4818,6 +4830,9 @@ pub async fn execute_project(
                         &plan.sql,
                         &inferred_columns,
                         None,
+                        plan.incremental
+                            .as_ref()
+                            .map(|inc| inc.timeseries.partition_column.as_str()),
                     ) {
                         tracing::warn!("Failed to save deployed schema for '{}': {}", plan.name, e);
                     }

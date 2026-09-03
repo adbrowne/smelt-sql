@@ -123,6 +123,12 @@ pub struct DeployedSchema {
     /// this field existed (`#[serde(default)]` back-compat).
     #[serde(default)]
     pub model_sql: Option<String>,
+    /// The model's declared `timeseries.partition_column` at the time this schema
+    /// was deployed — the address every partition-grain maintenance write targets.
+    /// `None` for snapshots written before this field existed
+    /// (`#[serde(default)]` back-compat), or for a model with no partition grain.
+    #[serde(default)]
+    pub partition_column: Option<String>,
     pub columns: Vec<DeployedColumn>,
 }
 
@@ -2075,6 +2081,7 @@ mod tests {
             deployed_at: Utc::now(),
             model_hash: "sha256:abc123".to_string(),
             model_sql: None,
+            partition_column: None,
             columns: vec![
                 col("order_date", "DATE", false),
                 col("total", "DECIMAL(10,2)", true),
@@ -2096,6 +2103,7 @@ mod tests {
             deployed_at: Utc::now(),
             model_hash: "sha256:abc123".to_string(),
             model_sql: Some("SELECT 1".to_string()),
+            partition_column: None,
             columns: vec![col("order_date", "DATE", false)],
         };
 
@@ -2119,6 +2127,42 @@ mod tests {
         let deserialized: DeployedSchema = serde_json::from_str(json).unwrap();
         assert_eq!(deserialized.model_sql, None);
         assert_eq!(deserialized.columns.len(), 1);
+    }
+
+    #[test]
+    fn deployed_schema_json_without_partition_column_deserializes() {
+        let json = r#"{
+            "model": "daily_revenue",
+            "version": 1,
+            "deployed_at": "2026-01-01T00:00:00Z",
+            "model_hash": "sha256:abc123",
+            "columns": [
+                {"name": "order_date", "type": "DATE", "nullable": false}
+            ]
+        }"#;
+
+        let deserialized: DeployedSchema = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.partition_column, None);
+    }
+
+    #[test]
+    fn deployed_schema_roundtrips_partition_column() {
+        let schema = DeployedSchema {
+            model: "daily_revenue".to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "sha256:abc123".to_string(),
+            model_sql: None,
+            partition_column: Some("event_date".to_string()),
+            columns: vec![col("order_date", "DATE", false)],
+        };
+
+        let json = serde_json::to_string(&schema).unwrap();
+        let deserialized: DeployedSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.partition_column,
+            Some("event_date".to_string())
+        );
     }
 
     #[test]

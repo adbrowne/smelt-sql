@@ -85,6 +85,17 @@ For the `timeseries:` fields (`event_time_column`, `partition_column`, `granular
 - **`quarter`** -- One partition per calendar quarter.
 - **`year`** -- One partition per calendar year.
 
+### Renaming `partition_column`
+
+Once a partition-grain model's table has been deployed, changing `timeseries.partition_column`
+is refused: `smelt run` (and `smelt build`) reports `MaintenancePartitionColumnChanged`, naming
+the recorded and the current column. This refusal fires even for a rename that repoints the
+address at a column your query already projects — a column-set diff alone can't see it, but the
+partition address is still a world fact that changed. No run flag bypasses it (the analyzer gate
+refuses on any Error-severity diagnostic unconditionally). To accept the rename, delete the
+model's recorded snapshot at `.smelt/targets/<target>/schemas/<model>.json` and re-run — the
+next run addresses the table under the new column and records a fresh snapshot.
+
 ## Running incremental models
 
 ### Explicit time range

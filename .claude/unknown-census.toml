@@ -437,42 +437,42 @@ discriminant = "dynamic"
 # StructFieldAdded sites (which DID propagate Unknown to operations); these
 # type-comparison sites are safe and classified legitimate.
 
-["crates/smelt-state/src/schema_tracking.rs:932"]
+["crates/smelt-state/src/schema_tracking.rs:938"]
 classification = "legitimate"
 reason = "ChangeType from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:934"]
+["crates/smelt-state/src/schema_tracking.rs:940"]
 classification = "legitimate"
 reason = "ChangeType to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:986"]
+["crates/smelt-state/src/schema_tracking.rs:992"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:988"]
+["crates/smelt-state/src/schema_tracking.rs:994"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1017"]
+["crates/smelt-state/src/schema_tracking.rs:1023"]
 classification = "legitimate"
 reason = "MapValueTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1019"]
+["crates/smelt-state/src/schema_tracking.rs:1025"]
 classification = "legitimate"
 reason = "MapValueTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1074"]
+["crates/smelt-state/src/schema_tracking.rs:1080"]
 classification = "legitimate"
 reason = "NestedTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1076"]
+["crates/smelt-state/src/schema_tracking.rs:1082"]
 classification = "legitimate"
 reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"

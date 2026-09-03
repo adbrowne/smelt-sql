@@ -914,6 +914,7 @@ mod tests {
             deployed_at: Utc::now(),
             model_hash: "sha256:abc".to_string(),
             model_sql: None,
+            partition_column: None,
             columns: vec![
                 DeployedColumn {
                     name: "order_date".to_string(),
@@ -958,6 +959,7 @@ mod tests {
             deployed_at: Utc::now(),
             model_hash: "sha256:abc".to_string(),
             model_sql: None,
+            partition_column: None,
             columns: vec![],
         };
         store.save_schema(&schema).unwrap();

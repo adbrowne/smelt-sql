@@ -4415,6 +4415,7 @@ fn derive_plan_with_real_deployed_schema(
         &deployed,
         &std::collections::BTreeMap::new(),
         None,
+        None,
     )
     .ok_or_else(|| anyhow::anyhow!("model {:?} carries no maintenance plan", recipe.model_name))?;
     Ok(result.plan)

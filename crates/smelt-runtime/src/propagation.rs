@@ -952,6 +952,7 @@ fn derive_clamp_and_locality_pass(
             // separately re-derived admission.
             &smelt_db::queries::maintenance::build_source_referential_integrity(&source_refs),
             None,
+            None,
         ) else {
             continue;
         };

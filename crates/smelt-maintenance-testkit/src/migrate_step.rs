@@ -170,6 +170,7 @@ where
         &derived.inputs.after_sql,
         &inferred,
         Some(deployed.version),
+        deployed.partition_column.as_deref(),
     )
     .with_context(|| format!("save migrated deployed schema for {db_name}"))?;
 

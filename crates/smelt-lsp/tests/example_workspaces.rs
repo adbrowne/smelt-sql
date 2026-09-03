@@ -1410,6 +1410,7 @@ async fn lsp_publishes_skeleton_changed_from_deployed_schema() {
         deployed_at: chrono::Utc::now(),
         model_hash: "test-hash".to_string(),
         model_sql: Some(old_sql.to_string()),
+        partition_column: None,
         columns: vec![
             smelt_state::schema_tracking::DeployedColumn {
                 name: "device_id".to_string(),

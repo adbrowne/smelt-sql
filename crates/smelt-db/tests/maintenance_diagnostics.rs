@@ -831,6 +831,7 @@ fn column_added_trigger_derived_from_deployed_schema() {
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
         None,
+        None,
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -894,6 +895,7 @@ fn column_added_trigger_skeleton_position_refuses() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        None,
         None,
     )
     .expect("refresh: incremental model must derive a plan");
@@ -983,6 +985,7 @@ fn column_added_trigger_rename_case_never_treated_as_in_place_update() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        None,
         None,
     )
     .expect("refresh: incremental model must derive a plan");
@@ -1330,6 +1333,7 @@ columns:
             deployed_at: Utc::now(),
             model_hash: "test-hash".to_string(),
             model_sql: model_sql.map(|s| s.to_string()),
+            partition_column: None,
             columns: columns
                 .iter()
                 .map(|c| DeployedColumn {
@@ -1340,6 +1344,132 @@ columns:
                 .collect(),
         };
         store.save_schema(&schema).expect("save deployed schema");
+    }
+
+    /// Like [`write_schema`], additionally recording a declared
+    /// `partition_column` address for the partition-column-rename refusal
+    /// tests below.
+    fn write_schema_with_partition_column(
+        root: &std::path::Path,
+        target: &str,
+        model: &str,
+        columns: &[&str],
+        partition_column: &str,
+    ) {
+        let store = FileStore::new(root, target);
+        store.init().expect("init .smelt");
+        let schema = DeployedSchema {
+            model: model.to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "test-hash".to_string(),
+            model_sql: None,
+            partition_column: Some(partition_column.to_string()),
+            columns: columns
+                .iter()
+                .map(|c| DeployedColumn {
+                    name: c.to_string(),
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                })
+                .collect(),
+        };
+        store.save_schema(&schema).expect("save deployed schema");
+    }
+
+    const PARTITION_SMELT_YML: &str = r#"
+name: partition_column_rename_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+"#;
+
+    const EVENTS_SOURCE: &str = r#"
+description: Events, append-only.
+mutation_profile: append_only
+columns:
+  - { name: event_date, type: DATE, nullable: false }
+  - { name: amount, type: INTEGER, nullable: false }
+"#;
+
+    /// A model whose declared `timeseries.partition_column` differs from the
+    /// address recorded in the deployed-schema snapshot at last deploy
+    /// emits `MaintenancePartitionColumnChanged` — the address every
+    /// partition-grain maintenance write targets is a world fact, not
+    /// re-derivable from the compiled SQL alone.
+    #[test]
+    fn renamed_partition_column_emits_maintenance_partition_column_changed() {
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT event_date, SUM(amount) AS total
+FROM smelt.sources.events
+GROUP BY event_date
+"#;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        write_schema_with_partition_column(
+            &root,
+            "dev",
+            "renamed_events",
+            &["event_date", "total"],
+            "event_day",
+        );
+        let diags = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", PARTITION_SMELT_YML),
+                ("models/sources/events.yml", EVENTS_SOURCE),
+                ("models/renamed_events.sql", model),
+            ],
+            "renamed_events",
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(DiagnosticCode::MaintenancePartitionColumnChanged)),
+            "expected MaintenancePartitionColumnChanged, got {diags:?}"
+        );
+
+        // A sibling model whose recorded and declared partition_column
+        // match emits none.
+        write_schema_with_partition_column(
+            &root,
+            "dev",
+            "unchanged_events",
+            &["event_date", "total"],
+            "event_date",
+        );
+        let diags_unchanged = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", PARTITION_SMELT_YML),
+                ("models/sources/events.yml", EVENTS_SOURCE),
+                ("models/unchanged_events.sql", model),
+            ],
+            "unchanged_events",
+        );
+        assert!(
+            diags_unchanged
+                .iter()
+                .all(|d| d.code != Some(DiagnosticCode::MaintenancePartitionColumnChanged)),
+            "matching partition_column must emit no refusal, got {diags_unchanged:?}"
+        );
     }
 
     /// A registered snapshot whose `model_sql` groups only by `device_id`
@@ -1572,6 +1702,7 @@ SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id
             root.clone(),
             vec![std::sync::Arc::from("device_id"), std::sync::Arc::from("n")],
             Some(std::sync::Arc::from(old_sql)),
+            None,
         );
         let diags_after = smelt_db::file_diagnostics(&db, ws, file);
         assert!(
@@ -1875,6 +2006,7 @@ fn register_deployed_schemas_from_disk_reads_target_schemas() {
         deployed_at: Utc::now(),
         model_hash: "h".to_string(),
         model_sql: Some("SELECT 1".to_string()),
+        partition_column: None,
         columns: vec![DeployedColumn {
             name: "order_id".to_string(),
             data_type: "INTEGER".to_string(),
