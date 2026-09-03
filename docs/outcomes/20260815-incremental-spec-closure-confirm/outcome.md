@@ -62,7 +62,7 @@ divergence entry removed).
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
 | 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | done |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | done |
-| 5 | Write `closure-report.md`; final standing-gate run | pending |
+| 5 | Write `closure-report.md`; final standing-gate run | planned |
 
 ## Decision log
 
@@ -164,6 +164,18 @@ divergence entry removed).
   went red-then-green. `check-inventory.sh`/`check-classification.sh` unchanged and still green.
   Timeless-oracle sweep across all four specs: zero `Phase [A-Z0-9]+` hits. Row 5 stands as written —
   criteria 1-3 were already satisfied by phases 1-3, criterion 4 is now fully satisfied.
+
+- 2026-09-04 — Phase 5 planned. No reshape: phase 4 fixed both of its findings inline, added no row
+  and no `## Blocked` entry, so row 5 is the last and stands as written. One gap fixed for this
+  phase: success criterion 1 demands each still-open bullet state *the reason it needs a product
+  decision this program didn't make*, and `baseline-inventory.md` records the `open` disposition
+  without that per-bullet reason — writing those 29 reasons is therefore phase-5 work, carried in
+  `closure-report.md` rather than back-filled into the inventory (phases 2/3 own the dispositions;
+  this phase does not re-derive them). A new gate, `check-closure-report.sh`, enforces the report's
+  completeness (all 80 IDs enumerated once, `closed` rows cite a sha, `open` rows carry a reason,
+  one section per criterion, all five criterion-5 gates named with a verdict). The criterion-5
+  gates are re-run in this phase rather than cited from phase 4, since criterion 5 asks for a
+  final green suite.
 
 ## Blocked
 
