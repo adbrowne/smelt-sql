@@ -57,6 +57,11 @@ fixture.
   finds a bullet is genuinely still owned by a live, actively-progressing plan outside
   `docs/outcomes/`, record that finding in the decision log rather than silently dropping the
   bullet from this outcome's phases.
+- A window function nested inside a `CASE` arm is invisible to
+  `analyze_expr_temporal` (`crates/smelt-logical/src/analysis/temporal.rs`), flagged by the phase-2
+  summary. `temporal.rs` is advisory-only under the property-composition-walk rule — it feeds no
+  admission gate — and the gap matches no partition-grain Known Divergences bullet with a
+  pre-`docs/outcomes/` tracker, so it is not folded in here.
 
 ## Phases
 
@@ -64,7 +69,7 @@ fixture.
 |---|-------|--------|
 | 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | done |
 | 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | done |
-| 3 | CTE-only `event_time_column` detection in the outer-visibility check | pending |
+| 3 | CTE-only `event_time_column` detection in the outer-visibility check | planned |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | pending |
 | 5 | Monotone-integer `partition_column` end-to-end (backfill chunking, scan-filter injection, explain clamp) | pending |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
@@ -118,6 +123,14 @@ fixture.
   (computed against the always-broken expansion path) to the true 12-day/
   3-chunk split; `rebuild_dry_run.rs`'s golden values and one LSP goto-def
   line number were updated to match. No phase reshape.
+
+- 2026-09-04 — Phase 3 planned. No phase row added, split, or reordered: the
+  phase-2 summary's only forward-looking finding (a window function nested in a
+  `CASE` arm is invisible to `temporal.rs`'s AST walk) is advisory-only — it
+  gates nothing and matches no residue bullet this outcome owns — so it is
+  recorded under §"Out of scope" rather than given a phase row. Phase 3 keeps
+  its audited scope: the outer-visibility check's Case 2 matches only a bare
+  parenthesized subquery in `FROM`, so the `WITH … FROM <cte>` form escapes.
 
 ## Blocked
 
