@@ -172,6 +172,18 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
             code: Some(DiagnosticCode::ContractDeferralInvalid),
             data: None,
         }),
+        // Raised by `extract_single_model`'s strict `contract:` pre-validation,
+        // the same site and pattern as `ContractFrozenHorizonInvalid`/
+        // `ContractDeferralInvalid` above — disambiguated by
+        // `smelt_core::metadata`'s own field-level check rather than by this
+        // mapper.
+        MetadataError::ContractRetainDepartedInvalid { .. } => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::ContractRetainDepartedInvalid),
+            data: None,
+        }),
     }
 }
 
@@ -2514,6 +2526,59 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         })
                         .accumulate(db);
                     }
+                }
+            }
+        }
+
+        // Contract-lattice `retain_departed` posture-admissibility +
+        // tombstone-column check (`docs/specs/incremental_models.md`
+        // §"Contract relaxations (`contract:`)"). Format validity was
+        // already checked at frontmatter-parse time
+        // (`MetadataError::ContractRetainDepartedInvalid`, handled above);
+        // this pure `smelt-logical` validator checks that the declaration
+        // sits on a keyed shape consuming a mutable snapshot, and that a
+        // declared tombstone column exists in the model's inferred output —
+        // sharing the same diagnostic code (single-owner rule: the
+        // oracle/validator, not this Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if let Some(retain_departed) = &contract.retain_departed {
+                let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
+                let grain = metadata.grain.unwrap_or(smelt_core::config::Grain::Key);
+                let refs = smelt_logical::collect_path_refs(sql_body);
+                let consumes_mutable_snapshot = refs.iter().any(|r| {
+                    ref_source_info(db, workspace, project, r).is_some_and(|info| {
+                        info.mutation_profile.as_ref().is_some_and(|m| {
+                            m.kind == smelt_core::sources::MutationProfile::Mutable
+                        })
+                    })
+                });
+                let tombstone_column = match retain_departed {
+                    smelt_core::config::RetainDeparted::Bool(_) => None,
+                    smelt_core::config::RetainDeparted::Tombstone { tombstone } => {
+                        Some(tombstone.as_str())
+                    }
+                };
+                let typed_schema = typed_model_schema(db, workspace, file);
+                let output_columns: Vec<String> = typed_schema
+                    .columns
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect();
+                if let Err(why) = smelt_logical::validate_retain_departed(
+                    grain,
+                    consumes_mutable_snapshot,
+                    tombstone_column,
+                    &output_columns,
+                    model_name,
+                ) {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("ContractRetainDepartedInvalid: {why}"),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::ContractRetainDepartedInvalid),
+                        data: None,
+                    })
+                    .accumulate(db);
                 }
             }
         }

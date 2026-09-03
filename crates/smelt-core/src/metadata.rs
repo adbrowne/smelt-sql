@@ -715,6 +715,21 @@ pub enum MetadataError {
     /// diagnostic code.
     #[error("ContractDeferralInvalid: contract.deferral is not a valid interval — {why}")]
     ContractDeferralInvalid { why: String },
+
+    /// A `contract.retain_departed` value is neither a bare bool nor
+    /// `{tombstone: <col>}` (`docs/specs/incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Raised at frontmatter-parse time by
+    /// `extract_single_model`'s strict pre-validation, the same pattern as
+    /// `ContractFrozenHorizonInvalid`/`ContractDeferralInvalid`. Posture
+    /// admissibility (declared on anything but a keyed shape consuming a
+    /// mutable snapshot) and a tombstone column absent from the model's
+    /// output are distinct checks made downstream by
+    /// `smelt_logical::contract::retain_departed::validate` (needs the
+    /// derived grain, resolved source facts, and the inferred output
+    /// schema, unavailable to this pure parse) — all three surface under
+    /// the same `ContractRetainDepartedInvalid` diagnostic code.
+    #[error("ContractRetainDepartedInvalid: contract.retain_departed is invalid — {why}")]
+    ContractRetainDepartedInvalid { why: String },
 }
 
 /// Disambiguates a `contract:` block's `"invalid data_latency"` deserialize
@@ -763,6 +778,39 @@ fn classify_contract_data_latency_error(value: &serde_yaml::Value, why: String) 
         return MetadataError::ContractDeferralInvalid { why };
     }
     MetadataError::ContractFrozenHorizonInvalid { why }
+}
+
+/// Whether `value`'s `retain_departed` key (if present) is not one of the
+/// two admitted declaration forms — a bare bool or `{tombstone: <col>}` —
+/// and, if so, a message naming what was found instead. Mirrors
+/// `classify_contract_data_latency_error`'s "walk the still-unvalidated
+/// mapping directly" approach, since serde_yaml's untagged-enum failure
+/// carries no field path either. `None` when `retain_departed` is absent or
+/// already well-formed (the caller only reaches this on a failed
+/// `ContractConfig` deserialize whose message didn't match the
+/// `DataLatency` case, so a well-formed `retain_departed` here means some
+/// *other* field is at fault).
+fn bad_retain_departed_reason(value: &serde_yaml::Value) -> Option<String> {
+    let mapping = value.as_mapping()?;
+    let v = mapping.get(serde_yaml::Value::String("retain_departed".to_string()))?;
+    if v.as_bool().is_some() {
+        return None;
+    }
+    if let Some(m) = v.as_mapping() {
+        let tombstone_ok = m.len() == 1
+            && m.get(serde_yaml::Value::String("tombstone".to_string()))
+                .and_then(|t| t.as_str())
+                .is_some();
+        if tombstone_ok {
+            return None;
+        }
+        return Some(format!(
+            "expected `true` or `{{tombstone: <column>}}`, found a mapping shaped {m:?}"
+        ));
+    }
+    Some(format!(
+        "expected `true` or `{{tombstone: <column>}}`, found {v:?}"
+    ))
 }
 
 /// Build the fix-it message for a refused `batched:` sub-block, naming each
@@ -1768,6 +1816,9 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     let msg = e.to_string();
                     if msg.contains("invalid data_latency") {
                         return Err(classify_contract_data_latency_error(value, msg));
+                    }
+                    if let Some(why) = bad_retain_departed_reason(value) {
+                        return Err(MetadataError::ContractRetainDepartedInvalid { why });
                     }
                     return Err(MetadataError::YamlParseError(e));
                 }

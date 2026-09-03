@@ -25,6 +25,7 @@ pub use contract::deferral::validate_deferral;
 pub use contract::frozen_horizon::{
     clamp_write_range as clamp_frozen_horizon_write_range, validate_frozen_horizon,
 };
+pub use contract::retain_departed::validate as validate_retain_departed;
 pub use data_tests::{
     lower_column_test, resolve_not_null_verdict, resolve_unique_verdict, ScanLowering, TestVerdict,
 };

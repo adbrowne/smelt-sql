@@ -959,6 +959,17 @@ pub enum DiagnosticCode {
     /// `smelt_logical::contract::deferral::validate_deferral`. Anchored at
     /// the top of the file (line 0, column 0).
     ContractDeferralInvalid,
+    /// A `contract.retain_departed` is neither a bare bool nor
+    /// `{tombstone: <col>}`, is declared on anything other than a keyed
+    /// shape consuming a mutable snapshot, or names a tombstone column
+    /// absent from the model's output (`incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Covers both the frontmatter-parse-time
+    /// format failure (`smelt_core::metadata::MetadataError::
+    /// ContractRetainDepartedInvalid`) and the posture/tombstone-column
+    /// check made by
+    /// `smelt_logical::contract::retain_departed::validate`. Anchored at the
+    /// top of the file (line 0, column 0).
+    ContractRetainDepartedInvalid,
 
     /// A user-written top-level SELECT-item alias begins with the reserved
     /// `_smelt_` prefix (`multi_backend.md` §"Output-schema type

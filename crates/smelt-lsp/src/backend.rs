@@ -400,6 +400,7 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::ColumnTestOnUnknownColumn => "column-test-on-unknown-column",
         DbCode::ContractFrozenHorizonInvalid => "contract-frozen-horizon-invalid",
         DbCode::ContractDeferralInvalid => "contract-deferral-invalid",
+        DbCode::ContractRetainDepartedInvalid => "contract-retain-departed-invalid",
         DbCode::ReservedProjectionAliasPrefix => "reserved-projection-alias-prefix",
         DbCode::UnsupportedOnBackend => "unsupported-on-backend",
     }

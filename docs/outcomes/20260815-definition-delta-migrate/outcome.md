@@ -349,11 +349,25 @@ open — not that the excluded bullets themselves are gone.
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | done |
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
-| 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | planned |
+| 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | done |
 | 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | pending |
 | 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 32 implement — `retain_departed`'s declaration-half triple lands.**
+  `crates/smelt-logical/src/contract/retain_departed.rs` single-owns posture/tombstone-column
+  validation, the departed-key quotient oracle (`classify_key`), and the reconcile-anti-join
+  probe emitter (`emit_departed_key_probe`), mirroring `frozen_horizon`/`deferral`.
+  `smelt_core::config::RetainDeparted` (untagged `Bool`/`Tombstone`) is the wire schema;
+  `MetadataError::ContractRetainDepartedInvalid` covers the frontmatter pre-validation case (a
+  value that is neither a bare bool nor `{tombstone: <col>}`); the posture/tombstone-column
+  admissibility check is wired into `smelt-db`'s `check_file_diagnostics`, resolving
+  "consumes a mutable snapshot" the same way the `deferral` cell check resolves "has a clock" —
+  by scanning the model's `smelt.sources.*` refs for a `mutation_profile: mutable_snapshot`
+  match. `EffectiveContract` and `render_label` now carry the point. The runtime half (the
+  anti-join delete leg actually running, the probe actually being dispatched) is unchanged —
+  phase 32b.
 
 - **2026-09-03, phase 32 plan — the two "blocked" rows were blocked on a missing plan file, not a design question; unblocked here, and the runtime half split out.** The Blocked section's own candidate option (a), and `phases/32-summary.md`, both name the PLAN step as the actor that closes this process gap. `phases/32-plan.md` now exists, so row 32 is `planned`; row 33 returns to `pending` so a later PLAN iteration writes its plan rather than the outcome terminating with it unaddressed. Reading the divergence bullet against the code (`rg retain_departed crates/` — zero hits) showed it covers two separable pieces: the lattice-point triple (spec-complete, greenfield, `smelt-logical`-local) and the runtime anti-join delete leg (dispatch + statement-parity surface in the reconcile write path). Row 32 takes the first; new row 32b takes the second. Per the never-defer rule the runtime half stays in the outcome as a phase row rather than moving to Out of scope — it is what makes the declared point observable, so criterion 20's bullet cannot honestly be removed without it.
 
