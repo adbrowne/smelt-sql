@@ -53,7 +53,7 @@ pub async fn insert_row_for(
             name = recipe.source.name,
             d = row.d.format("%Y-%m-%d"),
             id = row.id,
-            val = row.val,
+            val = row.val_sql(),
         ))
         .await
         .map_err(|e| anyhow::anyhow!("insert row: {e}"))?;
@@ -513,7 +513,18 @@ pub async fn run_redelivery_of_processed_window_is_idempotent(
         ConformanceStep::RunWindow {
             start: d,
             end: window_end,
-            rows: vec![GenRow { d, id: 1, val: 10 }, GenRow { d, id: 2, val: 20 }],
+            rows: vec![
+                GenRow {
+                    d,
+                    id: 1,
+                    val: Some(10),
+                },
+                GenRow {
+                    d,
+                    id: 2,
+                    val: Some(20),
+                },
+            ],
         },
         ConformanceStep::RerunWindow {
             start: d,
@@ -566,7 +577,7 @@ pub async fn run_full_refresh_interleave_resets_state_correctly(
             rows: vec![GenRow {
                 d: d1,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         ConformanceStep::FullRefreshRun,
@@ -576,7 +587,7 @@ pub async fn run_full_refresh_interleave_resets_state_correctly(
             rows: vec![GenRow {
                 d: d2,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
         ConformanceStep::RunWindow {
@@ -585,7 +596,7 @@ pub async fn run_full_refresh_interleave_resets_state_correctly(
             rows: vec![GenRow {
                 d: d3,
                 id: 3,
-                val: 30,
+                val: Some(30),
             }],
         },
     ]);
@@ -734,7 +745,7 @@ pub async fn run_column_add_between_runs_recovers_equivalence(
             rows: vec![GenRow {
                 d: w1_start,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         ConformanceStep::RunWindow {
@@ -743,7 +754,7 @@ pub async fn run_column_add_between_runs_recovers_equivalence(
             rows: vec![GenRow {
                 d: w2_start,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
         // Definition change: add a derived payload column, same skeleton.
@@ -760,7 +771,7 @@ pub async fn run_column_add_between_runs_recovers_equivalence(
             rows: vec![GenRow {
                 d: w3_start,
                 id: 3,
-                val: 30,
+                val: Some(30),
             }],
         },
     ]);

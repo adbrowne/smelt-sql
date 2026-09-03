@@ -1226,11 +1226,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   the other two derived execution postures, are computed and printed by `smelt explain`
   alongside the derived run shape; only the optimisation of actually reordering or
   parallelising windows remains unbuilt.
-- **The generative conformance pool cannot stage NULL payloads (Open Question)** — the
-  generated row type's payload field (`GenRow::val`) is a non-nullable `i64`, so the once-write
-  family's NULL direction (a key whose first window carries only a NULL payload) is covered by
-  one targeted test case rather than by the generated pool that proves every other keyed
-  family.
 - **The pattern-function template file does not exist** — `smelt.latest`, `smelt.once`, and
   `smelt.current` are specified as a shipped `smelt.define` template file (§"The column-family
   catalogue"), but no such file ships; each family is reachable only through its hand-written

@@ -63,7 +63,7 @@ async fn insert_row(
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
     )
     .await
@@ -134,7 +134,7 @@ fn frozen_horizon_recipe_upholds_relaxed_oracle_and_not_the_default() {
     let row0 = GenRow {
         d: day(0),
         id: 1,
-        val: 10,
+        val: Some(10),
     };
     rt.block_on(insert_row(&project, &recipe, &row0))
         .expect("insert row0");
@@ -153,7 +153,7 @@ fn frozen_horizon_recipe_upholds_relaxed_oracle_and_not_the_default() {
     let late = GenRow {
         d: day(0),
         id: 2,
-        val: 999,
+        val: Some(999),
     };
     rt.block_on(insert_row(&project, &recipe, &late))
         .expect("insert late row");
@@ -225,7 +225,7 @@ fn deferral_recipe_upholds_bracketed_oracle_with_a_skipped_run() {
     let row0 = GenRow {
         d: day(0),
         id: 1,
-        val: 10,
+        val: Some(10),
     };
     rt.block_on(insert_row(&project, &recipe, &row0))
         .expect("insert row0");
@@ -252,12 +252,12 @@ fn deferral_recipe_upholds_bracketed_oracle_with_a_skipped_run() {
     let row1 = GenRow {
         d: day(1),
         id: 2,
-        val: 20,
+        val: Some(20),
     };
     let row2 = GenRow {
         d: day(1) + chrono::Duration::days(1),
         id: 3,
-        val: 30,
+        val: Some(30),
     };
     rt.block_on(insert_row(&project, &recipe, &row1))
         .expect("insert row1");

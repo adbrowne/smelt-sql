@@ -23,10 +23,11 @@ use smelt_maintenance_testkit::oracle_modes::{
 };
 use smelt_maintenance_testkit::recipe::{
     arb_composed_route, arb_composed_route3_schedule, arb_enrichment_edge_recipe,
-    arb_enrichment_edge_schedule, arb_keyed_combiner, arb_keyed_schedule, arb_recipe,
-    ComposedKeyedRecipe, ComposedRoute, ComposedRoute3Schedule, ConstructKind, EnrichmentJoinKind,
-    KeyShape, KeyedCombiner, KeyedRecipe, KeyedSchedule, ModelEdit, ModelRecipe,
-    MutableEnrichedRecipe, RecipePool, SourcePosture, SourceRecipe, ValueEnrichedRecipe,
+    arb_enrichment_edge_schedule, arb_keyed_combiner, arb_keyed_schedule,
+    arb_once_write_null_schedule, arb_recipe, ComposedKeyedRecipe, ComposedRoute,
+    ComposedRoute3Schedule, ConstructKind, EnrichmentJoinKind, KeyShape, KeyedCombiner,
+    KeyedRecipe, KeyedSchedule, ModelEdit, ModelRecipe, MutableEnrichedRecipe, RecipePool,
+    SourcePosture, SourceRecipe, ValueEnrichedRecipe,
 };
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
@@ -104,7 +105,7 @@ async fn insert_row(
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ))
         .await
         .map_err(|e| anyhow::anyhow!("insert row: {e}"))?;
@@ -634,7 +635,7 @@ pub fn insert_fact_row(
             recipe.fact.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -965,7 +966,7 @@ pub fn insert_row_keyed(
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -1640,7 +1641,16 @@ async fn order_monotone_redelivery_is_idempotent_no_ledger_refusal() {
     );
 
     let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
-    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 5 }).expect("insert row");
+    insert_row_keyed(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(5),
+        },
+    )
+    .expect("insert row");
 
     let mut request = base_request("dev");
     request.start = Some("2024-01-01".to_string());
@@ -1698,7 +1708,7 @@ fn once_write_constant_payload_schedule() -> KeyedSchedule {
             rows: vec![GenRow {
                 d: d1,
                 id: 1,
-                val: 7,
+                val: Some(7),
             }],
         },
         // The shared key `1` recurs with the SAME value — the once-write
@@ -1714,12 +1724,12 @@ fn once_write_constant_payload_schedule() -> KeyedSchedule {
                 GenRow {
                     d: d2,
                     id: 1,
-                    val: 7,
+                    val: Some(7),
                 },
                 GenRow {
                     d: d2,
                     id: 2,
-                    val: 42,
+                    val: Some(42),
                 },
             ],
         },
@@ -1736,7 +1746,7 @@ fn once_write_constant_payload_schedule() -> KeyedSchedule {
             rows: vec![GenRow {
                 d: d1,
                 id: 1,
-                val: 7,
+                val: Some(7),
             }],
         },
     ])
@@ -1772,6 +1782,63 @@ async fn once_write_pool_upholds_end_state_equivalence() {
     drive_keyed_and_assert(&project, &recipe, &schedule)
         .await
         .expect("once-write keyed schedule must uphold end-state equivalence");
+}
+
+/// `once_write_null_pool_upholds_end_state_equivalence`
+/// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md` test 4):
+/// a deterministic proptest sample over [`arb_once_write_null_schedule`]
+/// crossed with all three once-write spellings (`OnceWrite`,
+/// `OnceWriteFallback`, `OnceWriteMultiCandidate`), each staged and driven
+/// through the real `execute_project` pipeline by [`drive_keyed_and_assert`],
+/// asserting the `STracker` full-refresh oracle after every window. This is
+/// the test that replaces `once_write_null_payload_then_value_upholds_
+/// equivalence`'s hand-written case as the *proof* of the once-write
+/// family's NULL-preservation obligation.
+#[tokio::test]
+async fn once_write_null_pool_upholds_end_state_equivalence() {
+    let mut runner = TestRunner::deterministic();
+    let schedule_strat = arb_once_write_null_schedule();
+
+    let combiners = [
+        KeyedCombiner::OnceWrite,
+        KeyedCombiner::OnceWriteFallback,
+        KeyedCombiner::OnceWriteMultiCandidate,
+    ];
+
+    let mut cases = 0;
+    for i in 0..10 {
+        let schedule = schedule_strat.new_tree(&mut runner).unwrap().current();
+        for combiner in combiners {
+            let recipe = KeyedRecipe::new_window_forward_once_write_with(combiner);
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let project = stage_keyed_recipe(&recipe, &tmp).unwrap_or_else(|e| {
+                panic!("case {i} {combiner:?}: failed to stage once-write keyed recipe: {e}")
+            });
+
+            let plan = classify_keyed(&project, &recipe).unwrap_or_else(|e| {
+                panic!("case {i} {combiner:?}: classify once-write keyed recipe failed: {e}")
+            });
+            assert!(
+                !plan.cells.is_empty(),
+                "case {i} {combiner:?}: expected the once-write keyed recipe to admit at \
+                 least one cell: {plan:#?}"
+            );
+
+            drive_keyed_and_assert(&project, &recipe, &schedule)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i} {combiner:?}: once-write NULL schedule {schedule:?} \
+                         equivalence check failed: {e}"
+                    )
+                });
+            cases += 1;
+        }
+    }
+    assert!(
+        cases > 0,
+        "deterministic once-write NULL sample produced zero cases — generator regression"
+    );
 }
 
 /// Phase 8 task 4: the once-write family's fallback-bearing spelling
@@ -2013,15 +2080,18 @@ async fn downstream_select_star_consumer_sees_only_presented_columns() {
 /// the classifier's NULL-preservation obligation refuses
 /// (`incremental_shapes.md` §"The column-family catalogue").
 ///
-/// Written as a targeted (non-generative) case rather than widened into the
-/// generated pool: `GenRow::val` is a non-nullable `i64` threaded through
-/// the schedule generators, the `STracker` oracle materializer, the feed
-/// replay, and the Spark twin's Arrow readers — making it nullable is a
-/// generator-wide change out of proportion to the one column family that
-/// anticipates NULLs. The oracle here is the same full-refresh body every
-/// other keyed case asserts against, evaluated over the physical source
-/// table: the schedule is insert-only and every inserted row precedes the
-/// run that processes it, so `S` after each run IS the whole source table.
+/// Retained as a PINNED MINIMAL WITNESS, not the direction's proof: since
+/// `GenRow::val` became nullable
+/// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md`), the
+/// proof lives in the generated pool
+/// (`once_write_null_pool_upholds_end_state_equivalence`, below) via
+/// `arb_once_write_null_schedule`. This hand-written case stays as a small,
+/// readable, exact-shape fixture for the one scenario the generator's own
+/// doc comment names explicitly. The oracle here is the same full-refresh
+/// body every other keyed case asserts against, evaluated over the physical
+/// source table: the schedule is insert-only and every inserted row
+/// precedes the run that processes it, so `S` after each run IS the whole
+/// source table.
 #[tokio::test]
 async fn once_write_null_payload_then_value_upholds_equivalence() {
     let recipe = KeyedRecipe::new_window_forward_once_write();
@@ -2036,8 +2106,8 @@ async fn once_write_null_payload_then_value_upholds_equivalence() {
     let d2 = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date");
 
     /// One staged row of the NULL-bearing schedule: `(key, payload)`, where
-    /// `None` stages a NULL payload — the direction `GenRow`'s non-nullable
-    /// `val` cannot express.
+    /// `None` stages a NULL payload. Kept as a local tuple rather than
+    /// `GenRow` for this pinned fixture's own hand-rolled insert loop below.
     type NullableRow = (i64, Option<i64>);
 
     // Each entry is one run window: the day it covers and the rows staged
@@ -2111,7 +2181,16 @@ async fn once_write_merge_keeps_first_value_despite_later_differing_redelivery()
     );
 
     let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
-    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 7 }).expect("insert first row");
+    insert_row_keyed(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(7),
+        },
+    )
+    .expect("insert first row");
 
     let mut request = base_request("dev");
     request.start = Some("2024-01-01".to_string());
@@ -2131,8 +2210,16 @@ async fn once_write_merge_keeps_first_value_despite_later_differing_redelivery()
 
     // A late redelivery carrying a DIFFERENT (larger) value for the SAME
     // key, within the SAME already-folded window.
-    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 99 })
-        .expect("insert differing late row");
+    insert_row_keyed(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(99),
+        },
+    )
+    .expect("insert differing late row");
 
     // Once-write grades `Grade::Idempotent` (no reprocessing ledger) — the
     // redelivery must succeed, not refuse with `KeyedReprocessedWindow`.
@@ -2376,7 +2463,7 @@ fn insert_fact_row_keyed_enriched(
             recipe.fact.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -2804,7 +2891,7 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
                 &GenRow {
                     d: start,
                     id: DIM_MUTATION_TEST_ID,
-                    val: 42,
+                    val: Some(42),
                 },
             )
             .unwrap_or_else(|e| panic!("case {i}: {label}: insert fact row failed: {e}"));
@@ -3138,7 +3225,7 @@ fn insert_fact_row_value_enriched(
             recipe.fact.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -3355,7 +3442,7 @@ fn value_enriched_recipe_executes_column_scoped_merge() {
             &GenRow {
                 d: start,
                 id: VALUE_ENRICHED_TEST_ID,
-                val: 42,
+                val: Some(42),
             },
         )
         .expect("insert seed fact row");
@@ -3585,7 +3672,18 @@ fn redelivery_of_processed_window_is_idempotent() {
         ConformanceStep::RunWindow {
             start: d,
             end: window_end,
-            rows: vec![GenRow { d, id: 1, val: 10 }, GenRow { d, id: 2, val: 20 }],
+            rows: vec![
+                GenRow {
+                    d,
+                    id: 1,
+                    val: Some(10),
+                },
+                GenRow {
+                    d,
+                    id: 2,
+                    val: Some(20),
+                },
+            ],
         },
         ConformanceStep::RerunWindow {
             start: d,
@@ -3635,7 +3733,7 @@ fn full_refresh_interleave_resets_state_correctly() {
             rows: vec![GenRow {
                 d: d1,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         // A mid-schedule full-refresh interleave: drops + rebuilds from the
@@ -3648,7 +3746,7 @@ fn full_refresh_interleave_resets_state_correctly() {
             rows: vec![GenRow {
                 d: d2,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
         ConformanceStep::RunWindow {
@@ -3657,7 +3755,7 @@ fn full_refresh_interleave_resets_state_correctly() {
             rows: vec![GenRow {
                 d: d3,
                 id: 3,
-                val: 30,
+                val: Some(30),
             }],
         },
     ]);
@@ -3955,7 +4053,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 &GenRow {
                     d: day0,
                     id,
-                    val: id * 10,
+                    val: Some(id * 10),
                 },
             )
             .unwrap_or_else(|e| panic!("case {i}: failed to seed fact row {id}: {e}"));
@@ -4036,7 +4134,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                     &GenRow {
                         d: new_day,
                         id: dim_id,
-                        val: dim_id * 10 + step_i as i64,
+                        val: Some(dim_id * 10 + step_i as i64),
                     },
                 )
                 .unwrap_or_else(|e| {
@@ -4215,7 +4313,7 @@ fn column_add_between_runs_recovers_equivalence() {
             rows: vec![GenRow {
                 d: w1_start,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         ConformanceStep::RunWindow {
@@ -4224,7 +4322,7 @@ fn column_add_between_runs_recovers_equivalence() {
             rows: vec![GenRow {
                 d: w2_start,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
         // Definition change: add a derived payload column, same skeleton.
@@ -4244,7 +4342,7 @@ fn column_add_between_runs_recovers_equivalence() {
             rows: vec![GenRow {
                 d: w3_start,
                 id: 3,
-                val: 30,
+                val: Some(30),
             }],
         },
     ]);
@@ -4373,7 +4471,7 @@ fn pure_backfill_column_add_executes_in_place_update() {
         // Creation run under the ORIGINAL body — establishes a deployed
         // schema baseline (no `val_doubled` yet) and a green equivalence
         // starting point.
-        rt_insert_and_run(&project, &recipe, w1_start, w1_end, &[GenRow { d: w1_start, id: 1, val: 10 }], &mut tracker)
+        rt_insert_and_run(&project, &recipe, w1_start, w1_end, &[GenRow { d: w1_start, id: 1, val: Some(10) }], &mut tracker)
             .await
             .expect("creation run");
 
@@ -4409,7 +4507,7 @@ fn pure_backfill_column_add_executes_in_place_update() {
         // (b) A plain windowed re-run (next window, new row) must dispatch
         // InPlaceUpdate — never a raw column-count crash, never a silent
         // recompute fallback.
-        insert_row(&project, &recipe, &GenRow { d: w2_start, id: 2, val: 20 })
+        insert_row(&project, &recipe, &GenRow { d: w2_start, id: 2, val: Some(20) })
             .await
             .expect("insert row 2");
         let snapshot = {
@@ -4502,7 +4600,7 @@ fn skeleton_position_add_derives_skeleton_column_added_refusal() {
         &[GenRow {
             d: w1_start,
             id: 1,
-            val: 10,
+            val: Some(10),
         }],
         &mut tracker,
     ))
@@ -4591,7 +4689,7 @@ fn migrate_step_applies_plan_and_recovers_new_definition_equivalence() {
             rows: vec![GenRow {
                 d: w1_start,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         ConformanceStep::RunWindow {
@@ -4600,7 +4698,7 @@ fn migrate_step_applies_plan_and_recovers_new_definition_equivalence() {
             rows: vec![GenRow {
                 d: w2_start,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
         // The migration: derive → apply in place → assert immediately.
@@ -4614,7 +4712,7 @@ fn migrate_step_applies_plan_and_recovers_new_definition_equivalence() {
             rows: vec![GenRow {
                 d: w3_start,
                 id: 3,
-                val: 30,
+                val: Some(30),
             }],
         },
     ]);
@@ -4686,7 +4784,7 @@ fn migrate_step_refuses_and_full_refreshes_when_no_technique_admits() {
             rows: vec![GenRow {
                 d: w1_start,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         // A skeleton change: no in-place technique admits — the step must
@@ -4701,7 +4799,7 @@ fn migrate_step_refuses_and_full_refreshes_when_no_technique_admits() {
             rows: vec![GenRow {
                 d: w2_start,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
     ]);
@@ -4857,7 +4955,7 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
         &GenRow {
             d: w1_start,
             id: 1,
-            val: 10,
+            val: Some(10),
         },
     ))
     .expect("seed row");
@@ -5059,7 +5157,7 @@ fn insert_composed_row(
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -5204,7 +5302,14 @@ fn composed_route3_slice() -> LocalitySlice {
 fn composed_delta_values_sql(rows: &[GenRow]) -> String {
     let values: Vec<String> = rows
         .iter()
-        .map(|r| format!("({}, DATE '{}', {})", r.id, r.d.format("%Y-%m-%d"), r.val))
+        .map(|r| {
+            format!(
+                "({}, DATE '{}', {})",
+                r.id,
+                r.d.format("%Y-%m-%d"),
+                r.val_sql()
+            )
+        })
         .collect();
     format!("(VALUES {}) AS t(id, d, val)", values.join(", "))
 }
@@ -5399,7 +5504,7 @@ async fn insert_composed_rows_via_backend(
                 recipe.source.name,
                 row.d.format("%Y-%m-%d"),
                 row.id,
-                row.val,
+                row.val_sql(),
             ))
             .await?;
     }

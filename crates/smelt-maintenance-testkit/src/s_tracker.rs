@@ -265,7 +265,7 @@ impl STracker {
                     "INSERT INTO {table} VALUES (DATE '{}', {}, {})",
                     row.d.format("%Y-%m-%d"),
                     row.id,
-                    row.val,
+                    row.val_sql(),
                 ))
                 .await
                 .map_err(|e| anyhow::anyhow!("insert into oracle temp table {table}: {e}"))?;
@@ -346,18 +346,28 @@ impl STracker {
                 .enumerate()
                 .map(|(i, r)| {
                     if i == 0 {
+                        // The leading branch's literals set the UNION's
+                        // column types (ANSI union column-naming rule); a
+                        // bare `NULL` has no type of its own, so a leading
+                        // NULL payload must be explicitly cast — an untyped
+                        // NULL there is rejected/mistyped by Spark and
+                        // BigQuery.
+                        let val_expr = match r.val {
+                            Some(v) => v.to_string(),
+                            None => "CAST(NULL AS INTEGER)".to_string(),
+                        };
                         format!(
                             "SELECT DATE '{}' AS {d}, {} AS {id}, {} AS {val}",
                             r.d.format("%Y-%m-%d"),
                             r.id,
-                            r.val
+                            val_expr
                         )
                     } else {
                         format!(
                             "SELECT DATE '{}', {}, {}",
                             r.d.format("%Y-%m-%d"),
                             r.id,
-                            r.val
+                            r.val_sql()
                         )
                     }
                 })
@@ -540,12 +550,12 @@ mod tests {
         let a = GenRow {
             d: date(2024, 1, 1),
             id: 1,
-            val: 10,
+            val: Some(10),
         };
         let late = GenRow {
             d: date(2024, 1, 1),
             id: 2,
-            val: 999,
+            val: Some(999),
         };
 
         // A wide rerun of window [2024-01-01, 2024-01-11) whose snapshot now
@@ -593,18 +603,18 @@ mod tests {
         let a = GenRow {
             d: w1.0,
             id: 1,
-            val: 10,
+            val: Some(10),
         };
         let b = GenRow {
             d: w2.0,
             id: 2,
-            val: 20,
+            val: Some(20),
         };
         // C is a late row landing back inside w1's range.
         let c = GenRow {
             d: w1.0,
             id: 3,
-            val: 5,
+            val: Some(5),
         };
 
         // Run 1: window w1, snapshot = {A}.
@@ -640,17 +650,17 @@ mod tests {
         let a = GenRow {
             d: w1.0,
             id: 1,
-            val: 10,
+            val: Some(10),
         };
         let b = GenRow {
             d: w2.0,
             id: 2,
-            val: 20,
+            val: Some(20),
         };
         let c = GenRow {
             d: w1.0,
             id: 3,
-            val: 5,
+            val: Some(5),
         };
 
         tracker.record_run(w1.0, w1.1, vec![a.clone()]);
@@ -740,12 +750,12 @@ mod tests {
         let a = GenRow {
             d: w1.0,
             id: 1,
-            val: 10,
+            val: Some(10),
         };
         let b = GenRow {
             d: w2.0,
             id: 2,
-            val: 20,
+            val: Some(20),
         };
 
         // A full refresh at this point sees both rows already in the
@@ -762,7 +772,7 @@ mod tests {
         let c = GenRow {
             d: w2.0,
             id: 3,
-            val: 30,
+            val: Some(30),
         };
         let k1 = tracker.record_run(w2.0, w2.1, vec![a.clone(), b.clone(), c.clone()]);
         assert_eq!(
@@ -788,12 +798,12 @@ mod tests {
         let a = GenRow {
             d: w1.0,
             id: 1,
-            val: 10,
+            val: Some(10),
         };
         let b = GenRow {
             d: w1.0,
             id: 2,
-            val: 20,
+            val: Some(20),
         };
         let k = tracker.record_run(w1.0, w1.1, vec![a, b]);
 
@@ -984,6 +994,27 @@ mod tests {
             "SELECT d, MEDIAN(val) AS med_val, COUNT(DISTINCT id) AS distinct_ids, \
              COUNT(*) AS row_count FROM oracle_events GROUP BY d",
             "DuckDB rendering must stay byte-identical to the pre-fix raw-text output"
+        );
+    }
+
+    /// `s_view_select_sql_types_a_leading_null_payload`
+    /// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md` test
+    /// 2): when the FIRST row of the `S_k` row-set query's `UNION ALL` chain
+    /// has a NULL payload, the leading branch emits a *typed* null
+    /// (`CAST(NULL AS INTEGER) AS val`), so the union's column type is not
+    /// the untyped NULL type (Spark and BigQuery both reject/mistype the
+    /// untyped form).
+    #[test]
+    fn s_view_select_sql_types_a_leading_null_payload() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+        let d = date(2024, 1, 1);
+        tracker.record_run(d, d + chrono::Duration::days(1), vec![GenRow::null(d, 1)]);
+
+        let sql = tracker.s_select_sql(0);
+        assert!(
+            sql.contains("CAST(NULL AS INTEGER) AS val"),
+            "leading NULL-payload row must render a typed null, got: {sql:?}"
         );
     }
 }

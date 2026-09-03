@@ -95,12 +95,12 @@ fn minimal_schedule() -> ConformanceSchedule {
             GenRow {
                 d: day(0),
                 id: 1,
-                val: 10,
+                val: Some(10),
             },
             GenRow {
                 d: day(0),
                 id: 2,
-                val: -5,
+                val: Some(-5),
             },
         ],
     }])
@@ -222,7 +222,7 @@ mod hazard {
                 rows: vec![GenRow {
                     d: day(0),
                     id: 1,
-                    val: 10,
+                    val: Some(10),
                 }],
             },
             ConformanceStep::RerunWindow {
@@ -262,7 +262,7 @@ mod hazard {
                 &GenRow {
                     d: day(0),
                     id: 1,
-                    val: 10,
+                    val: Some(10),
                 },
             )
             .expect("insert fact row");
@@ -437,7 +437,7 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
             rows: vec![GenRow {
                 d: day(0),
                 id: 1,
-                val: 5,
+                val: Some(5),
             }],
         }]);
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");

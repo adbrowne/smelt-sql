@@ -16,6 +16,7 @@
 
 #![allow(dead_code)]
 
+use arrow::array::Array;
 use chrono::NaiveDate;
 use duckdb::Connection;
 use proptest::prelude::*;
@@ -24,19 +25,48 @@ use crate::recipe::{arb_payload_value, ModelEdit, ModelRecipe, SourceRecipe};
 
 /// One row of the `events`-shaped source every Phase 1/2 recipe stages —
 /// integer-valued `val` (design §5's numeric-payload discipline), unlike
-/// `run_schedule::EventRow`'s legacy `f64`.
+/// `run_schedule::EventRow`'s legacy `f64`. `val` is nullable
+/// (`Option<i64>`) so the once-write family's NULL-preservation obligation
+/// (`incremental_shapes.md` §"The column-family catalogue") can be staged
+/// through the pool; every other combiner family's own generator keeps
+/// drawing `Some(..)` (`arb_payload_value`, unchanged).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenRow {
     pub d: NaiveDate,
     pub id: i64,
-    pub val: i64,
+    pub val: Option<i64>,
 }
 
 impl GenRow {
+    /// Construct a row with a non-NULL payload — the common case every
+    /// existing call site used before `val` became nullable.
+    pub fn new(d: NaiveDate, id: i64, val: i64) -> Self {
+        GenRow {
+            d,
+            id,
+            val: Some(val),
+        }
+    }
+
+    /// Construct a row with a NULL payload.
+    pub fn null(d: NaiveDate, id: i64) -> Self {
+        GenRow { d, id, val: None }
+    }
+
     /// The row's event-time value — the field [`crate::s_tracker::STracker`]'s
     /// window filter reads.
     pub fn event_time(&self) -> NaiveDate {
         self.d
+    }
+
+    /// Render `val` for SQL: `NULL` for `None`, the bare integer literal
+    /// otherwise — the single seam every insert/oracle site funnels through
+    /// so a NULL payload is never silently coerced to a sentinel value.
+    pub fn val_sql(&self) -> String {
+        match self.val {
+            Some(v) => v.to_string(),
+            None => "NULL".to_string(),
+        }
     }
 }
 
@@ -224,7 +254,7 @@ fn build_schedule(
                 let row = GenRow {
                     d: start,
                     id: next_id,
-                    val: *val,
+                    val: Some(*val),
                 };
                 next_id += 1;
                 row
@@ -238,7 +268,7 @@ fn build_schedule(
             let late_row = GenRow {
                 d: start,
                 id: next_id,
-                val: 7,
+                val: Some(7),
             };
             next_id += 1;
             steps.push(ConformanceStep::AppendLateRow(late_row));
@@ -324,7 +354,7 @@ fn build_schedule_with_definition_edit(
                 let row = GenRow {
                     d: start,
                     id: next_id,
-                    val: *val,
+                    val: Some(*val),
                 };
                 next_id += 1;
                 row
@@ -342,7 +372,7 @@ fn build_schedule_with_definition_edit(
             let late_row = GenRow {
                 d: start,
                 id: next_id,
-                val: 7,
+                val: Some(7),
             };
             next_id += 1;
             steps.push(ConformanceStep::AppendLateRow(late_row));
@@ -434,7 +464,7 @@ fn build_mixed_schedule(
                 let row = GenRow {
                     d: start,
                     id: next_id,
-                    val: *val,
+                    val: Some(*val),
                 };
                 first_id.get_or_insert(next_id);
                 next_id += 1;
@@ -539,7 +569,7 @@ pub fn read_source_snapshot(conn: &Connection, source: &SourceRecipe) -> Vec<Gen
         .expect("prepare source snapshot query");
     stmt.query_map([], |row| {
         let d_text: String = row.get(0)?;
-        Ok((d_text, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        Ok((d_text, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?))
     })
     .expect("query source snapshot")
     .collect::<Result<Vec<_>, _>>()
@@ -604,7 +634,11 @@ pub async fn read_source_snapshot_via_backend(
                     anyhow::anyhow!("parse snapshot date {:?}: {e}", d_col.value(i))
                 })?,
                 id: id_col.value(i),
-                val: val_col.value(i),
+                val: if val_col.is_null(i) {
+                    None
+                } else {
+                    Some(val_col.value(i))
+                },
             });
         }
     }
@@ -657,7 +691,7 @@ pub fn boundary_rows_for(
         let row = GenRow {
             d,
             id: *next_id,
-            val,
+            val: Some(val),
         };
         *next_id += 1;
         row
@@ -703,6 +737,19 @@ mod tests {
     use crate::recipe::{arb_recipe, RecipePool};
     use proptest::strategy::{Strategy, ValueTree};
     use proptest::test_runner::TestRunner;
+
+    /// `gen_row_null_payload_renders_sql_null`
+    /// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md` test
+    /// 1): [`GenRow::val_sql`] yields `NULL` for `None` and the bare integer
+    /// literal otherwise — the one rendering seam every insert/oracle site
+    /// funnels through.
+    #[test]
+    fn gen_row_null_payload_renders_sql_null() {
+        let d = base_date();
+        assert_eq!(GenRow::null(d, 1).val_sql(), "NULL");
+        assert_eq!(GenRow::new(d, 1, 42).val_sql(), "42");
+        assert_eq!(GenRow::new(d, 1, -7).val_sql(), "-7");
+    }
 
     /// Every generated schedule contains at least one `RunWindow` step, and
     /// every `AppendLateRow`'s window is re-run afterward (a self-check on

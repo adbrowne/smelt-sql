@@ -71,7 +71,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
 | 3 | Transactional ledger fold on every shipped backend | blocked |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
-| 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | planned |
+| 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
 | 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
@@ -155,6 +155,20 @@ six success criteria — criterion 1 is already met end-to-end without it.
   generator (`arb_once_write_null_schedule`) driven through the existing `STracker` oracle, and the
   hand-written case is retained as a pinned minimal witness with its now-false "GenRow::val is
   non-nullable" rationale rewritten.
+
+- 2026-09-04 — Phase 5 implemented and closed out (all green: `verify-phase.sh`,
+  `smelt-maintenance-testkit` (56), `smelt-cli --test maintenance_conformance` (75),
+  `cargo check -p smelt-cli --tests` clean). `GenRow::val` is now `Option<i64>`, threaded through
+  every construction/read site plus a new `arb_once_write_null_schedule` generator and four new
+  tests. `incremental_shapes.md`'s "generative conformance pool cannot stage NULL payloads" bullet
+  is deleted. Discovered (not fixed, out of scope for this phase): `cargo check -p smelt-cli --tests
+  --features smelt-cli/spark` (and the BigQuery twin) fail to compile on a PRE-EXISTING, unrelated
+  bug in `smelt-maintenance-testkit/src/families/gate_composed.rs`'s call to
+  `run_windowed_keyed_maintenance` (arg-count/closure-type mismatch against the function's current
+  signature) — confirmed pre-existing by re-running the same check against the base commit with
+  this phase's changes stashed out (identical errors, none about `GenRow`/`Option`/`val`). Flagged
+  for the next planner as a candidate short follow-up phase; it blocks that specific gated-twin
+  compile check for any change until fixed.
 
 ## Blocked
 

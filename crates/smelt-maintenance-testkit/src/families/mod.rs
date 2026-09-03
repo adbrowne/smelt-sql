@@ -624,7 +624,11 @@ mod tests {
         let k = tracker.record_run(
             d,
             d + chrono::Duration::days(1),
-            vec![crate::schedule_gen::GenRow { d, id: 1, val: 10 }],
+            vec![crate::schedule_gen::GenRow {
+                d,
+                id: 1,
+                val: Some(10),
+            }],
         );
 
         let backend = DefaultRelationBackend;
@@ -854,7 +858,11 @@ mod tests {
         let k = tracker.record_run(
             d,
             d + chrono::Duration::days(1),
-            vec![crate::schedule_gen::GenRow { d, id: 1, val: 10 }],
+            vec![crate::schedule_gen::GenRow {
+                d,
+                id: 1,
+                val: Some(10),
+            }],
         );
 
         let backend = BigQueryLikeRelationBackend;

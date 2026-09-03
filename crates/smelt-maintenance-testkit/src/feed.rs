@@ -553,7 +553,8 @@ pub fn apply_feed_step(
 ) -> anyhow::Result<()> {
     let table = format!("main.sources_{}", source.name);
     let clocked = is_clocked(source);
-    let FeedRow { d, id, val } = step.row;
+    let FeedRow { d, id, val: _ } = step.row.clone();
+    let val = step.row.val_sql();
     match step.op {
         FeedOp::Insert => {
             if clocked {
@@ -629,13 +630,13 @@ pub fn replay_feed(conn: &Connection, source: &SourceRecipe) -> anyhow::Result<V
         val = source.payload_column,
         name = source.name,
     ))?;
-    let rows: Vec<(String, String, i64, i64)> = stmt
+    let rows: Vec<(String, String, i64, Option<i64>)> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -751,7 +752,7 @@ fn build_feed_schedule(
                 let row = FeedRow {
                     d: base + chrono::Duration::days(i as i64),
                     id: next_id,
-                    val: *val,
+                    val: Some(*val),
                 };
                 alive_ids.push(next_id);
                 next_id += 1;
@@ -762,7 +763,7 @@ fn build_feed_schedule(
                 FeedRow {
                     d: base + chrono::Duration::days(i as i64),
                     id,
-                    val: *val,
+                    val: Some(*val),
                 }
             }
             OpChoice::Delete | OpChoice::Retract => {
@@ -771,7 +772,7 @@ fn build_feed_schedule(
                 FeedRow {
                     d: base + chrono::Duration::days(i as i64),
                     id,
-                    val: *val,
+                    val: Some(*val),
                 }
             }
         };
@@ -798,7 +799,7 @@ mod tests {
         let row = FeedRow {
             d: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
             id: 1,
-            val: 5,
+            val: Some(5),
         };
 
         assert!(
