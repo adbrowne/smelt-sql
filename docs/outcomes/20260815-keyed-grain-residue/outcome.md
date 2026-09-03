@@ -69,7 +69,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 |---|-------|--------|
 | 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
-| 3 | Transactional ledger fold on every shipped backend | pending |
+| 3 | Transactional ledger fold on every shipped backend | blocked |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | pending |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | pending |
 | 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
@@ -111,6 +111,62 @@ six success criteria — criterion 1 is already met end-to-end without it.
   needed its call-count assertions updated — an intentional consequence of this phase, not a
   regression. No new limitations discovered.
 
+- 2026-09-03 — Phase 3 blocked at planning, not implemented. Criterion 3 as worded presumes a
+  Spark/BigQuery ledger substrate, but `docs/research/20260816-open-questions-triage.md` item 12
+  records an explicit user decision to defer exactly that ("yes - let's put this future
+  extensions"), and `incremental_models.md` §Known Divergences cites that record as the reason the
+  Spark-dialect ledger builder is *deliberately* deferred. The alternative reading — implement
+  `state.md` §"The degradation contract" instead — is a real, unowned feature (availability
+  resolution does not exist at all; `state.md` §Known Divergences says so). Either way the choice
+  is a product call this outcome cannot make. Rows 4-6 are unaffected and stay workable; criterion
+  3 will be unmet at row 6 unless this is resolved first. Full entry under "## Blocked".
+
 ## Blocked
 
 <!-- Dated entries: phase, reason, candidate options. -->
+
+- 2026-09-03 — **Phase 3, "Transactional ledger fold on every shipped backend".**
+
+  **Decision needed:** what "transactional on every shipped backend" means for the merge ledger,
+  given that a recorded user decision already rules out the reading criterion 3 assumes.
+
+  **Why the outcome cannot answer it.** The outcome frames criterion 3 as a pure conformance gap
+  ("the DuckDB-only override is the gap, not the target"), inferred from
+  `incremental_shapes.md` §"The transactional frontier write (merge ledger)"'s phrase
+  "backend-resident and transactional with the write it describes". But
+  `docs/research/20260816-open-questions-triage.md` item 12 asks this exact question ("A
+  transactional ledger for Spark") and records the decision "yes - let's put this future
+  extensions"; `incremental_models.md` §Known Divergences ("The ledger's warehouse substrate is
+  DuckDB-only") cites that record and states the deferral is deliberate, with the recorded
+  `MaintenanceStateDowngraded` downgrade — not a Spark builder — as the intended behaviour. A
+  recorded user decision outranks an outcome's inference, so building the Spark/BigQuery ledger
+  would knowingly contradict it.
+
+  **Additional engineering fact.** Spark/Delta has no cross-statement transaction and no enforced
+  `PRIMARY KEY`, so the additive grade's never-fold-twice guarantee (an `INSERT` that violates a
+  primary key inside the same transaction as the write) has no faithful Spark realisation at all.
+  Criterion 3's literal form is not merely deferred there; it is unachievable without inventing a
+  different mechanism — itself a new product decision.
+
+  **Candidate options (for a human):**
+  1. **Amend criterion 3** to the already-decided target: on a ledger-less backend the cell takes
+     the specified, recorded, explain-visible downgrade, and "transactional" binds only where the
+     fold actually happens. Then phase 3 becomes "ledger-structure availability resolution":
+     a `merge_ledger` availability bit threaded like the existing `BackendWriteCapabilities`
+     precedent (`smelt-logical/src/maintenance/mod.rs`), a downgrade recorded as pure plan data,
+     a warning-level `MaintenanceStateDowngraded` diagnostic, and removal of the driver's
+     `Grade::Additive` `bail!` and `Grade::Idempotent` silent `tracing::warn` skip
+     (`smelt-runtime/src/maintenance_driver.rs`). Note this is a sizeable slice of `state.md`
+     §"The degradation contract", which today has no implementation and no owning outcome —
+     it may deserve its own outcome rather than a row here.
+  2. **Reverse triage item 12** and build the Spark (and BigQuery) ledger builders plus their
+     folds, accepting that Spark's fold cannot be transactional and that the additive grade must
+     therefore stay refused there — i.e. only the re-run-tolerant grade actually lands.
+  3. **Drop criterion 3 from this outcome** and record it under "## Out of scope" pointing at
+     triage item 12's future-extensions decision, leaving criteria 1, 2, 4, 5 as the outcome's
+     content.
+
+  **Minimum fix regardless of option:** phase 2 left a silent `tracing::warn` skip in the
+  `Grade::Idempotent` arm on non-DuckDB backends. Whatever is decided, a silent skip of a
+  correctness structure conflicts with `CLAUDE.md` §"Fail-loud discipline" and should become a
+  recorded, visible fact.
