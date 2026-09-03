@@ -337,7 +337,7 @@ open — not that the excluded bullets themselves are gone.
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | done |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | done |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | done |
-| 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | planned |
+| 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | done |
 | 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | pending |
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
@@ -346,6 +346,18 @@ open — not that the excluded bullets themselves are gone.
 
 ## Decision log
 
+- **2026-09-03, phase 28a — recorded two taken decisions; closed the docs-site CLI-coverage
+  divergence with a standing gate.** `incremental_models.md`'s "no out-of-band-edit tripwire"
+  cross-reference now points at §"Other deliberate boundaries" (the non-goal) instead of a
+  stale "Open Question, §Known Divergences" framing. `definition_deltas.md` §Design gained a
+  paragraph recording that a per-model `on_column_add: backfill | leave_null | recompute` knob
+  was considered and dropped — the per-column-group verdict already answers the question
+  case-by-case. New `crates/smelt-cli/tests/cli_docs_coverage.rs` walks `Commands`/
+  `DocsCommands` and every `*Args` struct's long flags in `main.rs` and asserts each is
+  documented verbatim in `docs-site/docs/reference/cli.md` (or listed in an
+  `UNDOCUMENTED_BY_DESIGN` allowlist, checked two-sided like the hardening baseline). The audit
+  found **zero residue** — cli.md already documented every command and flag — so the "docs-site
+  coverage … is partial" Known Divergences bullet was deleted outright rather than narrowed.
 - **2026-09-03, phase 27g — keyed-fold `write:` pin dispatch wired at runtime.** `WindowedKeyedRule`
   gained `write_group`, resolving `KeyedWriteMechanism` (27d) into an actual `StatementGroup`;
   `run_windowed_keyed_maintenance` resolves the mechanism once, up front, from the driving

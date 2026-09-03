@@ -1596,7 +1596,8 @@ already-computed changed-row set, never derived after the fact. **Trust boundary
 delta is trusted because the state is smelt-owned, written only by smelt's own conditional-write
 path — the general form of this trust argument is `state.md` §"The residency rule"; there is no
 out-of-band-edit tripwire — an external mutation to the target table between runs is not
-detected (an explicit Open Question, §Known Divergences). Empty and absent are distinct: an
+detected (§"Other deliberate boundaries", "No out-of-band-edit detection" — a stated non-goal,
+not an open question). Empty and absent are distinct: an
 empty recorded delta means the run executed and changed nothing (a real, propagatable fact); an
 absent record means no delta was recorded, and a consumer must not conflate the two. This
 composes with the derived settle bound (`incremental_shapes.md` §"Key temporal locality (the
@@ -2096,8 +2097,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   so that branch is proven only at resolver level; `smelt bakeoff` measures technique-family
   cost only, not the write-suppression dimension; whether a future cost model needs
   region-level change-ratio statistics from prior observed deltas is open.
-- **docs-site coverage of the plan's CLI surface is partial** — a one-time close-out task:
-  enumerate the undocumented residue once, then document or explicitly drop each item.
 - **The merged-group region-recompute rule is unverified in the implementation** — a group
   whose sensitivity spans two or more mutation-sensitive inputs must take region recompute
   (§"The plan matrix"); whether today's derivation ever admits a column-scoped repair for

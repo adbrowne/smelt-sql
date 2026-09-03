@@ -1,7 +1,7 @@
 ---
 feature: definition_deltas
 status: experimental
-last_reviewed: 2026-09-02
+last_reviewed: 2026-09-03
 owners: [andrew]
 ---
 
@@ -466,6 +466,15 @@ verb was rejected: the two operations differ in destructiveness, approval postur
 change was rejected: no per-column technique can make stored rows correspond to a definition
 that changes which rows exist. Refusing with the rebuild named keeps the fail-loud discipline
 (`incremental_models.md` §"Validator, not chooser").
+
+**No `on_column_add` policy knob.** A per-model frontmatter setting choosing what happens when a
+column is added (`backfill` / `leave_null` / `recompute`) was considered and dropped. `smelt
+migrate`'s per-column-group verdict (§"The verdict per column group" — eclipsed, backfill in
+place, re-derive, or skeleton change) already answers "what happens when this column is added"
+case-by-case, derived from the column's own computability rather than declared. A standalone
+knob would be a second, independently-driftable answer to the same question — exactly the
+namespace/identity anti-pattern this spec avoids elsewhere by deriving structure instead of
+declaring it. The question does not reopen: the verdict is the answer.
 
 ## Constraints & Invariants
 
