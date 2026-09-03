@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788434925526,
+  "lastUpdate": 1788435879726,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -281,6 +281,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 14.265003,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "b8bc12a3958f25ee394931ac3837e5ffcb864284",
+          "message": "CI: fix nightly-rust mise scoping and defensive toolchain pin\n\nMISE_RUST_VERSION=nightly was step-scoped on the mise-action step, but\nmise resolves the tool version per-invocation via its shims — a later\nstep has no visibility into an earlier step's env:, so the fuzz build\nsilently fell back to mise.toml's pinned stable and failed with \"the\noption Z is only accepted on the nightly compiler\". Moved to job-level\nenv in both fuzz.yml and test.yml's fuzz-build job.\n\nAlso drop the now-redundant \"Add rust components\" step (clippy/rustfmt\nship in mise's default rustup profile already — confirmed by the prior\nLint job passing without it), and pin `rustup target add` explicitly to\nthe mise-resolved toolchain via `--toolchain \"$(mise current rust)\"`\nwith `shell: bash` (matrix includes windows-latest, whose default shell\nis pwsh) so it can't silently target a different rustup default.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T21:40:25+10:00",
+          "tree_id": "32a5e2e1761db21fb0548ae16ce6114a03b6beae",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b8bc12a3958f25ee394931ac3837e5ffcb864284"
+        },
+        "date": 1788435877102,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 43.739557,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 41.940389,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.8402200000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.498046,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.219209,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 855.55502,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.141119,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.0159119999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 1.852918,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.555663,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 707.624365,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.61933,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 25.275699999999997,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 10.59207,
             "unit": "ms"
           }
         ]
