@@ -75,7 +75,7 @@ fixture.
 | 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | done |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | done |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | done |
-| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
+| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | planned |
 
 ## Decision log
 
@@ -295,6 +295,15 @@ fixture.
   fixed the diagnostic message, the new spec constraint, the diagnostics
   catalogue row, and the docs-site page to match. Success criterion 7
   complete. No phase reshape.
+
+- 2026-09-04 — Phase 8 planned. No phase row added, split, or reordered — this is the last
+  row and the phase-7 summary surfaced no new residue-owned work. Its one forward item (the
+  stale "specified ahead of a tracking plan" claim in Known Divergences bullet #3) was verified
+  already resolved: phase 6 removed that whole bullet, and the phrase no longer occurs anywhere
+  under `docs/specs/`, so phase 8 has nothing to correct there and the plan says so rather than
+  scheduling a no-op edit. The phase-7 summary's other forward note (a smoother remedy than
+  deleting the snapshot file for `MaintenancePartitionColumnChanged`) is new scope beyond every
+  success criterion and is not folded in; phase 8's summary records it as a finding.
 
 ## Blocked
 
