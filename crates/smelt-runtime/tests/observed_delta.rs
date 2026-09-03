@@ -848,6 +848,7 @@ async fn keyed_fold_suppressed_records_changed_keys() {
         &max_score_rule(),
         None,
         &suppression,
+        None,
         |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
         &no_retry_policy(),
         &ProbePolicy::per_run(),
@@ -913,6 +914,7 @@ async fn keyed_fold_fully_suppressed_records_an_empty_delta() {
         &max_score_rule(),
         None,
         &suppression,
+        None,
         |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
         &no_retry_policy(),
         &ProbePolicy::per_run(),
@@ -978,6 +980,7 @@ async fn keyed_fold_unconditional_records_no_delta() {
         &max_score_rule(),
         None,
         &suppression,
+        None,
         |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
         &no_retry_policy(),
         &ProbePolicy::per_run(),
@@ -1043,6 +1046,7 @@ async fn keyed_fold_delta_rolls_back_with_a_failed_write() {
         &rule,
         None,
         &suppression,
+        None,
         |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
         &no_retry_policy(),
         &ProbePolicy::per_run(),
@@ -1134,7 +1138,13 @@ impl Backend for KeyedNonDuckDbBackend {
         smelt_backend::SqlDialect::SparkSQL
     }
     fn capabilities(&self) -> smelt_backend::BackendCapabilities {
-        unimplemented!()
+        // The write-mechanism resolution (`resolve_keyed_write_mechanism`,
+        // 27g) now consults capabilities before any backend call — this
+        // fake backend's own SparkSQL dialect answers truthfully (Spark can
+        // run MERGE) so the driver reaches this test's actual target: the
+        // non-DuckDB dialect refusal inside the observed-delta branch, not
+        // an unrelated panic here.
+        smelt_backend::BackendCapabilities::spark()
     }
     async fn load_table(
         &self,
@@ -1187,6 +1197,7 @@ async fn keyed_fold_suppressed_recording_refuses_a_non_duckdb_backend() {
         &max_score_rule(),
         None,
         &suppression,
+        None,
         |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
         &no_retry_policy(),
         &ProbePolicy::per_run(),

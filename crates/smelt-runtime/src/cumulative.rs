@@ -165,6 +165,62 @@ impl WindowedKeyedRule for CumulativeClassification {
         build_cumulative_merge_sql(schema, table, delta_sql, self, slice, suppression, dialect)
     }
 
+    /// Realises a `write: staged_candidate` pin's mechanism
+    /// (`resolve_keyed_write_mechanism`, 27d/27g): the merge-less
+    /// staged-candidate group over the fold's own post-fold candidate rows
+    /// ([`keyed_fold_candidate_select`]), mirroring what
+    /// [`build_cumulative_merge_sql`]'s matched arm computes for the
+    /// `MERGE`-capable path. `slice` (key temporal locality) has no
+    /// staged-candidate realisation yet — this mechanism is reachable only
+    /// for a bare keyed model until locality composes with it. `Merge`
+    /// dispatches to the trait default (wraps [`Self::merge_sql`]).
+    fn write_group(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        slice: Option<&TargetSlicePredicate>,
+        mechanism: &smelt_logical::maintenance::choice::KeyedWriteMechanism,
+        dialect: MaintenanceDialect,
+    ) -> smelt_logical::maintenance::emit::StatementGroup {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+        match mechanism {
+            KeyedWriteMechanism::Merge(suppression) => {
+                smelt_logical::maintenance::emit::StatementGroup {
+                    statements: vec![smelt_logical::maintenance::emit::MaintenanceStatement {
+                        sql: self.merge_sql(schema, table, delta_sql, slice, suppression, dialect),
+                    }],
+                    transactional: false,
+                }
+            }
+            KeyedWriteMechanism::StagedCandidate { compared_columns } => {
+                let folds: Vec<(String, String)> = self
+                    .aggregator_columns
+                    .iter()
+                    .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
+                    .collect();
+                let schema_table = format!("{schema}.{table}");
+                let candidate_select =
+                    smelt_logical::maintenance::emit::keyed_fold_candidate_select(
+                        &schema_table,
+                        &self.unique_key,
+                        &folds,
+                        delta_sql,
+                        dialect,
+                    );
+                let staged_relation = format!("__smelt_staged_{table}");
+                smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+                    &schema_table,
+                    &staged_relation,
+                    &self.unique_key,
+                    &candidate_select,
+                    compared_columns,
+                    dialect,
+                )
+            }
+        }
+    }
+
     /// `Grade::Additive` iff any aggregator column's cross-partition
     /// combiner belongs to the **additive fold** family — `Sum` or `BitXor`
     /// (`docs/specs/incremental_shapes.md` §"The column-family catalogue")
@@ -456,6 +512,17 @@ pub async fn execute_cumulative_aggregate(
     // in which case `state_augmented_projection` below is a no-op.
     let state_columns = classification.state_columns();
 
+    // The `maintenance.cells[].write` pin (if any) addressing this keyed
+    // fold's write, resolved once, up front (`docs/outcomes/
+    // 20260815-definition-delta-migrate/phases/27g-plan.md`) — a keyed fold's
+    // cell is whole-row, so it matches by `on:` address alone
+    // (`smelt_db::queries::maintenance::keyed_fold_write_pin`).
+    let write_pin = model
+        .metadata
+        .as_deref()
+        .and_then(|m| smelt_db::queries::maintenance::keyed_fold_write_pin(m, &driving_source_name))
+        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+
     run_windowed_keyed_maintenance(
         backend,
         model_name,
@@ -465,6 +532,7 @@ pub async fn execute_cumulative_aggregate(
         &classification,
         locality_slice.as_ref(),
         &suppression,
+        write_pin,
         |step| {
             // 4. Per-partition pushdown: inject the driving source's
             //    `[step.start, step.end)` filter, then compile (resolves
@@ -1644,5 +1712,113 @@ mod tests {
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(sql, expected.statements[0].sql);
+    }
+
+    /// `WindowedKeyedRule::write_group`'s unpinned (`KeyedWriteMechanism::
+    /// Merge`) arm must stay byte-identical to `merge_sql`'s own output —
+    /// the driver's mechanism-aware dispatch (27g) must not perturb the
+    /// pre-existing unpinned path any callers already depend on.
+    #[test]
+    fn write_group_with_no_pin_is_byte_identical_to_the_merge() {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
+        let suppression = unconditional();
+
+        let direct_sql = classification.merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            None,
+            &suppression,
+            MaintenanceDialect::DuckDb,
+        );
+        let group = classification.write_group(
+            "main",
+            "device_daily",
+            delta_sql,
+            None,
+            &KeyedWriteMechanism::Merge(suppression),
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(group.statements[0].sql, direct_sql);
+        assert!(!group.transactional);
+    }
+
+    /// A `staged_candidate` pin's mechanism must realise the merge-less
+    /// staged-candidate group over the fold's own post-fold candidate rows —
+    /// byte-identical to a direct `emit_staged_candidate_conditional` call
+    /// over `keyed_fold_candidate_select`'s own candidate SQL (`docs/
+    /// outcomes/20260815-definition-delta-migrate/phases/27g-plan.md`).
+    #[test]
+    fn staged_candidate_pin_selects_the_staged_candidate_group() {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+        use smelt_logical::maintenance::emit::{
+            emit_staged_candidate_conditional, keyed_fold_candidate_select,
+        };
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
+        let compared_columns = vec!["event_count".to_string()];
+
+        let group = classification.write_group(
+            "main",
+            "device_daily",
+            delta_sql,
+            None,
+            &KeyedWriteMechanism::StagedCandidate {
+                compared_columns: compared_columns.clone(),
+            },
+            MaintenanceDialect::DuckDb,
+        );
+
+        let folds = vec![(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )];
+        let candidate_select = keyed_fold_candidate_select(
+            "main.device_daily",
+            &classification.unique_key,
+            &folds,
+            delta_sql,
+            MaintenanceDialect::DuckDb,
+        );
+        let expected = emit_staged_candidate_conditional(
+            "main.device_daily",
+            "__smelt_staged_device_daily",
+            &classification.unique_key,
+            &candidate_select,
+            &compared_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group, expected);
+        assert_eq!(group.statements.len(), 5);
+        assert!(group.transactional);
     }
 }

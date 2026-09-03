@@ -336,7 +336,7 @@ open — not that the excluded bullets themselves are gone.
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | done |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | done |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | done |
-| 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | planned |
+| 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | done |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
@@ -344,6 +344,14 @@ open — not that the excluded bullets themselves are gone.
 
 ## Decision log
 
+- **2026-09-03, phase 27g — keyed-fold `write:` pin dispatch wired at runtime.** `WindowedKeyedRule`
+  gained `write_group`, resolving `KeyedWriteMechanism` (27d) into an actual `StatementGroup`;
+  `run_windowed_keyed_maintenance` resolves the mechanism once, up front, from the driving
+  source's matching `cells[].write` pin (`smelt_db::queries::maintenance::keyed_fold_write_pin`).
+  The `Grade::Additive` ledger branch refuses fail-loud on a multi-statement `action_group`
+  (`fold_ledger_delta` only wraps one action statement) — not reachable by any current fixture,
+  but guarded rather than assumed impossible. `incremental_models.md`'s Known Divergences
+  "Conditional-maintenance gaps" bullet dropped its "no `write:` pin selects…" clause.
 - **2026-09-03, phase 27f — same-partition self-read refused as non-convergent.**
   `self_edge_bound_days` now requires `before.0 > 0` (not just `after == 0`) to admit a
   self-edge as `Ordered`; a zero-backward self-read is circular, refused with a reason naming

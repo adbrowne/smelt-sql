@@ -1018,6 +1018,373 @@ async fn keyed_fold_statements_come_from_the_emitter() {
     );
 }
 
+/// A `write: staged_candidate` pin (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27g-plan.md`) on a `refresh:
+/// keyed` model's driving-source cell must dispatch the merge-less
+/// staged-candidate mechanism at run time instead of the ordinary `MERGE` —
+/// even on a `MERGE`-capable backend (DuckDB), since an explicit pin is
+/// never second-guessed. Same fixture as
+/// `keyed_fold_statements_come_from_the_emitter` above, with one added
+/// `maintenance.cells[]` pin.
+#[tokio::test]
+async fn staged_candidate_keyed_fold_statements_come_from_the_emitter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+
+    write_model(
+        project_dir,
+        "events",
+        "---\n\
+         materialization: table\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT * FROM (VALUES \
+         (DATE '2024-01-01', 1, TIMESTAMP '2024-01-01 01:00:00'), \
+         (DATE '2024-01-02', 1, TIMESTAMP '2024-01-02 02:00:00'), \
+         (DATE '2024-01-02', 2, TIMESTAMP '2024-01-02 03:00:00')) \
+         AS t(event_date, device_id, event_ts)",
+    );
+    write_model(
+        project_dir,
+        "device_user_edges",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         maintenance:\n\
+         \x20\x20cells:\n\
+         \x20\x20\x20\x20- on: smelt.events\n\
+         \x20\x20\x20\x20\x20\x20columns: []\n\
+         \x20\x20\x20\x20\x20\x20write: staged_candidate\n\
+         ---\n\
+         SELECT device_id, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen \
+         FROM smelt.events GROUP BY device_id",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: staged_candidate_keyed_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    let request = make_request("dev", "2024-01-01", "2024-01-03");
+    let outcome = execute_project(
+        "staged-candidate-keyed-statement-parity-run".to_string(),
+        request,
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute_project (keyed, staged_candidate pin)");
+
+    assert!(
+        outcome.models.contains_key("device_user_edges"),
+        "device_user_edges must have run: {:?}",
+        outcome.models.keys().collect::<Vec<_>>()
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        2,
+        "two steps must each execute exactly one statement group: {:?}",
+        groups
+    );
+
+    // Step 1: unaffected by the pin — no target table yet, so the driver
+    // still takes the plain create branch.
+    assert_eq!(groups[0].statements.len(), 1);
+    assert!(groups[0].statements[0]
+        .sql
+        .starts_with("CREATE TABLE main.device_user_edges AS "));
+
+    // Step 2: the pin selects the merge-less staged-candidate group — five
+    // statements, transactional as one unit — never the MERGE.
+    let group = &groups[1];
+    assert_eq!(
+        group.statements.len(),
+        5,
+        "staged-candidate pin must yield a 5-statement group: {:?}",
+        group
+    );
+    assert!(group.transactional);
+    assert!(group.statements[0].sql.starts_with("CREATE TEMP TABLE"));
+    assert!(!group.statements.iter().any(|s| s.sql.contains("MERGE")));
+
+    let insert_candidates_sql = &group.statements[1].sql;
+    let candidate_select = insert_candidates_sql
+        .strip_prefix("INSERT INTO __smelt_staged_device_user_edges ")
+        .expect("insert-candidates shape");
+
+    let folds = vec![
+        (
+            "first_seen".to_string(),
+            "LEAST(target.first_seen, delta.first_seen)".to_string(),
+        ),
+        (
+            "last_seen".to_string(),
+            "GREATEST(target.last_seen, delta.last_seen)".to_string(),
+        ),
+    ];
+    // Recover the step's own compiled delta SELECT from the candidate
+    // SELECT's own `FROM (<delta_sql>) AS delta LEFT JOIN` shape (templated
+    // with a placeholder so the surrounding prefix/suffix are derived from
+    // the single-owner emitter itself, never hand-duplicated), then rebuild
+    // the exact group a direct emitter call over that delta produces.
+    let placeholder = "__PLACEHOLDER_DELTA__";
+    let templated = smelt_logical::maintenance::emit::keyed_fold_candidate_select(
+        "main.device_user_edges",
+        &["device_id".to_string()],
+        &folds,
+        placeholder,
+        MaintenanceDialect::DuckDb,
+    );
+    let (prefix, suffix) = templated.split_once(placeholder).unwrap();
+    let actual_delta_sql = candidate_select
+        .strip_prefix(prefix)
+        .and_then(|s| s.strip_suffix(suffix))
+        .expect("candidate_select must match keyed_fold_candidate_select's own shape");
+
+    let expected_candidate_select = smelt_logical::maintenance::emit::keyed_fold_candidate_select(
+        "main.device_user_edges",
+        &["device_id".to_string()],
+        &folds,
+        actual_delta_sql,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        candidate_select, expected_candidate_select,
+        "the executed candidate SELECT must be byte-identical to a direct \
+         keyed_fold_candidate_select call over the step's own delta"
+    );
+    let expected_group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.device_user_edges",
+        "__smelt_staged_device_user_edges",
+        &["device_id".to_string()],
+        &expected_candidate_select,
+        &["first_seen".to_string(), "last_seen".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group, &expected_group,
+        "executed staged-candidate group must be byte-identical to a direct emitter call"
+    );
+
+    // Result-equivalence: the staged-candidate write path must still
+    // reproduce a full refresh of the model's own aggregation.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT * FROM main.device_user_edges",
+            "SELECT device_id, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen \
+             FROM main.events GROUP BY device_id"
+        )
+        .await,
+        "the staged-candidate statements execute_project actually ran must reproduce a full \
+         refresh"
+    );
+}
+
+/// A `write: keyed`/`keyed_conditional` pin on a backend that cannot run
+/// `MERGE` at all must refuse the run before any write — the pin selects
+/// the `MERGE` mechanism explicitly, so the driver must never silently
+/// substitute the merge-less staged-candidate mechanism instead (`docs/
+/// outcomes/20260815-definition-delta-migrate/phases/27g-plan.md`).
+#[tokio::test]
+async fn keyed_pin_on_a_merge_less_backend_refuses_before_any_write() {
+    use smelt_logical::maintenance::choice::WriteSuppression;
+
+    struct MergeLessBackend {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Backend for MergeLessBackend {
+        async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+            self.calls.lock().unwrap().push(sql.to_string());
+            Ok(vec![])
+        }
+        async fn create_table_as(
+            &self,
+            _schema: &str,
+            _name: &str,
+            sql: &str,
+        ) -> Result<(), BackendError> {
+            self.calls.lock().unwrap().push(sql.to_string());
+            Ok(())
+        }
+        async fn create_view_as(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn drop_table_if_exists(
+            &self,
+            _schema: &str,
+            _name: &str,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        async fn drop_view_if_exists(
+            &self,
+            _schema: &str,
+            _name: &str,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        async fn get_row_count(&self, _schema: &str, _name: &str) -> Result<usize, BackendError> {
+            Ok(0)
+        }
+        async fn get_preview(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _limit: usize,
+        ) -> Result<Vec<RecordBatch>, BackendError> {
+            Ok(vec![])
+        }
+        async fn table_exists(&self, _schema: &str, _name: &str) -> Result<bool, BackendError> {
+            // Existing target — reaches the merge/write-mechanism branch,
+            // not the first-run create.
+            Ok(true)
+        }
+        async fn ensure_schema(&self, _schema: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn dialect(&self) -> SqlDialect {
+            SqlDialect::SparkSQL
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                supports_merge: false,
+                ..BackendCapabilities::spark()
+            }
+        }
+        async fn load_table(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _arrow_schema: SchemaRef,
+            _batches: Vec<RecordBatch>,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn delete_partitions(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _partitions: &PartitionRange,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn insert_into_from_query(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn insert_overwrite(
+            &self,
+            _schema: &str,
+            _table: &str,
+            _sql: &str,
+            _partition: &PartitionRange,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+    }
+
+    let backend = MergeLessBackend {
+        calls: Mutex::new(Vec::new()),
+    };
+    let classification = CumulativeClassification {
+        unique_key: vec!["device_id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "event_count".to_string(),
+            per_partition_agg: "COUNT".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::Sum,
+            state: None,
+        }],
+        driving_source: DrivingSource {
+            name: "smelt.events".to_string(),
+            timeseries: None,
+        },
+    };
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &smelt_core::config::Granularity::Day,
+    )
+    .expect("steps");
+    let suppression = WriteSuppression::Unconditional {
+        why: "test exercises the keyed pin refusal, not suppression".to_string(),
+    };
+    let pin = smelt_logical::maintenance::lookup_write_pattern("keyed").expect("registered");
+
+    let result = run_windowed_keyed_maintenance(
+        &backend,
+        "device_daily",
+        "main",
+        "device_daily",
+        &steps,
+        &classification,
+        None,
+        &suppression,
+        Some(pin),
+        |step| {
+            Ok(format!(
+                "SELECT device_id, COUNT(*) AS event_count FROM events WHERE d = '{}' GROUP BY \
+                 device_id",
+                step.partition_value
+            ))
+        },
+        &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
+    )
+    .await;
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("device_daily"),
+        "error must name the model: {err}"
+    );
+    assert!(err.contains("keyed"), "error must name the pin: {err}");
+    assert!(
+        backend.calls.lock().unwrap().is_empty(),
+        "no write statement must be issued once the pin refuses: {:?}",
+        backend.calls.lock().unwrap()
+    );
+}
+
 /// The `smelt explain` `KeyedFold` preview for a state-bearing model (`AVG`,
 /// `docs/outcomes/20260809-rung2-state-shapes` row 7) must carry the same
 /// state-column folds as the executed `MERGE` — both now go through the
@@ -1553,6 +1920,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
             why: "test asserts the unconditional checked-merge shape".to_string(),
         },
+        None,
         compile_step,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -1586,6 +1954,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
             why: "test asserts the unconditional checked-merge shape".to_string(),
         },
+        None,
         compile_step,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),

@@ -1003,16 +1003,15 @@ fn trigger_on_address(trigger: &Trigger) -> Option<String> {
 /// rows). Never re-derives admission or the registry's admissible set
 /// itself (`CLAUDE.md` §"Maintenance-plan purity") — just answers "does a
 /// `cells[]` entry name this cell, and if so, what pin did it write".
-pub fn matching_write_pin(
-    plan_cell: &smelt_logical::maintenance::PlanCell,
+fn write_pin_matching(
+    on_address: &str,
+    group: &str,
     column_groups: &[ColumnGroup],
     cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
 ) -> Option<String> {
     cells_cfg.iter().find_map(|cell_cfg| {
         let pin = cell_cfg.write.as_deref()?;
-        let on_matches =
-            trigger_on_address(&plan_cell.trigger).as_deref() == Some(cell_cfg.on.as_str());
-        if !on_matches {
+        if cell_cfg.on != on_address {
             return None;
         }
         let matched_group_name = column_groups
@@ -1023,10 +1022,40 @@ pub fn matching_write_pin(
                     .any(|c| cell_cfg.columns.iter().any(|cc| cc == c))
             })
             .map(|g| g.name());
-        let group_matches =
-            plan_cell.group == "{*}" || Some(plan_cell.group.clone()) == matched_group_name;
+        let group_matches = group == "{*}" || Some(group.to_string()) == matched_group_name;
         group_matches.then(|| pin.to_string())
     })
+}
+
+pub fn matching_write_pin(
+    plan_cell: &smelt_logical::maintenance::PlanCell,
+    column_groups: &[ColumnGroup],
+    cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
+) -> Option<String> {
+    let on_address = trigger_on_address(&plan_cell.trigger)?;
+    write_pin_matching(&on_address, &plan_cell.group, column_groups, cells_cfg)
+}
+
+/// The `maintenance.cells[].write` pin (if any) addressing a `refresh: keyed`
+/// model's window-forward keyed-fold write (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27g-plan.md`). Unlike
+/// [`matching_write_pin`], there is no derived [`smelt_logical::maintenance::
+/// PlanCell`] to read here — `keyed`'s classifier (`smelt-planner`) runs
+/// outside the `MaintenancePlan`/`derive_model_maintenance_plan` machinery
+/// entirely — but the keyed fold's cell is always whole-row (`group: "{*}"`),
+/// so it matches a `cells[]` entry by its `on:` address alone, using the
+/// exact same predicate [`matching_write_pin`] uses (`write_pin_matching`
+/// above, with `group` fixed to `"{*}"` and no column groups to consult).
+/// Never re-derives admission — a read-only lookup for the runtime write
+/// path to resolve the mechanism through
+/// [`smelt_logical::maintenance::choice::resolve_keyed_write_mechanism`].
+pub fn keyed_fold_write_pin(metadata: &ModelMetadata, driving_source: &str) -> Option<String> {
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    write_pin_matching(driving_source, "{*}", &[], cells_cfg)
 }
 
 /// Validate every `maintenance.cells[].write` pin against the open
@@ -1382,6 +1411,47 @@ mod tests {
             mutation_sensitivity: sensitivity.iter().map(|s| s.to_string()).collect(),
             membership_sensitivity: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn keyed_fold_write_pin_matches_on_the_driving_source_address() {
+        let metadata = ModelMetadata {
+            maintenance: Some(MaintenanceConfig {
+                defaults: None,
+                cells: vec![MaintenanceCellConfig {
+                    columns: vec![],
+                    on: "sources.events".to_string(),
+                    prefer: None,
+                    technique: None,
+                    write: Some("staged_candidate".to_string()),
+                }],
+                scan_bounds: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            keyed_fold_write_pin(&metadata, "sources.events"),
+            Some("staged_candidate".to_string())
+        );
+    }
+
+    #[test]
+    fn keyed_fold_write_pin_ignores_a_cell_addressed_at_another_source() {
+        let metadata = ModelMetadata {
+            maintenance: Some(MaintenanceConfig {
+                defaults: None,
+                cells: vec![MaintenanceCellConfig {
+                    columns: vec![],
+                    on: "sources.other".to_string(),
+                    prefer: None,
+                    technique: None,
+                    write: Some("staged_candidate".to_string()),
+                }],
+                scan_bounds: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(keyed_fold_write_pin(&metadata, "sources.events"), None);
     }
 
     #[test]

@@ -2108,9 +2108,8 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   and even where the posture is threaded through, only full-input re-derivation is admitted
   (live fold machinery for a change feed's delta shape is §Future Extensions, blocked on the
   retention point).
-- **Conditional-maintenance gaps**: no `write:` pin selects between keyed MERGE and
-  staged-candidate; a target whose `BackendCapabilities::supports_fingerprint_sidecar` is `false`
-  keeps the widened-scan recompute for a mutation-sensitive cell driven by an external
+- **Conditional-maintenance gaps**: a target whose `BackendCapabilities::supports_fingerprint_sidecar`
+  is `false` keeps the widened-scan recompute for a mutation-sensitive cell driven by an external
   `mutable_snapshot` source (`multi_backend.md` §"The fingerprint sidecar capability" — DuckDB
   alone sets it today). Refs: `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
   `docs/outcomes/20260815-definition-delta-migrate/phases/27b-plan.md`.

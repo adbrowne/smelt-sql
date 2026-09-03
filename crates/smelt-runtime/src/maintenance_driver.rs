@@ -163,6 +163,46 @@ pub trait WindowedKeyedRule: Send + Sync {
         dialect: MaintenanceDialect,
     ) -> String;
 
+    /// Build the [`StatementGroup`] that actually realises `mechanism`
+    /// (`smelt_logical::maintenance::choice::resolve_keyed_write_mechanism`,
+    /// 27d/27g) — the write-pin-aware counterpart of [`Self::merge_sql`].
+    /// Defaults to a one-statement group wrapping [`Self::merge_sql`] for
+    /// [`KeyedWriteMechanism::Merge`], so the unpinned path (every rule that
+    /// never sees a `staged_candidate` pin) stays byte-identical to the
+    /// pre-27g `merge_sql`-only dispatch. There is no default shape for
+    /// [`KeyedWriteMechanism::StagedCandidate`] — a rule reaching that arm
+    /// must override this method (`crate::cumulative::CumulativeClassification`
+    /// does); the default panics rather than silently falling back to
+    /// `merge_sql`, since `resolve_keyed_write_mechanism` only ever produces
+    /// `StagedCandidate` for a rule this driver's real (`keyed`) family
+    /// serves.
+    fn write_group(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        slice: Option<&TargetSlicePredicate>,
+        mechanism: &smelt_logical::maintenance::choice::KeyedWriteMechanism,
+        dialect: MaintenanceDialect,
+    ) -> StatementGroup {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+        match mechanism {
+            KeyedWriteMechanism::Merge(suppression) => StatementGroup {
+                statements: vec![MaintenanceStatement {
+                    sql: self.merge_sql(schema, table, delta_sql, slice, suppression, dialect),
+                }],
+                transactional: false,
+            },
+            KeyedWriteMechanism::StagedCandidate { .. } => {
+                panic!(
+                    "windowed-keyed-maintenance driver: rule produced \
+                     KeyedWriteMechanism::StagedCandidate but does not override \
+                     WindowedKeyedRule::write_group to realise it"
+                )
+            }
+        }
+    }
+
     /// The reconciliation ledger's storage grading for this rule's cell
     /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
     /// "Storage is graded by algebra"). `Grade::Additive` requires
@@ -271,6 +311,7 @@ pub async fn run_windowed_keyed_maintenance(
     rule: &dyn WindowedKeyedRule,
     locality: Option<&LocalitySlice>,
     suppression: &WriteSuppression,
+    write_pin: Option<&'static WritePattern>,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
     retry: &crate::execute::RetryPolicy<'_>,
     probe_policy: &crate::probes::ProbePolicy,
@@ -282,6 +323,34 @@ pub async fn run_windowed_keyed_maintenance(
             reason
         );
     }
+
+    // Resolve the write mechanism once, before any step runs (`docs/outcomes/
+    // 20260815-definition-delta-migrate/phases/27g-plan.md`): a `write:` pin
+    // selects between the keyed `MERGE` and the merge-less staged-candidate
+    // mechanism within the `KeyedFold` technique family
+    // (`smelt_logical::maintenance::choice::resolve_keyed_write_mechanism`).
+    // `Err` (a pin the backend/suppression combination cannot honour) and
+    // `Ok(None)` (neither mechanism is admissible) both refuse the whole run
+    // before any backend call — the same fail-closed posture `rule.refuse()`
+    // above already establishes for combiner safety.
+    let mechanism = match smelt_logical::maintenance::choice::resolve_keyed_write_mechanism(
+        suppression,
+        backend.capabilities().supports_merge,
+        write_pin,
+    ) {
+        Ok(Some(mechanism)) => mechanism,
+        Ok(None) => bail!(
+            "windowed-keyed-maintenance driver refused model '{}': the backend cannot run \
+             MERGE and the write is unconditional (no comparable compared-column set) — no \
+             merge-less unconditional keyed-fold mechanism exists",
+            model_name
+        ),
+        Err(refusal) => bail!(
+            "windowed-keyed-maintenance driver refused model '{}': {}",
+            model_name,
+            refusal
+        ),
+    };
 
     let start = Instant::now();
     let mut total_rows = 0;
@@ -348,17 +417,23 @@ pub async fn run_windowed_keyed_maintenance(
                 delta_select: delta_sql.clone(),
             },
         });
-        let action_sql = match &create_group {
-            Some(group) => group.statements[0].sql.clone(),
-            None => rule.merge_sql(
+        let action_group = match &create_group {
+            Some(group) => group.clone(),
+            None => rule.write_group(
                 schema,
                 table,
                 &delta_sql,
                 slice_predicate.as_ref(),
-                suppression,
+                &mechanism,
                 smelt_backend::maintenance_dialect(backend.dialect()),
             ),
         };
+        let action_sql = action_group
+            .statements
+            .iter()
+            .map(|s| s.sql.as_str())
+            .collect::<Vec<_>>()
+            .join(";\n");
 
         // Route 3's declared sub-route (`LocalitySlice::RecurrenceBounded`)
         // is admitted only **checked** (`incremental_shapes.md` §"Key
@@ -449,6 +524,27 @@ pub async fn run_windowed_keyed_maintenance(
                             backend.dialect().name(),
                             "additive-fold windowed-keyed maintenance ledger (never-fold-twice)",
                         )
+                    );
+                }
+
+                // `fold_ledger_delta` wraps exactly one action statement
+                // (`Backend::fold_ledger_delta`'s own signature) — the
+                // staged-candidate mechanism's multi-statement transactional
+                // group has no ledger-folded realisation today. An
+                // additive-graded cell always resolves `KeyedWriteMechanism::
+                // Merge` absent a `staged_candidate` pin, so this only fires
+                // for a pin explicitly requesting the merge-less mechanism
+                // over an additive fold — refuse fail-closed rather than
+                // silently mis-wrapping it.
+                if action_group.statements.len() != 1 {
+                    bail!(
+                        "windowed-keyed-maintenance driver refused model '{}': the resolved \
+                         write mechanism emits {} statements, but the never-fold-twice \
+                         reconciliation ledger (MP12) only wraps a single action statement — \
+                         an additive-graded cell has no ledger-folded staged-candidate \
+                         realisation",
+                        model_name,
+                        action_group.statements.len()
                     );
                 }
 
@@ -557,16 +653,10 @@ pub async fn run_windowed_keyed_maintenance(
                             &step.range.end,
                             &changed_keys_query,
                         );
-                        let group = StatementGroup {
-                            statements: vec![MaintenanceStatement {
-                                sql: action_sql.clone(),
-                            }],
-                            transactional: false,
-                        };
                         crate::execute::retry_backend_call(retry, || {
                             backend.execute_conditional_write_and_record_observed_delta(
                                 &ensure_sql,
-                                &group,
+                                &action_group,
                                 &record_sql,
                             )
                         })
@@ -581,17 +671,8 @@ pub async fn run_windowed_keyed_maintenance(
                         })?;
                     }
                     _ => {
-                        let group = match &create_group {
-                            Some(group) => group.clone(),
-                            None => StatementGroup {
-                                statements: vec![MaintenanceStatement {
-                                    sql: action_sql.clone(),
-                                }],
-                                transactional: false,
-                            },
-                        };
                         crate::execute::retry_backend_call(retry, || {
-                            backend.execute_statement_group(&group)
+                            backend.execute_statement_group(&action_group)
                         })
                         .await
                         .map_err(|e| {
@@ -5296,6 +5377,7 @@ mod tests {
             &AlwaysRefuses,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -5314,6 +5396,51 @@ mod tests {
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
+    /// A `write: staged_candidate` pin over an `Unconditional` verdict has no
+    /// sound realisation (`resolve_keyed_write_mechanism`'s own doc comment:
+    /// the staged-candidate emitter has no unconditional shape) — the
+    /// resulting `ChoiceRefusal` must propagate out of
+    /// `run_windowed_keyed_maintenance` as an error naming the model and the
+    /// pin, refused before any backend call, exactly like the combiner-safety
+    /// refusal above (`docs/outcomes/20260815-definition-delta-migrate/
+    /// phases/27g-plan.md`).
+    #[tokio::test]
+    async fn staged_candidate_pin_over_an_unconditional_cell_refuses() {
+        let backend = RecordingBackend::default();
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        let pin = smelt_logical::maintenance::lookup_write_pattern("staged_candidate").unwrap();
+        let result = run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRule,
+            None,
+            &unconditional_suppression(),
+            Some(pin),
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+            &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
+        )
+        .await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("model.under.test"),
+            "error must name the model: {err}"
+        );
+        assert!(
+            err.contains("staged_candidate"),
+            "error must name the pin: {err}"
+        );
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn sequences_create_then_merge_across_partitions_in_temporal_order() {
         let backend = RecordingBackend::default();
@@ -5327,6 +5454,7 @@ mod tests {
             &SumRule,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -5375,6 +5503,7 @@ mod tests {
             &SumRuleAdditive,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -5424,6 +5553,7 @@ mod tests {
             &SumRuleAdditive,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -5499,6 +5629,7 @@ mod tests {
             &rule,
             Some(&locality),
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT id, first_seen_at FROM src WHERE d = '{}'",
