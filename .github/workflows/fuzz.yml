@@ -24,22 +24,26 @@ jobs:
   fuzz:
     name: Fuzz Testing
     runs-on: ubuntu-latest
-    
+    env:
+      # Step-scoped env on the mise-action step alone isn't enough — mise's
+      # shims re-resolve the tool version from env on every invocation, so a
+      # later step (with no visibility into an earlier step's env:) would
+      # silently fall back to mise.toml's pinned stable version.
+      MISE_RUST_VERSION: nightly
+
     strategy:
       fail-fast: false
       matrix:
         target:
           - parse_never_panics
           - round_trip
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-      
+
       - name: Setup mise (rust nightly)
         uses: jdx/mise-action@v2
-        env:
-          MISE_RUST_VERSION: nightly
       
       - name: Cache cargo registry
         uses: actions/cache@v5

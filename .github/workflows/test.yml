@@ -24,6 +24,9 @@ jobs:
         uses: jdx/mise-action@v2
 
       - name: Add rust components
+        # mise's rust backend installs the minimal rustup profile — clippy
+        # and rustfmt aren't in it by default, unlike dtolnay/rust-toolchain's
+        # `with: components:` input which this replaces.
         run: rustup component add clippy rustfmt
 
       - name: Cache cargo
@@ -149,6 +152,10 @@ jobs:
   fuzz-build:
     name: Fuzz Targets Build Check
     runs-on: ubuntu-latest
+    env:
+      # Job-level, not step-level: mise's shims re-resolve the tool version
+      # from env on every invocation, so a later step needs this visible too.
+      MISE_RUST_VERSION: nightly
 
     steps:
       - name: Checkout code
@@ -156,8 +163,6 @@ jobs:
 
       - name: Setup mise (rust nightly)
         uses: jdx/mise-action@v2
-        env:
-          MISE_RUST_VERSION: nightly
 
       - name: Cache fuzz build
         uses: actions/cache@v5
