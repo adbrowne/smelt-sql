@@ -23,6 +23,12 @@ jobs:
       - name: Setup mise (rust, node)
         uses: jdx/mise-action@v2
 
+      - name: Add rust components
+        # mise's rust backend installs the minimal rustup profile — clippy
+        # and rustfmt aren't in it by default, unlike dtolnay/rust-toolchain's
+        # `with: components:` input which this replaces.
+        run: rustup component add clippy rustfmt
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
