@@ -174,7 +174,14 @@ ephemeral resolver (so a `smelt.<ephemeral>` ref is CTE-inlined, not resolved as
 reference) and the real upstream column typing derived from static type inference (so `SUM`/`AVG`
 over a `smelt.ref()` column casts to that column's actual type instead of the `BIGINT` default) —
 so the printed SQL matches what a run would compile for the same model and inputs (see Known
-Divergences for the one residual gap: a column aggregated directly off an ephemeral ref). Statements print in execution order; a transactional group is bracketed
+Divergences for the one residual gap: a column aggregated directly off an ephemeral ref). A
+suppressible cell's `ColumnScopedMerge`/`KeyedFold` matched arm is rendered in whichever variant
+the cell's own write-suppression resolution (P2/P3 proof plus the override ladder) would actually
+execute — the change-suppressed `IS DISTINCT FROM`-guarded arm wherever that resolution admits and
+prefers it, the plain unconditional arm otherwise — never an unconditional rendering that ignores
+what a live run would suppress. A cell whose pin makes the variant unresolvable (a `technique:
+suppress` pin over a refused proof) renders no statements for that technique, matching the report's
+own "write variant: …" line rather than falling back to a plain arm. Statements print in execution order; a transactional group is bracketed
 by `BEGIN`/`COMMIT` lines in the printout to show its atomicity (the backend supplies the real
 transaction mechanics at run time). Region literals come from `--period <start>..<end>` when
 given; without `--period`, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand

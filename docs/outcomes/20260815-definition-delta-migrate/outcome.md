@@ -330,7 +330,7 @@ open — not that the excluded bullets themselves are gone.
 | 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | done |
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | done |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | done |
-| 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
+| 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | done |
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | planned |
@@ -343,6 +343,15 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 27a — `--show-sql` previews resolve write suppression, matching a live run.**
+  A new shared resolver (`smelt_logical::maintenance::choice::resolve_cell_write_suppression`)
+  folds the P2/P3 proof + override ladder that `maintenance_driver.rs`'s live `ColumnScopedMerge`
+  path already ran inline; the `smelt-runtime::diagnostics` preview builder now calls it (and, for
+  `KeyedFold`, mirrors `cumulative.rs`'s own raw-proof-only live resolution — deliberately NOT the
+  override-folding one, since that live path doesn't fold overrides today). Discovered gap for a
+  future phase: KeyedFold's live write-suppression resolution ignores override pins and first-build
+  posture entirely, unlike `ColumnScopedMerge`'s. See `phases/27a-summary.md`.
 
 - **2026-09-03, phase 26b — per-arm `INTERSECT`/`EXCEPT` classification lands.**
   `grouping::derive_column_groups` no longer collapses a set-op model whole-model: a chain of one

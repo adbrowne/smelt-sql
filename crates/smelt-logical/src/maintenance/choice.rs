@@ -794,6 +794,41 @@ pub fn resolve_write_variant(
     })
 }
 
+/// Fold the write-suppression proof and its variant resolution into one call
+/// — `model_property_vector(sql, ...).comparability` →
+/// [`resolve_write_suppression`] → [`resolve_write_variant`] — the exact
+/// sequence `maintenance_driver.rs`'s live `ColumnScopedMerge`/`KeyedFold`
+/// resolvers each already run inline, and the one a preview builder
+/// (`smelt explain --show-sql`) must run identically so a printed statement
+/// can never drift from what a live run would execute
+/// (`incremental_models.md` §"Statement emission (single owner)"). Drops the
+/// `VariantReason` a caller that only wants the resolved SQL shape has no use
+/// for — a caller that also wants to explain *why* (`smelt explain`'s report
+/// line) still calls [`resolve_write_suppression`]/[`resolve_write_variant`]
+/// directly, as `smelt-cli/src/explain.rs` already does.
+pub fn resolve_cell_write_suppression(
+    sql: &str,
+    group_columns: &[String],
+    cell: &PlanCell,
+    overrides: &EffectiveOverride,
+) -> Result<WriteSuppression, ChoiceRefusal> {
+    let comparability = crate::analysis::walk::model_property_vector(
+        sql,
+        &crate::analysis::join_shape::JoinContext::new(),
+    )
+    .map(|v| v.comparability)
+    .unwrap_or_default();
+    let raw_suppression =
+        resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
+    resolve_write_variant(
+        &raw_suppression,
+        &cell.trigger,
+        cell.ledger_catch_up,
+        overrides,
+    )
+    .map(|(suppression, _reason)| suppression)
+}
+
 /// Which physical write mechanism realizes a keyed-fold cell's conditional
 /// write (T1/T2, `docs/plans/20260715-composed-axes-conditional-
 /// maintenance.md` Phase C5): the ordinary keyed `MERGE`

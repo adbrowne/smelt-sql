@@ -4458,6 +4458,7 @@ mod in_place_update_lowering {
             MaintenanceDialect::DuckDb,
             &[],
             &source_timeseries,
+            &[],
         );
 
         let preview = diagnostics

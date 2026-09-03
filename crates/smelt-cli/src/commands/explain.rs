@@ -720,6 +720,7 @@ async fn explain_maintenance_plan(
             dialect,
             &source_timeseries,
             &unique_key,
+            &result.column_groups,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("Failed to build model diagnostics for `{}`", canonical))?

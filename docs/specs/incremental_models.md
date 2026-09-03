@@ -2095,12 +2095,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   and even where the posture is threaded through, only full-input re-derivation is admitted
   (live fold machinery for a change feed's delta shape is §Future Extensions, blocked on the
   retention point).
-- **Conditional-maintenance gaps**: `smelt explain --show-sql` renders the unconditional
-  matched arm, never the suppressed form a live run executes; the region DELETE+INSERT
-  family has no conditional variant; the whole-row (keyless) staged-candidate realisation
-  does not exist; no `write:` pin selects between keyed MERGE and staged-candidate;
-  delta-restriction admission doesn't yet consume an external `mutable_snapshot` source's
-  fingerprint-sidecar delta; non-DuckDB targets keep the widened-scan recompute. Refs:
+- **Conditional-maintenance gaps**: the region DELETE+INSERT family has no conditional
+  variant; the whole-row (keyless) staged-candidate realisation does not exist; no `write:`
+  pin selects between keyed MERGE and staged-candidate; delta-restriction admission doesn't
+  yet consume an external `mutable_snapshot` source's fingerprint-sidecar delta; non-DuckDB
+  targets keep the widened-scan recompute. Refs:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 
 ## Future Extensions

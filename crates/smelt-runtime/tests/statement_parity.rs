@@ -1186,6 +1186,7 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
         MaintenanceDialect::DuckDb,
         &[],
         &source_timeseries,
+        &plan_result.column_groups,
     );
     let preview = plan_cell_diagnostics
         .technique_previews
@@ -1211,6 +1212,22 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
              `{fragment}` — preview: {preview_sql}\nexecuted: {executed_merge_sql}"
         );
     }
+
+    // Phase 27a (`docs/outcomes/20260815-definition-delta-migrate/phases/
+    // 27a-plan.md`): the preview's own change-suppressed matched-arm guard
+    // must be byte-identical to what the live run actually executed — never
+    // a preview that renders the unconditional arm while the live run
+    // suppressed, or vice versa. `avg_amount` is a plain `AVG` (registry-
+    // backed, P3 `Comparable`) over a proven `Key` row identity, so both
+    // resolve `WriteSuppression::Suppressed` here.
+    let guard = "target.avg_amount IS DISTINCT FROM \
+                 ((target.avg_amount__sum + delta.avg_amount__sum) / \
+                 (target.avg_amount__count + delta.avg_amount__count))";
+    assert!(
+        preview_sql.contains(guard) && executed_merge_sql.contains(guard),
+        "preview and executed statement must carry the identical change-suppressed guard — \
+         preview: {preview_sql}\nexecuted: {executed_merge_sql}"
+    );
 }
 
 /// The slice-predicated keyed-fold family: a `refresh: keyed` model that

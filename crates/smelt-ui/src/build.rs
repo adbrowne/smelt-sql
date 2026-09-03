@@ -338,13 +338,15 @@ pub fn build_model_diagnostics_response(
     let bound_ctx = build_bound_context(name, graph, config);
 
     let ws = smelt_db::Workspace::try_get(db);
-    let plan_cells: Vec<smelt_logical::maintenance::PlanCell> =
-        match (ws, db.source_file(&model.path)) {
-            (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file)
-                .map(|result| result.plan.cells)
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
+    let (plan_cells, column_groups): (
+        Vec<smelt_logical::maintenance::PlanCell>,
+        Vec<smelt_logical::maintenance::ColumnGroup>,
+    ) = match (ws, db.source_file(&model.path)) {
+        (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file)
+            .map(|result| (result.plan.cells, result.column_groups))
+            .unwrap_or_default(),
+        _ => (Vec::new(), Vec::new()),
+    };
 
     let default_target = config.targets.keys().next().cloned().unwrap_or_default();
     let target = config.get_target(name, model.metadata.as_deref(), &default_target);
@@ -415,6 +417,7 @@ pub fn build_model_diagnostics_response(
         dialect,
         &source_timeseries,
         &unique_key,
+        &column_groups,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 

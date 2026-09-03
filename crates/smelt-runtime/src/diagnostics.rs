@@ -28,13 +28,19 @@ use smelt_logical::analysis::walk::{
     model_property_vector, ColumnComparability, ColumnDeterminism, ColumnDiscriminant, DerivedFd,
     Grain as PropertyGrain,
 };
-use smelt_logical::maintenance::choice::technique_requires_row_identity;
+use smelt_logical::maintenance::choice::{
+    effective_override, resolve_cell_write_suppression, technique_requires_row_identity,
+    WriteSuppression,
+};
 use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold,
-    emit_per_group_recompute, MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
+    emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_delete_insert,
+    emit_in_place_update, emit_keyed_fold, emit_keyed_fold_suppressed, emit_per_group_recompute,
+    MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
 };
-use smelt_logical::maintenance::{PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger};
+use smelt_logical::maintenance::{
+    ColumnGroup, PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger,
+};
 use smelt_planner::SourceTimeseriesMap;
 
 use crate::compile::{CompilerRegistry, EphemeralResolver};
@@ -412,6 +418,65 @@ pub struct PlanCellDiagnostics {
     pub technique_previews: Vec<TechniquePreview>,
 }
 
+/// Resolve `cell`'s own write-suppression verdict for the preview builder —
+/// the same override-ladder + P2/P3 proof `smelt-cli/src/explain.rs`'s
+/// "write variant: …" report line already runs, folded through
+/// [`resolve_cell_write_suppression`] so this preview's rendered SQL can
+/// never drift from what a live run would execute
+/// (`docs/specs/incremental_models.md` §"Statement emission (single
+/// owner)"). `column_groups` is the model's derived column-group set
+/// (`smelt_logical::maintenance::derive::derive_maintenance_plan`'s
+/// `MaintenancePlanResult::column_groups`); `cell.group`'s display name
+/// matches exactly one member, or none for a synthetic/unit-test cell (an
+/// empty `group_columns` then fails the P3 proof fail-closed, same as a
+/// genuinely empty group).
+fn resolve_preview_write_suppression(
+    model: &ModelFile,
+    cell: &PlanCell,
+    column_groups: &[ColumnGroup],
+    sql: &str,
+) -> Result<WriteSuppression, String> {
+    let group_columns: Vec<String> = column_groups
+        .iter()
+        .find(|g| g.name() == cell.group)
+        .map(|g| g.columns.clone())
+        .unwrap_or_default();
+    let trigger_address = match &cell.trigger {
+        Trigger::NewData { source } | Trigger::UpstreamMutation { source } => Some(source.clone()),
+        Trigger::Backfill => Some("backfill".to_string()),
+        Trigger::ColumnAdded { .. } => None,
+    };
+    let maintenance_cfg = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.maintenance.as_ref());
+    let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+    let cells_cfg = maintenance_cfg
+        .map(|m| m.cells.as_slice())
+        .unwrap_or_default();
+    let overrides = trigger_address
+        .as_deref()
+        .map(|addr| effective_override(defaults_cfg, cells_cfg, addr, &group_columns))
+        .unwrap_or_default();
+    resolve_cell_write_suppression(sql, &group_columns, cell, &overrides)
+        .map_err(|refusal| format!("{WRITE_SUPPRESSION_REFUSAL_MARKER}{refusal}"))
+}
+
+/// Prefix marker on a [`build_technique_statements`] error string that
+/// distinguishes a write-suppression [`smelt_logical::maintenance::choice::
+/// ChoiceRefusal`] (`resolve_preview_write_suppression`'s own `Err`, e.g. a
+/// `technique: suppress` pin over a refused P2/P3 proof — a shape a live run
+/// hard-fails on, `maintenance_driver.rs`'s own `ChoiceRefusal` propagation)
+/// from every other structural build failure (a missing `unique_key`, an
+/// unclassifiable cumulative shape, …) that has always been possible for a
+/// cell's own admitted technique's illustrative preview to hit. Only the
+/// former downgrades [`Admissibility::Admitted`] to `NotApplicable` in
+/// [`resolve_technique_admissibility`] — every other structural failure
+/// keeps the pre-existing `Admitted`-despite-empty-statements convention
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility verdict":
+/// "Exactly one preview entry per cell is `Admitted`").
+const WRITE_SUPPRESSION_REFUSAL_MARKER: &str = "MaintenanceWriteSuppressionRefused: ";
+
 /// Build one technique's illustrative [`StatementGroup`] for `cell`, using
 /// the same pure emitters a live run uses
 /// (`docs/specs/incremental_models.md` §"Statement emission (single
@@ -455,6 +520,7 @@ fn build_technique_statements(
     unique_key: &[String],
     source_timeseries: &SourceTimeseriesMap,
     cell: &PlanCell,
+    column_groups: &[ColumnGroup],
 ) -> Result<StatementGroup, String> {
     let trigger = &cell.trigger;
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
@@ -580,14 +646,53 @@ fn build_technique_statements(
                 .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
                 .collect();
 
-            Ok(emit_keyed_fold(
-                &table_name,
-                &classification.unique_key,
-                &folds,
-                &compiled.sql,
-                None,
-                dialect,
-            ))
+            // Mirrors `crate::cumulative::resolve_cumulative_write_suppression`
+            // exactly (raw P2/P3 proof, group columns = the classification's
+            // own aggregator output names, row identity re-derived from the
+            // classification's proven unique key over the pre-augmentation
+            // SQL) rather than [`resolve_preview_write_suppression`]'s
+            // override-ladder-folding counterpart: the live `refresh: keyed`
+            // maintenance loop does not fold `resolve_write_variant`/
+            // `effective_override` into its own keyed-fold write-suppression
+            // resolution today (unlike `ColumnScopedMerge`'s live path in
+            // `maintenance_driver.rs`) — folding them in here would render a
+            // matched-arm shape a live KeyedFold run would not actually
+            // execute, the exact drift this phase's own goal refuses.
+            let fold_group_columns: Vec<String> = classification
+                .aggregator_columns
+                .iter()
+                .map(|col| col.output_name.clone())
+                .collect();
+            let fold_identity = row_identity(&classification.unique_key, &stripped_sql);
+            let fold_comparability = model_property_vector(&stripped_sql, &JoinContext::new())
+                .map(|v| v.comparability)
+                .unwrap_or_default();
+            let fold_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+                &fold_group_columns,
+                &fold_comparability,
+                &fold_identity,
+            );
+            match fold_suppression {
+                WriteSuppression::Suppressed { compared_columns } => {
+                    Ok(emit_keyed_fold_suppressed(
+                        &table_name,
+                        &classification.unique_key,
+                        &folds,
+                        &compiled.sql,
+                        None,
+                        &compared_columns,
+                        dialect,
+                    ))
+                }
+                WriteSuppression::Unconditional { .. } => Ok(emit_keyed_fold(
+                    &table_name,
+                    &classification.unique_key,
+                    &folds,
+                    &compiled.sql,
+                    None,
+                    dialect,
+                )),
+            }
         }
         Technique::ColumnScopedMerge => {
             if unique_key.is_empty() {
@@ -600,13 +705,25 @@ fn build_technique_statements(
                 .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
                 .map_err(|e| format!("failed to compile model body: {e}"))?;
 
-            Ok(emit_column_scoped_merge(
-                &table_name,
-                unique_key,
-                &compiled.sql,
-                &compiled.output_columns,
-                dialect,
-            ))
+            match resolve_preview_write_suppression(model, cell, column_groups, &stripped_sql)? {
+                WriteSuppression::Suppressed { compared_columns } => {
+                    Ok(emit_column_scoped_merge_suppressed(
+                        &table_name,
+                        unique_key,
+                        &compiled.sql,
+                        &compared_columns,
+                        &compiled.output_columns,
+                        dialect,
+                    ))
+                }
+                WriteSuppression::Unconditional { .. } => Ok(emit_column_scoped_merge(
+                    &table_name,
+                    unique_key,
+                    &compiled.sql,
+                    &compiled.output_columns,
+                    dialect,
+                )),
+            }
         }
         Technique::InPlaceUpdate => {
             let Trigger::ColumnAdded { columns } = trigger else {
@@ -775,7 +892,28 @@ fn resolve_technique_admissibility(
     build_result: &Result<StatementGroup, String>,
 ) -> Admissibility {
     if technique == cell.technique {
-        return Admissibility::Admitted;
+        // Ordinarily the cell's own admitted technique always builds — it
+        // was constructed from the same facts `derive_maintenance_plan`
+        // proved admission over. The one exception is a `technique:
+        // suppress` pin whose P2/P3 write-suppression proof itself refused
+        // (`resolve_preview_write_suppression`'s `ChoiceRefusal`): a live
+        // run over that same cell would hard-fail the whole run
+        // (`maintenance_driver.rs`'s own `.map_err(...)?` propagation), so
+        // there is no statement a live run would actually emit here to
+        // label `Admitted` — `NotApplicable` with the refusal's own reason
+        // is the honest verdict, never a silent claim of admission over an
+        // empty statement list.
+        return match build_result {
+            Err(reason) if reason.starts_with(WRITE_SUPPRESSION_REFUSAL_MARKER) => {
+                Admissibility::NotApplicable {
+                    reason: reason
+                        .strip_prefix(WRITE_SUPPRESSION_REFUSAL_MARKER)
+                        .unwrap_or(reason)
+                        .to_string(),
+                }
+            }
+            _ => Admissibility::Admitted,
+        };
     }
     if technique == Technique::DeleteInsert {
         // Region recompute is always sound and contract-agnostic over
@@ -803,7 +941,10 @@ fn resolve_technique_admissibility(
     }
     if let Err(reason) = build_result {
         return Admissibility::NotApplicable {
-            reason: reason.clone(),
+            reason: reason
+                .strip_prefix(WRITE_SUPPRESSION_REFUSAL_MARKER)
+                .unwrap_or(reason)
+                .to_string(),
         };
     }
     // Building succeeded, but `smelt_logical::maintenance::choice`'s own
@@ -838,6 +979,7 @@ pub fn build_plan_cell_diagnostics(
     dialect: MaintenanceDialect,
     unique_key: &[String],
     source_timeseries: &SourceTimeseriesMap,
+    column_groups: &[ColumnGroup],
 ) -> PlanCellDiagnostics {
     let technique_previews = ALL_TECHNIQUES
         .into_iter()
@@ -853,6 +995,7 @@ pub fn build_plan_cell_diagnostics(
                 unique_key,
                 source_timeseries,
                 cell,
+                column_groups,
             );
             let (statements, transactional) = match &build_result {
                 Ok(group) => (
@@ -948,6 +1091,7 @@ pub fn build_model_diagnostics(
     dialect: MaintenanceDialect,
     source_timeseries: &SourceTimeseriesMap,
     write_unique_key: &[String],
+    column_groups: &[ColumnGroup],
 ) -> Result<ModelDiagnostics, DiagnosticsError> {
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let declared_unique_key: Vec<String> = model
@@ -979,6 +1123,7 @@ pub fn build_model_diagnostics(
                 dialect,
                 write_unique_key,
                 source_timeseries,
+                column_groups,
             )
         })
         .collect();
@@ -1132,6 +1277,7 @@ mod tests {
             &[],
             &source_timeseries,
             &synthetic_backfill_cell(),
+            &[],
         )
         .unwrap_or_else(|e| {
             panic!("expected Ok (clamp injection over the expanded FROM), got Err: {e}")
