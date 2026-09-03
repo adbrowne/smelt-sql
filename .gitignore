@@ -1,5 +1,7 @@
 target/
 .cargo-cache/
+# Local mise overrides (per-developer tool/env tweaks) — never committed.
+.mise.local.toml
 # Local developer build-speed config (e.g. mold linker). Not normative to the
 # project — must not be committed, since it would apply to CI and every
 # contributor (where the chosen linker may not be installed).

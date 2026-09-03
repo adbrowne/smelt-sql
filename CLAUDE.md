@@ -89,32 +89,27 @@ These rules constrain how the codebase evolves; the spec is the authoritative so
 
 Using system DuckDB avoids recompiling DuckDB from C++ source, making builds much faster.
 
-**Setup:** Install the DuckDB shared library (v1.5.4) and set `DUCKDB_LIB_DIR`:
+**Setup:** this repo is [mise](https://mise.jdx.dev/)-managed (`mise.toml` at the repo root
+pins the Rust toolchain and Node version, and sets `DUCKDB_LIB_DIR`/`LD_LIBRARY_PATH`
+dynamically). One-time setup in a fresh checkout:
 ```bash
-# Download and install (one-time setup)
-curl -sL https://github.com/duckdb/duckdb/releases/download/v1.5.4/libduckdb-linux-amd64.zip -o /tmp/libduckdb.zip
-cd /tmp && unzip -o libduckdb.zip libduckdb.so
-sudo cp libduckdb.so /usr/local/lib/ && sudo ldconfig
-# Or for user-local install:
-mkdir -p ~/.local/lib/duckdb && cp libduckdb.so ~/.local/lib/duckdb/
-
-# Set env var (add to ~/.bashrc or ~/.zshrc) — point it at whichever install
-# you actually have. Guessing wrong fails at link time with a confusing
-# "cannot find -lduckdb", so detect rather than assume:
+mise trust
+mise install          # installs the pinned rust/node
+mise run setup-duckdb  # installs libduckdb.so v1.5.4 to ~/.local/lib/duckdb if not already present
+```
+After that, `DUCKDB_LIB_DIR`/`LD_LIBRARY_PATH` are set automatically in any shell mise
+manages (a mise-aware shell, or `mise exec -- <cmd>`). Without mise, set them by hand:
+```bash
 for d in /usr/local/lib "$HOME/.local/lib/duckdb"; do
   [ -e "$d/libduckdb.so" ] && export DUCKDB_LIB_DIR="$d" && break
 done
 export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR:$LD_LIBRARY_PATH"
-echo "DUCKDB_LIB_DIR=${DUCKDB_LIB_DIR:-<not found — install it above>}"
 ```
-
-`DUCKDB_LIB_DIR` is not set in any shell profile in this repo's environments, so
-every new shell (and every agent session) must export it before building.
 
 **Commands (system DuckDB is now the default):**
 ```bash
 # Build the entire workspace
-cargo build
+mise run build          # or: cargo build
 
 # Format code (required before committing)
 cargo fmt --all
@@ -126,10 +121,10 @@ cargo fmt --all -- --check
 # Prefer the shared gate: it lints BOTH feature sets CI lints (default, and
 # --no-default-features + duckdb backends), and is the same script CI runs, so
 # a local pass cannot diverge from CI.
-bash .claude/scripts/clippy-gate.sh
+mise run clippy          # or: bash .claude/scripts/clippy-gate.sh
 
 # Run tests
-cargo test
+mise run test          # or: cargo test
 
 # Verify example workspaces have no LSP diagnostics
 cargo test -p smelt-cli --test example_diagnostics
@@ -137,7 +132,8 @@ cargo test -p smelt-cli --test example_diagnostics
 # Standard pre-commit gate, bundled into ONE command (fmt + clippy + tests +
 # example_diagnostics, failures-only output). Prefer this over running the
 # four commands separately — it keeps agent transcripts small.
-bash .claude/scripts/verify-phase.sh          # add --fast to skip the full cargo test
+mise run verify          # or: bash .claude/scripts/verify-phase.sh
+mise run verify-fast     # skips the full cargo test
 
 # Run the LSP server
 cargo run -p smelt-lsp

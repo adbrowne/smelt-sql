@@ -1,0 +1,36 @@
+[tools]
+rust = "1.95"
+node = "24"
+
+[env]
+# DUCKDB_LIB_DIR mirrors the manual setup snippet in CLAUDE.md's "Build and
+# Test" section: prefer a system-wide install (/usr/local/lib, where CI puts
+# it), fall back to the user-local install `mise run setup-duckdb` makes.
+# Empty (not yet installed) is tolerated — cargo build will fail with its own
+# clear error rather than this template failing.
+DUCKDB_LIB_DIR = "{{ exec(command='bash scripts/mise-duckdb-lib-dir.sh') }}"
+LD_LIBRARY_PATH = "{{ env.DUCKDB_LIB_DIR }}:{{ env.LD_LIBRARY_PATH | default(value='') }}"
+
+[tasks.setup-duckdb]
+description = "Install the DuckDB shared library (v1.5.4) into ~/.local/lib/duckdb if not already present"
+run = "bash scripts/mise-setup-duckdb.sh"
+
+[tasks.verify]
+description = "Standard pre-commit gate: fmt + clippy + tests + example_diagnostics"
+run = "bash .claude/scripts/verify-phase.sh"
+
+[tasks.verify-fast]
+description = "verify, skipping the full cargo test run"
+run = "bash .claude/scripts/verify-phase.sh --fast"
+
+[tasks.clippy]
+description = "Clippy gate (both CI feature sets)"
+run = "bash .claude/scripts/clippy-gate.sh"
+
+[tasks.build]
+description = "cargo build --workspace"
+run = "cargo build"
+
+[tasks.test]
+description = "cargo test --workspace"
+run = "cargo test"
