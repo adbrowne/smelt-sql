@@ -348,7 +348,7 @@ open — not that the excluded bullets themselves are gone.
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | done |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | done |
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
-| 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
+| 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | planned |
 
 ## Decision log
 
@@ -1281,6 +1281,12 @@ DuckDB-test-grade backbuild emitters have no forms for. The residual defect is r
 `smelt-state/src` with the three `ddl_<dialect>.rs` modules as declared owners. No phase rows
 added or removed; phase 30's suggestion of per-technique backbuild parity fixtures declined and
 recorded under "## Out of scope".
+
+**2026-09-03 (phase 31 plan).** No reshape: the phase-30b summary surfaced no residue, and
+phase 31 is the last workable row. Planned as an audit-only close-out — the two anchor-spec
+validate runs plus a bullet-by-bullet check of success criteria 10–19 against the shipped spec
+text, with a standing rule that any *implementation* gap the audit uncovers becomes a new phase
+row rather than being fixed inside the audit.
 
 ## Blocked
 
