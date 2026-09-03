@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788344737597,
+  "lastUpdate": 1788432740197,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -93,6 +93,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.721246,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "223d4aafbc346af84af46e3a73aaee24e7382571",
+          "message": "Add mise for tool versions, DuckDB lib setup, and dev tasks\n\nPins Rust/Node via mise.toml, sets DUCKDB_LIB_DIR/LD_LIBRARY_PATH\ndynamically, and wraps verify-phase.sh/clippy-gate.sh as mise tasks so\na fresh checkout no longer needs the manual export block in CLAUDE.md.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T20:50:15+10:00",
+          "tree_id": "014d71c2b080ca2cbefbe2d941171aba7e1d090a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/223d4aafbc346af84af46e3a73aaee24e7382571"
+        },
+        "date": 1788432738179,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 55.995962000000006,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 53.52912499999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.249913,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.609754,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.29258300000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1105.874821,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.962205,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.506537,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.275263,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.781108,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 915.763423,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.537999999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.4442,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.365486,
             "unit": "ms"
           }
         ]
