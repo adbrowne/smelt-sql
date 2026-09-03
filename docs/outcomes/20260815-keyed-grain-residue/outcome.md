@@ -73,7 +73,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
 | 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | done |
-| 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | planned |
+| 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | done |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
@@ -204,6 +204,16 @@ six success criteria — criterion 1 is already met end-to-end without it.
   arg-drift that caused phase 6's rot — with the buffered `ReporterEvent` twin added so a
   `--jobs > 1` run does not lose the fact. Scope is explicitly the *visibility* of the skip only:
   the skip itself stays a skip, because deciding otherwise is phase 3's blocked product call.
+
+- 2026-09-04 — Phase 7 implemented and closed out (all green: `verify-phase.sh`,
+  `smelt-runtime --lib maintenance_driver` (28), `keyed_frontier_bookkeeping`/`statement_parity`/
+  `execute_parity` (33), `smelt-cli --test maintenance_conformance` (75), `cargo check -p
+  smelt-maintenance-testkit --features spark,bigquery --all-targets` clean). The non-DuckDB
+  `Grade::Idempotent` skip now calls `RunReporter::state_structure_unavailable` (new defaulted
+  trait method, buffered/replayed through `EventSink` for `--jobs > 1`, surfaced by `CliReporter`
+  as a `tracing::warn!`) instead of a bare `tracing::warn!` with no reporter involvement; the run
+  still succeeds. `smelt-ui`'s `BroadcastReporter` intentionally gets no override (it doesn't
+  forward events verbatim). No new limitations discovered.
 
 ## Blocked
 

@@ -143,6 +143,25 @@ pub trait RunReporter: Send + Sync {
         _error: &str,
     ) {
     }
+
+    /// A state structure a maintained model's run would normally write was
+    /// skipped because the backend offers no substrate for it — never a
+    /// silent omission (`docs/specs/incremental_shapes.md` §"The
+    /// transactional frontier write (merge ledger)": "the omission is
+    /// reported as a named fact on the run's reporter channel"). `structure`
+    /// names the skipped structure (e.g. `"merge ledger"`); `dialect` is the
+    /// backend dialect that lacks it; `consequence` is a short human-readable
+    /// description of what the skip means for this run. Default: no-op;
+    /// `smelt run` verbose output and reporter tests are the consumers.
+    fn state_structure_unavailable(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        _structure: &str,
+        _dialect: &str,
+        _consequence: &str,
+    ) {
+    }
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that

@@ -687,8 +687,11 @@ window may be re-merged (a no-op); the frontier serves reprocessing detection an
 bookkeeping, not refusal. The two grades differ in classification, not existence: for an
 additive-fold model the frontier is a correctness structure and always exists; for a
 re-run-tolerant model it is bookkeeping, written automatically whenever the project's state
-mode supports it (`state.md`), so `--auto` staleness always has a record to consult.
-Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
+mode supports it (`state.md`), so `--auto` staleness always has a record to consult. Where the
+backend offers no ledger substrate, the re-run-tolerant bookkeeping record is **not written**,
+and the omission is reported as a named fact on the run's reporter channel — never silently
+dropped; the additive grade has no such fallback and refuses the run outright there, since for
+it the frontier is a correctness structure. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
 describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
 state-structure inventory"), distinct from the opt-in run-state observability surface
 (`run_state.md`), and the model realisation of `state.md` §"The residency rule".
@@ -1204,7 +1207,9 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   best-effort check-then-act across separate statements; only the DuckDB backend overrides
   either with a real transaction, and every merge-ledger record (additive `INSERT` or
   re-run-tolerant `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB
-  window-forward keyed model writes no frontier record at all today.
+  window-forward keyed model writes no frontier record at all today — the re-run-tolerant grade
+  reports the omission on the run's reporter channel rather than dropping it silently; the
+  additive grade instead refuses the run.
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.

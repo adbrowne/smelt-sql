@@ -638,8 +638,11 @@ pub async fn run_windowed_keyed_maintenance(
                 // matches). The ledger substrate is DuckDB-only today (same
                 // posture as the `Additive` arm and the observed-delta
                 // record below); on any other dialect the record is skipped
-                // with a warning rather than refusing the run — this is
-                // bookkeeping, not a correctness gate.
+                // and the omission is reported as a named fact on the run's
+                // reporter channel — never silently dropped (`docs/specs/
+                // incremental_shapes.md` §"The transactional frontier write
+                // (merge ledger)") — this is bookkeeping, not a correctness
+                // gate, so the run itself proceeds.
                 let ledger_bookkeeping = if backend.dialect() == SqlDialect::DuckDB {
                     let ledger_ensure = ddl_duckdb::generate_ledger_table_ddl(schema);
                     let ledger_upsert = ddl_duckdb::generate_ledger_upsert_sql(
@@ -653,13 +656,15 @@ pub async fn run_windowed_keyed_maintenance(
                     );
                     Some((ledger_ensure, ledger_upsert))
                 } else {
-                    tracing::warn!(
-                        model = model_name,
-                        dialect = backend.dialect().name(),
+                    retry.reporter.state_structure_unavailable(
+                        retry.run_id,
+                        model_name,
+                        "merge ledger",
+                        backend.dialect().name(),
                         "re-run-tolerant keyed model merge-ledger bookkeeping record skipped: \
                          the ledger substrate is DuckDB-only today (docs/specs/\
                          incremental_shapes.md §\"The transactional frontier write (merge \
-                         ledger)\")"
+                         ledger)\")",
                     );
                     None
                 };
@@ -4999,6 +5004,33 @@ mod tests {
         }
     }
 
+    /// Captures `RunReporter::state_structure_unavailable` calls so a test
+    /// can assert on the reported model/structure/dialect without a real
+    /// transport.
+    #[derive(Default)]
+    struct CapturingReporter {
+        events: Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    impl crate::reporter::RunReporter for CapturingReporter {
+        fn state_structure_unavailable(
+            &self,
+            run_id: &str,
+            model: &str,
+            structure: &str,
+            dialect: &str,
+            consequence: &str,
+        ) {
+            self.events.lock().unwrap().push((
+                run_id.to_string(),
+                model.to_string(),
+                structure.to_string(),
+                dialect.to_string(),
+            ));
+            let _ = consequence;
+        }
+    }
+
     // ── 27e: resolve_live_external_delta_restriction_facts ────────────────
     // (`docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`)
 
@@ -5565,6 +5597,117 @@ mod tests {
         assert!(calls[7].contains("ON CONFLICT DO NOTHING"));
         assert!(calls[8].starts_with("execute_sql: MERGE INTO main.t"));
         assert!(calls[8].contains("2024-01-03"));
+    }
+
+    /// A re-run-tolerant (`Grade::Idempotent`) keyed model on a dialect with
+    /// no merge-ledger substrate (Spark) skips the bookkeeping record but
+    /// still succeeds — this is bookkeeping, not a correctness gate — and
+    /// the omission is reported as a named fact on the run's reporter
+    /// channel rather than silently dropped (`docs/specs/
+    /// incremental_shapes.md` §"The transactional frontier write (merge
+    /// ledger)").
+    #[tokio::test]
+    async fn idempotent_ledger_skip_on_non_duckdb_is_reported() {
+        let backend = RecordingBackend {
+            dialect: SqlDialect::SparkSQL,
+            ..Default::default()
+        };
+        let reporter = CapturingReporter::default();
+        let retry = crate::execute::RetryPolicy {
+            retry_max: 0,
+            base_backoff_ms: 0,
+            run_id: "run-1",
+            model_name: "model.under.test",
+            reporter: &reporter,
+        };
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRule,
+            None,
+            &unconditional_suppression(),
+            None,
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+            &retry,
+            &crate::probes::ProbePolicy::per_run(),
+        )
+        .await
+        .expect("a skipped ledger record must not fail the run");
+
+        let events = reporter.events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one state-structure-unavailable event, got {:?}",
+            events
+        );
+        let (run_id, model, structure, dialect) = &events[0];
+        assert_eq!(run_id, "run-1");
+        assert_eq!(model, "model.under.test");
+        assert_eq!(structure, "merge ledger");
+        assert_eq!(dialect, "Spark SQL");
+
+        let calls = backend.calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.contains("_smelt_ledger")),
+            "no ledger statement must be issued on a ledger-less dialect: {:?}",
+            calls
+        );
+    }
+
+    /// The negative direction of the test above: on DuckDB (which has the
+    /// ledger substrate) the bookkeeping record is written and no
+    /// `state_structure_unavailable` event fires.
+    #[tokio::test]
+    async fn idempotent_ledger_on_duckdb_reports_no_unavailability() {
+        let backend = RecordingBackend::default();
+        let reporter = CapturingReporter::default();
+        let retry = crate::execute::RetryPolicy {
+            retry_max: 0,
+            base_backoff_ms: 0,
+            run_id: "run-1",
+            model_name: "model.under.test",
+            reporter: &reporter,
+        };
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRule,
+            None,
+            &unconditional_suppression(),
+            None,
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+            &retry,
+            &crate::probes::ProbePolicy::per_run(),
+        )
+        .await
+        .unwrap();
+
+        assert!(reporter.events.lock().unwrap().is_empty());
+        let calls = backend.calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.contains("_smelt_ledger")),
+            "the ledger record must be written on DuckDB: {:?}",
+            calls
+        );
     }
 
     /// MP12: an `Additive`-graded rule routes every step's create-or-merge
