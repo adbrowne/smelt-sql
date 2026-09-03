@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788434921643,
+  "lastUpdate": 1788434925526,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -341,6 +341,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.79225327085001,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0de6608eec1fb0d859121a855346e90b3ba44f7f",
+          "message": "CI: use mise for Rust/Node toolchain setup instead of separate actions\n\nReplaces dtolnay/rust-toolchain and actions/setup-node with jdx/mise-action\neverywhere, including the nightly fuzz jobs (via MISE_RUST_VERSION=nightly),\nso CI now installs the exact versions pinned in mise.toml — the same ones\na local `mise install` gives a developer. DuckDB setup runs before mise in\nevery job so mise's dynamic DUCKDB_LIB_DIR detection resolves correctly.\nrustup target/component flags move to explicit `rustup target/component add`\nsteps since mise-action doesn't take rust-toolchain's `with:` inputs.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T21:23:56+10:00",
+          "tree_id": "e3db7539c211f46d445a76f0eb202cd78f940c44",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0de6608eec1fb0d859121a855346e90b3ba44f7f"
+        },
+        "date": 1788434924505,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.16585541552287,
             "unit": "MB/s"
           }
         ]
