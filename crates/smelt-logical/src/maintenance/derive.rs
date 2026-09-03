@@ -6,7 +6,7 @@
 //! classifiers that do not exist yet (column groups, skeleton roles) — see
 //! the module doc in [`super`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{ColumnRef, Expr};
@@ -20,13 +20,16 @@ use super::{
 use crate::analysis::definition_change::{
     classify_definition_change, DefinitionChangeClass, DefinitionChangeCtx,
 };
+use crate::analysis::discriminants::combiner_discriminants;
 use crate::analysis::faithful_fold::{faithful_fold, ConditionVerdict, FaithfulFold};
 use crate::analysis::fingerprint::fingerprint_projection;
 use crate::analysis::footprint::{reflect_footprint, FootprintResult};
 use crate::analysis::input_delta::{
     input_delta_discovery, MutationProfile as DeltaMutationProfile, SourceShape,
 };
-use crate::analysis::join_shape::JoinContext;
+use crate::analysis::join_shape::{
+    self, join_contribution_monotone, ContributionVerdict, JoinContext,
+};
 use crate::analysis::locality_projection::{locality_verdict, LocalityVerdict};
 use crate::analysis::model_diff::ColumnDef;
 use crate::analysis::output_delta::OutputDelta;
@@ -102,6 +105,73 @@ pub fn row_identity_with_context(
     }
 }
 
+/// Derive a model's full [`Trigger`] set from pure facts — the single
+/// derivation `docs/specs/incremental_models.md` §"Per-cell admission"'s
+/// "Which changed inputs get a mutation cell" paragraph describes. One
+/// `Trigger::NewData` per distinct source (declaration order,
+/// first-occurrence deduplicated — a source repeated in `sources`, e.g. once
+/// per alias, contributes exactly one creation trigger), one
+/// `Trigger::UpstreamMutation` per source the rule below admits, always
+/// `Trigger::Backfill`, and `Trigger::ColumnAdded` iff `added_columns` is
+/// non-empty.
+///
+/// A source gets an `UpstreamMutation` cell iff it **explicitly** declares
+/// `mutation_profile: mutable_snapshot` (named in `explicitly_mutable` — the
+/// fail-closed admission default alone never synthesises one; an undeclared
+/// source is not silently treated as mutable) **or** it is `AppendOnly` and
+/// named in some [`ColumnGroup::mutation_sensitivity`] (a late append into an
+/// already-written region changes stored values, so that region is
+/// maintained, not left stale).
+///
+/// The source's clock (`SourceFacts::partition_col`) is deliberately not
+/// part of this rule: whether the resulting cell's scan can be clamped to
+/// the output partition axis is a downstream *admission* question
+/// (`project_source_link`'s locality proof), not a derivation-time gate. A
+/// clocked mutable source whose scan the locality proof cannot clamp
+/// surfaces the ordinary `MaintenanceScanUnbounded` refusal — escapable by
+/// `allow_full_scan` / `scan_bounds.on_violation: warn` — the same loud path
+/// an unclocked one already takes, never a silently-dropped cell.
+pub fn derive_triggers(
+    sources: &[SourceFacts],
+    column_groups: &[ColumnGroup],
+    explicitly_mutable: &HashSet<String>,
+    added_columns: &[String],
+) -> Vec<Trigger> {
+    let mut triggers = Vec::new();
+    let mut seen = BTreeSet::new();
+    for s in sources {
+        if !seen.insert(s.name.clone()) {
+            continue;
+        }
+        triggers.push(Trigger::NewData {
+            source: s.name.clone(),
+        });
+        let gets_mutation_cell = match s.mutation {
+            MutationProfile::MutableSnapshot => explicitly_mutable.contains(&s.name),
+            // A change feed can only arise from an explicit declaration —
+            // there is no fail-closed default it could be silently
+            // conflated with — so the declaration alone suffices, unlike
+            // `MutableSnapshot`'s `explicitly_mutable` gate.
+            MutationProfile::ChangeFeed => true,
+            MutationProfile::AppendOnly => column_groups
+                .iter()
+                .any(|g| g.mutation_sensitivity.contains(&s.name)),
+        };
+        if gets_mutation_cell {
+            triggers.push(Trigger::UpstreamMutation {
+                source: s.name.clone(),
+            });
+        }
+    }
+    triggers.push(Trigger::Backfill);
+    if !added_columns.is_empty() {
+        triggers.push(Trigger::ColumnAdded {
+            columns: added_columns.to_vec(),
+        });
+    }
+    triggers
+}
+
 /// Order-independent, case-insensitive key-set equality — the same
 /// convention `Grain::has_subset_key` and the key-temporal-locality route's
 /// `unique_key` comparison use.
@@ -115,17 +185,14 @@ fn same_key_set(a: &[String], b: &[String]) -> bool {
 /// clocked source's own partition column stands in for
 /// `SourceShape::has_clock` (`SourceFacts::partition_col`'s doc comment: "the
 /// source's partition column, when it is clocked"), and the plan-layer
-/// [`MutationProfile`] maps onto the analysis-layer one 1:1 (v0 has no
-/// `ChangeFeed` source in the plan layer yet — `sources.md`'s structured
-/// `mutation_profile` kind is consumed at the `MutationProfile::AppendOnly`/
-/// `MutableSnapshot` granularity here; a `change_feed` source is out of scope
-/// for this phase, per `incremental_models.md` §Known Divergences).
+/// [`MutationProfile`] maps onto the analysis-layer one 1:1.
 fn source_shape(facts: &SourceFacts) -> SourceShape {
     SourceShape {
         has_clock: facts.partition_col.is_some(),
         mutation_profile: Some(match facts.mutation {
             MutationProfile::AppendOnly => DeltaMutationProfile::AppendOnly,
             MutationProfile::MutableSnapshot => DeltaMutationProfile::Mutable,
+            MutationProfile::ChangeFeed => DeltaMutationProfile::ChangeFeed,
         }),
     }
 }
@@ -518,7 +585,7 @@ pub fn append_model_edge_cells(
             links: &links,
         };
         let (partition_local, scans) =
-            match project_source_link(Some(output_partition_col), &loc, &facts) {
+            match project_source_link(Some(output_partition_col), None, &loc, &facts) {
                 SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
                 SourceLink::Unlinked { why } => (
                     PartitionLocal::No {
@@ -710,6 +777,27 @@ pub struct ModelInputs<'a> {
     /// `column_add_proof: None` did (`docs/plans/
     /// 20260808-derived-maintenance-proofs.md` Phase 4).
     pub old_columns: Vec<ColumnDef>,
+    /// The model's previously-deployed source SQL text (world-fact, from
+    /// the deployed-schema snapshot's `model_sql`, supplied by the caller —
+    /// this module does no I/O of its own). `None` means "no known deployed
+    /// SQL", which derives no [`Refusal::SkeletonClauseChanged`] at all —
+    /// fail-closed, the same posture `old_columns`/`deployed_column_names`
+    /// take (`docs/specs/definition_deltas.md` §"Detection").
+    pub old_sql: Option<&'a str>,
+    /// The declared `timeseries.partition_column` of a `Grain::Key` model,
+    /// `None` for a `Grain::Partition` output or a keyed output with no
+    /// declared `timeseries:` block. Poses the footprint question
+    /// (`model_properties.md` §"Footprint reflection / bounded write
+    /// footprint") for a keyed-grain output against this axis; a bare
+    /// keyed output (`None` here) gets no footprint claim at all.
+    pub keyed_time_axis: Option<&'a str>,
+    /// The declared `timeseries.partition_column` recorded in the
+    /// deployed-schema snapshot at last deploy (world-fact, supplied by the
+    /// caller — this module does no I/O of its own). `None` means "no known
+    /// recorded address" (no snapshot, or one written before this field
+    /// existed), which derives no [`Refusal::PartitionColumnChanged`] at
+    /// all — fail-closed, the same posture `old_sql` takes.
+    pub old_partition_col: Option<&'a str>,
 }
 
 impl ModelInputs<'_> {
@@ -787,15 +875,20 @@ pub struct LocalityInputs<'a> {
 /// `ScanUnbounded` refusal honoring `allow_full_scan`) stays at each call
 /// site — this adapter is policy-free.
 ///
-/// For a **keyed-grain** output (`output_partition_col` is `None`), the
-/// locality question is not posed — there is no output partition axis to
-/// project a write onto — and the proof is not consulted. The pre-proof
-/// linking rule is kept verbatim as documented vacuous-locality residue
-/// (`model_properties.md` §Known Divergences: a locality-admitted keyed
-/// model's clamps still carry the assumed mirror into propagation): a
-/// nonzero-margin `Bounded` read links, a zero-margin one does not.
+/// For a **keyed-grain** output (`output_partition_col` is `None`) with a
+/// declared `keyed_time_axis`, the footprint question IS posed against that
+/// axis — `loc.footprints` must already be `reflect_footprint`'s verdicts
+/// against it (the caller's responsibility, exactly as for a
+/// partition-addressed output): a `Bounded` footprint constructs the clamp
+/// carrying the derived write footprint; `Unbounded`/`NotDerivable` refuses
+/// the link. With no declared `keyed_time_axis` at all, the pre-proof
+/// linking rule is kept verbatim (a nonzero-margin `Bounded` read links, a
+/// zero-margin one does not), but the resulting clamp carries no footprint
+/// claim (`write_footprint: None`) — there is no axis to have posed it
+/// against.
 pub fn project_source_link(
     output_partition_col: Option<&str>,
+    keyed_time_axis: Option<&str>,
     loc: &LocalityInputs<'_>,
     facts: &SourceFacts,
 ) -> SourceLink {
@@ -808,30 +901,65 @@ pub fn project_source_link(
         return SourceLink::Unclocked;
     };
     let Some(output_axis) = output_partition_col else {
-        // Keyed-grain residue policy (see doc comment above) — not the proof.
-        return match bounds.get(&facts.name) {
-            Some(BoundResult::Bounded { before, after, .. }) => {
-                if *before > Seconds::ZERO || *after > Seconds::ZERO {
-                    SourceLink::Clamp(ScanClamp {
+        let read = bounds.get(&facts.name);
+        return match keyed_time_axis {
+            Some(_axis) => {
+                let Some(BoundResult::Bounded { before, after, .. }) = read else {
+                    return SourceLink::Unlinked {
+                        why: "scan bound not derivable".to_string(),
+                    };
+                };
+                match footprints
+                    .get(&facts.name)
+                    .unwrap_or(&FootprintResult::NotDerivable)
+                {
+                    FootprintResult::Bounded {
+                        before: write_before,
+                        after: write_after,
+                        ..
+                    } => SourceLink::Clamp(ScanClamp {
                         source: facts.name.clone(),
                         column: col.clone(),
                         before: *before,
                         after: *after,
-                    })
-                } else {
-                    SourceLink::Unlinked {
-                        why: format!(
-                            "no predicate links '{col}' to the output partition axis — the \
-                             scan cannot be partition-pruned"
-                        ),
-                    }
+                        write_footprint: Some((*write_before, *write_after)),
+                    }),
+                    FootprintResult::Unbounded => SourceLink::Unlinked {
+                        why: "derived write footprint is unbounded against the declared time \
+                              axis — a stored trajectory column"
+                            .to_string(),
+                    },
+                    FootprintResult::NotDerivable => SourceLink::Unlinked {
+                        why: "write footprint not derivable against the declared time axis"
+                            .to_string(),
+                    },
                 }
             }
-            Some(BoundResult::Unbounded) => SourceLink::Unlinked {
-                why: "derived scan is unbounded".to_string(),
-            },
-            Some(BoundResult::NotDerivable) | None => SourceLink::Unlinked {
-                why: "scan bound not derivable".to_string(),
+            None => match read {
+                Some(BoundResult::Bounded { before, after, .. }) => {
+                    if *before > Seconds::ZERO || *after > Seconds::ZERO {
+                        SourceLink::Clamp(ScanClamp {
+                            source: facts.name.clone(),
+                            column: col.clone(),
+                            before: *before,
+                            after: *after,
+                            write_footprint: None,
+                        })
+                    } else {
+                        SourceLink::Unlinked {
+                            why: format!(
+                                "no predicate links '{col}' to the output partition axis — the \
+                                 scan cannot be partition-pruned"
+                            ),
+                        }
+                    }
+                }
+                Some(BoundResult::Unbounded) => SourceLink::Unlinked {
+                    why: "derived scan is unbounded".to_string(),
+                },
+                Some(BoundResult::NotDerivable) | None => SourceLink::Unlinked {
+                    why: "scan bound not derivable".to_string(),
+                },
             },
         };
     };
@@ -851,16 +979,25 @@ pub fn project_source_link(
         .unwrap_or(CrossAxisLink::Absent);
 
     match locality_verdict(read, footprint, Some(col), Some(output_axis), link) {
-        LocalityVerdict::Local => match read {
-            BoundResult::Bounded { before, after, .. } => SourceLink::Clamp(ScanClamp {
+        LocalityVerdict::Local => match (read, footprint) {
+            (
+                BoundResult::Bounded { before, after, .. },
+                FootprintResult::Bounded {
+                    before: write_before,
+                    after: write_after,
+                    ..
+                },
+            ) => SourceLink::Clamp(ScanClamp {
                 source: facts.name.clone(),
                 column: col.clone(),
                 before: *before,
                 after: *after,
+                write_footprint: Some((*write_before, *write_after)),
             }),
             // Unreachable: the proof only ever answers `Local` over a
-            // `Bounded` read; kept fail-closed rather than panicking.
-            BoundResult::Unbounded | BoundResult::NotDerivable => SourceLink::Unlinked {
+            // `Bounded` read AND a `Bounded` footprint; kept fail-closed
+            // rather than panicking.
+            _ => SourceLink::Unlinked {
                 why: "scan bound not derivable".to_string(),
             },
         },
@@ -910,6 +1047,14 @@ fn derive_maintenance_plan_impl(
     source_referential_integrity: &SourceReferentialIntegrity,
 ) -> MaintenancePlan {
     let mut plan = MaintenancePlan::default();
+    if let Some(reason) = skeleton_clause_changed(inputs) {
+        plan.refusals
+            .push(Refusal::SkeletonClauseChanged { reason });
+    }
+    if let Some((from, to)) = partition_column_changed(inputs) {
+        plan.refusals
+            .push(Refusal::PartitionColumnChanged { from, to });
+    }
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
     // The write-scope dual of `bounds` (`model_properties.md` §"Footprint
     // reflection / bounded write footprint"), derived once per model and
@@ -917,7 +1062,7 @@ fn derive_maintenance_plan_impl(
     // key-grain output has no partition axis to spread a write across, so
     // the footprint question is not posed (empty map — the keyed residue
     // policy in `project_source_link` links instead).
-    let footprints = match inputs.output_partition_col() {
+    let footprints = match inputs.output_partition_col().or(inputs.keyed_time_axis) {
         Some(axis) => reflect_footprint(inputs.sql, &inputs.bound_context(), Some(axis)),
         None => HashMap::new(),
     };
@@ -972,6 +1117,7 @@ fn derive_maintenance_plan_impl(
                 source,
                 &identity,
                 source_referential_integrity,
+                &covered_by_mutation,
                 &mut plan,
             ),
             Trigger::ColumnAdded { columns } => {
@@ -1155,6 +1301,7 @@ fn derive_new_data(
             let posture = match facts.mutation {
                 MutationProfile::AppendOnly => DeltaMutationProfile::AppendOnly,
                 MutationProfile::MutableSnapshot => DeltaMutationProfile::Mutable,
+                MutationProfile::ChangeFeed => DeltaMutationProfile::ChangeFeed,
             };
             let representative = fold
                 .add_columns
@@ -1178,12 +1325,31 @@ fn derive_new_data(
                 // `NoAdmissibleTechnique` refusal is still pushed, and the
                 // repair refusal is pushed alongside it naming the failing
                 // obligation — additive, not a replacement.
+                //
+                // A `ChangeFeed` source has no fingerprint-sidecar to diff
+                // (`repair::discovery_posture` has no `SidecarDiff` arm for
+                // it — the feed's delta shape isn't consumed yet,
+                // `incremental_models.md` §Known Divergences), so the repair
+                // family is refused here, loud and named, rather than
+                // attempted against a discovery posture that doesn't exist.
+                if facts.mutation == MutationProfile::ChangeFeed {
+                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                        trigger: format!("{trigger:?}"),
+                        why: format!(
+                            "fold over '{source}' fails the faithful-fold source-posture \
+                             condition: {reason}, and the repair family has no fingerprint-\
+                             sidecar discovery for a change_feed source",
+                        ),
+                    });
+                    return;
+                }
                 let delta = repair::delta_shape_for_source(inputs.sql, facts);
                 match repair::admit_per_group_recompute(
                     inputs.sql,
                     unique_key,
                     facts,
                     inputs.output_partition_col(),
+                    inputs.keyed_time_axis,
                     loc,
                     &delta,
                 ) {
@@ -1220,14 +1386,81 @@ fn derive_new_data(
                                 fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
                             ),
                         });
-                        plan.refusals.push(match refusal {
-                            repair::RepairRefusal::KeysNotDiscoverable { source, why } => {
-                                Refusal::RepairKeysNotDiscoverable { source, why }
-                            }
+                        let (repair_why, repair_refusal) = match refusal {
+                            repair::RepairRefusal::KeysNotDiscoverable { source, why } => (
+                                why.clone(),
+                                Refusal::RepairKeysNotDiscoverable { source, why },
+                            ),
                             repair::RepairRefusal::SliceUnbounded { source, why } => {
-                                Refusal::RepairSliceUnbounded { source, why }
+                                (why.clone(), Refusal::RepairSliceUnbounded { source, why })
                             }
-                        });
+                        };
+                        plan.refusals.push(repair_refusal);
+
+                        // `KeyedRetractableContribution`
+                        // (`incremental_shapes.md` §"Enrichment joins"): the
+                        // repair family just failed to cover this source's
+                        // retraction (the arm we're already in) — test
+                        // whether the failure is specifically a retractable
+                        // ENRICHMENT-JOIN contribution, composing the
+                        // already-derived join cardinality with each fed
+                        // fold column's combiner algebra
+                        // (`join_shape::join_contribution_monotone`), mirroring
+                        // `dimension_join_contribution`'s own ctx-building
+                        // (keyed on the join's resolved ALIAS, never the bare
+                        // source name — a join condition qualifies columns
+                        // by alias). Never fires on join spelling alone:
+                        // `join_alias_for_source` returning `None` (no join
+                        // against `source` at all) pushes nothing, matching
+                        // `dimension_join_contribution`'s "never on join
+                        // spelling alone" guarantee; an empty declared
+                        // `unique_key` leaves the `JoinContext` with no entry
+                        // for the alias, which `fan_out` already treats as
+                        // fail-closed `OneToMany` (never an optimistic
+                        // empty-key-set match).
+                        if let Some(alias) = join_shape::join_alias_for_source(inputs.sql, source) {
+                            let mut join_ctx = JoinContext::new();
+                            if !facts.unique_key.is_empty() {
+                                let key_cols: Vec<&str> =
+                                    facts.unique_key.iter().map(String::as_str).collect();
+                                join_ctx = join_ctx.with_composite_unique_key(&alias, &key_cols);
+                            }
+                            let mut retractable_columns = Vec::new();
+                            let mut contribution_reason: Option<String> = None;
+                            for (column, combiner) in &fold.add_columns {
+                                let column_sensitive_to_source =
+                                    inputs.column_groups.iter().any(|g| {
+                                        g.mutation_sensitivity.contains(source)
+                                            && g.columns.contains(column)
+                                    });
+                                if !column_sensitive_to_source {
+                                    continue;
+                                }
+                                let Some(cardinality) = join_shape::source_join_cardinality(
+                                    inputs.sql, source, &join_ctx,
+                                ) else {
+                                    continue;
+                                };
+                                let discriminants = combiner_discriminants(*combiner, false);
+                                if let ContributionVerdict::Refused(reason) =
+                                    join_contribution_monotone(cardinality, &discriminants)
+                                {
+                                    retractable_columns.push(column.clone());
+                                    contribution_reason.get_or_insert(reason);
+                                }
+                            }
+                            if !retractable_columns.is_empty() {
+                                plan.refusals.push(Refusal::KeyedRetractableContribution {
+                                    source: source.to_string(),
+                                    columns: retractable_columns,
+                                    why: format!(
+                                        "{}; the repair family also cannot admit a per-group \
+                                         recompute for the retraction: {repair_why}",
+                                        contribution_reason.unwrap_or_default()
+                                    ),
+                                });
+                            }
+                        }
                     }
                 }
                 return;
@@ -1368,6 +1601,7 @@ fn derive_mutation(
     source: &str,
     identity: &RowIdentityVerdict,
     source_referential_integrity: &SourceReferentialIntegrity,
+    covered_by_mutation: &BTreeSet<String>,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::UpstreamMutation {
@@ -1401,6 +1635,29 @@ fn derive_mutation(
     for group in inputs.column_groups.iter().filter(|g| {
         g.mutation_sensitivity.contains(source) || g.membership_sensitivity.contains(source)
     }) {
+        // A `Trigger::NewData { source }` repair cell (`Technique::
+        // PerGroupRecompute`, `incremental_models.md` §"The repair family")
+        // already recomputes this exact group's bounded, per-key-affected
+        // scope every run — including a value change to an already-created
+        // row, the SAME thing an `UpstreamMutation` cell would exist to
+        // catch. Deriving both would double-write the same group from the
+        // same source in the same run (phase 19,
+        // `docs/outcomes/20260815-definition-delta-migrate`: widening
+        // `UpstreamMutation` derivation to a clocked `MutableSnapshot`
+        // source newly makes this collision reachable — the repair family
+        // is only ever admitted for exactly the retracting-source shape
+        // this trigger also now covers). `triggers` always orders a
+        // source's `NewData` before its `UpstreamMutation`
+        // (`derive_triggers`), so the repair cell, if any, is already in
+        // `plan.cells` by the time this loop runs.
+        let already_repaired = plan.cells.iter().any(|c| {
+            c.group == group.name()
+                && c.technique == Technique::PerGroupRecompute
+                && matches!(&c.trigger, Trigger::NewData { source: s } if s == source)
+        });
+        if already_repaired {
+            continue;
+        }
         // Membership sensitivity (`docs/specs/incremental_models.md` §"The
         // plan matrix"): a group governed by a row-admission read of
         // `source` must be repaired by a technique that can create and
@@ -1409,8 +1666,12 @@ fn derive_mutation(
         // group whose sensitivity to `source` is *purely* value (never
         // membership) is eligible for the cheaper column-scoped merge.
         let membership_sensitive = group.membership_sensitivity.contains(source);
-        let (locality, scans) = match project_source_link(inputs.output_partition_col(), loc, facts)
-        {
+        let (locality, scans) = match project_source_link(
+            inputs.output_partition_col(),
+            inputs.keyed_time_axis,
+            loc,
+            facts,
+        ) {
             SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
             SourceLink::Unclocked => (
                 PartitionLocal::No {
@@ -1440,7 +1701,34 @@ fn derive_mutation(
             });
             continue;
         }
-        let (corner, technique) = if membership_sensitive {
+        // Group-merge-provenance guard (`incremental_models.md` §"The plan
+        // matrix", decided in success criterion 18's "Group-merge-provenance
+        // policy" open question): a group whose sensitivity spans TWO OR
+        // MORE mutation-capable inputs is repaired by region recompute,
+        // never a column-scoped merge — the conservative, always-correct
+        // default every other mutation-sensitivity rule here already takes.
+        // "Mutation-capable" means the source actually gets its own
+        // `UpstreamMutation` trigger (`covered_by_mutation`, read straight
+        // off `triggers` — the SAME predicate `derive_triggers` already
+        // computed, not a second guess): an append-only source with no
+        // value-sensitivity of its own, or one this model doesn't derive a
+        // mutation cell for, does not count toward the merge, matching
+        // `membership_sensitive`'s existing scoping to genuinely
+        // mutation-driven groups.
+        let mutation_capable_inputs = group
+            .mutation_sensitivity
+            .union(&group.membership_sensitivity)
+            .filter(|s| covered_by_mutation.contains(*s))
+            .count();
+        // A `ChangeFeed` source's cell is clamped to full-input
+        // re-derivation, the same forcing shape the merged-group guard
+        // above uses: no column-scoped merge or fold realisation exists
+        // for a posture whose delta shape is never read
+        // (`incremental_models.md` §Known Divergences).
+        let (corner, technique) = if facts.mutation == MutationProfile::ChangeFeed
+            || membership_sensitive
+            || mutation_capable_inputs >= 2
+        {
             (Corner::RecomputeRegion, Technique::DeleteInsert)
         } else {
             (Corner::ColumnMerge, Technique::ColumnScopedMerge)
@@ -1530,6 +1818,61 @@ pub fn diff_deployed_columns(
     Some((old_columns, added))
 }
 
+/// Prove (or refuse to prove) that `inputs.sql`'s skeleton clause — the
+/// FROM/JOIN tree, GROUP BY/DISTINCT, and the row-set/ordering/row-count
+/// post-processing clauses — is unchanged against `inputs.old_sql`, using
+/// the same clause-level factoring `smelt migrate` uses
+/// ([`crate::backbuild::diff::definition_diff`]). Returns `Some(reason)`
+/// when [`crate::backbuild::SkeletonDiff::Changed`] proves a clause
+/// difference — the `Refusal::SkeletonClauseChanged` this function's caller
+/// pushes. Returns `None` when there is no deployed SQL to compare
+/// (`inputs.old_sql` is `None`), when either version fails to parse as a
+/// plain `SELECT`, or when the diff proves the skeleton
+/// [`crate::backbuild::SkeletonDiff::Unchanged`] or only gained `LEFT
+/// JOIN`s (`AddedLeftJoins`, admissible — research §4's G0 class). A
+/// `DefinitionDiff::Opaque` diff (unparseable, or a changed `WITH`-prefix)
+/// is deliberately NOT treated as a skeleton change here — this check only
+/// ever *adds* a refusal on a positive proof, never on an inability to
+/// prove either way, matching every other `deployed_*`-gated derivation in
+/// this module.
+fn skeleton_clause_changed(inputs: &ModelInputs) -> Option<String> {
+    let old_sql = inputs.old_sql?;
+    let old_stripped = crate::types::Frontmatter::strip(old_sql);
+    let new_stripped = crate::types::Frontmatter::strip(inputs.sql);
+    let old_parse = smelt_parser::parse(old_stripped);
+    let new_parse = smelt_parser::parse(new_stripped);
+    let old_file = smelt_parser::File::cast(old_parse.syntax())?;
+    let new_file = smelt_parser::File::cast(new_parse.syntax())?;
+    match crate::backbuild::diff::definition_diff(&old_file, &new_file) {
+        crate::backbuild::DefinitionDiff::Comparable(diff) => match diff.skeleton {
+            crate::backbuild::SkeletonDiff::Changed { reason, .. } => Some(reason),
+            crate::backbuild::SkeletonDiff::Unchanged
+            | crate::backbuild::SkeletonDiff::AddedLeftJoins(_) => None,
+        },
+        crate::backbuild::DefinitionDiff::Opaque { .. } => None,
+    }
+}
+
+/// Prove (or refuse to prove) that `inputs`'s declared
+/// `timeseries.partition_column` is unchanged against `inputs.old_partition_
+/// col` — the recorded address from the deployed-schema snapshot. Returns
+/// `Some((from, to))` naming the recorded and current column when they
+/// differ (ASCII-case-insensitive compare), the `Refusal::
+/// PartitionColumnChanged` this function's caller pushes. Returns `None`
+/// when there is no recorded address (`inputs.old_partition_col` is `None`)
+/// or the output has no partition axis at all (a `Grain::Key` output) — a
+/// keyed model's identity is its `unique_key`, not a partition column, so
+/// there is no address to compare.
+fn partition_column_changed(inputs: &ModelInputs) -> Option<(String, String)> {
+    let old = inputs.old_partition_col?;
+    let current = inputs.output_partition_col()?;
+    if old.eq_ignore_ascii_case(current) {
+        None
+    } else {
+        Some((old.to_string(), current.to_string()))
+    }
+}
+
 /// Definition change: the model gained fields. Skeleton adds are grain
 /// changes and refuse (EX-39); payload adds land in the 2×2's left column by
 /// what they read (EX-36/37/40), instantiating their ledger entries at
@@ -1566,7 +1909,7 @@ fn derive_column_added(
     );
     for col in columns {
         if inputs.output.skeleton_columns.contains(col) {
-            plan.refusals.push(Refusal::SkeletonColumnAdded {
+            plan.refusals.push(Refusal::SkeletonChanged {
                 column: col.clone(),
             });
             return;
@@ -1577,7 +1920,7 @@ fn derive_column_added(
             .map(|(_, role)| *role)
         {
             if role.is_skeleton() {
-                plan.refusals.push(Refusal::SkeletonColumnAdded {
+                plan.refusals.push(Refusal::SkeletonChanged {
                     column: col.clone(),
                 });
                 return;
@@ -1633,7 +1976,7 @@ fn derive_column_added(
                 };
                 match classify_definition_change(&def, inputs.sql, &ctx) {
                     Ok(DefinitionChangeClass::SkeletonAdd { .. }) => {
-                        plan.refusals.push(Refusal::SkeletonColumnAdded {
+                        plan.refusals.push(Refusal::SkeletonChanged {
                             column: (*c).clone(),
                         });
                         return;
@@ -1672,25 +2015,28 @@ fn derive_column_added(
                     });
                 }
                 (Some(DefinitionChangeClass::UpstreamRederive), None) => {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why: "re-derives from upstream, but this group's mutation-sensitivity \
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: added_in_group.iter().map(|c| (*c).clone()).collect(),
+                            why: "re-derives from upstream, but this group's mutation-sensitivity \
                               names no source to scan — a column-scoped merge cannot be \
                               constructed"
-                            .to_string(),
-                    });
+                                .to_string(),
+                        });
                 }
                 (_, Some(why)) => {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why,
-                    });
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: added_in_group.iter().map(|c| (*c).clone()).collect(),
+                            why,
+                        });
                 }
                 (_, None) => {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why: "in-place update not proven additive-only".to_string(),
-                    });
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: added_in_group.iter().map(|c| (*c).clone()).collect(),
+                            why: "in-place update not proven additive-only".to_string(),
+                        });
                 }
             }
             continue;
@@ -1712,17 +2058,28 @@ fn derive_column_added(
                 refused = true;
                 break;
             };
-            match project_source_link(inputs.output_partition_col(), loc, facts) {
+            match project_source_link(
+                inputs.output_partition_col(),
+                inputs.keyed_time_axis,
+                loc,
+                facts,
+            ) {
                 SourceLink::Clamp(clamp) => scans.push(clamp),
                 SourceLink::Unclocked | SourceLink::Unlinked { .. } if !facts.allow_full_scan => {
-                    plan.refusals.push(Refusal::ScanUnbounded {
-                        source: facts.name.clone(),
-                        why: format!(
-                            "backfill of {} reads '{}' with no partition bound",
-                            group.name(),
-                            facts.name
-                        ),
-                    });
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: group
+                                .columns
+                                .iter()
+                                .filter(|c| columns.contains(c))
+                                .cloned()
+                                .collect(),
+                            why: format!(
+                                "backfill of {} reads '{}' with no partition bound",
+                                group.name(),
+                                facts.name
+                            ),
+                        });
                     refused = true;
                     break;
                 }
@@ -1804,7 +2161,12 @@ fn read_locality(
     let mut scans = Vec::new();
     let mut verdict = PartitionLocal::Yes;
     for s in &inputs.sources {
-        match project_source_link(inputs.output_partition_col(), loc, s) {
+        match project_source_link(
+            inputs.output_partition_col(),
+            inputs.keyed_time_axis,
+            loc,
+            s,
+        ) {
             SourceLink::Clamp(clamp) => scans.push(clamp),
             SourceLink::Unclocked => {
                 if matches!(verdict, PartitionLocal::Yes) {
@@ -1833,4 +2195,108 @@ pub fn group_columns(groups: &[ColumnGroup]) -> BTreeSet<String> {
         .iter()
         .flat_map(|g| g.columns.iter().cloned())
         .collect()
+}
+
+#[cfg(test)]
+mod source_shape_tests {
+    use super::*;
+
+    /// Phase 28c: `source_shape` maps the plan-layer `MutationProfile::
+    /// ChangeFeed` onto the analysis-layer `DeltaMutationProfile::
+    /// ChangeFeed` 1:1, the same mapping `AppendOnly`/`MutableSnapshot`
+    /// already get — closing the "no `ChangeFeed` in the plan layer" gap
+    /// this function's own doc comment used to record.
+    #[test]
+    fn change_feed_source_shape_maps_to_change_feed_delta_profile() {
+        let facts = SourceFacts {
+            name: "feed".to_string(),
+            mutation: MutationProfile::ChangeFeed,
+            partition_col: None,
+            unique_key: vec![],
+            allow_full_scan: false,
+        };
+        let shape = source_shape(&facts);
+        assert_eq!(
+            shape.mutation_profile,
+            Some(DeltaMutationProfile::ChangeFeed)
+        );
+    }
+}
+
+#[cfg(test)]
+mod partition_column_changed_tests {
+    use super::*;
+
+    fn partition_inputs<'a>(
+        old_partition_col: Option<&'a str>,
+        partition_col: &str,
+    ) -> ModelInputs<'a> {
+        ModelInputs {
+            sql: "SELECT 1",
+            output: OutputSpec {
+                table: "t".to_string(),
+                grain: Grain::Partition {
+                    partition_col: partition_col.to_string(),
+                },
+                skeleton_columns: BTreeSet::new(),
+            },
+            sources: Vec::new(),
+            column_groups: Vec::new(),
+            fold: None,
+            old_columns: Vec::new(),
+            old_sql: None,
+            keyed_time_axis: None,
+            old_partition_col,
+        }
+    }
+
+    /// A `Grain::Partition` output whose declared `partition_column` differs
+    /// from the deployed-schema snapshot's recorded address derives a
+    /// `Refusal::PartitionColumnChanged` naming both columns.
+    #[test]
+    fn partition_column_rename_derives_refusal() {
+        let inputs = partition_inputs(Some("event_date"), "event_day");
+        let plan = derive_maintenance_plan(&inputs, &[]);
+        assert!(
+            plan.refusals.iter().any(|r| matches!(
+                r,
+                Refusal::PartitionColumnChanged { from, to }
+                    if from == "event_date" && to == "event_day"
+            )),
+            "expected PartitionColumnChanged, got {:?}",
+            plan.refusals
+        );
+    }
+
+    /// A case-insensitively-equal recorded/current column derives no
+    /// refusal — a rename is a different address, not a different spelling.
+    #[test]
+    fn unchanged_partition_column_derives_no_refusal() {
+        let inputs = partition_inputs(Some("Event_Date"), "event_date");
+        let plan = derive_maintenance_plan(&inputs, &[]);
+        assert!(
+            !plan
+                .refusals
+                .iter()
+                .any(|r| matches!(r, Refusal::PartitionColumnChanged { .. })),
+            "expected no PartitionColumnChanged, got {:?}",
+            plan.refusals
+        );
+    }
+
+    /// No recorded address (no snapshot, or one written before this field
+    /// existed) derives no refusal — fail-closed, never a guessed rename.
+    #[test]
+    fn absent_old_partition_column_fails_closed() {
+        let inputs = partition_inputs(None, "event_date");
+        let plan = derive_maintenance_plan(&inputs, &[]);
+        assert!(
+            !plan
+                .refusals
+                .iter()
+                .any(|r| matches!(r, Refusal::PartitionColumnChanged { .. })),
+            "expected no PartitionColumnChanged, got {:?}",
+            plan.refusals
+        );
+    }
 }

@@ -122,7 +122,8 @@ pub async fn post_run_plan(
     Json(request): Json<RunPlanRequest>,
 ) -> Result<Json<RunPlanResponse>, impl IntoResponse> {
     let graph = state.graph.lock().await;
-    match build::build_run_plan(&graph, &state.config, &request) {
+    let db = state.db.lock().await;
+    match build::build_run_plan(&graph, &state.config, &db, &request) {
         Ok(plan) => Ok(Json(plan)),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }

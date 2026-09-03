@@ -4,6 +4,7 @@ use crate::landed_deltas::LandedDeltaStore;
 use crate::reconciliation::ReconciliationStore;
 use crate::schema_tracking::DeployedSchema;
 use crate::snapshot_store::SnapshotStore;
+use crate::source_mutations::SourceMutationStore;
 use crate::source_postures::SourcePostureStore;
 use crate::RunManifest;
 use anyhow::{Context, Result};
@@ -162,6 +163,14 @@ impl FileStore {
 
     fn source_postures_path(&self) -> PathBuf {
         self.target_dir.join("source_postures.json")
+    }
+
+    fn source_mutations_path(&self) -> PathBuf {
+        self.target_dir.join("source_mutations.json")
+    }
+
+    fn migration_approvals_path(&self) -> PathBuf {
+        self.target_dir.join("migration_approvals.json")
     }
 
     fn frozen_band_baselines_path(&self) -> PathBuf {
@@ -535,6 +544,66 @@ impl FileStore {
             .with_context(|| format!("Failed to write source-posture store: {:?}", path))
     }
 
+    // --- Source mutation store ---
+
+    /// Load the per-source mutation-fingerprint baseline store from disk
+    /// (`docs/specs/incremental_models.md` §"When a mutation cell
+    /// dispatches"). Returns default if the file doesn't exist — a source
+    /// with no entry has never had a dispatched `UpstreamMutation` cell
+    /// record a baseline, so its cell unconditionally dispatches.
+    pub fn load_source_mutations(&self) -> Result<SourceMutationStore> {
+        self.check_version()?;
+        let path = self.source_mutations_path();
+        if !path.exists() {
+            return Ok(SourceMutationStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read source-mutation store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse source-mutation store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the per-source mutation-fingerprint baseline store to disk.
+    pub fn save_source_mutations(&self, store: &SourceMutationStore) -> Result<()> {
+        self.init()?;
+        let path = self.source_mutations_path();
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write source-mutation store: {:?}", path))
+    }
+
+    // --- Migration approval store ---
+
+    /// Load the per-model migration-plan approval store from disk
+    /// (`docs/specs/definition_deltas.md` §"`smelt migrate`"). Returns
+    /// default if the file doesn't exist — a model with no entry has never
+    /// had a migration plan derived and printed for approval.
+    pub fn load_migration_approvals(
+        &self,
+    ) -> Result<crate::migration_approvals::MigrationApprovalStore> {
+        self.check_version()?;
+        let path = self.migration_approvals_path();
+        if !path.exists() {
+            return Ok(crate::migration_approvals::MigrationApprovalStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read migration-approval store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse migration-approval store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the per-model migration-plan approval store to disk.
+    pub fn save_migration_approvals(
+        &self,
+        store: &crate::migration_approvals::MigrationApprovalStore,
+    ) -> Result<()> {
+        self.init()?;
+        let path = self.migration_approvals_path();
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write migration-approval store: {:?}", path))
+    }
+
     // --- Contract-lattice frozen-band baseline store ---
 
     /// Load the per-source frozen-band row-count baseline store from disk
@@ -694,6 +763,7 @@ mod tests {
                 retry_count: 0,
                 probes: Vec::new(),
                 subsumed: None,
+                deferred_cells: Vec::new(),
             },
         );
         RunManifest {
@@ -793,6 +863,35 @@ mod tests {
     }
 
     #[test]
+    fn source_mutation_store_round_trips() {
+        use crate::source_mutations::{SourceMutationBaseline, SourceMutationStore};
+
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev");
+
+        // Unrecorded source has no baseline.
+        let loaded = store.load_source_mutations().unwrap();
+        assert!(loaded.get("sources.events").is_none());
+
+        let mut mutations = SourceMutationStore::default();
+        mutations.record(
+            "sources.events",
+            SourceMutationBaseline {
+                recorded_count: 42,
+                recorded_fingerprint: "abc123".to_string(),
+                digest_columns: vec!["event_id".to_string()],
+            },
+        );
+        store.save_source_mutations(&mutations).unwrap();
+
+        let loaded = store.load_source_mutations().unwrap();
+        let baseline = loaded.get("sources.events").unwrap();
+        assert_eq!(baseline.recorded_count, 42);
+        assert_eq!(baseline.recorded_fingerprint, "abc123");
+        assert_eq!(baseline.digest_columns, vec!["event_id".to_string()]);
+    }
+
+    #[test]
     fn test_empty_store() {
         let dir = TempDir::new().unwrap();
         let store = FileStore::new(dir.path(), "dev");
@@ -814,6 +913,8 @@ mod tests {
             version: 1,
             deployed_at: Utc::now(),
             model_hash: "sha256:abc".to_string(),
+            model_sql: None,
+            partition_column: None,
             columns: vec![
                 DeployedColumn {
                     name: "order_date".to_string(),
@@ -857,6 +958,8 @@ mod tests {
             version: 1,
             deployed_at: Utc::now(),
             model_hash: "sha256:abc".to_string(),
+            model_sql: None,
+            partition_column: None,
             columns: vec![],
         };
         store.save_schema(&schema).unwrap();
@@ -1193,6 +1296,7 @@ mod tests {
                 retry_count: 0,
                 probes: Vec::new(),
                 subsumed: None,
+                deferred_cells: Vec::new(),
             },
         );
         models.insert(
@@ -1210,6 +1314,7 @@ mod tests {
                 retry_count: 0,
                 probes: Vec::new(),
                 subsumed: None,
+                deferred_cells: Vec::new(),
             },
         );
         models.insert(
@@ -1227,6 +1332,7 @@ mod tests {
                 retry_count: 0,
                 probes: Vec::new(),
                 subsumed: None,
+                deferred_cells: Vec::new(),
             },
         );
 

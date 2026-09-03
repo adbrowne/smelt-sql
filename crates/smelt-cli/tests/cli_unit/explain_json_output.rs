@@ -141,6 +141,7 @@ fn emitted_model_carries_origin_in_real_explain_pipeline() {
         &config,
         &smelt_runtime::FnBodyMap::new(),
         &origins,
+        None,
     )
     .expect("build explain output");
     let json = serde_json::to_string_pretty(&output).expect("serialize ExplainOutput");

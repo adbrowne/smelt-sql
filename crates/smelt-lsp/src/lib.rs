@@ -32,6 +32,7 @@ pub use hover::{
     hover_text_for_model_def_literal_open_brace,
     hover_text_for_model_def_name_field_value,
     hover_text_for_model_def_optional_field_value,
+    hover_text_for_source_clamp,
     passing_body_aggregate_labels,
     passing_body_completion_columns,
     render_expansion_frames,

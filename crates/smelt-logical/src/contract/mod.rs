@@ -23,11 +23,20 @@
 //!   `deferral::subsumption` single-own the licensing decisions;
 //!   `smelt-runtime`'s scheduler is a thin builder over them
 //!   (`docs/outcomes/20260809-contract-lattice-v1/outcome.md` phase 5).
+//! - `retain_departed`: the complete triple has landed — posture/
+//!   tombstone-column validation, the departed-key quotient oracle, and the
+//!   reconcile-anti-join probe emitter live in the `retain_departed`
+//!   module; the runtime write-path seam (`retain_departed::
+//!   reconcile_disposition`) resolves a declaration to the default point's
+//!   anti-join delete leg (`smelt-logical`'s `emit_departed_key_delete`) or
+//!   this point's probe dispatch, both driven from `smelt-runtime`'s
+//!   `execute_snapshot_reconcile`.
 
 pub mod deferral;
 pub mod frozen_horizon;
+pub mod retain_departed;
 
-use smelt_core::config::{ContractCellConfig, ContractConfig, DataLatency};
+use smelt_core::config::{ContractCellConfig, ContractConfig, DataLatency, RetainDeparted};
 
 /// Which declaration a cell's effective `deferral` window came from — the
 /// narrower-wins ladder [`effective_contract`] resolves, mirroring
@@ -58,12 +67,15 @@ pub struct EffectiveDeferral {
 pub struct EffectiveContract {
     pub frozen_horizon: Option<DataLatency>,
     pub deferral: Option<EffectiveDeferral>,
+    /// `retain_departed` is model-level only, like `frozen_horizon` — it
+    /// governs the model's own reconcile write, never a single cell's.
+    pub retain_departed: Option<RetainDeparted>,
 }
 
 impl EffectiveContract {
     /// True when neither relaxation applies — the default point.
     pub fn is_default(&self) -> bool {
-        self.frozen_horizon.is_none() && self.deferral.is_none()
+        self.frozen_horizon.is_none() && self.deferral.is_none() && self.retain_departed.is_none()
     }
 
     /// A one-line description used by both the text and JSON renderings
@@ -81,6 +93,14 @@ impl EffectiveContract {
             match d.origin {
                 DeferralOrigin::Model => parts.push(format!("deferral {}", d.window.display)),
                 DeferralOrigin::Cell => parts.push(format!("deferral {} (cell)", d.window.display)),
+            }
+        }
+        if let Some(r) = &self.retain_departed {
+            match r {
+                RetainDeparted::Bool(_) => parts.push("retain_departed".to_string()),
+                RetainDeparted::Tombstone { tombstone } => {
+                    parts.push(format!("retain_departed (tombstone: {tombstone})"))
+                }
             }
         }
         parts.join(", ")
@@ -131,6 +151,7 @@ pub fn effective_contract(
     EffectiveContract {
         frozen_horizon: cfg.frozen_horizon.clone(),
         deferral,
+        retain_departed: cfg.retain_departed.clone(),
     }
 }
 
@@ -151,6 +172,7 @@ mod effective_contract_tests {
         let cfg = ContractConfig {
             frozen_horizon: DataLatency::parse("90 days"),
             deferral: None,
+            retain_departed: None,
             cells: vec![],
         };
         let effective = effective_contract(Some(&cfg), "backfill", &[]);
@@ -168,6 +190,7 @@ mod effective_contract_tests {
         let cfg = ContractConfig {
             frozen_horizon: None,
             deferral: DataLatency::parse("6 hours"),
+            retain_departed: None,
             cells: vec![ContractCellConfig {
                 columns: vec!["amount".to_string()],
                 on: "sources.raw.events".to_string(),
@@ -190,6 +213,7 @@ mod effective_contract_tests {
         let cfg = ContractConfig {
             frozen_horizon: None,
             deferral: DataLatency::parse("6 hours"),
+            retain_departed: None,
             cells: vec![ContractCellConfig {
                 columns: vec!["other_column".to_string()],
                 on: "sources.raw.events".to_string(),
@@ -208,6 +232,33 @@ mod effective_contract_tests {
         assert_eq!(
             different_trigger.deferral.map(|d| d.origin),
             Some(DeferralOrigin::Model)
+        );
+    }
+
+    #[test]
+    fn render_label_includes_retain_departed() {
+        let bare = ContractConfig {
+            frozen_horizon: None,
+            deferral: None,
+            retain_departed: Some(RetainDeparted::Bool(true)),
+            cells: vec![],
+        };
+        let effective = effective_contract(Some(&bare), "backfill", &[]);
+        assert_eq!(effective.retain_departed, Some(RetainDeparted::Bool(true)));
+        assert_eq!(effective.render_label(), "retain_departed");
+
+        let tombstoned = ContractConfig {
+            frozen_horizon: None,
+            deferral: None,
+            retain_departed: Some(RetainDeparted::Tombstone {
+                tombstone: "is_departed".to_string(),
+            }),
+            cells: vec![],
+        };
+        let effective = effective_contract(Some(&tombstoned), "backfill", &[]);
+        assert_eq!(
+            effective.render_label(),
+            "retain_departed (tombstone: is_departed)"
         );
     }
 }

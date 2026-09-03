@@ -874,3 +874,70 @@ fn registry_matches_guide_markers() {
         "registry() ids and the guide's marked example ids must match exactly"
     );
 }
+
+/// Phase 8 (`docs/outcomes/20260815-definition-delta-migrate/outcome.md`)
+/// rewrote the guide around the shipped `smelt migrate` verb; the page must
+/// no longer claim the verb doesn't exist.
+#[test]
+fn page_has_no_stale_availability_wording() {
+    let doc = fs::read_to_string(GUIDE_PATH).unwrap_or_else(|e| panic!("read {GUIDE_PATH}: {e}"));
+
+    let stale_phrases = [
+        "no CLI command for this yet",
+        "what remains is the surface on top",
+    ];
+    for phrase in stale_phrases {
+        assert!(
+            !doc.contains(phrase),
+            "{GUIDE_PATH} still contains stale availability wording: {phrase:?}"
+        );
+    }
+    assert!(
+        !doc.contains("!!! warning \"Availability\""),
+        "{GUIDE_PATH} still contains the pre-CLI Availability warning admonition"
+    );
+}
+
+/// The rewritten guide must actually document the shipped verb's surface —
+/// not just stop claiming it's absent.
+#[test]
+fn page_documents_the_migrate_verb() {
+    let doc = fs::read_to_string(GUIDE_PATH).unwrap_or_else(|e| panic!("read {GUIDE_PATH}: {e}"));
+
+    for needle in [
+        "smelt migrate",
+        "smelt migrate --apply",
+        "--json",
+        "exit code",
+        "../reference/cli.md",
+    ] {
+        assert!(
+            doc.contains(needle),
+            "{GUIDE_PATH} is missing expected content: {needle:?}"
+        );
+    }
+    assert!(
+        doc.contains('3'),
+        "{GUIDE_PATH} should mention the pending-approval exit code 3"
+    );
+}
+
+/// The guide's verdict tour must cover every verdict label
+/// `definition_deltas.md` specifies, so a reader sees the full surface
+/// `smelt migrate` prints, not just the techniques.
+#[test]
+fn page_names_every_verdict() {
+    let doc = fs::read_to_string(GUIDE_PATH).unwrap_or_else(|e| panic!("read {GUIDE_PATH}: {e}"));
+
+    for verdict in [
+        "eclipsed",
+        "backfill in place",
+        "rederive",
+        "skeleton change",
+    ] {
+        assert!(
+            doc.to_lowercase().contains(verdict),
+            "{GUIDE_PATH} is missing verdict label {verdict:?}"
+        );
+    }
+}

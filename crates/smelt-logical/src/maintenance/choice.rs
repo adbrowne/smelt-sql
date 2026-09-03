@@ -359,19 +359,31 @@ pub fn resolve_cell_choice(
                     // (`repair::admit_per_group_recompute`'s bounded
                     // per-group slice), which is exactly diff_patch's own
                     // completeness argument for that slice — so the delete
-                    // leg is sound. Every other recompute (region
-                    // `DeleteInsert`) has no such premise threaded through
-                    // this admission layer yet, so its delete leg stays
-                    // omitted with a stated reason rather than silently
-                    // assumed complete.
-                    let delete_leg = if recompute == Technique::PerGroupRecompute {
+                    // leg is sound. The region `DeleteInsert` default's own
+                    // completeness argument is its write-window clamp
+                    // itself: the candidate a region recompute writes IS
+                    // the model's entire admitted state over the clamped
+                    // write range, so a stored row inside that range absent
+                    // from the candidate really has departed, never merely
+                    // unscanned — the same premise `resolve_repair_write`'s
+                    // caller threads for the membership-recompute lowering
+                    // (`docs/outcomes/20260815-definition-delta-migrate/
+                    // phases/12-plan.md`). Every OTHER recompute has no such
+                    // premise threaded through this admission layer yet, so
+                    // its delete leg stays omitted with a stated reason
+                    // rather than silently assumed complete.
+                    let delete_leg = if matches!(
+                        recompute,
+                        Technique::PerGroupRecompute | Technique::DeleteInsert
+                    ) {
                         diff_patch::DeleteLeg::Complete
                     } else {
                         diff_patch::DeleteLeg::Omitted {
                             why: "slice-completeness proof is not yet threaded through \
                                   resolve_cell_choice for this recompute technique — only \
-                                  PerGroupRecompute's own key-temporal-locality premise \
-                                  (already proven at admission) discharges it here"
+                                  PerGroupRecompute's key-temporal-locality premise and the \
+                                  region DeleteInsert default's write-window clamp (both \
+                                  already proven at admission) discharge it here"
                                 .to_string(),
                         }
                     };
@@ -585,6 +597,75 @@ pub fn resolve_write_suppression(
     }
 }
 
+/// Resolve whether a **keyless** (`RowIdentity::WholeRow`) region's
+/// staged-candidate write may be suppressed (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md`) — the whole-row
+/// counterpart of [`resolve_write_suppression`], which refuses outright
+/// whenever the row identity is `WholeRow`. Unlike the keyed proof, which
+/// only needs a cell's own mutation-sensitive column group to be comparable
+/// (the diff join addresses rows by key, so only the compared group's values
+/// matter), a keyless diff is a whole-row `EXCEPT ALL` — every selected
+/// column participates in row equality, so `output_columns` here is the
+/// model's full payload column set, not one cell's own group.
+///
+/// Fail-closed, mirroring [`resolve_write_suppression`]'s own posture:
+/// - A proven `RowIdentity::Key` never resolves here — that is the keyed
+///   mechanism's proof (`resolve_write_suppression`), never this one's.
+/// - An empty `output_columns` has nothing to compare and refuses.
+/// - A column absent from `comparability` is treated exactly like an
+///   explicit `Incomparable` verdict — absence of a proof is never trusted
+///   as a pass.
+pub fn resolve_keyless_staged_suppression(
+    output_columns: &[String],
+    comparability: &[ColumnComparability],
+    row_identity: &RowIdentityVerdict,
+) -> WriteSuppression {
+    if !matches!(row_identity.identity, RowIdentity::WholeRow) {
+        return WriteSuppression::Unconditional {
+            why: "a proven row identity (P2 verdict is Key) routes through the keyed \
+                  staged-candidate mechanism, never the keyless whole-row one"
+                .to_string(),
+        };
+    }
+
+    if output_columns.is_empty() {
+        return WriteSuppression::Unconditional {
+            why: "the model has no payload output columns to compare".to_string(),
+        };
+    }
+
+    let incomparable: Vec<String> = output_columns
+        .iter()
+        .filter(|col| {
+            let verdict = comparability
+                .iter()
+                .find(|c| c.output.eq_ignore_ascii_case(col));
+            match verdict {
+                Some(c) => c.comparability == Comparability::Incomparable,
+                // Fail-closed: no proof at all for this column is never
+                // trusted as a pass.
+                None => true,
+            }
+        })
+        .cloned()
+        .collect();
+
+    if incomparable.is_empty() {
+        WriteSuppression::Suppressed {
+            compared_columns: output_columns.to_vec(),
+        }
+    } else {
+        WriteSuppression::Unconditional {
+            why: format!(
+                "column(s) {} are not proven comparable across runs (P3) — the keyless \
+                 conditional write refuses fail-closed and falls back to the unconditional \
+                 region rewrite",
+                incomparable.join(", ")
+            ),
+        }
+    }
+}
+
 /// Why a suppressible cell's [`WriteSuppression`] verdict is or isn't
 /// **preferred** once admitted — the conditional-variant dimension the
 /// override ladder ranks alongside family choice
@@ -782,6 +863,107 @@ pub fn resolve_write_variant(
     })
 }
 
+/// Fold the write-suppression proof and its variant resolution into one call
+/// — `model_property_vector(sql, ...).comparability` →
+/// [`resolve_write_suppression`] → [`resolve_write_variant`] — the exact
+/// sequence `maintenance_driver.rs`'s live `ColumnScopedMerge`/`KeyedFold`
+/// resolvers each already run inline, and the one a preview builder
+/// (`smelt explain --show-sql`) must run identically so a printed statement
+/// can never drift from what a live run would execute
+/// (`incremental_models.md` §"Statement emission (single owner)"). Drops the
+/// `VariantReason` a caller that only wants the resolved SQL shape has no use
+/// for — a caller that also wants to explain *why* (`smelt explain`'s report
+/// line) still calls [`resolve_write_suppression`]/[`resolve_write_variant`]
+/// directly, as `smelt-cli/src/explain.rs` already does.
+pub fn resolve_cell_write_suppression(
+    sql: &str,
+    group_columns: &[String],
+    cell: &PlanCell,
+    overrides: &EffectiveOverride,
+) -> Result<WriteSuppression, ChoiceRefusal> {
+    let comparability = crate::analysis::walk::model_property_vector(
+        sql,
+        &crate::analysis::join_shape::JoinContext::new(),
+    )
+    .map(|v| v.comparability)
+    .unwrap_or_default();
+    let raw_suppression =
+        resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
+    resolve_write_variant(
+        &raw_suppression,
+        &cell.trigger,
+        cell.ledger_catch_up,
+        overrides,
+    )
+    .map(|(suppression, _reason)| suppression)
+}
+
+/// Whether a region `DeleteInsert` recompute may realise the change-
+/// suppressed staged write (`emit::emit_diff_patch`, `slice_predicate =
+/// region.predicate(...)`, `DeleteLeg::Complete`) instead of unconditionally
+/// rewriting its whole window — the region family's own conditional
+/// variant, mirroring [`WriteSuppression`] for the column-scoped `MERGE`
+/// family (`docs/specs/model_transforms.md` §"Change-suppressed MERGE and
+/// the staged-candidate conditional DELETE+INSERT"). `key` carries the
+/// proven row identity `emit_diff_patch`'s diff join addresses rows by —
+/// `WriteSuppression` has no use for it (a `MERGE`'s `unique_key` already
+/// comes from elsewhere), but the staged-candidate emitter needs it
+/// threaded through explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionWrite {
+    /// The plain unconditional region rewrite — today's byte-identical
+    /// `emit::emit_delete_insert` widened scan.
+    Unconditional { why: String },
+    /// The change-suppressed staged write is admitted and preferred: a
+    /// proven row identity plus a fully comparable column group license
+    /// `emit::emit_diff_patch` over the region's own slice predicate.
+    Suppressed {
+        key: Vec<String>,
+        compared_columns: Vec<String>,
+    },
+}
+
+/// Resolve a region `DeleteInsert` recompute's write variant — composed
+/// entirely from [`resolve_write_suppression`] (the same P2/P3 proof the
+/// column-scoped `MERGE` family already reuses) and [`resolve_write_variant`]
+/// (the same first-build/steady-state posture and override ladder), never a
+/// second proof. `row_identity`'s `RowIdentity::Key` is threaded into the
+/// `Suppressed` verdict for [`emit::emit_diff_patch`]'s diff-join key —
+/// `resolve_write_suppression` already refuses outright (`Unconditional`)
+/// whenever `row_identity` is `WholeRow`, so a `Suppressed` result here is
+/// only ever reached with a proven key.
+pub fn resolve_region_write_variant(
+    group_columns: &[String],
+    comparability: &[ColumnComparability],
+    row_identity: &RowIdentityVerdict,
+    trigger: &Trigger,
+    ledger_catch_up: bool,
+    overrides: &EffectiveOverride,
+) -> Result<RegionWrite, ChoiceRefusal> {
+    let suppression = resolve_write_suppression(group_columns, comparability, row_identity);
+    let (resolved, _reason) =
+        resolve_write_variant(&suppression, trigger, ledger_catch_up, overrides)?;
+    Ok(match resolved {
+        WriteSuppression::Unconditional { why } => RegionWrite::Unconditional { why },
+        WriteSuppression::Suppressed { compared_columns } => {
+            let key = match &row_identity.identity {
+                RowIdentity::Key(key) => key.clone(),
+                RowIdentity::WholeRow => {
+                    unreachable!(
+                        "resolve_write_suppression refuses (Unconditional) whenever \
+                         row_identity is WholeRow — a Suppressed verdict is only ever \
+                         reached with a proven key"
+                    )
+                }
+            };
+            RegionWrite::Suppressed {
+                key,
+                compared_columns,
+            }
+        }
+    })
+}
+
 /// Which physical write mechanism realizes a keyed-fold cell's conditional
 /// write (T1/T2, `docs/plans/20260715-composed-axes-conditional-
 /// maintenance.md` Phase C5): the ordinary keyed `MERGE`
@@ -826,12 +1008,86 @@ pub enum KeyedWriteMechanism {
 /// recompute, [`ChosenTechnique::RegionRecompute`]), never invent a
 /// merge-less unconditional MERGE substitute.
 ///
-/// This does not yet consult a `write:` pin (the open write-pattern
-/// registry and `maintenance.cells[].write` — tracked by a later phase);
-/// today it always prefers `MERGE` when the backend has it, matching
-/// "never a silent substitution" — the staged-candidate mechanism is
-/// reachable *only* through a genuine capability gap, not a preference.
+/// Consults an optional `write:` pin (`incremental_models.md` §"Per-cell
+/// write addressing" → "User pins"): within the `KeyedFold` technique
+/// family, `keyed`/`keyed_conditional` and `staged_candidate` all select the
+/// same *technique* but pin different **mechanisms**. `keyed`/
+/// `keyed_conditional` pin the `MERGE` mechanism — refusing
+/// (`ChoiceRefusal`) rather than silently falling back to the
+/// staged-candidate shape when the backend can't run `MERGE` (a fail-closed
+/// second line of defence behind the open registry's own
+/// `WriteCapability::Merge` check, `resolve_write_pin`). `staged_candidate`
+/// pins the merge-less staged conditional `DELETE`+`INSERT` **even on a
+/// `MERGE`-capable backend** — an explicit pin is not a downgrade to be
+/// second-guessed — and refuses when `suppression` is `Unconditional`: the
+/// staged-candidate emitter has no unconditional shape, so there is nothing
+/// to fall back to except a silent substitution, which a pin must never
+/// produce. A pin naming any other pattern (e.g. `region`) is outside this
+/// function's family — [`resolve_cell_choice`] itself already resolved (or
+/// refused) that case, so this function does not second-guess it and just
+/// applies the unpinned default below.
+///
+/// Absent a pin (or given one outside the `KeyedFold` family),
+/// `Ok(None)`/`Ok(Some(..))` matches the unpinned default: `MERGE` is
+/// preferred whenever the backend has it, and the staged-candidate
+/// mechanism is reachable only through a genuine capability gap
+/// (`backend_supports_merge = false` with a `Suppressed` verdict) — never a
+/// preference. `Ok(None)` means neither mechanism this function knows about
+/// is admissible: the backend cannot run `MERGE`, and the compare group was
+/// not fully comparable (or no row identity was proven) —
+/// `WriteSuppression::Unconditional`. There is no merge-less *unconditional*
+/// keyed-fold emitter in this catalogue (the staged-candidate shape's
+/// `DELETE`+`INSERT` only makes sense restricted to the rows whose effect is
+/// not the identity — see [`super::emit::emit_staged_candidate_conditional`]'s
+/// panic contract); a caller reaching `Ok(None)` must fall back to a
+/// backend-agnostic mechanism outside this function's scope (e.g. the
+/// always-available whole-region recompute,
+/// [`ChosenTechnique::RegionRecompute`]), never invent a merge-less
+/// unconditional MERGE substitute.
 pub fn resolve_keyed_write_mechanism(
+    suppression: &WriteSuppression,
+    backend_supports_merge: bool,
+    write_pin: Option<&'static super::WritePattern>,
+) -> Result<Option<KeyedWriteMechanism>, ChoiceRefusal> {
+    if let Some(pattern) = write_pin {
+        match pattern.name {
+            "staged_candidate" => {
+                return match suppression {
+                    WriteSuppression::Suppressed { compared_columns } => {
+                        Ok(Some(KeyedWriteMechanism::StagedCandidate {
+                            compared_columns: compared_columns.clone(),
+                        }))
+                    }
+                    WriteSuppression::Unconditional { why } => Err(ChoiceRefusal {
+                        trigger: "keyed-fold cell".to_string(),
+                        pinned: PinnedRequest::Write(pattern.name.to_string()),
+                        why: format!("write: staged_candidate has no unconditional form — {why}"),
+                    }),
+                };
+            }
+            "keyed" | "keyed_conditional" => {
+                return if backend_supports_merge {
+                    Ok(Some(KeyedWriteMechanism::Merge(suppression.clone())))
+                } else {
+                    Err(ChoiceRefusal {
+                        trigger: "keyed-fold cell".to_string(),
+                        pinned: PinnedRequest::Write(pattern.name.to_string()),
+                        why: "the backend cannot run MERGE — write: keyed/keyed_conditional \
+                              pins the MERGE mechanism, never a silent substitute"
+                            .to_string(),
+                    })
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(default_keyed_write_mechanism(
+        suppression,
+        backend_supports_merge,
+    ))
+}
+
+fn default_keyed_write_mechanism(
     suppression: &WriteSuppression,
     backend_supports_merge: bool,
 ) -> Option<KeyedWriteMechanism> {
@@ -1071,29 +1327,34 @@ mod keyed_write_mechanism_tests {
         }
     }
 
+    fn pattern(name: &str) -> &'static super::super::WritePattern {
+        super::super::lookup_write_pattern(name)
+            .unwrap_or_else(|| panic!("registry entry '{name}' must exist"))
+    }
+
     #[test]
     fn merge_capable_backend_always_resolves_to_merge_never_staged_candidate() {
         // Even a fully-comparable group stays on MERGE when the backend
         // can run one — the staged-candidate mechanism is never a silent
         // substitute for a MERGE the backend could have executed.
-        let resolved = resolve_keyed_write_mechanism(&suppressed(), true);
-        assert_eq!(resolved, Some(KeyedWriteMechanism::Merge(suppressed())));
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), true, None);
+        assert_eq!(resolved, Ok(Some(KeyedWriteMechanism::Merge(suppressed()))));
 
-        let resolved_unconditional = resolve_keyed_write_mechanism(&unconditional(), true);
+        let resolved_unconditional = resolve_keyed_write_mechanism(&unconditional(), true, None);
         assert_eq!(
             resolved_unconditional,
-            Some(KeyedWriteMechanism::Merge(unconditional()))
+            Ok(Some(KeyedWriteMechanism::Merge(unconditional())))
         );
     }
 
     #[test]
     fn merge_less_backend_with_comparable_group_admits_staged_candidate() {
-        let resolved = resolve_keyed_write_mechanism(&suppressed(), false);
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), false, None);
         assert_eq!(
             resolved,
-            Some(KeyedWriteMechanism::StagedCandidate {
+            Ok(Some(KeyedWriteMechanism::StagedCandidate {
                 compared_columns: vec!["event_count".to_string()]
-            })
+            }))
         );
     }
 
@@ -1102,8 +1363,84 @@ mod keyed_write_mechanism_tests {
         // Fail-closed: no merge-less unconditional keyed-fold mechanism
         // exists in this catalogue — the caller must fall back further
         // (e.g. region recompute), never invent a substitute here.
-        let resolved = resolve_keyed_write_mechanism(&unconditional(), false);
-        assert_eq!(resolved, None);
+        let resolved = resolve_keyed_write_mechanism(&unconditional(), false, None);
+        assert_eq!(resolved, Ok(None));
+    }
+
+    #[test]
+    fn an_unpinned_cell_resolves_exactly_as_before() {
+        assert_eq!(
+            resolve_keyed_write_mechanism(&suppressed(), true, None),
+            Ok(Some(KeyedWriteMechanism::Merge(suppressed())))
+        );
+        assert_eq!(
+            resolve_keyed_write_mechanism(&unconditional(), true, None),
+            Ok(Some(KeyedWriteMechanism::Merge(unconditional())))
+        );
+        assert_eq!(
+            resolve_keyed_write_mechanism(&suppressed(), false, None),
+            Ok(Some(KeyedWriteMechanism::StagedCandidate {
+                compared_columns: vec!["event_count".to_string()]
+            }))
+        );
+        assert_eq!(
+            resolve_keyed_write_mechanism(&unconditional(), false, None),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn staged_candidate_pin_selects_staged_mechanism_on_a_merge_capable_backend() {
+        let resolved =
+            resolve_keyed_write_mechanism(&suppressed(), true, Some(pattern("staged_candidate")));
+        assert_eq!(
+            resolved,
+            Ok(Some(KeyedWriteMechanism::StagedCandidate {
+                compared_columns: vec!["event_count".to_string()]
+            }))
+        );
+    }
+
+    #[test]
+    fn staged_candidate_pin_over_an_unconditional_verdict_refuses() {
+        for backend_supports_merge in [true, false] {
+            let resolved = resolve_keyed_write_mechanism(
+                &unconditional(),
+                backend_supports_merge,
+                Some(pattern("staged_candidate")),
+            );
+            match resolved {
+                Err(ChoiceRefusal { pinned, .. }) => {
+                    assert_eq!(pinned, PinnedRequest::Write("staged_candidate".to_string()));
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn keyed_conditional_pin_selects_merge_and_refuses_on_a_merge_less_backend() {
+        let refused =
+            resolve_keyed_write_mechanism(&suppressed(), false, Some(pattern("keyed_conditional")));
+        match refused {
+            Err(ChoiceRefusal { pinned, .. }) => {
+                assert_eq!(
+                    pinned,
+                    PinnedRequest::Write("keyed_conditional".to_string())
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        let admitted =
+            resolve_keyed_write_mechanism(&suppressed(), true, Some(pattern("keyed_conditional")));
+        assert_eq!(admitted, Ok(Some(KeyedWriteMechanism::Merge(suppressed()))));
+    }
+
+    #[test]
+    fn a_pin_outside_the_keyed_fold_family_leaves_the_default_selection() {
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), true, Some(pattern("region")));
+        assert_eq!(resolved, Ok(Some(KeyedWriteMechanism::Merge(suppressed()))));
     }
 }
 
@@ -1195,6 +1532,90 @@ mod write_suppression_tests {
                 assert!(why.contains("row identity") || why.contains("WholeRow"));
             }
             other => panic!("expected Unconditional refusal, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod keyless_write_suppression_tests {
+    use super::*;
+    use crate::maintenance::RowIdentity;
+
+    fn whole_row_identity() -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        }
+    }
+
+    fn key_identity(cols: &[&str]) -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::Key(cols.iter().map(|s| s.to_string()).collect()),
+            proven_mismatch: None,
+        }
+    }
+
+    fn comparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Comparable,
+        }
+    }
+
+    fn incomparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Incomparable,
+        }
+    }
+
+    #[test]
+    fn whole_row_identity_admits_keyless_staged_suppression_when_every_column_is_comparable() {
+        let columns = vec!["event_id".to_string(), "payload".to_string()];
+        let comparability = vec![comparable("event_id"), comparable("payload")];
+
+        let resolved =
+            resolve_keyless_staged_suppression(&columns, &comparability, &whole_row_identity());
+        assert_eq!(
+            resolved,
+            WriteSuppression::Suppressed {
+                compared_columns: columns
+            }
+        );
+    }
+
+    #[test]
+    fn whole_row_identity_with_an_incomparable_column_refuses_keyless_staged_suppression() {
+        let columns = vec!["event_id".to_string(), "notes".to_string()];
+        let comparability = vec![comparable("event_id"), incomparable("notes")];
+
+        let resolved =
+            resolve_keyless_staged_suppression(&columns, &comparability, &whole_row_identity());
+        match resolved {
+            WriteSuppression::Unconditional { why } => {
+                assert!(
+                    why.contains("notes"),
+                    "refusal reason must name the incomparable column; got: {why}"
+                );
+            }
+            other => panic!("expected Unconditional refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_identity_never_resolves_the_keyless_mechanism() {
+        let columns = vec!["event_id".to_string()];
+        let comparability = vec![comparable("event_id")];
+
+        let resolved =
+            resolve_keyless_staged_suppression(&columns, &comparability, &key_identity(&["id"]));
+        match resolved {
+            WriteSuppression::Unconditional { why } => {
+                assert!(why.contains("keyed"), "got: {why}");
+            }
+            other => {
+                panic!("expected Unconditional refusal (falls through to keyed), got {other:?}")
+            }
         }
     }
 }
@@ -1406,6 +1827,130 @@ mod write_variant_tests {
 }
 
 #[cfg(test)]
+mod region_write_variant_tests {
+    use super::*;
+    use crate::maintenance::{RowIdentity, Trigger};
+
+    fn key_identity(cols: &[&str]) -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::Key(cols.iter().map(|s| s.to_string()).collect()),
+            proven_mismatch: None,
+        }
+    }
+
+    fn whole_row_identity() -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        }
+    }
+
+    fn comparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Comparable,
+        }
+    }
+
+    #[test]
+    fn region_write_variant_suppresses_over_a_proven_key_and_comparable_group() {
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = key_identity(&["region_id"]);
+        let trigger = Trigger::NewData {
+            source: "sources.payments".to_string(),
+        };
+
+        let resolved = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &trigger,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("proven key + comparable group over a steady-state trigger admits suppression");
+        assert_eq!(
+            resolved,
+            RegionWrite::Suppressed {
+                key: vec!["region_id".to_string()],
+                compared_columns: vec!["amount".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn region_write_variant_is_unconditional_without_a_proven_key() {
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = whole_row_identity();
+        let trigger = Trigger::NewData {
+            source: "sources.payments".to_string(),
+        };
+
+        let resolved = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &trigger,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert!(matches!(resolved, RegionWrite::Unconditional { .. }));
+    }
+
+    #[test]
+    fn region_write_variant_is_unconditional_on_a_first_build_trigger() {
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = key_identity(&["region_id"]);
+
+        let resolved = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &Trigger::Backfill,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert!(matches!(resolved, RegionWrite::Unconditional { .. }));
+    }
+
+    #[test]
+    fn region_write_variant_propagates_a_refused_suppress_pin() {
+        // No proven row identity — the P2/P3 proof itself refuses. A
+        // `technique: suppress` pin cannot force suppression on over that,
+        // and must surface as a hard `Err`, never a silent `Unconditional`.
+        let group = vec!["amount".to_string()];
+        let comparability = vec![comparable("amount")];
+        let identity = whole_row_identity();
+        let trigger = Trigger::NewData {
+            source: "sources.payments".to_string(),
+        };
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(CellTechnique::Suppress),
+        };
+
+        let err = resolve_region_write_variant(
+            &group,
+            &comparability,
+            &identity,
+            &trigger,
+            false,
+            &overrides,
+        )
+        .expect_err("pinning suppression over a refused P2/P3 proof must refuse");
+        assert_eq!(
+            err.pinned,
+            PinnedRequest::Technique(CellTechnique::Suppress)
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::maintenance::{Corner, MaintenancePlan, PartitionLocal, PlanCell};
@@ -1612,7 +2157,12 @@ mod tests {
     }
 
     #[test]
-    fn diff_patch_over_a_delete_insert_recompute_still_omits_the_delete_leg() {
+    fn diff_patch_over_a_region_delete_insert_default_admits_the_delete_leg() {
+        // The region `DeleteInsert` default's own write-window clamp IS its
+        // slice-completeness argument (`docs/outcomes/
+        // 20260815-definition-delta-migrate/phases/12-plan.md`), so —
+        // unlike an as-yet-unthreaded recompute technique — this delete leg
+        // is admitted `Complete`, not degraded to `Omitted`.
         let diff_patch_pattern =
             crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
         let trigger = Trigger::UpstreamMutation {
@@ -1629,7 +2179,7 @@ mod tests {
         .expect("diff_patch pin over a delete-insert cell must resolve");
         match resolved {
             ChosenTechnique::DiffPatch { delete_leg, .. } => {
-                assert!(matches!(delete_leg, diff_patch::DeleteLeg::Omitted { .. }));
+                assert_eq!(delete_leg, diff_patch::DeleteLeg::Complete);
             }
             other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
         }

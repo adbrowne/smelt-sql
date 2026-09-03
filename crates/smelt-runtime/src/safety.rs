@@ -7,6 +7,8 @@
 use anyhow::Result;
 use smelt_planner::{derive_model_source_bounds, ModelGraph, Planner, Transformation};
 
+use crate::compile::expand_function_calls;
+use crate::fn_bodies::FnBodyMap;
 use crate::schema_evolution::SchemaEvolutionResult;
 
 /// Build a `smelt_planner::ModelGraph` from the selected model list.
@@ -18,10 +20,18 @@ use crate::schema_evolution::SchemaEvolutionResult;
 /// `selected` must be in topological (execution) order so that upstream deps
 /// appear before their consumers. Use `DependencyGraph::execution_order()` to
 /// obtain this ordering.
+///
+/// Each model's `sql` is stored *expanded* (`fn_bodies` applied via
+/// [`expand_function_calls`]) — the lookback-refusal gate and the
+/// window-function batch-safety check downstream both classify off this
+/// `ModelGraph`, and a lookback hidden inside a `smelt.define` body must be
+/// visible to them exactly as an inline one is (`docs/specs/incremental_shapes.md`
+/// §"Functions inside partition-grain bodies").
 pub fn build_model_graph(
     selected: &[String],
     graph: &smelt_core::graph::DependencyGraph,
     config: &smelt_core::config::Config,
+    fn_bodies: &FnBodyMap,
 ) -> ModelGraph {
     let mut model_graph = ModelGraph::new();
     for model_name in selected {
@@ -53,7 +63,7 @@ pub fn build_model_graph(
                 .unwrap_or_default();
             model_graph.add_model(smelt_planner::ModelInfo {
                 name: model.name.clone(),
-                sql: model.content.clone(),
+                sql: expand_function_calls(&model.content, fn_bodies),
                 refs,
                 timeseries_config,
                 incremental_config,

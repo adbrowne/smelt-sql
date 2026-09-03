@@ -47,7 +47,7 @@ pub async fn insert_row_keyed_for(
             name = recipe.source.name,
             d = row.d.format("%Y-%m-%d"),
             id = row.id,
-            val = row.val,
+            val = row.val_sql(),
         ))
         .await
         .map_err(|e| anyhow::anyhow!("insert keyed row: {e}"))?;

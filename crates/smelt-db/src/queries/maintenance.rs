@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use smelt_core::config::{
     Grain as ConfigGrain, Granularity, MaintenanceConfig, RefreshStrategy, ScanBoundsConfig,
-    ScanBoundsRequire,
+    ScanBoundsRequire, ScanBoundsViolation,
 };
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
@@ -31,8 +31,8 @@ use smelt_logical::maintenance::locality::{
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
-    locality_refused_plan, ColumnGroup, Grain as PlanGrain, MaintenancePlan,
-    MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
+    identity_not_derivable_plan, locality_refused_plan, ColumnGroup, Grain as PlanGrain,
+    MaintenancePlan, MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
 };
 use smelt_logical::rules::cumulative::{
     declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
@@ -69,6 +69,33 @@ pub struct MaintenancePlanResult {
     /// internal derivation never re-decides which columns are
     /// state-bearing).
     pub state_columns: Vec<smelt_logical::StateColumnSummary>,
+    /// This model's three derived execution postures
+    /// (`incremental_shapes.md` §"Derived execution postures",
+    /// `docs/outcomes/20260815-keyed-grain-residue` phase 4) — `None` for a
+    /// model that never classifies as `grain: key` (nothing to derive
+    /// postures over), populated by the same `smelt-db/src/lib.rs` caller
+    /// that fills `state_columns` from the same classification call.
+    pub execution_postures: Option<smelt_logical::ExecutionPostures>,
+    /// The run shape [`execution_postures`] qualifies — `Some(true)` for
+    /// snapshot-reconcile (zero clocked driving sources), `Some(false)` for
+    /// window-forward, `None` alongside `execution_postures: None`. A
+    /// second field rather than folded into `ExecutionPostures` itself: the
+    /// run shape depends on the classification's `driving_source`, not on
+    /// `aggregator_columns` alone, so it can't be derived by
+    /// `execution_postures`'s pure column-slice signature.
+    pub is_snapshot_reconcile: Option<bool>,
+    /// This model's per-column change-comparability (P3,
+    /// `model_properties.md` §"Change comparability") — the SAME
+    /// `analysis::walk::model_property_vector` call `derive_fold_spec` (or,
+    /// for a `grain: partition` model with no fold spec, a dedicated call
+    /// below) already makes, surfaced here so a `write:` pin's equivalence
+    /// proof ([`smelt_logical::maintenance::cell_equivalence_proof`]) and
+    /// `smelt explain` both read the one derivation rather than re-walking
+    /// the model's SQL (`CLAUDE.md` §"Maintenance-plan purity"). Empty for
+    /// every early-refusal path (`key_per_partition`, a declared/derived
+    /// `unique_key` mismatch, a locality refusal) — those never reach the
+    /// walk at all.
+    pub comparability: Vec<smelt_logical::analysis::walk::ColumnComparability>,
 }
 
 /// Build one [`SourceFacts`] from a resolved source declaration (`None` when
@@ -83,10 +110,9 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
         .map(|m| m.kind)
     {
         Some(SourceMutationKind::AppendOnly) => PlanMutationProfile::AppendOnly,
-        // `ChangeFeed` has no plan-layer representation yet
-        // (`incremental_models.md` §Known Divergences); undeclared and
-        // `Mutable` both fail closed to the stricter posture rather than
-        // assume append-only.
+        Some(SourceMutationKind::ChangeFeed) => PlanMutationProfile::ChangeFeed,
+        // Undeclared and `Mutable` both fail closed to the stricter
+        // posture rather than assume append-only.
         _ => PlanMutationProfile::MutableSnapshot,
     };
     // The source's own declared `unique_key:` (`sources.md` §"Row
@@ -116,33 +142,38 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
 /// Resolve the effective `maintenance.scan_bounds` for `source_address`:
 /// the model's own block wins over the project baseline in `smelt.yml`
 /// (`incremental_models.md` §Surface "Frontmatter": "A project-level default
-/// in `smelt.yml` sets the baseline; per-model blocks refine it").
+/// in `smelt.yml` sets the baseline; per-model blocks refine it"). The
+/// `on_violation` severity resolves with the SAME narrower-wins ladder as
+/// `require` (default `Error`) — `incremental_models.md` §"Partition-local
+/// maintenance (the K8 guardrail)": `warn` admits the derived plan and
+/// reports the violation as a Warning; `error` (the default) refuses.
 ///
-/// Returns `(allow_full_scan, require)`. `on_violation` severity mapping is
-/// not yet consumed here — every refusal maps to an Error diagnostic today
-/// (`docs/specs/incremental_models.md` §Known Divergences narrows this once a
-/// consumer needs the Warning path).
+/// Returns `(allow_full_scan, require, on_violation)`.
 pub fn effective_scan_bounds(
     source_address: &str,
     model: Option<&ScanBoundsConfig>,
     project: Option<&ScanBoundsConfig>,
-) -> (bool, ScanBoundsRequire) {
+) -> (bool, ScanBoundsRequire, ScanBoundsViolation) {
     let require = model
         .and_then(|s| s.require)
         .or_else(|| project.and_then(|s| s.require))
         .unwrap_or(ScanBoundsRequire::PartitionLocal);
+    let on_violation = model
+        .and_then(|s| s.on_violation)
+        .or_else(|| project.and_then(|s| s.on_violation))
+        .unwrap_or(ScanBoundsViolation::Error);
     // `require: none` disables the guardrail outright: every source reads as
     // though it were explicitly accepted, since the operator declared no
     // partition-locality expectation to check the derived plan against.
     if require == ScanBoundsRequire::None {
-        return (true, require);
+        return (true, require, on_violation);
     }
     let allow = model
         .map(|s| s.allow_full_scan(source_address))
         .filter(|b| *b)
         .or_else(|| project.map(|s| s.allow_full_scan(source_address)))
         .unwrap_or(false);
-    (allow, require)
+    (allow, require, on_violation)
 }
 
 /// Detect a fold candidate for a `grain: key` model's own outermost
@@ -358,6 +389,8 @@ pub fn derive_model_maintenance_plan(
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
+    deployed_model_sql: Option<&str>,
+    deployed_partition_column: Option<&str>,
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -384,6 +417,9 @@ pub fn derive_model_maintenance_plan(
             column_groups: Vec::new(),
             degenerate: Vec::new(),
             state_columns: Vec::new(),
+            execution_postures: None,
+            is_snapshot_reconcile: None,
+            comparability: Vec::new(),
         });
     }
     let partition_col = metadata
@@ -433,8 +469,34 @@ pub fn derive_model_maintenance_plan(
                         column_groups: Vec::new(),
                         degenerate: Vec::new(),
                         state_columns: Vec::new(),
+                        execution_postures: None,
+                        is_snapshot_reconcile: None,
+                        comparability: Vec::new(),
                     });
                 }
+            } else if unique_key.is_empty() {
+                // No declared top-level `unique_key:` and the model's own
+                // GROUP BY derives no key either — there is no identity to
+                // check anything against. Checked here (frontmatter-time,
+                // reached by `file_diagnostics()` and `smelt explain`
+                // without a run) rather than left to fail later, opaquely,
+                // wherever a plan first consults `unique_key`
+                // (`docs/specs/models.md` §"Constraint violations").
+                return Some(MaintenancePlanResult {
+                    plan: identity_not_derivable_plan(format!(
+                        "model '{table}' asserts grain: key but declares no top-level \
+                         unique_key: and its outermost SELECT's GROUP BY derives no key \
+                         (empty) — a keyed model must have a derivable identity, either a \
+                         declared unique_key: or a non-empty GROUP BY \
+                         (docs/specs/models.md §\"Constraint violations\")"
+                    )),
+                    column_groups: Vec::new(),
+                    degenerate: Vec::new(),
+                    state_columns: Vec::new(),
+                    execution_postures: None,
+                    is_snapshot_reconcile: None,
+                    comparability: Vec::new(),
+                });
             }
             // A `grain: key` model that also declares a `timeseries:`
             // block must clear the key-temporal-locality gate before a
@@ -498,6 +560,9 @@ pub fn derive_model_maintenance_plan(
                             column_groups: Vec::new(),
                             degenerate: Vec::new(),
                             state_columns: Vec::new(),
+                            execution_postures: None,
+                            is_snapshot_reconcile: None,
+                            comparability: Vec::new(),
                         });
                     }
                     // Admitted: the derived `LocalitySlice` is folded onto
@@ -536,6 +601,18 @@ pub fn derive_model_maintenance_plan(
         smelt_logical::maintenance::derive::diff_deployed_columns(sql, deployed_column_names)
             .unwrap_or_default()
     };
+    // A keyed-grain output's declared `timeseries.partition_column` — the
+    // axis the footprint question is posed against (`model_properties.md`
+    // §"Footprint reflection / bounded write footprint"). `None` for a
+    // `Grain::Partition` output (posed against its own partition axis
+    // instead) or a keyed output with no declared `timeseries:` block.
+    let keyed_time_axis = match &output.grain {
+        PlanGrain::Key { .. } => metadata
+            .timeseries
+            .as_ref()
+            .map(|t| t.partition_column.as_str()),
+        PlanGrain::Partition { .. } => None,
+    };
     let inputs = ModelInputs {
         sql,
         output,
@@ -543,56 +620,21 @@ pub fn derive_model_maintenance_plan(
         column_groups: grouping.groups.clone(),
         fold,
         old_columns,
+        old_sql: deployed_model_sql,
+        keyed_time_axis,
+        old_partition_col: deployed_partition_column,
     };
 
-    let mut triggers = Vec::new();
-    for s in sources {
-        triggers.push(Trigger::NewData {
-            source: s.name.clone(),
-        });
-        // A mutation trigger is derived only for a source that (a) is
-        // unclocked (`partition_col: None` — a pure lookup join no clocked
-        // read window ever bounds) and (b) **explicitly** declares
-        // `mutation_profile: mutable_snapshot` on its own source YAML — not
-        // merely the fail-closed default `source_facts` assigns an
-        // undeclared source for admission purposes elsewhere. A source that
-        // hasn't declared any posture at all is the common case for a
-        // pre-existing model with no maintenance-plan awareness yet;
-        // treating "undeclared" as "declared mutable" here would newly
-        // refuse builds that never opted into the K8 guardrail's scope.
-        // Two further cases are deliberately NOT derived here yet:
-        //   - An `AppendOnly` source's rows never change once written — the
-        //     aggregate-window sensitivity `grouping::derive_column_groups`
-        //     marks it with describes the *creation* cell's still-open
-        //     window, not a mutation trigger of its own.
-        //   - A **clocked** `MutableSnapshot` source (the driving source
-        //     itself, or an enrichment join with its own `timeseries:`)
-        //     would need the runtime-injected incremental read window to
-        //     link a static bound — invisible to `derive_model_bounds`'s
-        //     text-level scan — so deriving an `UpstreamMutation` trigger
-        //     for it here would spuriously refuse under the K8 guardrail
-        //     whenever the model's raw SQL has no literal date predicate
-        //     (the normal, correct shape for a window-forward incremental
-        //     model). Scoping this trigger to unclocked, explicitly-mutable
-        //     sources only is this phase's deliberately narrow slice of
-        //     obligation 4 (`incremental_models.md` §"Per-cell admission"); a
-        //     clocked enrichment join's own scan-bound derivation is
-        //     deferred.
-        if s.partition_col.is_none()
-            && s.mutation == PlanMutationProfile::MutableSnapshot
-            && explicitly_mutable.contains(&s.name)
-        {
-            triggers.push(Trigger::UpstreamMutation {
-                source: s.name.clone(),
-            });
-        }
-    }
-    triggers.push(Trigger::Backfill);
-    if !added_columns.is_empty() {
-        triggers.push(Trigger::ColumnAdded {
-            columns: added_columns,
-        });
-    }
+    // Trigger derivation itself is a pure `smelt-logical` function
+    // (`derive::derive_triggers`, `incremental_models.md` §"Per-cell
+    // admission" → "Which changed inputs get a mutation cell") — this
+    // wrapper only assembles the facts (Salsa purity rule).
+    let triggers = smelt_logical::maintenance::derive::derive_triggers(
+        sources,
+        &grouping.groups,
+        explicitly_mutable,
+        &added_columns,
+    );
 
     let mut plan = derive_maintenance_plan_with_referential_integrity(
         &inputs,
@@ -606,11 +648,27 @@ pub fn derive_model_maintenance_plan(
             settle_bound: bound,
         }
     });
+    // The single `model_property_vector` call this derivation surfaces to
+    // callers (`MaintenancePlanResult::comparability`'s own doc comment) —
+    // `derive_fold_spec` above already re-derives the same vector for a
+    // `grain: key` model's fold-spec walk, so this call is only load-bearing
+    // for a `grain: partition` model (no fold spec) or when the fold-spec
+    // walk itself failed to parse; either way, consumers read this field,
+    // never re-walk.
+    let comparability = smelt_logical::analysis::walk::model_property_vector(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+    )
+    .map(|v| v.comparability)
+    .unwrap_or_default();
     Some(MaintenancePlanResult {
         plan,
         column_groups: grouping.groups,
         degenerate: grouping.degenerate,
+        comparability,
         state_columns: Vec::new(),
+        execution_postures: None,
+        is_snapshot_reconcile: None,
     })
 }
 
@@ -641,6 +699,8 @@ pub fn derive_model_maintenance_plan_with_edges(
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
+    deployed_model_sql: Option<&str>,
+    deployed_partition_column: Option<&str>,
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -652,6 +712,8 @@ pub fn derive_model_maintenance_plan_with_edges(
         key_recurrences,
         deployed_column_names,
         source_referential_integrity,
+        deployed_model_sql,
+        deployed_partition_column,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred). Reads the
@@ -734,24 +796,36 @@ pub fn single_clocked_source_granularity(
 }
 
 /// Build [`SourceFacts`] for every `(ref_string, source_info)` pair a model
-/// references, applying the `maintenance.scan_bounds` ladder.
+/// references, applying the `maintenance.scan_bounds` ladder's `require`
+/// half. The second return value names every source whose guardrail
+/// resolved to `on_violation: warn` and was not otherwise accepted
+/// (`require: none` or a declared `allow_full_scan`) — a CANDIDATE the
+/// caller may re-derive with `allow_full_scan` forced on once it knows
+/// (from the plan this first pass derives) whether that source's scan is
+/// actually unbounded; not every candidate here corresponds to a real
+/// violation; only a source that surfaces a `Refusal::ScanUnbounded` in the
+/// derived plan actually needs the second pass and the Warning diagnostic.
 pub fn build_source_facts(
     refs: &[(String, Option<SourceInfo>)],
     model_scan_bounds: Option<&ScanBoundsConfig>,
     project_scan_bounds: Option<&ScanBoundsConfig>,
-) -> Vec<SourceFacts> {
+) -> (Vec<SourceFacts>, Vec<String>) {
     let mut out = Vec::new();
+    let mut warn_candidates = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
     for (name, info) in refs {
         if seen.contains_key(name) {
             continue;
         }
         seen.insert(name.clone(), ());
-        let (allow_full_scan, _require) =
+        let (allow_full_scan, _require, on_violation) =
             effective_scan_bounds(name, model_scan_bounds, project_scan_bounds);
+        if !allow_full_scan && on_violation == ScanBoundsViolation::Warn {
+            warn_candidates.push(name.clone());
+        }
         out.push(source_facts(name, info.as_ref(), allow_full_scan));
     }
-    out
+    (out, warn_candidates)
 }
 
 /// Build the `(bare source name, key_recurrence)` list for every referenced
@@ -830,11 +904,50 @@ pub enum MaintenanceRefusal {
     LocalityNotEstablished {
         message: String,
     },
-    /// `MaintenanceSkeletonColumnAdded` — an added column occupies a
+    /// `GrainAssertionMismatch` — a `grain: key` model with no declared
+    /// top-level `unique_key:` and no GROUP-BY-derivable identity either.
+    IdentityNotDerivable {
+        message: String,
+    },
+    /// `MaintenanceSkeletonChanged` — an added or changed column occupies a
     /// row-membership/identity (skeleton) position, a grain change rather
     /// than a column backfill (EX-39, `definition_deltas.md` §"The verdict per column group").
-    SkeletonColumnAdded {
+    SkeletonChanged {
         column: String,
+    },
+    /// `MaintenanceSkeletonChanged` — the model's skeleton *clause* itself
+    /// changed against a prior deployed snapshot (a changed `GROUP BY`, a
+    /// changed `FROM` target, a changed join shape), proven by
+    /// `smelt_logical::maintenance::derive::skeleton_clause_changed`'s
+    /// clause-level factoring rather than by a `ColumnAdded` trigger
+    /// landing in a skeleton position. Maps to the same
+    /// `MaintenanceSkeletonChanged` diagnostic code as `SkeletonChanged`
+    /// above — one code, two refusal shapes.
+    SkeletonClauseChanged {
+        reason: String,
+    },
+    /// `MaintenancePartitionColumnChanged` — the model's declared
+    /// `timeseries.partition_column` differs from the address recorded in
+    /// the deployed-schema snapshot at last deploy
+    /// (`docs/specs/incremental_shapes.md` §"The partition grain").
+    PartitionColumnChanged {
+        from: String,
+        to: String,
+    },
+    /// `MaintenanceColumnAddNotBackfillable` — a non-skeleton column
+    /// addition that cannot be backfilled in place; the run proceeds with a
+    /// Warning rather than refusing (`definition_deltas.md` §"Detection").
+    DefinitionChangeNotBackfillable {
+        columns: Vec<String>,
+        why: String,
+    },
+    /// `KeyedRetractableContribution` — a retractable enrichment-join
+    /// contribution the repair family cannot admit a per-group recompute
+    /// for (`incremental_shapes.md` §"Enrichment joins").
+    KeyedRetractableContribution {
+        source: String,
+        columns: Vec<String>,
+        why: String,
     },
 }
 
@@ -875,6 +988,13 @@ pub struct MaintenancePlanDiagnostics {
     /// write addressing" → "User pins") — computed by
     /// [`write_pin_diagnostics`].
     pub write_pin_refusals: Vec<WritePinDiagnostic>,
+    /// Every source name whose `maintenance.scan_bounds.on_violation: warn`
+    /// admitted the derived plan in place of a refusal
+    /// (`incremental_models.md` §"Partition-local maintenance (the K8
+    /// guardrail)") — `file_diagnostics` folds each into a
+    /// `MaintenanceScanUnbounded` diagnostic at `Warning` severity rather
+    /// than the `Error` a bare refusal maps to.
+    pub scan_bounds_warnings: Vec<String>,
 }
 
 /// The open write-pattern registry's [`smelt_logical::maintenance::
@@ -927,16 +1047,15 @@ fn trigger_on_address(trigger: &Trigger) -> Option<String> {
 /// rows). Never re-derives admission or the registry's admissible set
 /// itself (`CLAUDE.md` §"Maintenance-plan purity") — just answers "does a
 /// `cells[]` entry name this cell, and if so, what pin did it write".
-pub fn matching_write_pin(
-    plan_cell: &smelt_logical::maintenance::PlanCell,
+fn write_pin_matching(
+    on_address: &str,
+    group: &str,
     column_groups: &[ColumnGroup],
     cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
 ) -> Option<String> {
     cells_cfg.iter().find_map(|cell_cfg| {
         let pin = cell_cfg.write.as_deref()?;
-        let on_matches =
-            trigger_on_address(&plan_cell.trigger).as_deref() == Some(cell_cfg.on.as_str());
-        if !on_matches {
+        if cell_cfg.on != on_address {
             return None;
         }
         let matched_group_name = column_groups
@@ -947,10 +1066,70 @@ pub fn matching_write_pin(
                     .any(|c| cell_cfg.columns.iter().any(|cc| cc == c))
             })
             .map(|g| g.name());
-        let group_matches =
-            plan_cell.group == "{*}" || Some(plan_cell.group.clone()) == matched_group_name;
+        let group_matches = group == "{*}" || Some(group.to_string()) == matched_group_name;
         group_matches.then(|| pin.to_string())
     })
+}
+
+pub fn matching_write_pin(
+    plan_cell: &smelt_logical::maintenance::PlanCell,
+    column_groups: &[ColumnGroup],
+    cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
+) -> Option<String> {
+    let on_address = trigger_on_address(&plan_cell.trigger)?;
+    write_pin_matching(&on_address, &plan_cell.group, column_groups, cells_cfg)
+}
+
+/// The `maintenance.cells[].write` pin (if any) addressing a `refresh: keyed`
+/// model's window-forward keyed-fold write (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27g-plan.md`). Unlike
+/// [`matching_write_pin`], there is no derived [`smelt_logical::maintenance::
+/// PlanCell`] to read here — `keyed`'s classifier (`smelt-planner`) runs
+/// outside the `MaintenancePlan`/`derive_model_maintenance_plan` machinery
+/// entirely — but the keyed fold's cell is always whole-row (`group: "{*}"`),
+/// so it matches a `cells[]` entry by its `on:` address alone, using the
+/// exact same predicate [`matching_write_pin`] uses (`write_pin_matching`
+/// above, with `group` fixed to `"{*}"` and no column groups to consult).
+/// Never re-derives admission — a read-only lookup for the runtime write
+/// path to resolve the mechanism through
+/// [`smelt_logical::maintenance::choice::resolve_keyed_write_mechanism`].
+pub fn keyed_fold_write_pin(metadata: &ModelMetadata, driving_source: &str) -> Option<String> {
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    write_pin_matching(driving_source, "{*}", &[], cells_cfg)
+}
+
+/// The `maintenance.defaults`/`maintenance.cells[].prefer`/`cells[].technique`
+/// override ladder's effective value for a `refresh: keyed` model's
+/// whole-row keyed-fold write-suppression dimension (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/33-plan.md`). Mirrors
+/// [`keyed_fold_write_pin`]'s own reasoning: there is no derived `PlanCell`
+/// to consult here, and the keyed fold's cell is always whole-row
+/// (`group: "{*}"`), so a `cells[]` entry matches by its `on:` address
+/// alone — the same address-only rule [`write_pin_matching`]'s `group ==
+/// "{*}"` arm already applies, not [`smelt_logical::maintenance::choice::
+/// effective_override`]'s per-column-group `matching_cell`, which would
+/// never match a whole-row cell's (typically empty) `columns`.
+/// Never re-derives admission — a read-only lookup the runtime write path
+/// folds into [`smelt_logical::maintenance::choice::resolve_write_variant`].
+pub fn keyed_fold_effective_override(
+    metadata: &ModelMetadata,
+    driving_source: &str,
+) -> smelt_logical::maintenance::choice::EffectiveOverride {
+    let maintenance = metadata.maintenance.as_ref();
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
+        maintenance.map(|m| m.cells.as_slice()).unwrap_or(&[]);
+    let broad_prefer = maintenance
+        .and_then(|m| m.defaults.as_ref())
+        .and_then(|d| d.prefer);
+    let narrow = cells_cfg.iter().find(|c| c.on == driving_source);
+    smelt_logical::maintenance::choice::EffectiveOverride {
+        prefer: narrow.and_then(|c| c.prefer).or(broad_prefer),
+        technique: narrow.and_then(|c| c.technique),
+    }
 }
 
 /// Validate every `maintenance.cells[].write` pin against the open
@@ -964,17 +1143,27 @@ pub fn matching_write_pin(
 /// on any declared target backend refuses, naming that backend, rather than
 /// silently passing because a *different* target happens to support it.
 ///
+/// A compare-based pin (`diff_patch`/`keyed_conditional`/`staged_candidate`)
+/// is additionally checked against `comparability` — the model's derived
+/// P3 column-comparability (`MaintenancePlanResult::comparability`) — via
+/// [`smelt_logical::maintenance::cell_equivalence_proof`], so an
+/// incomparable compared column or a `WholeRow` cell refuses
+/// `MaintenanceWriteAddressingRefused` here too, not just the structural
+/// contract-fact check.
+///
 /// Pure function — the caller ([`maintenance_plan_diagnostics`]) gathers
-/// `metadata`/`plan`/`column_groups`/`active_backends` and calls this; it
-/// never re-derives the plan itself (Salsa purity rule).
+/// `metadata`/`plan`/`column_groups`/`active_backends`/`comparability` and
+/// calls this; it never re-derives the plan itself (Salsa purity rule).
 pub fn write_pin_diagnostics(
     metadata: &ModelMetadata,
     plan: &MaintenancePlan,
     column_groups: &[ColumnGroup],
     active_backends: &[String],
+    comparability: &[smelt_logical::analysis::walk::ColumnComparability],
 ) -> Vec<WritePinDiagnostic> {
     use smelt_logical::maintenance::{
-        resolve_write_pin, OutputContractFacts, RowIdentity, WritePinRefusal,
+        cell_equivalence_proof, resolve_write_pin, OutputContractFacts, RowIdentity,
+        WritePinRefusal,
     };
 
     let Some(maintenance) = metadata.maintenance.as_ref() else {
@@ -1019,6 +1208,11 @@ pub fn write_pin_diagnostics(
             has_partition_axis,
         };
         let cell_label = format!("{:?}", plan_cell.trigger);
+        let group_columns: Vec<String> = column_groups
+            .iter()
+            .find(|g| g.name() == plan_cell.group)
+            .map(|g| g.columns.clone())
+            .unwrap_or_default();
 
         for backend_name in &backends {
             let backend_caps = backend_write_capabilities_for(backend_name);
@@ -1028,7 +1222,14 @@ pub fn write_pin_diagnostics(
                 backend_name,
                 facts,
                 backend_caps,
-                |_pattern| Ok(()),
+                |pattern| {
+                    cell_equivalence_proof(
+                        pattern,
+                        &group_columns,
+                        comparability,
+                        &plan_cell.row_identity,
+                    )
+                },
             ) {
                 out.push(match refusal {
                     WritePinRefusal::PatternUnavailable { pattern, backend } => {
@@ -1067,6 +1268,7 @@ pub fn write_pin_diagnostics(
 ///
 /// Pure function — the `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs`
 /// only gathers `source_refs`/`metadata`/`sql` and calls this.
+#[allow(clippy::too_many_arguments)]
 pub fn maintenance_plan_diagnostics(
     sql: &str,
     table: &str,
@@ -1075,12 +1277,16 @@ pub fn maintenance_plan_diagnostics(
     project_scan_bounds: Option<&ScanBoundsConfig>,
     extra_model_sources: &[(SourceFacts, Granularity)],
     active_backends: &[String],
+    deployed_column_names: &[String],
+    deployed_model_sql: Option<&str>,
+    deployed_partition_column: Option<&str>,
 ) -> MaintenancePlanDiagnostics {
     let model_scan_bounds = metadata
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let mut sources = build_source_facts(source_refs, model_scan_bounds, project_scan_bounds);
+    let (mut sources, scan_bounds_warn_candidates) =
+        build_source_facts(source_refs, model_scan_bounds, project_scan_bounds);
     for (facts, _) in extra_model_sources {
         if !sources.iter().any(|s| s.name == facts.name) {
             sources.push(facts.clone());
@@ -1110,7 +1316,7 @@ pub fn maintenance_plan_diagnostics(
     let driving_source_granularity = single_clocked_granularity(clocked_granularities);
     let key_recurrences = build_key_recurrences(source_refs);
     let source_referential_integrity = build_source_referential_integrity(source_refs);
-    let Some(result) = derive_model_maintenance_plan(
+    let Some(mut result) = derive_model_maintenance_plan(
         sql,
         table,
         metadata,
@@ -1118,18 +1324,65 @@ pub fn maintenance_plan_diagnostics(
         &explicitly_mutable,
         driving_source_granularity,
         &key_recurrences,
-        // `smelt-db` diagnostics/`smelt explain` have no I/O access to the
-        // deployed-schema snapshot (Salsa purity) — no `ColumnAdded`
-        // trigger is derivable here; `smelt-runtime`'s maintenance driver
-        // is the production caller that supplies a real snapshot.
-        &[],
+        // The deployed-schema snapshot is now a Salsa world-fact input
+        // (`workspace_ingest::register_deployed_schemas_from_disk`) the
+        // `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs` resolves and
+        // passes down here — `smelt-db` itself still does no I/O, per the
+        // Salsa-purity rule; it only forwards what the caller resolved.
+        deployed_column_names,
         &source_referential_integrity,
+        deployed_model_sql,
+        deployed_partition_column,
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
             ..Default::default()
         };
     };
+    // `on_violation: warn` (`incremental_models.md` §"Partition-local
+    // maintenance (the K8 guardrail)"): a source in `scan_bounds_warn_
+    // candidates` is only a REAL violation when the first pass actually
+    // refused it with `ScanUnbounded` — a candidate whose scan turned out
+    // to be bounded anyway (e.g. the driving, already-clocked source) must
+    // not be reported. Only for the sources that genuinely refused, re-
+    // derive once more with `allow_full_scan` forced on for exactly those
+    // sources, admitting the plan and surfacing each as a Warning instead
+    // of a refusal.
+    let scan_bounds_warnings: Vec<String> = result
+        .plan
+        .refusals
+        .iter()
+        .filter_map(|r| match r {
+            smelt_logical::maintenance::Refusal::ScanUnbounded { source, .. }
+                if scan_bounds_warn_candidates.contains(source) =>
+            {
+                Some(source.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    if !scan_bounds_warnings.is_empty() {
+        for facts in sources.iter_mut() {
+            if scan_bounds_warnings.contains(&facts.name) {
+                facts.allow_full_scan = true;
+            }
+        }
+        if let Some(admitted) = derive_model_maintenance_plan(
+            sql,
+            table,
+            metadata,
+            &sources,
+            &explicitly_mutable,
+            driving_source_granularity,
+            &key_recurrences,
+            deployed_column_names,
+            &source_referential_integrity,
+            deployed_model_sql,
+            deployed_partition_column,
+        ) {
+            result = admitted;
+        }
+    }
     let refusals = result
         .plan
         .refusals
@@ -1147,9 +1400,20 @@ pub fn maintenance_plan_diagnostics(
                     why: why.clone(),
                 })
             }
-            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { column } => {
-                Some(MaintenanceRefusal::SkeletonColumnAdded {
+            smelt_logical::maintenance::Refusal::SkeletonChanged { column } => {
+                Some(MaintenanceRefusal::SkeletonChanged {
                     column: column.clone(),
+                })
+            }
+            smelt_logical::maintenance::Refusal::SkeletonClauseChanged { reason } => {
+                Some(MaintenanceRefusal::SkeletonClauseChanged {
+                    reason: reason.clone(),
+                })
+            }
+            smelt_logical::maintenance::Refusal::PartitionColumnChanged { from, to } => {
+                Some(MaintenanceRefusal::PartitionColumnChanged {
+                    from: from.clone(),
+                    to: to.clone(),
                 })
             }
             // An underivable upstream-model clock. Recorded in the plan (and
@@ -1157,7 +1421,7 @@ pub fn maintenance_plan_diagnostics(
             // folded into `file_diagnostics()` — `MaintenanceReachNotDerivable`
             // has no `DiagnosticCode` variant yet (`diagnostics.md` §Known
             // divergences). Leave unmapped so a future phase's own diagnostic
-            // lands it, exactly as `SkeletonColumnAdded` above.
+            // lands it, exactly as `SkeletonChanged` above.
             smelt_logical::maintenance::Refusal::ReachNotDerivable { .. } => None,
             smelt_logical::maintenance::Refusal::UnsupportedGrain {
                 grain,
@@ -1171,17 +1435,37 @@ pub fn maintenance_plan_diagnostics(
                     message: message.clone(),
                 })
             }
+            smelt_logical::maintenance::Refusal::IdentityNotDerivable { message } => {
+                Some(MaintenanceRefusal::IdentityNotDerivable {
+                    message: message.clone(),
+                })
+            }
             // The repair family's two obligation refusals
             // (`MaintenanceRepairKeysNotDiscoverable`/
-            // `MaintenanceRepairSliceUnbounded`). Not yet produced by any
-            // wired derivation — `derive_repair_cell` is standalone,
-            // callable machinery this phase, not yet consulted by
-            // `derive_maintenance_plan` — and has no `DiagnosticCode`
-            // variant yet. Left unmapped exactly as `ReachNotDerivable`
-            // above, for the same reason: a future phase's own diagnostic
-            // lands it.
+            // `MaintenanceRepairSliceUnbounded`) — `derive_new_data`
+            // (`smelt-logical/src/maintenance/derive.rs`) already pushes
+            // both when `repair::admit_per_group_recompute` refuses, but
+            // neither has a `DiagnosticCode` variant yet. Left unmapped
+            // exactly as `ReachNotDerivable` above, for the same reason: a
+            // future phase's own diagnostic lands it.
             smelt_logical::maintenance::Refusal::RepairKeysNotDiscoverable { .. } => None,
             smelt_logical::maintenance::Refusal::RepairSliceUnbounded { .. } => None,
+            smelt_logical::maintenance::Refusal::DefinitionChangeNotBackfillable {
+                columns,
+                why,
+            } => Some(MaintenanceRefusal::DefinitionChangeNotBackfillable {
+                columns: columns.clone(),
+                why: why.clone(),
+            }),
+            smelt_logical::maintenance::Refusal::KeyedRetractableContribution {
+                source,
+                columns,
+                why,
+            } => Some(MaintenanceRefusal::KeyedRetractableContribution {
+                source: source.clone(),
+                columns: columns.clone(),
+                why: why.clone(),
+            }),
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -1194,12 +1478,14 @@ pub fn maintenance_plan_diagnostics(
         &result.plan,
         &result.column_groups,
         active_backends,
+        &result.comparability,
     );
     MaintenancePlanDiagnostics {
         refusals,
         cell_column_group_violations,
         granularity_mismatch,
         write_pin_refusals,
+        scan_bounds_warnings,
     }
 }
 
@@ -1216,6 +1502,115 @@ mod tests {
             mutation_sensitivity: sensitivity.iter().map(|s| s.to_string()).collect(),
             membership_sensitivity: BTreeSet::new(),
         }
+    }
+
+    fn source_info_with_mutation(kind: Option<SourceMutationKind>) -> SourceInfo {
+        SourceInfo {
+            path: std::path::PathBuf::from("/tmp/s.yml"),
+            address_segments: vec!["sources".to_string(), "s".to_string()],
+            columns: vec![],
+            description: None,
+            name_override: None,
+            tags: vec![],
+            timeseries: None,
+            mutation_profile: kind.map(smelt_core::sources::SourceMutationProfile::from_kind),
+            source_lateness: None,
+            watermark: None,
+            unique_key: None,
+            retention: None,
+            referential_integrity: None,
+        }
+    }
+
+    /// Phase 28c: a declared `mutation_profile: change_feed` source facts to
+    /// `PlanMutationProfile::ChangeFeed` — while undeclared and `mutable_snapshot`
+    /// both still fail closed to the stricter `MutableSnapshot` posture.
+    #[test]
+    fn source_facts_maps_declared_change_feed() {
+        let feed = source_info_with_mutation(Some(SourceMutationKind::ChangeFeed));
+        assert_eq!(
+            source_facts("feed", Some(&feed), true).mutation,
+            PlanMutationProfile::ChangeFeed
+        );
+
+        let mutable = source_info_with_mutation(Some(SourceMutationKind::Mutable));
+        assert_eq!(
+            source_facts("mutable", Some(&mutable), true).mutation,
+            PlanMutationProfile::MutableSnapshot
+        );
+
+        assert_eq!(
+            source_facts("undeclared", None, true).mutation,
+            PlanMutationProfile::MutableSnapshot
+        );
+    }
+
+    #[test]
+    fn keyed_fold_write_pin_matches_on_the_driving_source_address() {
+        let metadata = ModelMetadata {
+            maintenance: Some(MaintenanceConfig {
+                defaults: None,
+                cells: vec![MaintenanceCellConfig {
+                    columns: vec![],
+                    on: "sources.events".to_string(),
+                    prefer: None,
+                    technique: None,
+                    write: Some("staged_candidate".to_string()),
+                }],
+                scan_bounds: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            keyed_fold_write_pin(&metadata, "sources.events"),
+            Some("staged_candidate".to_string())
+        );
+    }
+
+    #[test]
+    fn keyed_fold_write_pin_ignores_a_cell_addressed_at_another_source() {
+        let metadata = ModelMetadata {
+            maintenance: Some(MaintenanceConfig {
+                defaults: None,
+                cells: vec![MaintenanceCellConfig {
+                    columns: vec![],
+                    on: "sources.other".to_string(),
+                    prefer: None,
+                    technique: None,
+                    write: Some("staged_candidate".to_string()),
+                }],
+                scan_bounds: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(keyed_fold_write_pin(&metadata, "sources.events"), None);
+    }
+
+    #[test]
+    fn keyed_fold_effective_override_matches_by_on_address() {
+        let metadata = ModelMetadata {
+            maintenance: Some(MaintenanceConfig {
+                defaults: None,
+                cells: vec![MaintenanceCellConfig {
+                    columns: vec![],
+                    on: "sources.events".to_string(),
+                    prefer: None,
+                    technique: Some(smelt_core::config::CellTechnique::Unconditional),
+                    write: None,
+                }],
+                scan_bounds: None,
+            }),
+            ..Default::default()
+        };
+        let effective = keyed_fold_effective_override(&metadata, "sources.events");
+        assert_eq!(
+            effective.technique,
+            Some(smelt_core::config::CellTechnique::Unconditional)
+        );
+
+        let non_matching = keyed_fold_effective_override(&metadata, "sources.other");
+        assert_eq!(non_matching.technique, None);
+        assert_eq!(non_matching.prefer, None);
     }
 
     #[test]
@@ -1287,10 +1682,26 @@ mod tests {
                 allow_full_scan: true,
             },
         );
-        let (allow, require) =
+        let (allow, require, on_violation) =
             effective_scan_bounds("sources.enrichment", Some(&model), Some(&project));
         assert!(allow);
         assert_eq!(require, ScanBoundsRequire::PartitionLocal);
+        assert_eq!(on_violation, ScanBoundsViolation::Error);
+    }
+
+    #[test]
+    fn effective_scan_bounds_on_violation_model_overrides_project() {
+        let project = ScanBoundsConfig {
+            on_violation: Some(ScanBoundsViolation::Error),
+            ..Default::default()
+        };
+        let model = ScanBoundsConfig {
+            on_violation: Some(ScanBoundsViolation::Warn),
+            ..Default::default()
+        };
+        let (_, _, on_violation) =
+            effective_scan_bounds("sources.enrichment", Some(&model), Some(&project));
+        assert_eq!(on_violation, ScanBoundsViolation::Warn);
     }
 
     #[test]
@@ -1381,6 +1792,8 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -1437,6 +1850,8 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -1483,6 +1898,8 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -1548,6 +1965,8 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -1642,6 +2061,8 @@ mod tests {
             &[],
             &[],
             &real_ri,
+            None,
+            None,
         )
         .expect("model must derive a plan");
         let cell = with_real_ri
@@ -1666,6 +2087,8 @@ mod tests {
             &[],
             &[],
             &SourceReferentialIntegrity::new(),
+            None,
+            None,
         )
         .expect("model must derive a plan");
         let cell = with_empty_ri
@@ -1748,6 +2171,8 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
         )
         .expect("route 1 must derive a plan");
         assert!(

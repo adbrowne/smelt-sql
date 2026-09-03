@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-03
 owners: [andrew]
 ---
 
@@ -330,7 +330,13 @@ maintenance:
 - The override ladder is `defaults.prefer` → `cells[].prefer` → `cells[].technique`, narrower
   scope winning; `technique:` alone bypasses the cost model. Overrides select among
   **admissible** techniques only — an override can never select an inadmissible one (§"Per-cell
-  admission"). (Cost-model and `prefer` consumption status: §Known Divergences.)
+  admission"). The ladder is consulted uniformly by every dispatch route, including the
+  ordinary windowed/partition-grain region path (§Design "Absent a cost model: the fixed
+  preference order"); no cost model exists yet to rank between two admissible techniques
+  (§Future Extensions). The ladder's write-suppression dimension (`suppress`/`unconditional`)
+  is consulted by every write consumer that can suppress, the keyed-fold write included; on
+  the keyed-fold route the structural first-build default never applies, because a first build
+  there is a `CREATE TABLE … AS`, never a suppressible merge.
 - `<source-address>` names the changed input the cell handles, as the model's SQL refers to
   it — a source (`sources.customers`) or an upstream model (`order_facts`). A worked pin from
   the running example — steer `order_facts`'s tier-correction cell to an unconditional write:
@@ -455,7 +461,16 @@ contract:
   model's landed delta is the output window a completed run wrote). No per-invocation delta is
   computed automatically — a source named without a matching `--landed` propagates nothing.
   Opt-in; the intended default posture once trusted. Prints the **dirty set** — the per-model
-  regions propagation says must run (§"The graph layer") — before acting.
+  regions propagation says must run (§"The graph layer") — before acting. Accepts the ordinary
+  `--select`/`--exclude` selectors (`model_selection.md` grammar, `+` upstream/downstream
+  operators included): propagation itself is always whole-workspace — dirt must compose through
+  unselected intermediates — but the selector narrows only which propagated runs execute. The
+  printed dirty set still shows the whole propagated set, with deselected lines marked
+  `SUPPRESSED (not selected)`. A retained dirty model whose direct upstream is itself dirty but
+  deselected is refused with a diagnostic naming both (the same posture as `cli.md`
+  §"`--exclude` and working-set consistency"); the fix is to add `+<model>` to pull the upstream
+  in, or drop the downstream from the selection. An intersection that selects nothing is a quiet
+  no-op (`smelt: no models matched the selector(s)`, exit `0`, per `cli.md`).
 - `smelt run --auto` — process only the intervals the run-state interval ledger
   (`run_state.md`) does not yet cover for the selected models; the keyed grain's staleness
   interaction is `incremental_shapes.md` §"Interaction with `--auto` / staleness".
@@ -512,6 +527,9 @@ smelt run     [selectors]                                                       
 - For a **window-forward keyed** model, both flags are required and address the **driving
   source's** `partition_column`/`granularity` — never a column of the keyed output, even when
   an admitted output `timeseries:` block exists (run flags always address the source's clock).
+  A run with neither flag, or only one, **refuses** rather than falling back to a whole-source
+  rebuild; `--full-refresh` is the only intentional escape to drop and recreate the target from
+  the whole-source SELECT (`incremental_shapes.md` §"The key grain").
 - For a **snapshot-reconcile** keyed model (no clocked source), the flags are a **hard error** —
   *"model has no clocked driving source; run without event-time flags"*. Each run is a whole
   reconciliation.
@@ -530,7 +548,7 @@ codes and the contract-lattice codes below; the partition-grain and key-grain co
 |---|---|
 | `MaintenanceNoAdmissibleTechnique` | No technique survives a cell's admission; names the cell (§"Per-cell admission"). |
 | `MaintenanceReachNotDerivable` | A required scan bound is neither derivable nor declared (§"Per-cell admission" obligation 4). |
-| `MaintenanceScanUnbounded` | A scan/footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists (§"Partition-local maintenance (the K8 guardrail)"). |
+| `MaintenanceScanUnbounded` | A scan/footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists — Error severity by default, or Warning under a `scan_bounds.on_violation: warn` acceptance, which admits the plan instead of refusing it (§"Partition-local maintenance (the K8 guardrail)"). |
 | `MaintenanceUnboundedFootprint` | A targeted write was requested for a cell whose write footprint is unbounded, e.g. a stored trajectory under late data (§"Per-cell admission" obligation 5). |
 | `MaintenanceGraphUnsupportedNode` | A cyclic edge set, an inadmissible self-referential model, or a keyed node whose delta signature degrades to `general` in the propagation graph (§"The graph layer"). |
 | `MaintenanceWriteAddressingRefused` | A `cells[].write` pin names an addressing that cannot uphold the cell's equivalence invariant; names the cell and the refused pattern (§"Per-cell write addressing"). |
@@ -538,7 +556,7 @@ codes and the contract-lattice codes below; the partition-grain and key-grain co
 | `MaintenanceRepairKeysNotDiscoverable` | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set; names the changed input and why the delta yields no key set (§"The repair family"). |
 | `MaintenanceRepairSliceUnbounded` | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked; names the source and the unbounded reach (§"The repair family"). |
 
-`MaintenanceSkeletonColumnAdded` — a definition delta adding or changing a field in a skeleton
+`MaintenanceSkeletonChanged` — a definition delta adding or changing a field in a skeleton
 position — is owned by `definition_deltas.md` §Surface.
 
 **Contract-lattice codes.**
@@ -550,6 +568,7 @@ position — is owned by `definition_deltas.md` §Surface.
 | `ContractDeferralInvalid` | A `contract.deferral` (model- or cell-level) is unparseable or negative, or declared on a cell with no clock to measure lag against (§"Contract relaxations (`contract:`)"). |
 | `ContractDeferralExceeded` | Runtime probe, deferral point only: the ledger-derived lag between a cell's maintained frontier and its input frontier exceeds the declared `D`; names the cell and the measured lag (§"The contract lattice"). |
 | `ContractRetainDepartedInvalid` | A `contract.retain_departed` is declared on anything other than a keyed shape consuming a mutable snapshot, or names a tombstone column absent from the model's output; names the failing condition (§"Contract relaxations (`contract:`)"). |
+| `ContractDepartedKeyUnmarked` | Runtime probe, `retain_departed` point only: a departed key survives the reconcile without its declared tombstone column marked; names the unmarked count (§"The contract lattice"). |
 
 ## Semantics
 
@@ -828,7 +847,11 @@ default point forbids. Work subsumption is proven from two ledger facts, never i
 range coverage alone: a prior manifest recorded `skipped_deferral` for this cell, **and** the
 current run's write range covers that cell's pending window
 (`(maintained_frontier, input_frontier]`); when both hold, the covering run's manifest records
-the subsumed window alongside its normal `success` outcome.
+the subsumed window alongside its normal `success` outcome. A per-cell `deferral` declared on
+the plain `Trigger::NewData` fold licenses a skip only when it covers ALL of the fold's own
+column groups — a cell addressing a strict subset cannot decline the fold's whole-row write, the
+same "licensed relaxation, never a way to decline unlicensed work" posture `lag ≤ 0` already
+falls through to.
 
 **Retention (`retain_departed`), keyed shapes over a mutable snapshot.** At the default point
 a key absent from the current snapshot is deleted at reconcile (§"The equivalence invariant",
@@ -839,7 +862,12 @@ snapshot, the strict per-key equation holds unchanged; a stored key absent from 
 snapshot is exempt from comparison (and, when a tombstone column is declared, must be marked
 in it). The probe is the reconcile scan's own anti-join — the very computation that would
 otherwise have deleted — recording the retained-departed key count on the run manifest, with
-the retained set's tombstone marking checked where declared. The point is meaningful only
+the retained set's tombstone marking checked where declared. It is dispatched on **every**
+reconcile that suppresses the delete, independent of the project's `probes:` cadence — it
+stands in for the delete the default point would have run, so a cadence skip would suppress
+the delete while verifying nothing. Its manifest record (`run_state.md` §"Run manifest")
+carries fact `contract.retain_departed` with the retained-departed count in `observed`; an
+unmarked tombstone raises `ContractDepartedKeyUnmarked`. The point is meaningful only
 where departure is observable and deletion is the default, so it is admitted **only on a
 keyed shape consuming a mutable snapshot**; declaring it anywhere else is a configuration
 error (`ContractRetainDepartedInvalid`).
@@ -954,6 +982,34 @@ an unrecognised construct refuses, never defaults). The obligations, each with i
    discovery"); an unresolvable delta shape refuses the repair family by name
    (`MaintenanceRepairKeysNotDiscoverable`).
 
+**Which changed inputs get a mutation cell.** A source gets an `UpstreamMutation` cell iff it
+**explicitly declares** `mutation_profile: mutable_snapshot` or `mutation_profile: change_feed`
+(the fail-closed admission default alone never synthesises one — an undeclared source is not
+silently treated as mutable), **or** it is `append_only` and named in some column group's
+value-sensitivity set (a late append into an already-written region changes stored values, so
+that region is maintained, not left stale). Unlike `mutable_snapshot`, a `change_feed` cell needs
+no value-sensitivity check to qualify: a change feed can only arise from an explicit declaration,
+so there is no fail-closed default it could be silently conflated with. The resulting cell is
+admitted as full-input re-derivation over the source's current contents — the feed's own delta
+rows are not read (§Known Divergences). The source's clock is not part of this rule: whether the
+resulting cell's scan can be clamped to the output partition axis is a downstream admission
+question (obligation 4 above), not a derivation-time gate. A clocked mutable source whose scan
+cannot be clamped surfaces the ordinary `MaintenanceScanUnbounded` refusal — escapable by
+`allow_full_scan` / `scan_bounds.on_violation: warn` — the same loud path an unclocked one already
+takes, never a silently-dropped cell.
+
+**When a mutation cell dispatches.** An `UpstreamMutation` cell that is otherwise live does not
+unconditionally dispatch on every run: a run compares the source's recorded content fingerprint
+(row count plus an order-independent row digest over the source's digest columns) against the
+source's current fingerprint. Equal — the same row count, the same digest-column set, and the
+same content digest — means nothing changed since the last dispatch, so the cell is recorded as a
+no-op for this run and executes no statements. Anything else (a differing digest, a differing row
+count, a changed digest-column set, or no recorded baseline at all) means the cell dispatches as
+above, and the observed fingerprint is re-recorded as the new baseline. Recording happens only on
+a run that actually dispatched — the same discipline the append-only posture baseline follows
+(§"Probe obligation" in `model_properties.md`) — so a failed run cannot suppress the next run's
+cell.
+
 **Interchangeability and choice.** Two techniques serve one cell interchangeably iff, at a
 fixed `S`, they produce identical state on the columns deciding which rows exist — the
 `S`-indexed refinement of the equivalence invariant, `S` a **per-input vector** once the plan
@@ -997,7 +1053,28 @@ addressing (§"Partition-local maintenance (the K8 guardrail)"). **User pins**:
 *admissible* mechanisms without ever widening the admissible set — refused with
 `MaintenanceWriteAddressingRefused` when the addressing cannot uphold the equivalence
 invariant, and with `MaintenanceWritePatternUnavailable` when the name is unrecognised or the
-backend cannot execute it.
+backend cannot execute it. A pin's equivalence factor is evaluated against the cell's
+**derived** column comparability and row identity — the same P2/P3 proof
+`resolve_write_suppression` owns (§"Windowed maintenance and the horizon") — not structural
+facts alone: a compare-based pattern (`diff_patch`, `keyed_conditional`, `staged_candidate`)
+over a column group with an unproven-comparable member, or over a cell with no proven row
+identity, refuses `MaintenanceWriteAddressingRefused` naming the offending column(s). A hard
+`technique: suppress` pin whose suppression proof itself refuses is a run-refusing
+`ChoiceRefusal` raised before any statement executes — never a silent fallback to the
+unconditional/region form — and `smelt explain` prints the same refusal.
+
+**Within-family mechanism pins.** `keyed`, `keyed_conditional`, and `staged_candidate` all
+select the same `KeyedFold` *technique*, but pin different **mechanisms** within it (the keyed
+`MERGE` versus the merge-less staged-candidate conditional `DELETE`+`INSERT`, §"Windowed
+maintenance and the horizon"). `keyed`/`keyed_conditional` pin the `MERGE` mechanism: unavailable
+on a backend without `MERGE` refuses `MaintenanceWritePatternUnavailable` — already the open
+registry's capability answer, since both names declare `WriteCapability::Merge`. `staged_candidate`
+pins the staged conditional `DELETE`+`INSERT` **even on a `MERGE`-capable backend** — an explicit
+pin is a choice, never a downgrade to be second-guessed. A `staged_candidate` pin over a cell
+whose write-suppression verdict resolved `Unconditional` refuses `MaintenanceWriteAddressingRefused`
+— the staged-candidate shape has no unconditional form, so there is nothing to fall back to except
+a silent substitution, which a pin must never produce. Absent a pin naming one of these three,
+`MERGE` stays preferred wherever the backend can run it, matching the unpinned default.
 
 **Worked example — the plan of a composed model.** `order_facts` (running example) declares
 both `unique_key: [order_id]` and a `timeseries:` clock on `order_ts`/`order_date`, joining
@@ -1054,7 +1131,14 @@ set. It requires a declared `unique_key` for the insert/update legs and change c
 (`model_properties.md` §"Change comparability") for the update leg; the delete leg
 additionally requires **slice completeness** (the repair family's correctness premise, §"The
 repair family") and without it degrades explicitly to insert+update, a reduced-capability
-admission rather than a silently dropped delete leg. `diff_patch` is graded **Idempotent** (a
+admission rather than a silently dropped delete leg. A region recompute's own slice-completeness
+argument is its write scope itself: the candidate a region recompute writes IS the model's
+entire admitted state over that scope (the full model for an unwindowed recompute, the clamped
+write window for a windowed one) — nothing is excluded from the comparison, so a stored row
+inside that scope absent from the candidate has genuinely departed, never merely unscanned. The
+delete leg is therefore admitted `Complete` for the region `DeleteInsert` default the same way
+it already is for a `PerGroupRecompute` cell's own key-temporal-locality proof. `diff_patch` is
+graded **Idempotent** (a
 second run against unchanged input diffs to empty), making it the reconciliation and
 drift-repair write; its slice is the *candidate's own* — affected-key set for a per-group
 recompute, partition region for a windowed one — so it is not tied to a partition axis.
@@ -1233,9 +1317,11 @@ predicate on **both** the scan and the merge/overwrite target, since a bound sta
 non-partition column is one the storage layer cannot prune by. Under the default `scan_bounds`
 (`require: partition_local`, `on_violation: error`), a non-local cell refuses
 (`MaintenanceScanUnbounded`) unless the source carries `allow_full_scan: true`; `max_lookback`
-additionally refuses a derived span wider than the operator's stated expectation. The
-guardrail never modifies a clamp — it only refuses or warns (§Surface "Maintenance overrides
-(`maintenance:`)").
+additionally refuses a derived span wider than the operator's stated expectation.
+`on_violation: warn` **admits** the derived plan for that source in place of the refusal and
+reports the violation as a Warning-severity `MaintenanceScanUnbounded` instead of an
+Error-severity one; the guardrail stays check-only either way — it never modifies a derived
+clamp, only refuses or warns (§Surface "Maintenance overrides (`maintenance:`)").
 
 #### Statement emission (single owner)
 
@@ -1260,8 +1346,13 @@ since which source keys count as "changed" is a derived maintenance-relevant com
 (introspection, seed loading, schema-evolution DDL) is outside this rule; single ownership is
 what makes maintenance SQL *observable* — the same emitters serve execution, the conformance
 equivalence gates, and `smelt explain --show-sql`, so printed SQL cannot drift from executed
-SQL. Definition-delta migration statements are inside this rule: they come from the same
-emitter layer (`definition_deltas.md` §"Plan-and-approve").
+SQL. Schema-evolution DDL is outside the maintenance/backbuild emitter rule but is itself
+single-owned per dialect by `smelt-state`'s `ddl_duckdb.rs`/`ddl_spark.rs`/`ddl_bigquery.rs` —
+it is not routed through `backbuild::emit` because those emitters are DuckDB-test-grade and
+have no forms for struct-field, nested-widening, or nullability operations, and because
+`smelt-state` sits below `smelt-logical`; no caller outside those three modules composes
+schema-evolution DDL text. Definition-delta migration statements are inside this rule: they
+come from the same emitter layer (`definition_deltas.md` §"Plan-and-approve").
 
 ### The frontier
 
@@ -1311,10 +1402,18 @@ instantiates the affected groups' entries at `S = ∅` over every existing regio
 **Edges.** A dependency edge is `downstream reads upstream` under the downstream cell's
 derived scan clamp, between two partition axes whose grain is the declared
 `timeseries.granularity` of each node — never per-edge, never derived from the SQL (the
-classifier only *checks* the declaration, e.g. against a `date_trunc` grouping). Clamp margins
-ceil **outward** to whole partitions; each hop aligns its result outward to the receiving
-axis's grain. Outward maps are monotone, so sufficiency composes; narrowing never does.
-**Widen-never-narrow** is the graph layer's composition law.
+classifier only *checks* the declaration, e.g. against a `date_trunc` grouping). Every declared
+granularity (`hour` through `year`) has a graph axis; an edge cannot be built without both
+endpoints' declared grains. Intervals are half-open instants — exact seconds on the node's own
+declared axis, not day ordinals — and clamp margins apply **exactly**; it is the *receiving*
+axis's own outward alignment, not a blanket day ceiling, that widens a touched interval to
+whole partitions of that axis's grain (an hour-grain node widens to whole hours, a day-grain
+node to whole days, and so on through week — aligned to the declared `week_start`, default
+Monday — month, quarter, and year, each to real civil boundaries). Outward maps are monotone,
+so sufficiency composes; narrowing never does. **Widen-never-narrow** is the graph layer's
+composition law. A propagated interval rendered into a `smelt run` window still aligns outward
+to whole days, because the run-window surface is date-valued even when the underlying dirt is
+sub-day.
 
 **Typed edges.** An edge carries a **vector** of typed components, one per column group the
 downstream consumer reads: `(delta shape × addressing × column set)` — the upstream's delta
@@ -1335,13 +1434,54 @@ interval. The `MaintenanceGraphUnsupportedNode` refusal below fires only where t
 delta signature degrades all the way to `general`, and its message names the operator that
 degraded the type.
 
+A keyed dirt-set is not a dead end once seeded: a node carrying keyed dirt is a dirty node in
+exactly the same sense an interval-dirty node is, so its own outbound edges are walked too, and
+its outbound contribution follows the same widen-never-narrow law as an interval-addressed
+node's does — a downstream that is itself keyed-grain stays on the keyed channel (the affected
+key set composes forward unchanged, since a key-addressed downstream has no interval axis to
+project it through), while a clocked or unclocked downstream widens to whole-table interval
+dirt (there is no key→interval projection to narrow it by). `smelt run --since-upstream`
+schedules a node reached only through the keyed channel as a whole-table run — the keyed
+channel has no interval axis to bound a partial run by — and its printed dirty-set report names
+the affected key columns and the upstream that produced them, distinguishably from an interval
+line.
+
+**Column-group-scoped dirt.** Dirt carries an optional column-group scope alongside its
+interval or keyed-dirt-set payload: the subset of the downstream's own column groups
+(`model_properties.md` §"Per-column mutation-sensitivity / column provenance") a given inbound
+edge's delta can actually touch. The scope is admitted only when three conditions all hold —
+the upstream is a proven row-preserving (closure-pruned) enrichment source of the downstream
+(`model_properties.md` §"Semantics", the same closure proof that prunes membership
+sensitivity), the downstream's own column-group partition is non-degenerate, and the source
+names at least one but not all of the downstream's groups. Every other shape — a creation-
+reaching (driving) source, a degenerate collapse, or an upstream that (by this reading) names
+no group at all — is whole-model dirt, unchanged: this is a widen-never-narrow refinement of
+the graph layer's existing composition law, never a new way to under-dirty a node. An outbound
+edge carrying no typed components (§"Typed edges") propagates unscoped regardless of the
+node's own scope — the scope only ever gates a *typed* edge.
+
+The scope composes forward the same way interval dirt does: a node's own column-group scope is
+the union of every inbound edge's scope, and a node reached by even one unscoped inbound edge is
+whole-model dirty in the column-group sense too — the scope never survives a merge with an
+unscoped contribution. Once a node's own scope is known, it gates that node's *outbound* edges:
+a consumer whose typed components name only column groups outside the node's own dirty scope
+reads nothing the delta touches, and that edge contributes no dirt downstream at all — narrower
+than whole-model dirt reaching a consumer that structurally cannot be affected by it. The
+`--since-upstream` dirty-set report names a narrowed edge's scope on its own per-edge line
+(`  {downstream} <- {upstream}: {interval} [groups: {group}, …]`) when the edge carried one;
+an unscoped line is unchanged.
+
 **Upstream model edges.** A maintained model's ref to another maintained model in the same
 project is a plan edge of the same standing as a `sources.*` ref: the upstream model's own
 validated `timeseries:` declaration supplies the clock the downstream creation cell is clamped
 by, and scan bounds compose through the chain exactly as the propagation graph composes them.
 An upstream-model ref whose clock cannot be derived (the upstream declares no `timeseries:`
 and none is inferable) is a recorded refusal on that cell (`MaintenanceReachNotDerivable`,
-naming the edge) — never a silent drop. A ref to a `full`-mode or view upstream derives no
+naming the edge) — never a silent drop. The partition-addressed creation cell this edge admits
+(when it admits one) is what the run loop actually executes, read from the model's own derived
+plan rather than a hardcoded technique; an edge refused `ReachNotDerivable` with no other
+creation-trigger cell to fall back on refuses the run rather than silently region-recomputing
+under a default technique the plan never admitted for that trigger. A ref to a `full`-mode or view upstream derives no
 creation cell (there is no incremental delta to receive); it participates in
 mutation/backfill triggers only. For forward propagation, `--source` accepts either a declared
 source or an upstream maintained model; a model's landed delta is the output window a
@@ -1358,22 +1498,47 @@ delta is exactly "recompute and write only the affected key groups", the repair 
 definition). `MaintenanceReachNotDerivable` narrows accordingly: it fires only for a clockless
 upstream whose derived shape is *not* key-addressed (`append-only within window` or `general`)
 — a clockless `keyed upsert` upstream is admitted via the key-addressed route rather than
-refused. The fail-closed leg is explicit: when the downstream's own SQL does not carry the
-upstream's key columns (they cannot be resolved through the downstream's own grain), the edge
-is refused by name (`MaintenanceRepairKeysNotDiscoverable`) rather than falling back to a
-silent whole-table cell.
+refused. Two discovery routes attempt this admission, either sufficient on its own: **upstream-
+keyed** — the downstream's own grain resolves through the upstream's own `KeyedUpsert` key
+columns directly — and **grain-over-upstream** — the downstream's grain columns are columns of
+the upstream relation itself, reached through a plain single-relation `FROM` with no fan-out
+join, even when they are not the upstream's own key columns (the common shape when a downstream
+regroups an upstream's rows onto a different, coarser or unrelated key than the upstream folds
+by). The fail-closed leg is explicit: when the downstream's grain does not resolve against the
+upstream relation under either route — because the grain columns are not columns of that
+relation at all, or because a fan-out join stands between the downstream and the upstream — the
+edge is refused by name (`MaintenanceRepairKeysNotDiscoverable`) rather than falling back to a
+silent whole-table cell. A live key-addressed cell is dispatched irrespective of the
+downstream's own grain — a `grain: partition` downstream takes it in place of its ordinary
+window-forward batch loop for that run, because the cell's bounded read is the affected key
+set and has no partition-interval axis to compose with a run window.
 
 A key-addressed cell's affected-key set is discovered from the **group-grain fingerprint
 sidecar diff** over the upstream's own output table (§"The repair family" — "Obligation 7 over
-a `mutable_snapshot` source"), keyed at the upstream's key columns: a clockless keyed upstream
-is, from the consumer's own view, exactly a mutable snapshot with no clock to clamp a scan by,
-so the sidecar's stored comparandum is what bounds the read instead — a clamp-less
-`SELECT DISTINCT` over the upstream would degenerate to a full-table rescan, which the
-per-group recompute technique this cell admits exists specifically to avoid. The
-changed upstream keys are then projected through the upstream relation onto the downstream's
-own key columns (the key columns this cell's key scope names, `KeyScope::keys`):
-`SELECT DISTINCT <key_expr(key_scope.keys)> FROM <upstream_table> WHERE <upstream key expr> IN
-(<changed keys>)`. The candidate recompute is the downstream's full (unwindowed) SQL
+a `mutable_snapshot` source"): a clockless keyed upstream is, from the consumer's own view,
+exactly a mutable snapshot with no clock to clamp a scan by, so the sidecar's stored comparandum
+is what bounds the read instead — a clamp-less `SELECT DISTINCT` over the upstream would
+degenerate to a full-table rescan, which the per-group recompute technique this cell admits
+exists specifically to avoid. Which columns the sidecar groups by, and how the diff's own
+changed-key set becomes the downstream's affected-key relation, depends on which route admitted
+the cell:
+
+- **Upstream-keyed.** The sidecar groups at the upstream's own key columns. The changed upstream
+  keys are then projected through the upstream relation onto the downstream's own key columns
+  (the key columns this cell's key scope names, `KeyScope::keys`):
+  `SELECT DISTINCT <key_expr(key_scope.keys)> FROM <upstream_table> WHERE <upstream key expr> IN
+  (<changed keys>)`.
+- **Grain-over-upstream.** The sidecar groups directly at the downstream's own grain columns,
+  projected over the upstream relation — the diff's own changed-key set *is* the downstream's
+  affected-key set, so no forward-projection `SELECT` runs. This is not merely an optimization:
+  a row whose grain value moves from one downstream group to another between diffs flips the
+  order-insensitive digest of both the vacated and the arriving group, so the diff surfaces
+  both. Projecting forward from a set of changed *upstream* keys (the upstream-keyed route's own
+  `IN (...)` query) reads only the upstream's post-change state and would surface the arriving
+  group alone, silently missing the vacated one — an under-approximation the equivalence
+  invariant forbids. Grouping the sidecar at the downstream's own grain is what avoids that gap.
+
+The candidate recompute is the downstream's full (unwindowed) SQL
 semi-joined to that key relation, and the write is the repair family's own targeted
 `DELETE`+`INSERT` (or the `write: diff_patch` write leg, when pinned) — identical to any other
 per-group-recompute cell's lowering once its affected-key relation and candidate
@@ -1390,8 +1555,10 @@ by `sources.md` §"The fingerprint sidecar", which upholds this requirement).
 This discovery route is
 DuckDB-only, matching the sidecar's existing posture elsewhere in this spec — a non-DuckDB
 target dialect refuses by name before any backend call, never a silent widening to a
-full-table read. A `key_scope` key the upstream relation does not carry is a fail-loud
-refusal, never a widening to every key.
+full-table read. Under the upstream-keyed route, a `key_scope` key the upstream relation does
+not carry is a fail-loud refusal, never a widening to every key; the grain-over-upstream route
+poses no such subset obligation (its `key_scope` is the downstream's own grain, validated by
+admission rather than checked against the upstream's key columns).
 
 **Forward propagation — what must run.** Runs are driven by **what landed**, per source, as
 partition intervals on that source's own axis; a cron tick is only the poller. Processing
@@ -1422,6 +1589,15 @@ is the whole table. The two directions are **one-sided inverses at best** ("adjo
 inverse"): `forward(backward(P)) ⊇ P` — resolving what a period needs and propagating it
 forward may over-cover the period, never under-cover it.
 
+Backward resolution does not consult a recorded observed delta (§"Observed deltas on model
+edges"): the resolved slices state what must **exist** over the requested period, and a change
+record cannot soundly narrow an existence question — a present-and-empty record means a past
+run changed nothing, not that the region is current with respect to inputs that landed since.
+Currency is the reconciliation ledger's question (§"The frontier record (reconciliation
+ledger)", `smelt run --auto`), not the observed-delta record's; narrowing on delta evidence
+alone would under-cover the resolved period, breaking `forward(backward(P)) ⊇ P` above. This
+is a deliberate non-goal, not unbuilt work.
+
 **Observed deltas on model edges.** A model edge's propagated delta follows the same
 landed-delta refinement as a source edge (`sources.md` §"Landed-delta (derived, recorded)"):
 where a run recorded an **observed output delta** — the changed-row set a conditional write
@@ -1431,24 +1607,77 @@ delta; absent a record the edge falls back to the run's written window, the coar
 always-correct form (widen-never-narrow). The record is warehouse-resident, alongside the
 reconciliation ledger, and written in the **same backend transaction as the write it records**
 — a delta visible without its write, or a write without its delta, breaks propagation
-soundness. **Trust boundary:** an observed delta is trusted because the state is smelt-owned,
-written only by smelt's own conditional-write path — the general form of this trust argument
-is `state.md` §"The residency rule"; there is no out-of-band-edit tripwire — an
-external mutation to the target table between runs is not detected (an explicit Open
-Question, §Known Divergences). Empty and absent are distinct: an empty recorded delta means
-the run executed and changed nothing (a real, propagatable fact); an absent record means no
-delta was recorded, and a consumer must not conflate the two. This composes with the derived
-settle bound (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
-output)"): a stable upstream chain degenerates to empty-delta no-op propagation with a
-provable horizon behind it.
+soundness. Three write families record a delta this way: the column-scoped conditional
+`MERGE`, the change-suppressed keyed fold, and the staged-candidate conditional recompute (the
+keyed fold's changed-keys guard compares the stored value against the fold's own combine
+expression, not the raw delta column, since a fold's matched arm updates on a folded-value
+change; the staged-candidate recompute additionally records a departed key — present in the
+target, absent from the candidate — since its DELETE removes that row too). An **unconditional**
+write of any family never records one — the record is a byproduct of a conditional write's
+already-computed changed-row set, never derived after the fact. **Trust boundary:** an observed
+delta is trusted because the state is smelt-owned, written only by smelt's own conditional-write
+path — the general form of this trust argument is `state.md` §"The residency rule"; there is no
+out-of-band-edit tripwire — an external mutation to the target table between runs is not
+detected (§"Other deliberate boundaries", "No out-of-band-edit detection" — a stated non-goal,
+not an open question). Empty and absent are distinct: an
+empty recorded delta means the run executed and changed nothing (a real, propagatable fact); an
+absent record means no delta was recorded, and a consumer must not conflate the two. This
+composes with the derived settle bound (`incremental_shapes.md` §"Key temporal locality (the
+time-partitioned output)"): a present-and-empty delta whose window lies entirely behind the
+model's derived settle bound is provably final — no later-arriving row can still touch it — and
+is reported as a **settled no-op**, distinct from a present-and-empty delta still inside the
+bound (reported as merely empty-this-run, since it may yet receive a late row that dirties the
+window on a future run). This is a reporting distinction only: both arms already contribute
+zero dirt to propagation — the settle bound names which empty is provably permanent, it never
+prunes further work beyond what an empty delta already prunes. `smelt run --since-upstream`
+reads the recorded delta live for a model-address delta origin, at the exact `(model,
+window_start, window_end)` key the write side records under: absent, it falls back to the
+declared `--landed` window unchanged (widen-never-narrow); present and empty, it propagates
+nothing (and the dirty-set report names it settled or unsettled per the composition above);
+present and non-empty, it projects the recorded partitions through the model's own established
+locality route. The read is DuckDB-scoped today, matching the write side — a target with no
+observed-delta storage reads back "absent" and falls back, never errors; a non-DuckDB backend's
+write side refuses fail-loud on a conditional write that would otherwise record a delta, rather
+than silently writing without recording one.
+
+**Time-unrolled self-edges.** A self-referential model — one whose own SQL reads
+`smelt.<self>` — is not a table-graph cycle to the propagation graph; it is a **day-unrolled
+self-edge**, admitted iff the self-reference is provably strictly time-backward over the
+model's declared partition axis (the same proof that governs ordered backfill execution,
+§"Window independence and self-referential models" in `incremental_shapes.md`): `after == 0`
+and a derivable finite backward bound (`before_days`), on a day or month partition axis on both
+sides. Admission never depends on the timeseries clock being fresh — only on the bound being
+derivable and strictly backward. Its own two propagation rules are asymmetric, because the
+self-edge's forward and backward directions do not read the same relation:
+
+- **Forward (dirt).** A landed delta on `[a, b)` of the model widens to **the frontier**,
+  `[a, →)` — an open-ended interval, never `[a, b)` alone — because day `D`'s output feeds day
+  `D+1`'s read of the model's own prior output, transitively without bound. This applies once
+  per visit to the node (the topological walk visits it exactly once), not as a fixed point.
+- **Backward (requirement).** A requirement of `[s, e)` on the model additionally requires the
+  model's own `[s − before_days, s)` — one application against the stored basis/checkpoint, not
+  a fixed point, since a bounded self-read converges from a known prior state rather than
+  recursing indefinitely.
+
+The dirty set stays open-ended (`[a, →)`) because that is the honest statement of what is
+dirty — but a *run* needs a closed region, so at scheduling time an open-ended interval is
+resolved to `[a, today + 1 day)` (today's partition inclusive), against the same `now` the
+propagation planner already takes. An open-ended interval whose start is itself after today is
+a fail-loud refusal naming the model — a silently empty window would be wrong-and-quiet. The
+printed dirty-set report still renders the open-ended `[a, →)` form; the per-run log line
+reports the resolved closed window it actually executes.
+
+A self-edge that reads forward (`after > 0`), is unbounded or underivable, or touches a
+`Keyed`-grain partition axis on either side, is refused exactly as before: fail-loud
+(`MaintenanceGraphUnsupportedNode`), naming the model and the reason. A genuine multi-node
+table-graph cycle (two or more distinct models forming a cycle) is refused unchanged — only a
+node's edge to *itself* gets the day-unrolled treatment.
 
 **Refusals.** The graph refuses fail-loud (`MaintenanceGraphUnsupportedNode`) on: a cyclic
-edge set; a **self-referential** model (a table-graph cycle that is a DAG only when
-time-unrolled — admissible in principle iff its self-clamp is strictly time-backward, with
-forward dirt running to the frontier and backward resolution reaching the model's
-basis/checkpoint); and a **keyed node whose delta signature is `general`** (no partition axis
-for interval dirt and no admitted key addressing either — treating it as day-axis would be
-wrong-and-quiet). A keyed node proven `keyed upsert` is **not** refused on this ground — see
+edge set (excluding an admitted self-edge, above); a **keyed node whose delta signature is
+`general`** (no partition axis for interval dirt and no admitted key addressing either —
+treating it as day-axis would be wrong-and-quiet). A keyed node proven `keyed upsert` is
+**not** refused on this ground — see
 "Keyed dirt-sets and the narrowed refusal", above — and neither is a locality-admitted
 time-partitioned keyed output: it is a clocked node whose edges use its declared granularity,
 and whose outbound dirt is the key→partition projection of what its runs changed — exact under
@@ -1523,6 +1752,18 @@ per-model strategy enum would be a lossy projection; strategy is derived per cel
 *shape* too was rejected: it reintroduces the silent contract swap the declaration law exists
 to prevent. Shape-defining facts remain declared-and-checked.
 (`docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §10, §13.)
+
+**Absent a cost model: the fixed preference order.** Until a cost model exists to rank between
+two admissible techniques, the override ladder resolves to a fixed preference order applied
+uniformly across every dispatch route: a validated `cells[].write` pin first (the most specific
+addressing-level override); then a hard `cells[].technique` pin, which refuses loudly
+(`ChoiceRefusal`) when the resolvable set does not contain it rather than silently falling back;
+then a soft `defaults.prefer`/`cells[].prefer` bias, which never refuses; then the cell's own
+admitted-and-live technique; and finally region recompute, the always-available fallback. This
+order was chosen over letting an unranked ambiguity fall through to an arbitrary pick, because
+"a pin bypasses the cost model, never admission" only holds if the absence of a cost model has
+one deterministic, documented answer rather than a per-call-site accident of implementation
+order.
 
 **One invariant; addressing is the real axis, and it is per-cell.** An earlier framing split
 the contract into a per-partition equivalence and an end-state equivalence, one per shape —
@@ -1797,13 +2038,6 @@ and §References → Plans. Shape-profile gaps are `incremental_shapes.md` §Kno
 definition-delta gaps (including the unwired synthesis layer and the verb renames) are
 `definition_deltas.md` §Known Divergences.
 
-- **Posture-derived key departure is unimplemented; the runtime retains departed keys
-  unconditionally.** A snapshot-reconcile run does not delete keys absent from the incoming
-  scan (no anti-join delete leg exists), and the `retain_departed` retention point — the
-  declared way to keep that behaviour — has no declaration parsing, oracle transform, probe
-  emitter, or `ContractRetainDepartedInvalid` diagnostic. Today every keyed model behaves as
-  if `retain_departed` were silently declared (decision record:
-  `docs/research/20260816-open-questions-triage.md`).
 - **The determinism scope is unimplemented.** The runtime still compile-time-pins
   `NOW()`/`CURRENT_*` in partition-grain models and rejects them in keyed models, instead of
   running them as-is; the conformance oracle's comparison and the recompute-equality
@@ -1812,65 +2046,46 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   record: `docs/research/20260816-open-questions-triage.md`).
 - **The scheduler does not yet consume delta signatures end to end.** Signatures shape
   admission and are printed, but the DAG scheduler's currency for "what needs re-running" is
-  still whole day-intervals: a clockless `keyed upsert` upstream feeding a `grain: partition`
-  downstream derives a key-addressed repair cell the run loop never dispatches (the result is
-  correct but not incremental — that route is wired only inside the `grain: key` run branch,
-  so such an upstream instead maintains its downstream via the ordinary run route); keyed
-  dirt-sets carry key columns and provenance, not affected key *values* (value-level discovery
-  stays with the run-time mechanism); and cross-model runs require the operator to state what
-  landed upstream on the command line, because no per-source watermark is persisted. Tracked:
+  still whole day-intervals: keyed dirt-sets carry key columns and provenance, not affected key
+  *values* (value-level discovery stays with the run-time mechanism); and cross-model runs
+  require the operator to state what landed upstream on the command line, because no
+  per-source watermark is persisted. Tracked:
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
 - **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes
   the signature the first line; today's output leads with grain), nor the per-column guarantee
   summary or derived run shape. Tracked:
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
-- **Per-cell `deferral` is not yet scheduled** — it parses, validates, and prints as declared,
-  but needs per-cell frontier addressing, which the frontier record tracks only per-region
-  today (a state-shape change, not a lattice-point change). Tracked:
-  `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
-- **`diff_patch` over the region `DeleteInsert` default has no runtime lowering** — the
-  resolver fails loud by name, but no caller today reaches it, so the pin is unenforced rather
-  than refused for that case. Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
-- **Frontmatter-time grain checking has one narrow gap**: a `grain: key` model deriving
-  identity from its `GROUP BY` (no top-level `unique_key:`) is checked only at plan
-  derivation, not frontmatter validation (cross-ref `models.md` §Known Divergences).
-- **The write-pin equivalence factor is structural only** — the per-cell equivalence hook
-  always accepts; threading column-comparability or a suppression-specific proof is later
-  work. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **An inadmissible write-*variant* pin has no pre-execution gate** — forcing
-  `technique: suppress` on a refusing cell silently falls back to full recompute instead of
-  refusing; `smelt explain` also misses this case. Tracked:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Observed-delta consumption is partial**: `--since-upstream` doesn't read the recorded
-  delta table live; backward resolution consumes none; the keyed-fold and staged-candidate
-  write families record nothing; the settle-bound × observed-delta composition has no live
-  "delta empty" leg. Tracked:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **No execution technique keys off a maintained-model creation cell** — the propagated
-  region materializes via the ordinary run loop, not a per-cell technique. Tracked:
-  `docs/plans/20260710-web-analytics-maintenance-demo.md`.
-- **Plan-consumer gaps**: the horizon-clamped partition-local mutation quadrant is
-  unreachable from any real workspace; dispatch cannot distinguish "a mutation genuinely
-  happened" from re-derivation; the `prefer` soft-bias ladder and
-  `scan_bounds.on_violation: warn` parse but are not consumed (every refusal is an Error);
-  the cost model between two admissible techniques is unbuilt; `AppendOnly` sources get no
-  `UpstreamMutation` cell. Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **A `contract.cells[].deferral` cell addressing a strict subset of the plain fold's own
+  column groups cannot decline the fold's whole-row write.** The plain `Trigger::NewData`
+  incremental fold now resolves its per-cell decisions before running: it skips only when
+  EVERY one of its own column groups is fully covered by skip-licensed declaring cells
+  (`smelt_logical::contract::deferral::fold_deferral_verdict`, dispatched from
+  `maintenance_driver::resolve_fold_deferral`), recording the skip as `skipped_deferral` with
+  the declaring addresses in `RunManifest.deferred_cells` and advancing no cell frontier. A run
+  that actually folds — because coverage is partial, a covered cell is unlicensed, or the
+  measured lag exceeds the declared window — always folds the whole row and advances every one
+  of its own declaring cells' frontiers together (`IntervalStore`'s per-model `cell_frontiers`
+  map), never a partial advance. Every other currently-wired per-cell dispatch site
+  (`resolve_live_membership_recompute_cell`, `resolve_live_column_scoped_cell`,
+  `resolve_live_per_group_recompute_cell`'s `UpstreamMutation` branch) still serves an `on:`
+  trigger over a mutable or unclocked source, over which `contract.cells[].deferral` is not
+  validly declarable at all (`validate_deferral`), so this dispatch remains the only one a
+  per-cell `deferral` declaration can ever reach. Tracked:
+  `docs/outcomes/20260809-contract-lattice-v1/outcome.md`,
+  `docs/outcomes/20260815-definition-delta-migrate/phases/14-plan.md`.
+- **`diff_patch` over the region `DeleteInsert` default has a runtime lowering for the
+  membership-sensitive (`grain: key`, `UpstreamMutation`-triggered) case only** — `resolve_live_
+  membership_recompute_cell` routes a `write: diff_patch` pin to `execute_diff_patch` with the
+  trivial whole-scope slice predicate. The ordinary windowed/partition-grain region default (the
+  plain incremental `DELETE`+`INSERT` batch loop, `resolve_incremental_strategy`) now consults
+  the same override ladder (`resolve_cell_choice`) for the creation cell's family choice, but a
+  `write: diff_patch` pin there still maps to `backend_default` (no `diff_patch` lowering for
+  this trigger) rather than the `execute_diff_patch` path — narrower than before this phase, not
+  closed. Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output
-  poses no partition-locality question, so a locality-admitted keyed model's clamps carry an
-  assumed (underived) write-footprint mirror into propagation;
-  `MaintenanceSkeletonColumnAdded` is reachable (unit coverage, and via `smelt-runtime`'s
-  maintenance driver, the only caller with I/O access to derive a real `ColumnAdded` trigger)
-  but not yet surfaced as an LSP/CLI diagnostic ahead of a run (`smelt-db`'s own
-  diagnostics/`smelt explain` path always derives an empty trigger set);
-  column-group-scoped dirt coarsens to whole-partition (safe, over-running); hour granularity
-  is declared surface but propagation is day-ordinal; the built grain-alignment check
-  validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
-  graph edges still take the declaration directly. Refs: `model_properties.md` §Known
-  Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
 - **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
   cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
   the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the
@@ -1878,12 +2093,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   until a real Spark-targeted incremental workload demands one — on a ledger-less backend the
   recorded downgrade is the intended behaviour, not a stopgap (decision record:
   `docs/research/20260816-open-questions-triage.md`).
-- **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
-  (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
-  key-level dirt representation exists (intervals are the graph's only currency); the
-  `examples/web_analytics` workspace is not fully `--since-upstream`-compatible end to end (a
-  self-referential model and a bare-keyed model with readers each refuse the whole-workspace
-  graph); no `--select` scoping exists.
+- **Graph-layer gaps**: a `grain: key` model that also declares `timeseries:` but cannot
+  establish key temporal locality still refuses (`MaintenanceGraphUnsupportedNode`) — key-
+  temporal-locality establishment (§"Key temporal locality") is a separate proof from
+  key-addressed model-edge admission and is not extended by either of that admission's discovery
+  routes.
 - **Delta detection for `--since-upstream` is explicit-only in v1** — the runner supplies
   landed deltas on the command line; no persisted per-source watermark or automatic diffing
   is consumed (§Future Extensions).
@@ -1892,35 +2106,16 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §8).
 - **The derived model-wide horizon is under construction**, as is the data-quality check for
   the model-author lateness-flag pattern. Tracked: `docs/plans/20260704-model-updates.md`.
-- **Override-ladder reach (Open Question)**: the keyed-fold suppression consumer honours
-  `Suppressed` unconditionally — the first-build-vs-steady-state rule doesn't reach it; no
-  real fixture derives a column-scoped/keyed-fold cell under a first-build/backfill trigger,
-  so that branch is proven only at resolver level; `smelt bakeoff` measures technique-family
-  cost only, not the write-suppression dimension; whether a future cost model needs
-  region-level change-ratio statistics from prior observed deltas is open.
-- **docs-site coverage of the plan's CLI surface is partial** — a one-time close-out task:
-  enumerate the undocumented residue once, then document or explicitly drop each item.
-- **The merged-group region-recompute rule is unverified in the implementation** — a group
-  whose sensitivity spans two or more mutation-sensitive inputs must take region recompute
-  (§"The plan matrix"); whether today's derivation ever admits a column-scoped repair for
-  such a group has not been audited, and no check or fixture pins the rule (decision record:
-  `docs/research/20260816-open-questions-triage.md`).
-- **`change_feed` sources do not yet get an `UpstreamMutation` cell** — every other
-  mutation-sensitive posture receives one, and a change feed must too; today none is derived,
-  and even where the posture is threaded through, only full-input re-derivation is admitted
-  (live fold machinery for a change feed's delta shape is §Future Extensions, blocked on the
-  retention point).
-- **`INTERSECT`/`EXCEPT` are unclassified set operations**: they collapse to whole-model
-  mutation-sensitivity, so every admitted cell is region recompute; a future distribution
-  proof needs per-arm-cardinality reasoning. Cross-ref `model_properties.md` §Known
-  Divergences.
-- **Conditional-maintenance gaps**: `smelt explain --show-sql` renders the unconditional
-  matched arm, never the suppressed form a live run executes; the region DELETE+INSERT
-  family has no conditional variant; the whole-row (keyless) staged-candidate realisation
-  does not exist; no `write:` pin selects between keyed MERGE and staged-candidate;
-  delta-restriction admission doesn't yet consume an external `mutable_snapshot` source's
-  fingerprint-sidecar delta; non-DuckDB targets keep the widened-scan recompute. Refs:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **A `change_feed` source's mutation cell always re-derives from the full input** — a
+  `change_feed`-declared source gets an `UpstreamMutation` cell (§"Which changed inputs get a
+  mutation cell"), but the cell never reads the feed's own delta rows; live fold machinery over
+  a change feed's delta shape (retractions, `delta_identity`) remains §Future Extensions, blocked
+  on the retention point.
+- **Conditional-maintenance gaps**: a target whose `BackendCapabilities::supports_fingerprint_sidecar`
+  is `false` keeps the widened-scan recompute for a mutation-sensitive cell driven by an external
+  `mutable_snapshot` source (`multi_backend.md` §"The fingerprint sidecar capability" — DuckDB
+  alone sets it today). Refs: `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
+  `docs/outcomes/20260815-definition-delta-migrate/phases/27b-plan.md`.
 
 ## Future Extensions
 
@@ -1928,6 +2123,14 @@ Ideas for widening the admission space that are **not decided**. Nothing here is
 none of it may be relied on or implemented against until it graduates into
 §Surface/§Semantics via its own spec diff and plan.
 
+- **The cost model between two admissible techniques.** `defaults.prefer: auto`/absent
+  `prefer` names this as the eventual decision-maker, but nothing ranks admissible
+  alternatives today — the fixed preference order (§Design "Absent a cost model: the fixed
+  preference order") stands in until a real cost model exists.
+- **Cost-model input for the write-suppression dimension.** Ranking a suppressed write against
+  an unconditional one needs region-level change-ratio statistics from prior observed deltas
+  that nothing collects today; `smelt bakeoff` measures technique-family cost only, not the
+  write-suppression dimension. Undecided.
 - **Further contract-lattice points.** Candidates, in the priority order the delta framing
   suggests (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §5):
   - **Reconciliation points** — equivalence promised at declared moments (say, end of day)

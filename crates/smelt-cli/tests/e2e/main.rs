@@ -7,7 +7,6 @@
 #![allow(dead_code, unused_imports, unused_macros)]
 
 mod address_collision;
-mod backbuild_cumulative_e2e;
 mod build_summary_visibility;
 mod cohort_count_acceptance;
 mod combined_generators_e2e;
@@ -20,6 +19,7 @@ mod events_deduped_redelivery_equivalence;
 mod example_builds;
 mod fn_body_wiring;
 mod fn_incremental_ts_e2e;
+mod full_refresh_escape_rebuild;
 mod functions_e2e;
 mod incremental_idempotency;
 mod incremental_nondeterministic_columns_e2e;
@@ -30,8 +30,10 @@ mod meta_config_e2e;
 mod meta_hofs_e2e;
 mod meta_lists_e2e;
 mod meta_workspace_e2e;
+mod modeldef_per_emission_override_e2e;
 mod path_prefix_build;
 mod per_partition_equivalence;
+mod rebuild_cumulative_e2e;
 mod run_command_end_to_end;
 mod schema_evolution_incremental;
 mod schema_roundtrip;

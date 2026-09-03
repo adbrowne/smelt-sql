@@ -14,28 +14,51 @@ Between those poles sits a large class of edits whose effect on the deployed
 table is reachable by a **targeted script** — an `ALTER`, a column-scoped
 `UPDATE`, a predicate-scoped `DELETE` or `INSERT` — far cheaper than
 recomputing the table. Backbuild synthesis finds those scripts automatically:
-it emits one only when fail-closed structural conditions hold, and every
+it emits one only when fail-closed structural conditions hold, every
 technique is verified against a full-rebuild oracle in smelt's conformance
-suite.
+suite, and `smelt migrate` is the command that drives it against your own
+project. Emitted scripts are DuckDB dialect.
 
-!!! note "Naming: two things called “backbuild”"
+## Using it
 
-    [`smelt backbuild`](../reference/cli.md#smelt-backbuild) is the CLI command
-    that re-runs a model (and its upstreams) over a date range — reprocessing
-    *data* under an unchanged definition. **Backbuild synthesis**, this page, is
-    about *definition* changes: deriving a migration script from the diff
-    between two versions of a model's SQL. The two share a goal (avoid
-    recomputing what you don't have to) but operate on different inputs.
+`smelt migrate <model>` diffs the model's currently-deployed definition
+against its current SQL, classifies the diff per column group, and prints the
+plan — the verdict and chosen technique for each group — without touching the
+table. If the plan is non-trivial it exits `3`: a signal a human should review
+it, not a failure.
 
-!!! warning "Availability"
+```console
+$ smelt migrate order_facts
+definition delta for order_facts (1 column group affected):
 
-    There is no CLI command for this yet — today you cannot invoke synthesis on
-    your own project. The classifier, script emitters, and every technique on
-    this page are complete and verified against a DuckDB oracle in the
-    conformance suite
-    (`crates/smelt-logical/tests/backbuild_conformance.rs`); what remains is
-    the surface on top: sourcing the "before" definition, and choosing and
-    executing an option. Emitted scripts are DuckDB dialect.
+  discount          backfill in place    SelfDerivedColumnAdd (2 statements)
+
+plan hash: sha256:4f2a91c6…   approve and execute with: smelt migrate order_facts --apply
+$ echo $?
+3
+```
+
+The exit code `3` here is not a failure — see [`smelt migrate`](../reference/cli.md#smelt-migrate)
+§"Exit codes" for the full table.
+
+Review the plan, then approve and execute it with `smelt migrate --apply`.
+`--apply` only
+ever executes the plan whose hash matches what was just printed and approved
+— if the model or its inputs changed since the plan step, it refuses rather
+than applying a stale script:
+
+```console
+$ smelt migrate order_facts --apply
+smelt migrate order_facts: applied 2 statements — the definition delta is cleared.
+$ echo $?
+0
+```
+
+`--json` gives the same plan and exit-code contract as machine-readable
+output, which is what makes `smelt migrate --json` usable as a CI gate: a
+pipeline blocks on exit `3` until a human has reviewed and re-run the plan
+step locally. See [`smelt migrate`](../reference/cli.md#smelt-migrate) for
+the full flag reference and exit-code table.
 
 ## The idea in one example
 
@@ -113,6 +136,48 @@ difference inserts) bake in *current* upstream state — run them against a stal
 table and the touched columns reflect fresh data while untouched siblings
 don't. The conformance suite includes a stale-input case that demonstrates
 this edge rather than just stating it.
+
+## Verdicts and approval
+
+`smelt migrate` classifies each affected column group into one of four
+verdicts, worst-first when a plan mixes them:
+
+- **Eclipsed** — the diff is a no-op for this group (e.g. a pure reformat).
+  Nothing to migrate; a plan with every group eclipsed exits `0` with nothing
+  to approve.
+- **Backfill in place** — every admitted technique for this group only reads
+  the deployed table itself (renames, stored-column updates, filter-scoped
+  deletes). This is the [tour](#a-tour-of-what-smelt-can-migrate)'s bulk of
+  cases: rename, add-from-stored, fix-in-place, tighten/loosen a filter.
+- **Rederive** — at least one admitted technique reads an upstream (a
+  pull-through, a join enrichment, a UNION branch add). Correctness still
+  holds under the same [equivalence guarantee](#the-guarantee); it just isn't
+  a self-contained rewrite of the stored table.
+- **Skeleton change (full refresh only)** — no admissible technique exists
+  for this group. `smelt migrate` prints the plan's refusals and leaves full
+  refresh (`smelt run --allow-full-refresh`) as the only route.
+
+A non-skeleton column addition that turns out **not** to be backfillable in
+place (an unbounded scan, no admissible technique, or an unresolvable
+expression) never blocks an ordinary run: it shows up ahead of time as an
+editor/`smelt explain` warning naming the affected columns, the run ALTERs the
+column in and leaves its historical rows `NULL`, and `smelt migrate` is the
+fix that backfills them.
+
+Per group, `smelt migrate` picks the first admissible technique from the
+option set [How it works](#how-it-works) enumerates — there is no cost model
+weighing a targeted script against full refresh; a targeted script is always
+preferred to full refresh whenever any group has one, and among a group's own
+options the classifier's fixed derivation order decides.
+
+**Approval.** The plan step (no `--apply`) always prints the current plan and
+records its hash to a per-target, per-model approval store — this is what
+"seeing the plan" means for approval purposes. Running the plan step again
+with no further edits reports the same hash as already approved and exits
+`0`. `--apply` executes only a plan whose freshly re-derived hash matches
+what's on record: if the model or its inputs changed since the plan was
+printed, the recorded approval is stale and `--apply` refuses, printing the
+new plan for you to review and approve again.
 
 ## A tour of what smelt can migrate
 
@@ -629,9 +694,12 @@ page cannot drift from what smelt actually emits.
   variants. Note the win is also engine-dependent: on a copy-on-write
   warehouse format a column-scoped `UPDATE` still rewrites every touched file
   — what it saves there is the upstream scans and joins, not the write.
-- smelt **enumerates options; it does not yet choose** between a targeted
-  script and full refresh — a cost model over the recorded option metadata is
-  the planned chooser.
+- `smelt migrate` **picks the first admissible technique per group, with no
+  cost model** — see [Verdicts and approval](#verdicts-and-approval). A
+  targeted script is always preferred to full refresh whenever a group has
+  one; choosing between two admitted techniques on cost (e.g. an
+  upstream-read option vs. a self-read option of similar cost) is not yet
+  implemented.
 - Dropped columns are sequenced into the script (`ALTER ... DROP COLUMN`,
   always last), but whether a drop is *allowed to run at all* stays owned by
   [schema evolution](schema-evolution.md)'s `--allow-column-removal` opt-in —
@@ -644,7 +712,7 @@ page cannot drift from what smelt actually emits.
 ## Related pages
 
 - [Incremental Models](incremental-models.md) — maintenance of *data* changes
-  under an unchanged definition, including the `smelt backbuild` range rebuild.
+  under an unchanged definition, including the `smelt rebuild` range rebuild.
 - [Schema Evolution](schema-evolution.md) — physical schema change
   classification and DDL capability per backend.
 - [Incremental Equivalence](../concepts/incremental-equivalence.md) — the same

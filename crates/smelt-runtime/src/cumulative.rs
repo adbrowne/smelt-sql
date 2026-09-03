@@ -16,22 +16,30 @@
 //! is re-scanned every run; see that function's own doc comment.
 
 use crate::compile::{CompilerRegistry, EphemeralResolver};
-use crate::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance, WindowedKeyedRule};
+use crate::maintenance_driver::{
+    driving_steps, keyed_fold_changed_keys_select, run_windowed_keyed_maintenance,
+    WindowedKeyedRule,
+};
 use crate::transformer::{inject_source_filters, SourceBound, TimeRange};
 use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
 use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::walk::model_property_vector;
-use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
+use smelt_logical::contract::retain_departed::{reconcile_disposition, DepartedKeyDisposition};
+use smelt_logical::maintenance::choice::{
+    resolve_write_suppression, resolve_write_variant, EffectiveOverride, WriteSuppression,
+};
 use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
-    emit_keyed_fold, emit_keyed_fold_suppressed, emit_recurrence_bound_probe, MaintenanceDialect,
+    emit_departed_key_delete, emit_keyed_fold, emit_keyed_fold_suppressed,
+    emit_recurrence_bound_probe, MaintenanceDialect, MaintenanceStatement, StatementGroup,
     TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::{
     establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
 };
+use smelt_logical::maintenance::Trigger;
 use smelt_planner::{
     classify_cumulative, combiner_for, CrossPartitionCombiner, CumulativeClassification,
     KeyedDiagnostic, SourceTimeseriesMap,
@@ -162,6 +170,62 @@ impl WindowedKeyedRule for CumulativeClassification {
         build_cumulative_merge_sql(schema, table, delta_sql, self, slice, suppression, dialect)
     }
 
+    /// Realises a `write: staged_candidate` pin's mechanism
+    /// (`resolve_keyed_write_mechanism`, 27d/27g): the merge-less
+    /// staged-candidate group over the fold's own post-fold candidate rows
+    /// ([`keyed_fold_candidate_select`]), mirroring what
+    /// [`build_cumulative_merge_sql`]'s matched arm computes for the
+    /// `MERGE`-capable path. `slice` (key temporal locality) has no
+    /// staged-candidate realisation yet — this mechanism is reachable only
+    /// for a bare keyed model until locality composes with it. `Merge`
+    /// dispatches to the trait default (wraps [`Self::merge_sql`]).
+    fn write_group(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        slice: Option<&TargetSlicePredicate>,
+        mechanism: &smelt_logical::maintenance::choice::KeyedWriteMechanism,
+        dialect: MaintenanceDialect,
+    ) -> smelt_logical::maintenance::emit::StatementGroup {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+        match mechanism {
+            KeyedWriteMechanism::Merge(suppression) => {
+                smelt_logical::maintenance::emit::StatementGroup {
+                    statements: vec![smelt_logical::maintenance::emit::MaintenanceStatement {
+                        sql: self.merge_sql(schema, table, delta_sql, slice, suppression, dialect),
+                    }],
+                    transactional: false,
+                }
+            }
+            KeyedWriteMechanism::StagedCandidate { compared_columns } => {
+                let folds: Vec<(String, String)> = self
+                    .aggregator_columns
+                    .iter()
+                    .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
+                    .collect();
+                let schema_table = format!("{schema}.{table}");
+                let candidate_select =
+                    smelt_logical::maintenance::emit::keyed_fold_candidate_select(
+                        &schema_table,
+                        &self.unique_key,
+                        &folds,
+                        delta_sql,
+                        dialect,
+                    );
+                let staged_relation = format!("__smelt_staged_{table}");
+                smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+                    &schema_table,
+                    &staged_relation,
+                    &self.unique_key,
+                    &candidate_select,
+                    compared_columns,
+                    dialect,
+                )
+            }
+        }
+    }
+
     /// `Grade::Additive` iff any aggregator column's cross-partition
     /// combiner belongs to the **additive fold** family — `Sum` or `BitXor`
     /// (`docs/specs/incremental_shapes.md` §"The column-family catalogue")
@@ -186,33 +250,20 @@ impl WindowedKeyedRule for CumulativeClassification {
     /// cell `Additive` — conservative (never unsafe), per
     /// `WindowedKeyedRule::ledger_grade`'s doc comment.
     fn ledger_grade(&self) -> Grade {
-        let any_additive = self.aggregator_columns.iter().any(|col| {
-            // A state-bearing column's own `cross_partition_combiner`
-            // (`OrderMonotone`/`OnceWrite`/`Recomputed`) says nothing about
-            // whether its *state* folds additively — grade off each state
-            // column's own combiner instead. `AVG`/the variance family's
-            // state is entirely `Sum` (the first additive state this
-            // mechanism admits, `docs/outcomes/20260809-rung2-state-shapes`
-            // row 7); `MAX_BY`/`MIN_BY`'s `(v, o)` and once-write's
-            // `(value, written)` states are not, and stay `Idempotent`.
-            if let Some(state) = &col.state {
-                state.state_columns.iter().any(|s| {
-                    matches!(
-                        s.combiner,
-                        CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
-                    )
-                })
-            } else {
-                matches!(
-                    col.cross_partition_combiner,
-                    CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
-                )
-            }
-        });
-        if any_additive {
-            Grade::Additive
-        } else {
+        // Delegates to the single owner of the re-run-tolerance verdict
+        // (`smelt_logical::rules::cumulative::execution_postures`,
+        // `docs/outcomes/20260815-keyed-grain-residue` phase 4) rather than
+        // re-deriving it here — this rule's own doc comment above states
+        // the rationale (additive columns double-count/cancel on a re-run),
+        // but the derivation itself lives in `smelt-logical` so `smelt
+        // explain` prints the same verdict this grading consumes.
+        if smelt_logical::execution_postures(&self.aggregator_columns)
+            .rerun_tolerant
+            .holds
+        {
             Grade::Idempotent
+        } else {
+            Grade::Additive
         }
     }
 
@@ -246,6 +297,36 @@ impl WindowedKeyedRule for CumulativeClassification {
             )
             .sql,
         )
+    }
+
+    /// `keyed`'s own `unique_key` plus its aggregator columns' rendered
+    /// fold expressions (the SAME `expand_aggregator_column_folds` call
+    /// [`build_cumulative_merge_sql`] uses to build the live MERGE) are
+    /// exactly what [`keyed_fold_changed_keys_select`] needs — this impl
+    /// supplies them and delegates the query shape entirely to that
+    /// function.
+    fn observed_delta_changed_keys_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        compared_columns: &[String],
+        partition_column: Option<&str>,
+    ) -> Option<String> {
+        let folds: Vec<(String, String)> = self
+            .aggregator_columns
+            .iter()
+            .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
+            .collect();
+        let schema_table = format!("{schema}.{table}");
+        Some(keyed_fold_changed_keys_select(
+            &schema_table,
+            &self.unique_key,
+            delta_sql,
+            compared_columns,
+            &folds,
+            partition_column,
+        ))
     }
 }
 
@@ -414,7 +495,21 @@ pub async fn execute_cumulative_aggregate(
     // model's own P2 row identity and P3 change-comparability over the
     // fold's own output columns (`docs/plans/20260715-composed-axes-
     // conditional-maintenance.md` Phase C6) — never re-derived per step.
-    let suppression = resolve_cumulative_write_suppression(&classification, &clean_sql);
+    // Folds the override ladder's write-suppression dimension in
+    // (`docs/outcomes/20260815-definition-delta-migrate/phases/33-plan.md`).
+    let write_suppression_overrides = model
+        .metadata
+        .as_deref()
+        .map(|m| {
+            smelt_db::queries::maintenance::keyed_fold_effective_override(m, &driving_source_name)
+        })
+        .unwrap_or_default();
+    let suppression = resolve_cumulative_write_suppression(
+        &classification,
+        &clean_sql,
+        &write_suppression_overrides,
+    )
+    .map_err(|refusal| anyhow::anyhow!("{}", refusal))?;
 
     // The hidden decomposed-state columns every state-bearing aggregator
     // column carries (`docs/specs/incremental_shapes.md` §"Decomposed state
@@ -422,6 +517,17 @@ pub async fn execute_cumulative_aggregate(
     // Empty for every column family admitted before this mechanism existed,
     // in which case `state_augmented_projection` below is a no-op.
     let state_columns = classification.state_columns();
+
+    // The `maintenance.cells[].write` pin (if any) addressing this keyed
+    // fold's write, resolved once, up front (`docs/outcomes/
+    // 20260815-definition-delta-migrate/phases/27g-plan.md`) — a keyed fold's
+    // cell is whole-row, so it matches by `on:` address alone
+    // (`smelt_db::queries::maintenance::keyed_fold_write_pin`).
+    let write_pin = model
+        .metadata
+        .as_deref()
+        .and_then(|m| smelt_db::queries::maintenance::keyed_fold_write_pin(m, &driving_source_name))
+        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
 
     run_windowed_keyed_maintenance(
         backend,
@@ -432,6 +538,7 @@ pub async fn execute_cumulative_aggregate(
         &classification,
         locality_slice.as_ref(),
         &suppression,
+        write_pin,
         |step| {
             // 4. Per-partition pushdown: inject the driving source's
             //    `[step.start, step.end)` filter, then compile (resolves
@@ -494,11 +601,14 @@ pub async fn execute_cumulative_aggregate(
 /// `[run_start, run_end)` window — the whole source is re-scanned every
 /// run. First run (target does not yet exist) creates the table from the
 /// compiled SELECT directly; every subsequent run `MERGE`s the whole-source
-/// scan into the existing target via [`build_cumulative_merge_sql`]
-/// (`emit_keyed_fold`'s shape carries no `DELETE`, so a key present in the
-/// target but absent from the incoming scan is retained unchanged — the
-/// documented carve-out, `incremental_shapes.md` §"End-state equivalence").
-/// No reconciliation ledger: `classification`'s plain-overwrite columns are
+/// scan into the existing target via [`build_cumulative_merge_sql`], then —
+/// unless `contract.retain_departed` is declared
+/// (`smelt_logical::contract::retain_departed::reconcile_disposition`) —
+/// deletes any key present in the target but absent from the incoming scan
+/// ([`emit_departed_key_delete`]), the merge and delete running as one
+/// transactional [`StatementGroup`] (`incremental_shapes.md` §"Departed
+/// keys and deletion"). No reconciliation ledger: `classification`'s
+/// plain-overwrite columns are
 /// idempotent by construction (re-running an unchanged snapshot converges),
 /// so `Grade::Idempotent` semantics apply without any ledger bookkeeping —
 /// this executor never touches one.
@@ -517,6 +627,7 @@ pub async fn execute_snapshot_reconcile(
     schema: &str,
     db_table_name: &str,
     classification: &CumulativeClassification,
+    probe_sink: &mut Vec<smelt_state::ProbeRecord>,
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
     let start = std::time::Instant::now();
@@ -554,7 +665,23 @@ pub async fn execute_snapshot_reconcile(
             .await
             .with_context(|| format!("Failed to create keyed model {}", model_name))?;
     } else {
-        let suppression = resolve_cumulative_write_suppression(classification, &clean_sql);
+        let write_suppression_overrides = model
+            .metadata
+            .as_deref()
+            .map(|m| {
+                smelt_db::queries::maintenance::keyed_fold_effective_override(
+                    m,
+                    &classification.driving_source.name,
+                )
+            })
+            .unwrap_or_default();
+        let suppression = resolve_cumulative_write_suppression(
+            classification,
+            &clean_sql,
+            &write_suppression_overrides,
+        )
+        .map_err(|refusal| anyhow::anyhow!("{}", refusal))?;
+        let dialect = smelt_backend::maintenance_dialect(backend.dialect());
         let merge_sql = build_cumulative_merge_sql(
             schema,
             db_table_name,
@@ -562,10 +689,100 @@ pub async fn execute_snapshot_reconcile(
             classification,
             None,
             &suppression,
-            smelt_backend::maintenance_dialect(backend.dialect()),
+            dialect,
         );
+        let schema_table = format!("{schema}.{db_table_name}");
+        let mut statements = vec![MaintenanceStatement { sql: merge_sql }];
+        let declared_retain_departed = model
+            .metadata
+            .as_deref()
+            .and_then(|m| m.contract.as_ref())
+            .and_then(|c| c.retain_departed.as_ref());
+        let transactional = match reconcile_disposition(declared_retain_departed) {
+            DepartedKeyDisposition::Delete => {
+                statements.push(emit_departed_key_delete(
+                    &schema_table,
+                    &classification.unique_key,
+                    &compiled.sql,
+                    dialect,
+                ));
+                true
+            }
+            DepartedKeyDisposition::Retain { tombstone } => {
+                // The declared point's probe: the reconcile scan's own
+                // anti-join, dispatched at the pre-write site instead of
+                // running the default point's delete
+                // (`smelt_logical::contract::retain_departed::
+                // emit_departed_key_probe`). `current_table` is a
+                // parenthesised subquery over this run's compiled scan — the
+                // probe emitter appends its own `c` alias.
+                let key_refs: Vec<&str> = classification
+                    .unique_key
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                let probe = smelt_logical::contract::retain_departed::emit_departed_key_probe(
+                    &schema_table,
+                    &format!("({})", compiled.sql),
+                    &key_refs,
+                    tombstone.as_deref(),
+                );
+                let batches = backend.execute_sql(&probe.sql).await.with_context(|| {
+                    format!(
+                        "Failed to run the retain_departed probe for keyed model {}",
+                        model_name
+                    )
+                })?;
+                let rows = crate::check_runner::batches_to_rows(&batches);
+                let retained: u64 = rows
+                    .first()
+                    .and_then(|r| r.get("retained_departed_count"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                tracing::info!(
+                    model = %model_name,
+                    retained_departed_count = retained,
+                    "contract.retain_departed: reconcile anti-join probe"
+                );
+                // Dispatched on every reconcile that suppresses the
+                // default point's delete, independent of the project's
+                // `probes:` cadence — this probe stands in for the delete
+                // the default point would otherwise have run, so a
+                // cadence skip would suppress the delete while verifying
+                // nothing (`docs/outcomes/20260815-definition-delta-migrate/
+                // phases/34-plan.md`).
+                probe_sink.push(smelt_state::ProbeRecord {
+                    fact: "contract.retain_departed".to_string(),
+                    probe: "ContractDepartedKeyUnmarked".to_string(),
+                    outcome: smelt_state::ProbeRecordOutcome::Dispatched,
+                    observed: Some(retained),
+                });
+                if tombstone.is_some() {
+                    let unmarked: u64 = rows
+                        .first()
+                        .and_then(|r| r.get("unmarked_departed_count"))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    anyhow::ensure!(
+                        unmarked == 0,
+                        "ContractDepartedKeyUnmarked: model '{}' declares \
+                         contract.retain_departed with a tombstone column, but {unmarked} \
+                         departed key(s) are not marked departed — every row a reconcile no \
+                         longer scans from the source must have its tombstone set before it is \
+                         exempted from comparison \
+                         (`docs/specs/incremental_models.md` §\"Retention (retain_departed)\")",
+                        model_name
+                    );
+                }
+                false
+            }
+        };
+        let group = StatementGroup {
+            statements,
+            transactional,
+        };
         backend
-            .execute_sql(&merge_sql)
+            .execute_statement_group(&group)
             .await
             .with_context(|| format!("Failed to reconcile keyed model {}", model_name))?;
     }
@@ -670,10 +887,27 @@ pub fn build_cumulative_merge_sql(
 /// (`model_property_vector`) over the model's own SQL. `compared_columns`
 /// is exactly the fold's own output columns — there is nothing else a
 /// keyed-fold cell's matched arm could write.
+///
+/// Folds the override ladder's write-suppression dimension in via
+/// [`resolve_write_variant`] (`docs/outcomes/20260815-definition-delta-
+/// migrate/phases/33-plan.md`) — `maintenance.cells[].technique: suppress|
+/// unconditional`/`prefer:` addressing this keyed fold's driving source was
+/// previously silently ignored on this route. Both keyed call sites reach a
+/// merge only once the target table already exists (`run_windowed_keyed_
+/// maintenance` emits `emit_create_table_as` for a non-existent table; the
+/// snapshot-reconcile executor resolves suppression inside its `else` arm
+/// of `!table_exists`), so `Trigger::Backfill`/`ledger_catch_up` can never
+/// be observed here — `keyed`'s classifier runs outside the
+/// `MaintenancePlan` machinery and carries no `PlanCell`. Passing
+/// `Trigger::NewData` with `ledger_catch_up: false` is therefore a
+/// derivation from the route's own structure, not an assumption: every
+/// reachable call is, by construction, a steady-state write over an
+/// already-populated table.
 fn resolve_cumulative_write_suppression(
     classification: &CumulativeClassification,
     sql: &str,
-) -> WriteSuppression {
+    overrides: &EffectiveOverride,
+) -> Result<WriteSuppression, smelt_logical::maintenance::choice::ChoiceRefusal> {
     let group_columns: Vec<String> = classification
         .aggregator_columns
         .iter()
@@ -683,7 +917,11 @@ fn resolve_cumulative_write_suppression(
     let comparability = model_property_vector(sql, &JoinContext::new())
         .map(|v| v.comparability)
         .unwrap_or_default();
-    resolve_write_suppression(&group_columns, &comparability, &identity)
+    let suppression = resolve_write_suppression(&group_columns, &comparability, &identity);
+    let trigger = Trigger::NewData {
+        source: classification.driving_source.name.clone(),
+    };
+    resolve_write_variant(&suppression, &trigger, false, overrides).map(|(variant, _)| variant)
 }
 
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
@@ -1188,7 +1426,12 @@ mod tests {
         let sql = "SELECT event_id, MIN(device_id) AS device_id, \
                     MIN(CAST(event_date AS DATE)) AS first_seen_date \
                     FROM smelt.sources.raw.events GROUP BY event_id";
-        let suppression = resolve_cumulative_write_suppression(&classification, sql);
+        let suppression = resolve_cumulative_write_suppression(
+            &classification,
+            sql,
+            &EffectiveOverride::default(),
+        )
+        .expect("no override pinned — resolve_write_variant never refuses here");
         assert_eq!(
             suppression,
             WriteSuppression::Suppressed {
@@ -1196,6 +1439,181 @@ mod tests {
             },
             "a MIN-folded group over a proven key must admit suppression, not refuse: \
              {suppression:?}"
+        );
+    }
+
+    /// `docs/outcomes/20260815-definition-delta-migrate/phases/33-plan.md`:
+    /// a hard `technique: unconditional` pin addressing the keyed fold's
+    /// driving source must reach the resolver — the write must fall back to
+    /// the plain unconditional matched arm even though P2/P3 both admit
+    /// suppression. Before this phase `resolve_cumulative_write_suppression`
+    /// never consulted the override ladder at all, so this pin was silently
+    /// ignored.
+    #[test]
+    fn keyed_fold_unconditional_pin_reaches_the_emitted_merge() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["event_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT event_id, MIN(device_id) AS device_id FROM smelt.sources.raw.events \
+                    GROUP BY event_id";
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(smelt_core::config::CellTechnique::Unconditional),
+        };
+        let suppression = resolve_cumulative_write_suppression(&classification, sql, &overrides)
+            .expect("technique: unconditional never refuses");
+        assert!(
+            matches!(suppression, WriteSuppression::Unconditional { .. }),
+            "pinned technique: unconditional must resolve the unconditional variant even \
+             though P2/P3 admit suppression: {suppression:?}"
+        );
+
+        let delta_sql = "SELECT event_id, MIN(device_id) AS device_id FROM events GROUP BY \
+                          event_id";
+        let merge_sql = build_cumulative_merge_sql(
+            "main",
+            "events_deduped",
+            delta_sql,
+            &classification,
+            None,
+            &suppression,
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(
+            !merge_sql.contains("IS DISTINCT FROM"),
+            "the pinned unconditional arm must not emit the change-suppressed guard: \
+             {merge_sql}"
+        );
+    }
+
+    /// `technique: suppress` over a proof that refused (P2 `WholeRow`
+    /// identity here) must propagate the resolver's `ChoiceRefusal`, never
+    /// silently fall back to the unconditional arm.
+    #[test]
+    fn keyed_fold_suppress_pin_over_refused_proof_refuses() {
+        let classification = CumulativeClassification {
+            unique_key: vec![],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT MIN(device_id) AS device_id FROM smelt.sources.raw.events";
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(smelt_core::config::CellTechnique::Suppress),
+        };
+        let result = resolve_cumulative_write_suppression(&classification, sql, &overrides);
+        assert!(
+            result.is_err(),
+            "technique: suppress over a WholeRow (no proven key) row identity must refuse, \
+             not silently emit the unconditional arm: {result:?}"
+        );
+    }
+
+    /// The soft `prefer: unconditional` bias flips the structural default
+    /// (suppressed, since P2/P3 both admit it here) without ever refusing.
+    #[test]
+    fn keyed_fold_prefer_unconditional_soft_biases_without_refusing() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["event_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT event_id, MIN(device_id) AS device_id FROM smelt.sources.raw.events \
+                    GROUP BY event_id";
+
+        let unconditional_bias = EffectiveOverride {
+            prefer: Some(smelt_core::config::TechniquePreference::Unconditional),
+            technique: None,
+        };
+        let suppression =
+            resolve_cumulative_write_suppression(&classification, sql, &unconditional_bias)
+                .expect("a soft prefer never refuses");
+        assert!(matches!(
+            suppression,
+            WriteSuppression::Unconditional { .. }
+        ));
+
+        // A `prefer: suppress` bias over a WholeRow proof refusal falls
+        // back silently — never a hard refusal like the pin above.
+        let whole_row_classification = CumulativeClassification {
+            unique_key: vec![],
+            ..classification
+        };
+        let suppress_bias = EffectiveOverride {
+            prefer: Some(smelt_core::config::TechniquePreference::Suppress),
+            technique: None,
+        };
+        let fallback_suppression = resolve_cumulative_write_suppression(
+            &whole_row_classification,
+            "SELECT MIN(device_id) AS device_id FROM smelt.sources.raw.events",
+            &suppress_bias,
+        )
+        .expect("a soft prefer never refuses even over a WholeRow proof failure");
+        assert!(matches!(
+            fallback_suppression,
+            WriteSuppression::Unconditional { .. }
+        ));
+    }
+
+    /// Regression: with no `maintenance:` overrides at all
+    /// (`EffectiveOverride::default()`), the emitted merge SQL is
+    /// byte-identical to what it was before this phase folded the ladder
+    /// in — the trigger derivation (`Trigger::NewData`, `ledger_catch_up:
+    /// false`) must not perturb the unpinned default.
+    #[test]
+    fn keyed_fold_unpinned_write_is_byte_identical() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["event_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT event_id, MIN(device_id) AS device_id FROM smelt.sources.raw.events \
+                    GROUP BY event_id";
+        let suppression = resolve_cumulative_write_suppression(
+            &classification,
+            sql,
+            &EffectiveOverride::default(),
+        )
+        .expect("no override pinned — never refuses");
+        assert_eq!(
+            suppression,
+            WriteSuppression::Suppressed {
+                compared_columns: vec!["device_id".to_string()]
+            }
         );
     }
 
@@ -1255,6 +1673,44 @@ mod tests {
             },
         };
         assert_eq!(classification.ledger_grade(), Grade::Idempotent);
+    }
+
+    /// `ledger_grade` delegates to `smelt_logical::execution_postures`
+    /// rather than re-deriving re-run tolerance
+    /// (`docs/outcomes/20260815-keyed-grain-residue` phase 4) — over a
+    /// mixed additive+idempotent column set, the runtime's grade must be
+    /// exactly the shared derivation's `rerun_tolerant` verdict.
+    #[test]
+    fn ledger_grade_agrees_with_shared_posture_derivation() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![
+                AggregatorColumn {
+                    output_name: "total_amount".to_string(),
+                    per_partition_agg: "SUM".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Sum,
+                    state: None,
+                },
+                AggregatorColumn {
+                    output_name: "max_val".to_string(),
+                    per_partition_agg: "MAX".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Max,
+                    state: None,
+                },
+            ],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let postures = smelt_logical::execution_postures(&classification.aggregator_columns);
+        let expected_grade = if postures.rerun_tolerant.holds {
+            Grade::Idempotent
+        } else {
+            Grade::Additive
+        };
+        assert_eq!(classification.ledger_grade(), expected_grade);
+        assert_eq!(classification.ledger_grade(), Grade::Additive);
     }
 
     /// The `WindowedKeyedRule` impl must refuse a non-monoid combiner
@@ -1611,5 +2067,113 @@ mod tests {
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(sql, expected.statements[0].sql);
+    }
+
+    /// `WindowedKeyedRule::write_group`'s unpinned (`KeyedWriteMechanism::
+    /// Merge`) arm must stay byte-identical to `merge_sql`'s own output —
+    /// the driver's mechanism-aware dispatch (27g) must not perturb the
+    /// pre-existing unpinned path any callers already depend on.
+    #[test]
+    fn write_group_with_no_pin_is_byte_identical_to_the_merge() {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
+        let suppression = unconditional();
+
+        let direct_sql = classification.merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            None,
+            &suppression,
+            MaintenanceDialect::DuckDb,
+        );
+        let group = classification.write_group(
+            "main",
+            "device_daily",
+            delta_sql,
+            None,
+            &KeyedWriteMechanism::Merge(suppression),
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(group.statements[0].sql, direct_sql);
+        assert!(!group.transactional);
+    }
+
+    /// A `staged_candidate` pin's mechanism must realise the merge-less
+    /// staged-candidate group over the fold's own post-fold candidate rows —
+    /// byte-identical to a direct `emit_staged_candidate_conditional` call
+    /// over `keyed_fold_candidate_select`'s own candidate SQL (`docs/
+    /// outcomes/20260815-definition-delta-migrate/phases/27g-plan.md`).
+    #[test]
+    fn staged_candidate_pin_selects_the_staged_candidate_group() {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+        use smelt_logical::maintenance::emit::{
+            emit_staged_candidate_conditional, keyed_fold_candidate_select,
+        };
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
+        let compared_columns = vec!["event_count".to_string()];
+
+        let group = classification.write_group(
+            "main",
+            "device_daily",
+            delta_sql,
+            None,
+            &KeyedWriteMechanism::StagedCandidate {
+                compared_columns: compared_columns.clone(),
+            },
+            MaintenanceDialect::DuckDb,
+        );
+
+        let folds = vec![(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )];
+        let candidate_select = keyed_fold_candidate_select(
+            "main.device_daily",
+            &classification.unique_key,
+            &folds,
+            delta_sql,
+            MaintenanceDialect::DuckDb,
+        );
+        let expected = emit_staged_candidate_conditional(
+            "main.device_daily",
+            "__smelt_staged_device_daily",
+            &classification.unique_key,
+            &candidate_select,
+            &compared_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group, expected);
+        assert_eq!(group.statements.len(), 5);
+        assert!(group.transactional);
     }
 }

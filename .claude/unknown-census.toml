@@ -437,42 +437,42 @@ discriminant = "dynamic"
 # StructFieldAdded sites (which DID propagate Unknown to operations); these
 # type-comparison sites are safe and classified legitimate.
 
-["crates/smelt-state/src/schema_tracking.rs:927"]
+["crates/smelt-state/src/schema_tracking.rs:938"]
 classification = "legitimate"
 reason = "ChangeType from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:929"]
+["crates/smelt-state/src/schema_tracking.rs:940"]
 classification = "legitimate"
 reason = "ChangeType to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:981"]
+["crates/smelt-state/src/schema_tracking.rs:992"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:983"]
+["crates/smelt-state/src/schema_tracking.rs:994"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1012"]
+["crates/smelt-state/src/schema_tracking.rs:1023"]
 classification = "legitimate"
 reason = "MapValueTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1014"]
+["crates/smelt-state/src/schema_tracking.rs:1025"]
 classification = "legitimate"
 reason = "MapValueTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1069"]
+["crates/smelt-state/src/schema_tracking.rs:1080"]
 classification = "legitimate"
 reason = "NestedTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"
 
-["crates/smelt-state/src/schema_tracking.rs:1071"]
+["crates/smelt-state/src/schema_tracking.rs:1082"]
 classification = "legitimate"
 reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 discriminant = "dynamic"
@@ -506,27 +506,27 @@ discriminant = "dynamic"
 
 # ── smelt-types / signatures ──────────────────────────────────────────────────
 
-["crates/smelt-types/src/signatures.rs:2457"]
+["crates/smelt-types/src/signatures.rs:2462"]
 classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3414"]
+["crates/smelt-types/src/signatures.rs:3419"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3416"]
+["crates/smelt-types/src/signatures.rs:3421"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:4354"]
+["crates/smelt-types/src/signatures.rs:4385"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:5475"]
+["crates/smelt-types/src/signatures.rs:5506"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"

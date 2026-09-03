@@ -42,8 +42,8 @@ enum Commands {
     Init(InitArgs),
     /// Run models and materialize them in the target database
     Run(RunArgs),
-    /// Backbuild: rebuild a target model and all its upstreams for a time range
-    Backbuild(BackbuildArgs),
+    /// Rebuild: rebuild a target model and all its upstreams for a time range
+    Rebuild(RebuildArgs),
     /// Show column types for a model
     Table(TableArgs),
     /// Start the web UI for visualizing the model graph
@@ -64,6 +64,8 @@ enum Commands {
     Bakeoff(BakeoffArgs),
     /// Show pending schema changes between model definitions and deployed state
     Diff(DiffArgs),
+    /// Derive and print the definition-delta migration plan for a model (plan-only; --apply lands later)
+    Migrate(MigrateArgs),
     /// Run unit tests for models
     Test(TestArgs),
     /// Run data-quality checks against the configured target
@@ -172,6 +174,14 @@ struct RunArgs {
     #[arg(long = "allow-full-refresh")]
     allow_full_refresh: bool,
 
+    /// Drop and rebuild every selected incremental model rather than
+    /// applying batches. Not a fold, so it is never refused by the
+    /// definition-delta gate (`docs/specs/definition_deltas.md`
+    /// §"Detection") — it runs under the model's current definition
+    /// regardless of any pending migration.
+    #[arg(long = "full-refresh")]
+    full_refresh: bool,
+
     /// Allow incremental models that fail the safety classifier to fall back to
     /// full-table refresh instead of being refused at planning time.
     /// Use this only as a temporary escape hatch while fixing the model SQL.
@@ -220,7 +230,7 @@ struct RunArgs {
 }
 
 #[derive(Parser)]
-struct BackbuildArgs {
+struct RebuildArgs {
     /// Target model selector (e.g., +daily_revenue, model_name)
     selector: String,
 
@@ -383,6 +393,14 @@ struct BuildArgs {
     #[arg(long = "allow-downgrade")]
     allow_downgrade: bool,
 
+    /// Drop and recreate every selected model's target from scratch instead
+    /// of maintaining it incrementally. Required to build a window-forward
+    /// keyed model (`grain: key` over a clocked source) with no
+    /// `--event-time-start`/`--event-time-end` window — see `smelt run
+    /// --full-refresh`.
+    #[arg(long = "full-refresh")]
+    full_refresh: bool,
+
     /// Backward resolution: given the target model (the positional
     /// argument) and this period, resolve the per-ancestor required
     /// upstream slices and the ancestor-first/target-last build order
@@ -480,11 +498,14 @@ struct ExplainArgs {
     #[arg(long = "show-sql")]
     show_sql: bool,
 
-    /// Region literal bounds for `--show-sql`, `<start>..<end>`
-    /// (`YYYY-MM-DD`, end exclusive). Without this flag, the printed
-    /// statements use the symbolic placeholders `{{window_start}}`/
-    /// `{{window_end}}` instead of real literals.
-    #[arg(long = "period", requires = "show_sql")]
+    /// Run-window bounds, `<start>..<end>` (either `YYYY-MM-DD..YYYY-MM-DD`
+    /// on the calendar axis or `<int>..<int>` on the integer axis, end
+    /// exclusive). Used both by `--show-sql` (printed literals instead of
+    /// the symbolic `{{window_start}}`/`{{window_end}}` placeholders) and by
+    /// `--json`'s per-source `scan_start`/`scan_end` resolution. Without
+    /// this flag, `--show-sql` prints symbolic placeholders and `--json`
+    /// omits the resolved scan window fields.
+    #[arg(long = "period")]
     period: Option<String>,
 
     /// Render a named technique's own preview statements instead of the
@@ -576,6 +597,33 @@ struct DiffArgs {
     exclude: Vec<String>,
 
     /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct MigrateArgs {
+    /// Name of the model to derive a definition-delta migration plan for
+    model: String,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Target environment from smelt.yml — the recorded definition and
+    /// deployed schema are per-target.
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// Execute the most recently printed (approved) migration plan. Refuses
+    /// (exit 3) if no plan is on record or the freshly re-derived plan no
+    /// longer matches it, and refuses (exit 1) if the plan requires a full
+    /// refresh.
+    #[arg(long)]
+    apply: bool,
+
+    /// Machine-readable plan output (CI mode). Same exit-code contract as
+    /// the human-readable path.
     #[arg(long)]
     json: bool,
 }
@@ -694,11 +742,21 @@ async fn main() -> std::process::ExitCode {
     // exit 2 (usage error) per `docs/specs/cli.md` §"Exit codes" — a distinct
     // classifier from the generic one, same pattern as `init` above.
     let is_list = matches!(cli.command, Commands::List(_));
+    // `smelt migrate` classifies its own exit codes (3 for a pending or
+    // stale-approval refusal, 1 for a full-refresh-required refusal) via
+    // `commands::migrate::exit_code_for` — same pattern as `init`/`list`
+    // above. See `docs/specs/cli.md` §"Exit codes" — `smelt migrate`
+    // specifics.
+    let is_migrate = matches!(cli.command, Commands::Migrate(_));
+    // `smelt run` classifies a `DefinitionDeltaPendingError` refusal to exit
+    // `3` via `commands::run::exit_code_for` — same pattern as `migrate`
+    // above. See `docs/specs/cli.md` §"Exit codes" — `smelt run` specifics.
+    let is_run = matches!(cli.command, Commands::Run(_));
 
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
         Commands::Run(args) => commands::run::run(args, scope).await,
-        Commands::Backbuild(args) => commands::backbuild::backbuild(args, scope).await,
+        Commands::Rebuild(args) => commands::rebuild::rebuild(args, scope).await,
         Commands::Table(args) => commands::table::table(args, scope).await,
         Commands::Ui(args) => commands::ui::ui(args).await,
         Commands::Seed(args) => commands::seed::run_seed(args, scope).await,
@@ -709,6 +767,7 @@ async fn main() -> std::process::ExitCode {
         Commands::Explain(args) => commands::explain::explain(args, scope).await,
         Commands::Bakeoff(args) => commands::bakeoff::bakeoff(args, scope).await,
         Commands::Diff(args) => commands::diff::diff(args, scope).await,
+        Commands::Migrate(args) => commands::migrate::migrate(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Check(args) => commands::check::run_checks(args).await,
         Commands::List(args) => commands::list::list(args, scope).await,
@@ -729,6 +788,10 @@ async fn main() -> std::process::ExitCode {
                 commands::init::exit_code_for(&err)
             } else if is_list {
                 commands::list::exit_code_for(&err)
+            } else if is_migrate {
+                commands::migrate::exit_code_for(&err)
+            } else if is_run {
+                commands::run::exit_code_for(&err)
             } else {
                 smelt_cli::exit_code_for(&err)
             };

@@ -46,6 +46,13 @@ jobs:
         # so CI and local can't drift into linting different feature sets.
         run: bash .claude/scripts/clippy-gate.sh
 
+      - name: Gated conformance twin compile check
+        # smelt-maintenance-testkit's families/ module only compiles under
+        # spark/bigquery; nothing else in this Lint job type-checks it, so it
+        # can rot silently between the rare PRs that touch those features.
+        # Compile-only — no live Spark server or BigQuery credentials needed.
+        run: cargo check -p smelt-maintenance-testkit --features spark,bigquery --all-targets
+
       - name: Run hardening budget gate
         # Counts production unwrap/expect/println per crate (excluding test code)
         # and compares against the committed baseline in .claude/hardening-baseline.txt.

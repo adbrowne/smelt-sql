@@ -17,7 +17,7 @@
 //! `examples/web_analytics/generate_tutorial.py` — keep them in lockstep;
 //! each is annotated with the Python function it must match exactly.
 //!
-//! Cheap: `explain --show-sql` never connects to a backend, `backbuild
+//! Cheap: `explain --show-sql` never connects to a backend, `rebuild
 //! --dry-run` writes nothing to the (temp, per-test) database file it
 //! opens, and `run --dry-run` / `diff` in this suite never touch real data
 //! either — no datagen, no real query execution. Runs in plain `cargo test`.
@@ -407,11 +407,11 @@ fn run_smelt(
     fixture_schemas: bool,
     workspaces: &mut WorkspaceCache,
 ) -> String {
-    let is_backbuild = argv.first().map(String::as_str) == Some("backbuild");
+    let is_rebuild = argv.first().map(String::as_str) == Some("rebuild");
     let workspace = workspaces.get(cwd_rel, fixture_schemas);
 
     let mut full_args = argv.to_vec();
-    if is_backbuild {
+    if is_rebuild {
         let target_dir = workspace.join("target");
         fs::create_dir_all(&target_dir).expect("mkdir target");
         full_args.push("--database".to_string());
@@ -475,7 +475,7 @@ fn parse_generate_directive(rest: &str) -> (HashMap<String, Option<String>>, Vec
 fn default_render_mode(subcommand: &str) -> Option<&'static str> {
     match subcommand {
         "explain" => Some("cells"),
-        "backbuild" => Some("sql"),
+        "rebuild" => Some("sql"),
         "run" => Some("text"),
         "diff" => Some("text"),
         _ => None,
@@ -492,7 +492,7 @@ fn fresh_generate_block(rest: &str, workspaces: &mut WorkspaceCache) -> (String,
         "smelt-generate directive has no argv: {rest}"
     );
     let subcommand = argv[0].as_str();
-    let is_backbuild = subcommand == "backbuild";
+    let is_rebuild = subcommand == "rebuild";
 
     let cwd_rel = opts.get("cwd").and_then(|v| v.clone()).unwrap_or_default();
     let expect_exit: i32 = opts
@@ -522,7 +522,7 @@ fn fresh_generate_block(rest: &str, workspaces: &mut WorkspaceCache) -> (String,
         "cells" => render_cells(&raw, &argv, rest),
         "sql" => render_sql(&raw),
         "skeleton" => {
-            let base = if is_backbuild {
+            let base = if is_rebuild {
                 render_sql(&raw)
             } else {
                 render_cells(&raw, &argv, rest)

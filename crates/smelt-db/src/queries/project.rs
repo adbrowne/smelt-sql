@@ -691,18 +691,20 @@ pub struct EmittedModelDef {
     pub tags: Vec<String>,
     /// `ModelDef.description` field value, defaulting to `""`.
     pub description: String,
-    /// Inherited `incremental:` block from the generator file's frontmatter,
-    /// when `materialization == "incremental"`.  `None` for non-incremental
-    /// emissions or when the generator's frontmatter has no `incremental:` block.
-    ///
-    /// Per `meta_language.md` §Design "Why the closed five-field set":
-    /// the file-wide `incremental:` frontmatter is shared by all incremental
-    /// emissions from that generator; per-`ModelDef` overrides are not supported
-    /// in v1.
+    /// `incremental:` config for this emission, when `materialization ==
+    /// "incremental"`.  `None` for non-incremental emissions.  Sourced from
+    /// the generator file's file-wide frontmatter `incremental:` block
+    /// (specifically its `safety_overrides`), with the emission's own
+    /// `ModelDef.safety_overrides` field — when present — replacing the
+    /// frontmatter block's `safety_overrides` in full (whole-block
+    /// replacement, not key-level merge; `meta_language.md` §"`ModelDef` meta
+    /// record type").
     pub incremental_config: Option<PartitionGrainConfig>,
-    /// Inherited `timeseries:` block from the generator file's frontmatter,
-    /// when `materialization == "incremental"`.  `None` for non-incremental
-    /// emissions or when the generator's frontmatter has no `timeseries:` block.
+    /// `timeseries:` config for this emission, when `materialization ==
+    /// "incremental"`.  `None` for non-incremental emissions.  Sourced from
+    /// the generator file's file-wide frontmatter `timeseries:` block, with
+    /// the emission's own `ModelDef.timeseries` field — when present —
+    /// replacing it in full (whole-block replacement).
     pub timeseries_config: Option<TimeseriesConfig>,
     /// Lambda parameter bindings captured at W2 evaluation time.
     ///
@@ -815,6 +817,74 @@ pub fn generator_files(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Ve
 }
 
 /// Pure helper: extract the `name` field literal value text from a `RecordLiteral`.
+/// Extract the nested `RecordLiteral` for a `ModelDef.timeseries` /
+/// `ModelDef.safety_overrides` field, if present.
+fn extract_modeldef_override_record(
+    literal: &RecordLiteral,
+    field_name: &str,
+) -> Option<RecordLiteral> {
+    for field in literal.fields() {
+        if field.name().as_deref() != Some(field_name) {
+            continue;
+        }
+        let value_expr = field.value_expr()?;
+        return smelt_parser::ast::RecordLiteral::cast(value_expr.syntax().clone())
+            .or_else(|| value_expr.syntax().children().find_map(RecordLiteral::cast));
+    }
+    None
+}
+
+/// Render a nested override `RecordLiteral`'s fields as a YAML mapping,
+/// suitable for `serde_yaml::from_str::<TimeseriesConfig>` /
+/// `::<PartitionGrainSafetyOverrides>`. Field values are taken verbatim
+/// (quotes stripped from string literals) — the caller's type checker
+/// (`infer_model_def_literal`) has already validated the sub-field set.
+fn override_record_literal_to_yaml(literal: &RecordLiteral) -> String {
+    let mut out = String::new();
+    for field in literal.fields() {
+        let Some(name) = field.name() else { continue };
+        let Some(value_expr) = field.value_expr() else {
+            continue;
+        };
+        let raw = value_expr.syntax().text().to_string();
+        let raw = raw.trim();
+        let unquoted = if raw.len() >= 2
+            && ((raw.starts_with('\'') && raw.ends_with('\''))
+                || (raw.starts_with('"') && raw.ends_with('"')))
+        {
+            &raw[1..raw.len() - 1]
+        } else {
+            raw
+        };
+        out.push_str(&name);
+        out.push_str(": ");
+        out.push_str(unquoted);
+        out.push('\n');
+    }
+    out
+}
+
+/// Extract `ModelDef.timeseries` as a `TimeseriesConfig`, if the field is
+/// present on the literal. Returns `None` when absent; a malformed override
+/// (rejected upstream by the type checker) deserializes to `None` rather than
+/// panicking — this function is a best-effort extractor for the happy path,
+/// matching `materialise_emitted_model_def`'s existing convention.
+fn extract_modeldef_timeseries_override(literal: &RecordLiteral) -> Option<TimeseriesConfig> {
+    let nested = extract_modeldef_override_record(literal, "timeseries")?;
+    let yaml = override_record_literal_to_yaml(&nested);
+    serde_yaml::from_str::<TimeseriesConfig>(&yaml).ok()
+}
+
+/// Extract `ModelDef.safety_overrides` as a `PartitionGrainSafetyOverrides`,
+/// if the field is present on the literal.
+fn extract_modeldef_safety_overrides_override(
+    literal: &RecordLiteral,
+) -> Option<smelt_core::config::PartitionGrainSafetyOverrides> {
+    let nested = extract_modeldef_override_record(literal, "safety_overrides")?;
+    let yaml = override_record_literal_to_yaml(&nested);
+    serde_yaml::from_str::<smelt_core::config::PartitionGrainSafetyOverrides>(&yaml).ok()
+}
+
 fn extract_modeldef_field_text(
     literal: &RecordLiteral,
     field_name: &str,
@@ -947,15 +1017,28 @@ fn materialise_emitted_model_def(
         .unwrap_or_default();
 
     // Inherit the `incremental:` and `timeseries:` blocks only when materialization == "incremental".
-    // Per `meta_language.md` §Design "Why the closed five-field set", non-incremental
-    // emissions silently ignore the generator's frontmatter `incremental:` block.
+    // Non-incremental emissions ignore both the generator's frontmatter blocks
+    // and any `ModelDef.timeseries` / `ModelDef.safety_overrides` fields (the
+    // type checker already refuses the latter combination with
+    // `ModelDefOverrideRequiresIncremental`).
+    //
+    // Per-`ModelDef` overrides replace the corresponding block in full
+    // (`meta_language.md` §"`ModelDef` meta record type" — whole-block
+    // replacement, not key-level merge).
     let incremental_config = if materialization == "incremental" {
-        frontmatter_incremental.cloned()
+        let base = frontmatter_incremental.cloned();
+        match extract_modeldef_safety_overrides_override(literal) {
+            Some(overrides) => Some(PartitionGrainConfig {
+                safety_overrides: overrides,
+                ..base.unwrap_or_default()
+            }),
+            None => base,
+        }
     } else {
         None
     };
     let timeseries_config = if materialization == "incremental" {
-        frontmatter_timeseries.cloned()
+        extract_modeldef_timeseries_override(literal).or_else(|| frontmatter_timeseries.cloned())
     } else {
         None
     };
@@ -1290,13 +1373,22 @@ fn materialise_modeldef_from_lambda_body(
     }
 
     // Inherit the `incremental:` and `timeseries:` blocks only when materialization == "incremental".
+    // Per-`ModelDef` overrides replace the corresponding block in full.
     let incremental_config = if materialization == "incremental" {
-        frontmatter_incremental.cloned()
+        let base = frontmatter_incremental.cloned();
+        match extract_modeldef_safety_overrides_override_with_binding(&literal, record_fields) {
+            Some(overrides) => Some(PartitionGrainConfig {
+                safety_overrides: overrides,
+                ..base.unwrap_or_default()
+            }),
+            None => base,
+        }
     } else {
         None
     };
     let timeseries_config = if materialization == "incremental" {
-        frontmatter_timeseries.cloned()
+        extract_modeldef_timeseries_override_with_binding(&literal, record_fields)
+            .or_else(|| frontmatter_timeseries.cloned())
     } else {
         None
     };
@@ -1360,6 +1452,49 @@ fn extract_field_value_with_binding(
         }
     }
     None
+}
+
+/// Render a nested override `RecordLiteral`'s fields as a YAML mapping,
+/// resolving `param.field` accesses against `record_fields` (lambda-binding
+/// emission path counterpart to `override_record_literal_to_yaml`).
+fn override_record_literal_to_yaml_with_binding(
+    literal: &RecordLiteral,
+    record_fields: &std::collections::BTreeMap<String, crate::loader::MetaValue>,
+) -> String {
+    let mut out = String::new();
+    for field in literal.fields() {
+        let Some(name) = field.name() else { continue };
+        let Some(value_expr) = field.value_expr() else {
+            continue;
+        };
+        let raw = value_expr.syntax().text().to_string();
+        let resolved = resolve_field_access_or_literal(&raw, record_fields);
+        out.push_str(&name);
+        out.push_str(": ");
+        out.push_str(&resolved);
+        out.push('\n');
+    }
+    out
+}
+
+/// Lambda-binding counterpart to `extract_modeldef_timeseries_override`.
+fn extract_modeldef_timeseries_override_with_binding(
+    literal: &RecordLiteral,
+    record_fields: &std::collections::BTreeMap<String, crate::loader::MetaValue>,
+) -> Option<TimeseriesConfig> {
+    let nested = extract_modeldef_override_record(literal, "timeseries")?;
+    let yaml = override_record_literal_to_yaml_with_binding(&nested, record_fields);
+    serde_yaml::from_str::<TimeseriesConfig>(&yaml).ok()
+}
+
+/// Lambda-binding counterpart to `extract_modeldef_safety_overrides_override`.
+fn extract_modeldef_safety_overrides_override_with_binding(
+    literal: &RecordLiteral,
+    record_fields: &std::collections::BTreeMap<String, crate::loader::MetaValue>,
+) -> Option<smelt_core::config::PartitionGrainSafetyOverrides> {
+    let nested = extract_modeldef_override_record(literal, "safety_overrides")?;
+    let yaml = override_record_literal_to_yaml_with_binding(&nested, record_fields);
+    serde_yaml::from_str::<smelt_core::config::PartitionGrainSafetyOverrides>(&yaml).ok()
 }
 
 /// Resolve a simple expression text to a string:
@@ -3583,6 +3718,193 @@ mod tests {
         assert_eq!(
             ts.event_time_column, "dt",
             "inherited event_time_column must be 'dt'"
+        );
+    }
+
+    // ─── Per-`ModelDef` overrides (phase 4, partition-grain residue) ─────────
+
+    /// Two `ModelDef` literals in the same array-literal generator body, each
+    /// with its own `timeseries` block, produce two `EmittedModelDef`s with
+    /// distinct `timeseries_config`s — the file-wide frontmatter block is not
+    /// shared across incompatible emissions.
+    #[test]
+    fn array_literal_emission_uses_per_modeldef_timeseries() {
+        let generator = concat!(
+            "---\n",
+            "generates: models\n",
+            "refresh: incremental\n",
+            "grain: partition\n",
+            "timeseries:\n",
+            "  event_time_column: dt\n",
+            "  partition_column: dt\n",
+            "  granularity: day\n",
+            "---\n",
+            "[ModelDef { name: 'us_west', body: SELECT * FROM orders, materialization: 'incremental', ",
+            "timeseries: { event_time_column: 'created_at', partition_column: 'created_at', granularity: 'day' } }, ",
+            "ModelDef { name: 'eu', body: SELECT * FROM orders, materialization: 'incremental', ",
+            "timeseries: { event_time_column: 'updated_at', partition_column: 'updated_at', granularity: 'day' } }]"
+        );
+
+        let (db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", generator)]);
+        let gen_files = generator_files(&db, workspace);
+        assert_eq!(gen_files.len(), 1);
+
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics, got: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(result.emissions.len(), 2);
+
+        let us_west = result
+            .emissions
+            .iter()
+            .find(|e| e.name == "us_west")
+            .expect("us_west emission");
+        let eu = result
+            .emissions
+            .iter()
+            .find(|e| e.name == "eu")
+            .expect("eu emission");
+
+        assert_eq!(
+            us_west
+                .timeseries_config
+                .as_ref()
+                .expect("us_west must carry timeseries_config")
+                .event_time_column,
+            "created_at"
+        );
+        assert_eq!(
+            eu.timeseries_config
+                .as_ref()
+                .expect("eu must carry timeseries_config")
+                .event_time_column,
+            "updated_at"
+        );
+        assert_ne!(
+            us_west.timeseries_config, eu.timeseries_config,
+            "each emission's per-ModelDef override must win over the shared frontmatter block"
+        );
+    }
+
+    /// A `map(fn c => ModelDef { … })` chain whose `ModelDef.timeseries.event_time_column`
+    /// is a loader-row field access (`c.time_col`) resolves per loader row —
+    /// mirrors `extract_field_value_with_binding`'s existing top-level-field
+    /// resolution, extended to the nested override record.
+    #[test]
+    fn lambda_emission_binds_timeseries_from_loader_record() {
+        let generator = concat!(
+            "---\n",
+            "generates: models\n",
+            "refresh: incremental\n",
+            "grain: partition\n",
+            "---\n",
+            "smelt.config.load_yaml('cohorts.yaml', List<{name: Text, time_col: Text}>) |> map(fn c => ModelDef { ",
+            "name: c.name, body: SELECT * FROM orders, materialization: 'incremental', ",
+            "timeseries: { event_time_column: c.time_col, partition_column: c.time_col, granularity: 'day' } })"
+        );
+        let yaml = "- name: us_west\n  time_col: created_at\n";
+
+        let (mut db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", generator)]);
+        let loader_path: std::sync::Arc<str> = std::sync::Arc::from("cohorts.yaml");
+        let yaml_text: std::sync::Arc<str> = std::sync::Arc::from(yaml);
+        db.set_loader_file(loader_path, yaml_text, true);
+
+        let gen_files = generator_files(&db, workspace);
+        assert_eq!(gen_files.len(), 1);
+
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics, got: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(result.emissions.len(), 1);
+
+        let ts = result.emissions[0]
+            .timeseries_config
+            .as_ref()
+            .expect("emission must carry the per-row timeseries override");
+        assert_eq!(
+            ts.event_time_column, "created_at",
+            "c.time_col must resolve against the loader row"
+        );
+    }
+
+    /// Regression guard: an emission that carries no `ModelDef.timeseries` /
+    /// `ModelDef.safety_overrides` field still inherits the generator file's
+    /// file-wide frontmatter block unchanged (today's behaviour, preserved).
+    #[test]
+    fn emission_without_override_still_inherits_frontmatter_block() {
+        let generator = concat!(
+            "---\n",
+            "generates: models\n",
+            "refresh: incremental\n",
+            "grain: partition\n",
+            "timeseries:\n",
+            "  event_time_column: dt\n",
+            "  partition_column: dt\n",
+            "  granularity: day\n",
+            "---\n",
+            "[ModelDef { name: 'us_west', body: SELECT * FROM orders, materialization: 'incremental' }]"
+        );
+
+        let (db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", generator)]);
+        let gen_files = generator_files(&db, workspace);
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.emissions.len(), 1);
+
+        let ts = result.emissions[0]
+            .timeseries_config
+            .as_ref()
+            .expect("must inherit frontmatter timeseries_config");
+        assert_eq!(ts.event_time_column, "dt");
+        assert_eq!(ts.partition_column, "dt");
+    }
+
+    /// `ModelDef.safety_overrides` replaces the generator's frontmatter
+    /// `safety_overrides:` block in full (whole-block replacement, not
+    /// key-level merge) and the resulting `PartitionGrainConfig` reaches
+    /// `discovery::model_file_from_emitted_def`'s consumer via
+    /// `emitted.incremental_config`.
+    #[test]
+    fn safety_overrides_override_reaches_emitted_metadata() {
+        let generator = concat!(
+            "---\n",
+            "generates: models\n",
+            "refresh: incremental\n",
+            "grain: partition\n",
+            "timeseries:\n",
+            "  event_time_column: dt\n",
+            "  partition_column: dt\n",
+            "  granularity: day\n",
+            "safety_overrides:\n",
+            "  allow_window_functions: true\n",
+            "---\n",
+            "[ModelDef { name: 'us_west', body: SELECT * FROM orders, materialization: 'incremental', ",
+            "safety_overrides: { allow_having: true } }]"
+        );
+
+        let (db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", generator)]);
+        let gen_files = generator_files(&db, workspace);
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.emissions.len(), 1);
+
+        let cfg = result.emissions[0]
+            .incremental_config
+            .as_ref()
+            .expect("must carry incremental_config");
+        assert!(
+            cfg.safety_overrides.allow_having,
+            "override's allow_having must be set"
+        );
+        assert!(
+            !cfg.safety_overrides.allow_window_functions,
+            "whole-block replacement must drop the frontmatter's allow_window_functions, not merge it"
         );
     }
 

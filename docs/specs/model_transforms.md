@@ -47,15 +47,15 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
 | Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
 | Change-suppressed MERGE (keyed `merge_into` / column-scoped merge variant) | region row identity + change comparability on every compared column | matched-arm gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the cell's comparable mutation-sensitive columns, so a row whose applied effect is the identity is never written; the unmatched side is dialect-keyed (`WHEN NOT MATCHED BY SOURCE` where the dialect has it, else a separate scoped `DELETE` in the same statement group) | **built** (column-scoped and keyed-fold) |
-| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | *partial* (keyed identity only) |
+| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | keyed identity: full; whole-row identity: region-grained suppression |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[out_start − k − offset, out_end)`, clamp output to the derived output window `[out_start, out_end)`: read the margin, never re-write it | **built** |
 | Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
 | Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
 | Explicit bounded-domain multiset state | bounded-domain budget assertion | store a per-key value→count multiset (a bounded-domain Z-set); one state serves many presentations and free retraction | unbuilt |
-| Definition-change field-backfill: in-place `UPDATE` | additive-only model diff, payload field is a pure function of stored columns | backfill the added column with an in-place `UPDATE`, no upstream re-read; refused (`MaintenanceSkeletonColumnAdded`) if the field lands in a skeleton (identity/grouping/dedup/ordering) position — that is a grain change, not a backfill | **built** |
-| Definition-change field-backfill: keyed column-scoped `MERGE` | additive-only model diff, payload field re-derives from upstream | backfill the added column by re-deriving from upstream via the generic column-scoped merge, keyed where the source is keyed, inheriting that source's partition-locality verdict unchanged; refused (`MaintenanceSkeletonColumnAdded`) in a skeleton position for the same reason | unbuilt |
+| Definition-change field-backfill: in-place `UPDATE` | additive-only model diff, payload field is a pure function of stored columns | backfill the added column with an in-place `UPDATE`, no upstream re-read; refused (`MaintenanceSkeletonChanged`) if the field lands in a skeleton (identity/grouping/dedup/ordering) position — that is a grain change, not a backfill | **built** |
+| Definition-change field-backfill: keyed column-scoped `MERGE` | additive-only model diff, payload field re-derives from upstream | backfill the added column by re-deriving from upstream via the generic column-scoped merge, keyed where the source is keyed, inheriting that source's partition-locality verdict unchanged; refused (`MaintenanceSkeletonChanged`) in a skeleton position for the same reason | unbuilt |
 | Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + a **derived** horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact. Licensed by a *derived* `H` only — a *declared*-on-source `H` no longer licenses this transform (an under-declared source lateness would silently truncate the recompute); where `H` is not derivable the transform is simply not licensed and the enrichment evaluates via the ordinary widened scan | **built** |
 | Horizon settled-delay / tail-rewrite | maintained-window / **derived** horizon derivation | for a forward-reach (late-arriving) source, hold the write until the derived horizon has settled, or rewrite the tail slice within the horizon on a later run; the write clamp tracks the *derived* horizon, never a declared value. Batched-side forward-reach machinery, confirmed derived-only (never licensed by a declared horizon) | unbuilt |
 | Reconciliation-ledger fold | additive column-group algebra | consult the `(output-region × column-group)` ledger entry before merging: refuse (never fold) a delta already in its processed set, otherwise combine and extend it; required by any non-idempotent (additive-fold) combiner, which must refuse a re-run of a ledgered window exactly, not best-effort | unbuilt |
@@ -221,6 +221,33 @@ identity) or `EXCEPT ALL` both ways (whole-row identity); `DELETE` the changed-o
 `INSERT` the changed-or-new rows. Byte-equivalent to today's region DELETE+INSERT at fixed `S`,
 with the write physically restricted to the rows whose effect is not the identity.
 
+**The whole-row realisation is region-grained, not row-grained.** A keyless region (no declared
+`unique_key`, no proven grain key — `RowIdentity::WholeRow`) has no row address a multiset
+difference could delete with multiplicity in portable SQL, so suppression licenses the whole
+region as one unit rather than individual rows: a two-way `EXCEPT ALL` diff between stored state
+and the staged candidate is materialised once into a 1-row-max sentinel relation, computed before
+either write statement runs (never an `EXISTS` re-evaluated after the `DELETE` has already
+mutated the target — that would be order-dependent), and the region's existing unconditional
+`DELETE`+`INSERT` is guarded on the sentinel being non-empty: diff empty ⇒ neither statement
+touches a row; diff non-empty ⇒ byte-identical to today's unconditional region write. The same
+fixed-`S` bit-equality obligation applies, at this coarser suppression grain. No observed delta
+(T5) is recorded on this path — the observed-delta table is keyed by the row identity's key
+columns, and a keyless write has none.
+
+**The region DELETE+INSERT family's own conditional realisation** takes this same shape,
+scoped by the output region's own slice predicate rather than an affected-key set: the update
+leg guards on `IS DISTINCT FROM` over the compared column group, the delete leg is complete (a
+region recompute's candidate covers its own slice by construction, so nothing is ever omitted
+from it), and the insert leg adds new keys. Admitted by the same P2/P3 proof as every other
+variant in this section — a proven row identity plus a fully comparable column group — and
+falling fail-closed to the unconditional widened scan otherwise: an empty or whole-row identity,
+an incomparable compared column, a first-build/definition-change-backfill trigger with no prior
+state to diff against (`incremental_models.md` §"Windowed maintenance and the horizon" category
+2's first-build posture), or a model with no resolvable delta-restriction facts. Delta
+restriction (T3, `incremental_models.md` §"Upstream model edges") wins over this variant when
+both are admitted for the same cell: restricting the scan itself is strictly cheaper than
+suppressing writes within an unrestricted one.
+
 **Definition-change field-backfill** is the pair of techniques a model gaining
 output fields backfills with (`definition_deltas.md` §"The verdict per column group"), chosen by what the added field reads: a payload field that is a
 *pure function of stored columns* backfills as an **in-place `UPDATE`** (no
@@ -228,7 +255,7 @@ upstream read), admitted only under the additive-only model-diff proof; a
 payload field that *re-derives from upstream* backfills as the **generic
 column-scoped merge**, keyed where the source is keyed, inheriting that
 source's partition-locality verdict unchanged. Both members of the pair are
-**refused** with `MaintenanceSkeletonColumnAdded` — never applied — when the
+**refused** with `MaintenanceSkeletonChanged` — never applied — when the
 added field lands in a **skeleton** position (identity/grouping/dedup/ordering):
 that is a grain change, not a backfill, and the honest plan is a recompute
 (effectively a new model). Fields added together factor by shared
@@ -398,7 +425,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   field-backfill (`crates/smelt-runtime/src/backfill.rs::targeted_column_backfill`),
   which builds the `UPDATE ... FROM (...) AS src` statement licensed by an
   additive-only model diff and a non-empty `unique_key` (the keyed
-  column-scoped-`MERGE` half, and the `MaintenanceSkeletonColumnAdded` refusal,
+  column-scoped-`MERGE` half, and the `MaintenanceSkeletonChanged` refusal,
   are unbuilt); dimension-driven horizon-bounded MERGE
   (`crates/smelt-runtime/src/dimension_horizon_merge.rs::dimension_horizon_merge`),
   which clamps a dimension batch's recompute `SELECT` to `[conv_ts − H,
@@ -454,27 +481,29 @@ by `docs/plans/20260704-model-updates.md` (design:
   skewing derived `partition_column` can compose with ordered self-referential
   execution at all is undecided; today the combination simply does not widen.
   Tracked in `docs/plans/20260711-derived-output-window.md`.
-- **Change-suppressed MERGE is built for the column-scoped and keyed-fold families; the region
-  DELETE+INSERT family stays unconditional.** The column-scoped `MERGE` emitter
-  (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`) and the keyed-fold
-  `MERGE` emitter (`emit_keyed_fold_suppressed`) both gain a matched-arm `IS DISTINCT FROM`
-  predicate over the cell's comparable columns — the keyed-fold variant compares the stored
-  value against the fold's own combine expression, since a keyed fold's matched arm never copies
-  a delta column verbatim — admitted fail-closed by `maintenance::choice::resolve_write_suppression`
-  over the region row identity (P2) and per-column change comparability (P3) proofs. The region
-  DELETE+INSERT family still rewrites its whole window unconditionally.
-- **The staged-candidate conditional DELETE+INSERT is built for the keyed-identity realisation
-  only; the whole-row `EXCEPT ALL` realisation remains unbuilt.** `smelt_logical::maintenance::
-  emit::emit_staged_candidate_conditional` emits the merge-less keyed-shaped write — stage the
-  candidate region into a temp relation, `DELETE` the rows a declared/proven key identifies as
-  changed, `INSERT` the changed-or-new rows read back from the staged relation, `DROP` the temp
-  relation — as one transaction, so a mid-group failure leaves both the target and the temp-
-  relation namespace untouched. `maintenance::choice::resolve_keyed_write_mechanism` chooses
-  between the keyed `MERGE` and this mechanism from a backend-capability flag alone (never a
-  silent substitution on a `MERGE`-capable backend); a `write:` pin over this choice, the
-  whole-row (`EXCEPT ALL`-both-ways) realisation for a keyless region, and wiring this choice
-  into the live `refresh: keyed` per-partition execution loop (`smelt-runtime::cumulative`) all
-  remain open, tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Change-suppressed MERGE is built for the column-scoped and keyed-fold families.** The
+  column-scoped `MERGE` emitter (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`)
+  and the keyed-fold `MERGE` emitter (`emit_keyed_fold_suppressed`) both gain a matched-arm
+  `IS DISTINCT FROM` predicate over the cell's comparable columns — the keyed-fold variant compares
+  the stored value against the fold's own combine expression, since a keyed fold's matched arm
+  never copies a delta column verbatim — admitted fail-closed by
+  `maintenance::choice::resolve_write_suppression` over the region row identity (P2) and
+  per-column change comparability (P3) proofs. The region DELETE+INSERT family's own conditional
+  realisation (`smelt_logical::maintenance::choice::resolve_region_write_variant` →
+  `emit::emit_diff_patch`) is wired only for a model-edge-sourced creation cell
+  (`smelt_runtime::maintenance_driver::DeltaRestrictionFacts`); an external-source-only region
+  cell still rewrites its whole window unconditionally.
+- **The staged-candidate conditional DELETE+INSERT's keyed-identity realisation has no `write:`
+  pin, and is not yet wired into the live `refresh: keyed` per-partition execution loop.**
+  `smelt_logical::maintenance::emit::emit_staged_candidate_conditional` emits the merge-less
+  keyed-shaped write — stage the candidate region into a temp relation, `DELETE` the rows a
+  declared/proven key identifies as changed, `INSERT` the changed-or-new rows read back from the
+  staged relation, `DROP` the temp relation — as one transaction, so a mid-group failure leaves
+  both the target and the temp-relation namespace untouched. `maintenance::choice::
+  resolve_keyed_write_mechanism` chooses between the keyed `MERGE` and this mechanism from a
+  backend-capability flag alone (never a silent substitution on a `MERGE`-capable backend); a
+  `write:` pin over this choice, and wiring it into `smelt-runtime::cumulative`, remain open,
+  tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Delta-restricted enrichment join is built for a maintained-model edge's own driving-source
   recompute.** `maintenance::derive::append_model_edge_cells` derives the skeleton-source-closure
   verdict (P1, `model_properties.md`) shared by every model edge of a downstream model;
@@ -500,7 +529,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   fold/recompute-reset pair (no `(output-region × column-group)` ledger
   storage exists yet — every technique today behaves as if it always folds
   cleanly); the keyed column-scoped-`MERGE` half of definition-change
-  field-backfill and its `MaintenanceSkeletonColumnAdded` refusal. Generic
+  field-backfill and its `MaintenanceSkeletonChanged` refusal. Generic
   column-scoped merge has a standalone, admission-gated entry point today
   (`maintenance_driver::resolve_cell_technique`/`decide_column_merge_dispatch`
   + `maintenance_driver::execute_column_scoped_merge`, `incremental_models.md`

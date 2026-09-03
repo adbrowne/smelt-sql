@@ -55,6 +55,31 @@ fn run_select(selector: &str) -> (bool, String) {
     (output.status.success(), combined)
 }
 
+/// Like [`run_select`], but with `--full-refresh` — required now that a
+/// window-forward keyed run (a clocked driving source, `events_ts` here)
+/// with no event-time window refuses rather than silently full-refreshing
+/// (`docs/specs/incremental_shapes.md` §"The key grain").
+fn run_select_full_refresh(selector: &str) -> (bool, String) {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    copy_dir_all(&workspace_dir(), tmp.path()).expect("copy fixture");
+
+    let output = Command::new(smelt_bin())
+        .args([
+            "run",
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+            "--select",
+            selector,
+            "--full-refresh",
+        ])
+        .output()
+        .expect("run smelt");
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    (output.status.success(), combined)
+}
+
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -73,11 +98,16 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A well-formed cumulative model builds on the no-window path. Guards the fix
-/// against over-rejection: classifying must not break valid models.
+/// A well-formed cumulative model builds on the no-window full-refresh path.
+/// Guards the fix against over-rejection: classifying must not break valid
+/// models. `--full-refresh` is required — a window-forward keyed run
+/// (`events_ts`'s declared clock) with no event-time window now refuses
+/// rather than silently full-refreshing
+/// (`docs/specs/incremental_shapes.md` §"The key grain") — this is the
+/// intentional rebuild escape the test exercises.
 #[test]
 fn valid_cumulative_builds_without_window() {
-    let (ok, out) = run_select("+edges_valid");
+    let (ok, out) = run_select_full_refresh("+edges_valid");
     assert!(
         ok,
         "valid cumulative model must build on the no-window full-refresh path; output:\n{}",

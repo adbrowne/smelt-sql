@@ -30,7 +30,9 @@ use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_delete_insert, widened_scan_predicate, MaintenanceDialect,
     Region, StatementGroup,
 };
-use smelt_logical::maintenance::propagate::{propagate, DayInterval, Edge};
+use smelt_logical::maintenance::propagate::{
+    day_start, propagate, Edge, PartitionInterval, DAY_SECONDS,
+};
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, ScanClamp, SourceFacts, Trigger,
 };
@@ -71,10 +73,12 @@ fn date_of(day: i64) -> String {
     format!("(DATE '2026-01-01' + INTERVAL '{day} days')")
 }
 
-fn region_of(iv: &DayInterval) -> Region {
+/// `PartitionInterval` bounds are exact seconds — recover this file's own
+/// local day-ordinal convention (epoch day 0 = 2026-01-01) before rendering.
+fn region_of(iv: &PartitionInterval) -> Region {
     Region {
-        start: date_of(iv.start),
-        end: date_of(iv.end),
+        start: date_of(iv.start / DAY_SECONDS),
+        end: date_of(iv.end / DAY_SECONDS),
     }
 }
 
@@ -140,6 +144,9 @@ fn silver_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -167,6 +174,9 @@ fn rollup_inputs() -> ModelInputs<'static> {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -285,20 +295,23 @@ fn landed_upstream_days_propagate_to_exactly_the_partitions_that_must_run() {
     )
     .expect("land conversions day");
 
-    let mut deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
-    deltas.insert("conversions".to_string(), vec![DayInterval::new(14, 15)]);
+    let mut deltas: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
+    deltas.insert(
+        "conversions".to_string(),
+        vec![PartitionInterval::new(day_start(14), day_start(15))],
+    );
     let result = propagate(&edges, &deltas).expect("propagate");
 
     // The 14d footprint reaches back exactly to 01-01; the 2025-12-01 event
     // (day −31) is outside and must not be scheduled.
     assert_eq!(
         result.dirty["silver_events"],
-        vec![DayInterval::new(0, 15)],
+        vec![PartitionInterval::new(day_start(0), day_start(15))],
         "conversions day 14 dirties silver [day 0, day 15)"
     );
     assert_eq!(
         result.dirty["daily_conv_rate"],
-        vec![DayInterval::new(0, 15)],
+        vec![PartitionInterval::new(day_start(0), day_start(15))],
         "the same-axis rollup edge passes the dirt through"
     );
     // The bronze edge contributed nothing this tick.
@@ -347,12 +360,15 @@ fn landed_upstream_days_propagate_to_exactly_the_partitions_that_must_run() {
     )
     .expect("land bronze day");
 
-    let mut deltas2: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
-    deltas2.insert("bronze_events".to_string(), vec![DayInterval::new(15, 16)]);
+    let mut deltas2: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
+    deltas2.insert(
+        "bronze_events".to_string(),
+        vec![PartitionInterval::new(day_start(15), day_start(16))],
+    );
     let result2 = propagate(&edges, &deltas2).expect("propagate");
     assert_eq!(
         result2.per_edge[&("silver_events".to_string(), "bronze_events".to_string())],
-        vec![DayInterval::new(13, 16)],
+        vec![PartitionInterval::new(day_start(13), day_start(16))],
         "an arrival day dirties the event days it can carry (48h back)"
     );
 
@@ -509,6 +525,9 @@ fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -518,15 +537,15 @@ fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
 /// experiment variable (naive vs resolved).
 fn build_sandbox(
     conn: &Connection,
-    required: &BTreeMap<String, Vec<DayInterval>>,
-    conversions_slice: &DayInterval,
-    period: &DayInterval,
+    required: &BTreeMap<String, Vec<PartitionInterval>>,
+    conversions_slice: &PartitionInterval,
+    period: &PartitionInterval,
 ) {
-    let slice_pred = |col: &str, iv: &DayInterval| {
+    let slice_pred = |col: &str, iv: &PartitionInterval| {
         format!(
             "{col} >= {} AND {col} < {}",
-            date_of(iv.start),
-            date_of(iv.end)
+            date_of(iv.start / DAY_SECONDS),
+            date_of(iv.end / DAY_SECONDS)
         )
     };
     let bronze_iv = required["bronze_events"][0];
@@ -652,25 +671,25 @@ fn bounded_period_build_including_upstreams_matches_the_full_universe() {
     ];
 
     // Backward resolution: build daily_conv_rate for [Jan 5, Jan 8) = [4, 7).
-    let period = DayInterval::new(4, 7);
+    let period = PartitionInterval::new(day_start(4), day_start(7));
     let resolved = required_inputs(&edges, "daily_conv_rate", period).expect("resolve");
     assert_eq!(
         resolved.required["silver_events"],
-        vec![DayInterval::new(4, 7)]
+        vec![PartitionInterval::new(day_start(4), day_start(7))]
     );
     assert_eq!(
         resolved.required["bronze_events"],
-        vec![DayInterval::new(4, 9)],
+        vec![PartitionInterval::new(day_start(4), day_start(9))],
         "arrivals widen forward by the 48h lateness window"
     );
     assert_eq!(
         resolved.required["conversions"],
-        vec![DayInterval::new(4, 21)],
+        vec![PartitionInterval::new(day_start(4), day_start(21))],
         "conversions widen forward by the 14d attribution window"
     );
     assert_eq!(
         resolved.required["sessions"],
-        vec![DayInterval::new(2, 7)],
+        vec![PartitionInterval::new(day_start(2), day_start(7))],
         "sessions widen backward by the 48h max session length"
     );
     assert_eq!(
@@ -682,8 +701,8 @@ fn bounded_period_build_including_upstreams_matches_the_full_universe() {
     let uni_silver = sb_silver_body("uni.");
     let period_pred = format!(
         "event_date >= {} AND event_date < {}",
-        date_of(period.start),
-        date_of(period.end)
+        date_of(period.start / DAY_SECONDS),
+        date_of(period.end / DAY_SECONDS)
     );
     let silver_baseline = format!("SELECT * FROM ({uni_silver}) WHERE {period_pred}");
     let rollup_baseline = format!(
@@ -694,7 +713,12 @@ fn bounded_period_build_including_upstreams_matches_the_full_universe() {
     // --- Negative control: an under-widened conversions slice (the naive
     // [4, 7) guess) builds without error but silently diverges — the
     // sentinel event (id 2, converting on day 17) loses its score.
-    build_sandbox(&conn, &resolved.required, &DayInterval::new(4, 7), &period);
+    build_sandbox(
+        &conn,
+        &resolved.required,
+        &PartitionInterval::new(day_start(4), day_start(7)),
+        &period,
+    );
     let naive_sentinel: Option<f64> = conn
         .query_row(
             "SELECT conversion_score FROM silver_events WHERE event_id = 2",
@@ -794,25 +818,30 @@ fn a_dirty_day_rebuilds_exactly_its_containing_month_downstream() {
     let e = Edge {
         upstream: "silver_events".to_string(),
         downstream: "monthly_report".to_string(),
-        before_days: 0,
-        after_days: 0,
+        before_seconds: 0,
+        after_seconds: 0,
         upstream_grain: PartitionGrain::Day,
         downstream_grain: PartitionGrain::Month,
         components: Vec::new(),
+        footprint_seconds: Some((0, 0)),
+        dirtied_groups: None,
     };
 
     // A January day changes upstream (a late-arriving event lands).
     conn.execute_batch("INSERT INTO silver_events VALUES (4, DATE '2026-01-17', 11.0);")
         .expect("land new silver row");
     let d17 = day_ordinal(2026, 1, 17);
-    let mut deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut deltas: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     deltas.insert(
         "silver_events".to_string(),
-        vec![DayInterval::new(d17, d17 + 1)],
+        vec![PartitionInterval::new(day_start(d17), day_start(d17 + 1))],
     );
     let result = propagate(&[e], &deltas).expect("propagate");
 
-    let jan = DayInterval::new(day_ordinal(2026, 1, 1), day_ordinal(2026, 2, 1));
+    let jan = PartitionInterval::new(
+        day_start(day_ordinal(2026, 1, 1)),
+        day_start(day_ordinal(2026, 2, 1)),
+    );
     assert_eq!(
         result.dirty["monthly_report"],
         vec![jan],
@@ -822,8 +851,8 @@ fn a_dirty_day_rebuilds_exactly_its_containing_month_downstream() {
     // Rebuild exactly the propagated month partition.
     for iv in &result.dirty["monthly_report"] {
         let region = Region {
-            start: format!("DATE '{}'", ordinal_to_iso(iv.start)),
-            end: format!("DATE '{}'", ordinal_to_iso(iv.end)),
+            start: format!("DATE '{}'", ordinal_to_iso(iv.start / DAY_SECONDS)),
+            end: format!("DATE '{}'", ordinal_to_iso(iv.end / DAY_SECONDS)),
         };
         batch_group(
             &conn,

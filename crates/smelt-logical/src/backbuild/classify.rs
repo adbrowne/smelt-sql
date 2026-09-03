@@ -2083,6 +2083,17 @@ fn classify_added_column(
         }
     }
 
+    // B1/B3 both assume a per-row, group-blind expression that can be
+    // spliced verbatim into a row-scoped `UPDATE` — an expression containing
+    // an aggregate call anywhere (`expr_contains_aggregate`) has no such
+    // meaning and must never reach either technique: a zero-dependency
+    // aggregate call like `COUNT(*)` would otherwise pass B1's dependency
+    // check vacuously (no column dependencies to prove missing) and emit an
+    // `UPDATE t SET c = COUNT(*)`, which every backend rejects (aggregates
+    // are not allowed in `UPDATE ... SET`). B5 is the only correct
+    // admission path for an aggregate-shaped added column.
+    let is_aggregate_expr = expr_contains_aggregate(&col.expr);
+
     // B1 and B3 are attempted independently (research §2 "Options, not
     // choices"): an added column derivable both from stored columns and
     // from an upstream pull-through must carry *both* options on one atom,
@@ -2091,7 +2102,16 @@ fn classify_added_column(
     // recorded regardless of whether the other side is admitted — options
     // and refusals are not mutually exclusive
     // (`b_dual_derivable_refusals_still_recorded`).
-    let b1_result = try_b1(col, representative_sources, inputs);
+    let b1_result = if is_aggregate_expr {
+        Err(format!(
+            "B1 (self-derivable column add) refused for '{}': the expression contains an \
+             aggregate function call, which has no row-scoped meaning in an in-place UPDATE \
+             — B5 is the admission path for an aggregate-shaped added column",
+            col.name
+        ))
+    } else {
+        try_b1(col, representative_sources, inputs)
+    };
 
     // B3 shares B1's expression-validity leaf check (subquery/window/opaque
     // function/non-determinism, research §4 intro) — when B1's failure came
@@ -2101,7 +2121,14 @@ fn classify_added_column(
     // *failed*; if B1 succeeded, B3 is still attempted independently.
     let expr_is_invalid = model_diff::collect_dependencies(&col.expr).is_err();
     let attempt_b3 = b1_result.is_ok() || !expr_is_invalid;
-    let b3_result = if attempt_b3 {
+    let b3_result = if is_aggregate_expr {
+        Some(Err(format!(
+            "B3 (upstream pull-through) refused for '{}': the expression contains an aggregate \
+             function call, which has no row-scoped meaning in an in-place UPDATE — B5 is the \
+             admission path for an aggregate-shaped added column",
+            col.name
+        )))
+    } else if attempt_b3 {
         Some(try_b3(col, representative_sources, inputs))
     } else {
         None
@@ -2540,6 +2567,34 @@ fn try_d2(
     })
 }
 
+/// Whether `expr` contains a registry-recognized aggregate function call
+/// anywhere in its syntax tree, not just at the top level (e.g.
+/// `COUNT(*) + 1`, `CASE WHEN x THEN SUM(y) END`) — the B1/B3 attempt gate
+/// above. Self-inclusive: `expr` itself being a bare aggregate call (the
+/// [`is_group_by_aggregate_shape`] shape B5 targets) also counts.
+fn expr_contains_aggregate(expr: &Expr) -> bool {
+    fn walk(node: &SyntaxNode) -> bool {
+        // Never descend into a nested subquery: an aggregate call inside a
+        // scalar subquery says nothing about the OUTER expression's own
+        // row-scoped-ness — that shape is already refused, more precisely,
+        // by `model_diff::collect_dependencies`'s own subquery check
+        // (`b1_subquery_refuses`'s pinned reason text).
+        if node.kind() == SyntaxKind::SUBQUERY {
+            return false;
+        }
+        if let Some(func) = Expr::cast(node.clone()).and_then(|e| e.as_function_call()) {
+            if func
+                .name()
+                .is_some_and(|name| SqlFunction::from_name(&name).is_some_and(|f| f.is_aggregate()))
+            {
+                return true;
+            }
+        }
+        node.children().any(|child| walk(&child))
+    }
+    walk(expr.syntax())
+}
+
 // ===== B5: new aggregate column at unchanged GROUP BY grain (research §4
 // B5) =====
 
@@ -2712,13 +2767,38 @@ fn try_b5(
         ));
     }
 
-    let from_text = stmt.from_clause().map(|f| f.text()).ok_or_else(|| {
+    // Unlike B1/B3 (which only ever splice a single already-proven
+    // expression), B5 splices the model's WHOLE FROM/WHERE tree verbatim —
+    // that tree still carries the model's own `smelt.<path>` DSL ref syntax
+    // (`smelt.sources.events`, `smelt.<upstream_model>`), which only the
+    // compiler's own printer normally resolves. `requalify_source_refs`
+    // rewrites every such reference to its resolved physical name from
+    // `inputs.sources` — fail-closed (named refusal) rather than splicing
+    // unresolved DSL syntax into an executed statement.
+    let from_clause = stmt.from_clause().ok_or_else(|| {
         format!(
             "B5 (aggregate column add) refused for '{}': the model has no FROM clause",
             col.name
         )
     })?;
-    let where_text = stmt.where_clause().map(|w| w.text()).unwrap_or_default();
+    let from_text = requalify::requalify_source_refs(from_clause.syntax(), &inputs.sources)
+        .map_err(|reason| {
+            format!(
+                "B5 (aggregate column add) refused for '{}': {reason}",
+                col.name
+            )
+        })?;
+    let where_text = match stmt.where_clause() {
+        Some(w) => {
+            requalify::requalify_source_refs(w.syntax(), &inputs.sources).map_err(|reason| {
+                format!(
+                    "B5 (aggregate column add) refused for '{}': {reason}",
+                    col.name
+                )
+            })?
+        }
+        None => String::new(),
+    };
     let group_by_text = group_by.syntax().text().to_string();
 
     let agg_text = col.expr.text();

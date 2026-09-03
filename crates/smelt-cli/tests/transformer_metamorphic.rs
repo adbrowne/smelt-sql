@@ -261,6 +261,7 @@ fn window_partition_union_equals_unwindowed_run() {
         let full_range = TimeRange {
             start: date(0),
             end: date(SPAN_DAYS),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
 
         // Baselines: the raw resolved model, and the full-domain clamp.
@@ -294,6 +295,7 @@ fn window_partition_union_equals_unwindowed_run() {
             let range = TimeRange {
                 start: start.clone(),
                 end: end.clone(),
+                axis: smelt_logical::PartitionAxis::Calendar,
             };
             let clamped = inject_time_filter(&model_sql, "dt", &range)
                 .unwrap_or_else(|e| panic!("case {case}: clamp refused: {e:?}"));
@@ -359,6 +361,7 @@ fn qualified_clamp_column_is_refused() {
     let range = TimeRange {
         start: date(0),
         end: date(SPAN_DAYS),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
     let result = inject_time_filter("SELECT e.dt FROM events e", "e.dt", &range);
     assert!(result.is_err(), "qualified clamp column must be refused");

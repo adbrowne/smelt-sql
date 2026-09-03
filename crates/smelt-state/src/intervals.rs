@@ -10,6 +10,17 @@ pub struct ModelIntervals {
     pub model_hash: String,
     /// Sorted, non-overlapping covered intervals.
     pub covered_intervals: Vec<Interval>,
+    /// Per-`contract.cells[]` maintained frontier — keyed by
+    /// `smelt_logical::contract::deferral::cell_address`, valued by the
+    /// recorded interval end date (`"%Y-%m-%d"`). `#[serde(default)]` so a
+    /// ledger JSON written before this field existed deserialises with an
+    /// empty map, needing no migration
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`).
+    /// Absent from this map means "never recorded" — the same "first run,
+    /// never skip" posture `run_license`'s `None` frontier already grants at
+    /// model granularity.
+    #[serde(default)]
+    pub cell_frontiers: HashMap<String, String>,
 }
 
 /// A contiguous time interval [start, end).
@@ -38,7 +49,22 @@ impl ModelIntervals {
         Self {
             model_hash,
             covered_intervals: Vec::new(),
+            cell_frontiers: HashMap::new(),
         }
+    }
+
+    /// Record `end` as `cell`'s maintained frontier, advancing only that
+    /// cell — sibling cells and `covered_intervals` are untouched
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`
+    /// test 4).
+    pub fn record_cell_frontier(&mut self, cell: &str, end: &str) {
+        self.cell_frontiers
+            .insert(cell.to_string(), end.to_string());
+    }
+
+    /// `cell`'s recorded maintained frontier, or `None` if never recorded.
+    pub fn cell_frontier(&self, cell: &str) -> Option<&str> {
+        self.cell_frontiers.get(cell).map(String::as_str)
     }
 
     /// Record that [start, end) has been covered. Merges with adjacent/overlapping intervals.
@@ -231,6 +257,38 @@ mod tests {
         assert_eq!(mi.covered_intervals.len(), 1);
         assert_eq!(mi.covered_intervals[0].start, "2026-01-01");
         assert_eq!(mi.covered_intervals[0].end, "2026-01-20");
+    }
+
+    #[test]
+    fn cell_frontiers_default_when_absent_from_an_old_ledger() {
+        // A ledger JSON written before `cell_frontiers` existed has no such
+        // key — `#[serde(default)]` must deserialise it as an empty map,
+        // needing no ledger migration.
+        let json = r#"{"model_hash":"hash1","covered_intervals":[]}"#;
+        let mi: ModelIntervals = serde_json::from_str(json).expect("deserialises");
+        assert!(mi.cell_frontiers.is_empty());
+        assert_eq!(mi.cell_frontier("any"), None);
+    }
+
+    #[test]
+    fn recording_a_cell_frontier_advances_only_that_cell() {
+        let mut mi = ModelIntervals::new("hash1".into());
+        mi.record_interval("2026-01-01", "2026-01-10");
+        mi.record_cell_frontier("a@raw.a", "2026-01-05");
+
+        assert_eq!(mi.cell_frontier("a@raw.a"), Some("2026-01-05"));
+        assert_eq!(
+            mi.cell_frontier("b@raw.b"),
+            None,
+            "recording one cell's frontier must leave sibling cells untouched"
+        );
+        // The model-level covered intervals are untouched by a cell-level
+        // record.
+        assert_eq!(mi.covered_intervals.len(), 1);
+        assert_eq!(mi.covered_intervals[0].end, "2026-01-10");
+
+        mi.record_cell_frontier("a@raw.a", "2026-01-08");
+        assert_eq!(mi.cell_frontier("a@raw.a"), Some("2026-01-08"));
     }
 
     #[test]

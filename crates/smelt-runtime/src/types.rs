@@ -98,7 +98,7 @@ pub struct ExecuteRequest {
     pub ephemeral_seed_ctes: Vec<(String, String, String)>,
 
     /// When `true`, run `smelt.check`s after each model materializes (build
-    /// semantics). `false` for `smelt run` and `smelt backbuild` (run
+    /// semantics). `false` for `smelt run` and `smelt rebuild` (run
     /// semantics — checks are a build/check concern, not a run concern).
     #[serde(default)]
     pub run_checks: bool,

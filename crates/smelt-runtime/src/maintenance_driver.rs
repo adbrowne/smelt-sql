@@ -27,25 +27,27 @@ use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{
-    effective_override, resolve_cell_choice, resolve_recompute_restriction,
-    resolve_write_suppression, resolve_write_variant, ChosenTechnique, RecomputeRestriction,
-    WriteSuppression,
+    effective_override, enrichment_restrict_column, resolve_cell_choice,
+    resolve_cell_write_suppression, resolve_recompute_restriction, resolve_region_write_variant,
+    ChoiceRefusal, ChosenTechnique, RecomputeRestriction, RegionWrite, WriteSuppression,
 };
 use smelt_logical::maintenance::derive::SourceReferentialIntegrity;
+use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed,
     emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
-    emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
-    emit_fingerprint_sidecar_diff, emit_in_place_update, emit_per_group_recompute,
-    emit_repair_group_digest_select, emit_repair_group_sidecar_diff,
-    emit_staged_candidate_conditional_recompute, widened_scan_predicate, MaintenanceDialect,
-    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
+    emit_delete_insert_delta_restricted, emit_diff_patch, emit_fingerprint_digest_select,
+    emit_fingerprint_sidecar_diff, emit_per_group_recompute, emit_repair_group_digest_select,
+    emit_repair_group_sidecar_diff, emit_staged_candidate_conditional_recompute,
+    widened_scan_predicate, MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
+    TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
 use smelt_logical::maintenance::{
-    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowPreservation, ScanClamp,
-    SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
+    KeyDiscovery, MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowPreservation,
+    ScanClamp, SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern,
+    WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -98,6 +100,7 @@ pub fn driving_steps(
             range: TimeRange {
                 start: current.format("%Y-%m-%d").to_string(),
                 end: next.format("%Y-%m-%d").to_string(),
+                axis: smelt_logical::PartitionAxis::Calendar,
             },
         });
         current = next;
@@ -161,6 +164,46 @@ pub trait WindowedKeyedRule: Send + Sync {
         dialect: MaintenanceDialect,
     ) -> String;
 
+    /// Build the [`StatementGroup`] that actually realises `mechanism`
+    /// (`smelt_logical::maintenance::choice::resolve_keyed_write_mechanism`,
+    /// 27d/27g) — the write-pin-aware counterpart of [`Self::merge_sql`].
+    /// Defaults to a one-statement group wrapping [`Self::merge_sql`] for
+    /// [`KeyedWriteMechanism::Merge`], so the unpinned path (every rule that
+    /// never sees a `staged_candidate` pin) stays byte-identical to the
+    /// pre-27g `merge_sql`-only dispatch. There is no default shape for
+    /// [`KeyedWriteMechanism::StagedCandidate`] — a rule reaching that arm
+    /// must override this method (`crate::cumulative::CumulativeClassification`
+    /// does); the default panics rather than silently falling back to
+    /// `merge_sql`, since `resolve_keyed_write_mechanism` only ever produces
+    /// `StagedCandidate` for a rule this driver's real (`keyed`) family
+    /// serves.
+    fn write_group(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        slice: Option<&TargetSlicePredicate>,
+        mechanism: &smelt_logical::maintenance::choice::KeyedWriteMechanism,
+        dialect: MaintenanceDialect,
+    ) -> StatementGroup {
+        use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+        match mechanism {
+            KeyedWriteMechanism::Merge(suppression) => StatementGroup {
+                statements: vec![MaintenanceStatement {
+                    sql: self.merge_sql(schema, table, delta_sql, slice, suppression, dialect),
+                }],
+                transactional: false,
+            },
+            KeyedWriteMechanism::StagedCandidate { .. } => {
+                panic!(
+                    "windowed-keyed-maintenance driver: rule produced \
+                     KeyedWriteMechanism::StagedCandidate but does not override \
+                     WindowedKeyedRule::write_group to realise it"
+                )
+            }
+        }
+    }
+
     /// The reconciliation ledger's storage grading for this rule's cell
     /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
     /// "Storage is graded by algebra"). `Grade::Additive` requires
@@ -211,6 +254,32 @@ pub trait WindowedKeyedRule: Send + Sync {
         );
         None
     }
+
+    /// Build the changed-keys `SELECT` a suppressed keyed fold's observed
+    /// output delta is recorded from (T5,
+    /// `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+    /// deltas on model edges") — the rule supplies its own `unique_key` and
+    /// fold expressions, which the driver does not otherwise know.
+    /// `partition_column`, when `Some`, is the locality-admitted model's own
+    /// declared partition column (the record's touched-partition
+    /// projection); `None` for a bare keyed model with no partition axis.
+    /// `None` refuses recording fail-closed for a rule with no keyed-fold
+    /// shape at all — the default here exists only so a rule that never
+    /// reaches the suppressed-idempotent branch below need not implement
+    /// it; `keyed`'s own impl
+    /// (`crate::cumulative::CumulativeClassification`) always returns
+    /// `Some`.
+    fn observed_delta_changed_keys_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        compared_columns: &[String],
+        partition_column: Option<&str>,
+    ) -> Option<String> {
+        let _ = (schema, table, delta_sql, compared_columns, partition_column);
+        None
+    }
 }
 
 /// Run the windowed-keyed-maintenance loop: `classify` already happened (its
@@ -231,8 +300,12 @@ pub trait WindowedKeyedRule: Send + Sync {
 /// already reflected — a reprocessed window — refuses the run with a
 /// `KeyedReprocessedWindow`-shaped error
 /// (`docs/specs/incremental_shapes.md` §"Reprocessing") instead of silently
-/// double-counting. `Grade::Idempotent` cells skip the ledger entirely — no
-/// warehouse table is ever created for them.
+/// double-counting. `Grade::Idempotent` cells also write to the same ledger
+/// table, keyed identically, but via an `ON CONFLICT DO NOTHING` upsert
+/// rather than a refusal — a re-run-tolerant model's re-merge of an
+/// already-recorded window is a no-op, not an error
+/// (`docs/specs/incremental_shapes.md` §"The transactional frontier write
+/// (merge ledger)").
 #[allow(clippy::too_many_arguments)]
 pub async fn run_windowed_keyed_maintenance(
     backend: &dyn Backend,
@@ -243,6 +316,7 @@ pub async fn run_windowed_keyed_maintenance(
     rule: &dyn WindowedKeyedRule,
     locality: Option<&LocalitySlice>,
     suppression: &WriteSuppression,
+    write_pin: Option<&'static WritePattern>,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
     retry: &crate::execute::RetryPolicy<'_>,
     probe_policy: &crate::probes::ProbePolicy,
@@ -254,6 +328,34 @@ pub async fn run_windowed_keyed_maintenance(
             reason
         );
     }
+
+    // Resolve the write mechanism once, before any step runs (`docs/outcomes/
+    // 20260815-definition-delta-migrate/phases/27g-plan.md`): a `write:` pin
+    // selects between the keyed `MERGE` and the merge-less staged-candidate
+    // mechanism within the `KeyedFold` technique family
+    // (`smelt_logical::maintenance::choice::resolve_keyed_write_mechanism`).
+    // `Err` (a pin the backend/suppression combination cannot honour) and
+    // `Ok(None)` (neither mechanism is admissible) both refuse the whole run
+    // before any backend call — the same fail-closed posture `rule.refuse()`
+    // above already establishes for combiner safety.
+    let mechanism = match smelt_logical::maintenance::choice::resolve_keyed_write_mechanism(
+        suppression,
+        backend.capabilities().supports_merge,
+        write_pin,
+    ) {
+        Ok(Some(mechanism)) => mechanism,
+        Ok(None) => bail!(
+            "windowed-keyed-maintenance driver refused model '{}': the backend cannot run \
+             MERGE and the write is unconditional (no comparable compared-column set) — no \
+             merge-less unconditional keyed-fold mechanism exists",
+            model_name
+        ),
+        Err(refusal) => bail!(
+            "windowed-keyed-maintenance driver refused model '{}': {}",
+            model_name,
+            refusal
+        ),
+    };
 
     let start = Instant::now();
     let mut total_rows = 0;
@@ -320,17 +422,23 @@ pub async fn run_windowed_keyed_maintenance(
                 delta_select: delta_sql.clone(),
             },
         });
-        let action_sql = match &create_group {
-            Some(group) => group.statements[0].sql.clone(),
-            None => rule.merge_sql(
+        let action_group = match &create_group {
+            Some(group) => group.clone(),
+            None => rule.write_group(
                 schema,
                 table,
                 &delta_sql,
                 slice_predicate.as_ref(),
-                suppression,
+                &mechanism,
                 smelt_backend::maintenance_dialect(backend.dialect()),
             ),
         };
+        let action_sql = action_group
+            .statements
+            .iter()
+            .map(|s| s.sql.as_str())
+            .collect::<Vec<_>>()
+            .join(";\n");
 
         // Route 3's declared sub-route (`LocalitySlice::RecurrenceBounded`)
         // is admitted only **checked** (`incremental_shapes.md` §"Key
@@ -424,6 +532,27 @@ pub async fn run_windowed_keyed_maintenance(
                     );
                 }
 
+                // `fold_ledger_delta` wraps exactly one action statement
+                // (`Backend::fold_ledger_delta`'s own signature) — the
+                // staged-candidate mechanism's multi-statement transactional
+                // group has no ledger-folded realisation today. An
+                // additive-graded cell always resolves `KeyedWriteMechanism::
+                // Merge` absent a `staged_candidate` pin, so this only fires
+                // for a pin explicitly requesting the merge-less mechanism
+                // over an additive fold — refuse fail-closed rather than
+                // silently mis-wrapping it.
+                if action_group.statements.len() != 1 {
+                    bail!(
+                        "windowed-keyed-maintenance driver refused model '{}': the resolved \
+                         write mechanism emits {} statements, but the never-fold-twice \
+                         reconciliation ledger (MP12) only wraps a single action statement — \
+                         an additive-graded cell has no ledger-folded staged-candidate \
+                         realisation",
+                        model_name,
+                        action_group.statements.len()
+                    );
+                }
+
                 let ensure_sql = ddl_duckdb::generate_ledger_table_ddl(schema);
                 let insert_sql = ddl_duckdb::generate_ledger_insert_sql(
                     schema,
@@ -480,28 +609,164 @@ pub async fn run_windowed_keyed_maintenance(
                 // (single owner)"). The `Additive` branch above is the
                 // documented exception: its action statement is interleaved
                 // with the reconciliation ledger's own DDL/DML via
-                // `fold_ledger_delta`, unchanged by this phase.
-                let group = match &create_group {
-                    Some(group) => group.clone(),
-                    None => StatementGroup {
-                        statements: vec![MaintenanceStatement {
-                            sql: action_sql.clone(),
-                        }],
-                        transactional: false,
-                    },
-                };
-                crate::execute::retry_backend_call(retry, || {
-                    backend.execute_statement_group(&group)
-                })
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                // `fold_ledger_delta`.
+                //
+                // A change-suppressed keyed fold's MERGE (T5, `docs/specs/
+                // incremental_models.md` §"The graph layer" — "Observed
+                // deltas on model edges") additionally records its observed
+                // output delta in the SAME backend transaction as the
+                // write — but only past the first (table-creating) step:
+                // `create_group` is a plain `CREATE TABLE ... AS`, not a
+                // conditional write, so there is no changed-row set to
+                // record from it. `Grade::Additive` (ledger-folded) ISN'T
+                // reached here — this arm only ever runs for
+                // `Grade::Idempotent` cells.
+                //
+                // Every step ALSO writes a re-run-tolerance bookkeeping
+                // record into the SAME merge ledger the `Additive` arm
+                // above uses (`docs/specs/incremental_shapes.md` §"The
+                // transactional frontier write (merge ledger)" — "every
+                // window-forward keyed model maintains a per-model
+                // frontier", unqualified by grading), keyed identically —
+                // `LEDGER_WHOLE_ROW_GROUP`/`rule.ledger_input()` — via
+                // `ON CONFLICT DO NOTHING` rather than `Additive`'s
+                // never-fold-twice `PRIMARY KEY` refusal, since a repeat
+                // merge of the same window is never a correctness violation
+                // for an idempotent cell. The first (table-creating) step
+                // is recorded too — that window is merged state — because
+                // it always falls into the `_` arm below (its `create_group`
+                // is never the `(None, Suppressed)` pattern the first arm
+                // matches). The ledger substrate is DuckDB-only today (same
+                // posture as the `Additive` arm and the observed-delta
+                // record below); on any other dialect the record is skipped
+                // and the omission is reported as a named fact on the run's
+                // reporter channel — never silently dropped (`docs/specs/
+                // incremental_shapes.md` §"The transactional frontier write
+                // (merge ledger)") — this is bookkeeping, not a correctness
+                // gate, so the run itself proceeds.
+                let ledger_bookkeeping = if backend.dialect() == SqlDialect::DuckDB {
+                    let ledger_ensure = ddl_duckdb::generate_ledger_table_ddl(schema);
+                    let ledger_upsert = ddl_duckdb::generate_ledger_upsert_sql(
+                        schema,
                         model_name,
-                        action_sql,
-                        e
-                    )
-                })?;
+                        LEDGER_WHOLE_ROW_GROUP,
+                        rule.ledger_input(),
+                        &step.partition_value,
+                        &step.range.start,
+                        &step.range.end,
+                    );
+                    Some((ledger_ensure, ledger_upsert))
+                } else {
+                    retry.reporter.state_structure_unavailable(
+                        retry.run_id,
+                        model_name,
+                        "merge ledger",
+                        backend.dialect().name(),
+                        "re-run-tolerant keyed model merge-ledger bookkeeping record skipped: \
+                         the ledger substrate is DuckDB-only today (docs/specs/\
+                         incremental_shapes.md §\"The transactional frontier write (merge \
+                         ledger)\")",
+                    );
+                    None
+                };
+
+                match (&create_group, suppression) {
+                    (None, WriteSuppression::Suppressed { compared_columns }) => {
+                        if backend.dialect() != SqlDialect::DuckDB {
+                            bail!(
+                                "{}",
+                                BackendError::unsupported(
+                                    backend.dialect().name(),
+                                    "observed-delta recording for a change-suppressed keyed \
+                                     fold (T5)",
+                                )
+                            );
+                        }
+                        let partition_column = locality.map(LocalitySlice::partition_column);
+                        let changed_keys_query = match rule.observed_delta_changed_keys_sql(
+                            schema,
+                            table,
+                            &delta_sql,
+                            compared_columns,
+                            partition_column,
+                        ) {
+                            Some(sql) => sql,
+                            None => bail!(
+                                "windowed-keyed-maintenance driver refused model '{}': a \
+                                 change-suppressed keyed fold requires the rule to provide an \
+                                 observed-delta changed-keys query, and none was provided — \
+                                 refusing fail-closed rather than silently skipping the record",
+                                model_name
+                            ),
+                        };
+                        let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+                        let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+                            schema,
+                            table,
+                            &step.range.start,
+                            &step.range.end,
+                            &changed_keys_query,
+                        );
+                        let mut ensure_sqls = vec![ensure_sql];
+                        let mut pre_write_sqls = vec![record_sql];
+                        if let Some((ledger_ensure, ledger_upsert)) = &ledger_bookkeeping {
+                            ensure_sqls.push(ledger_ensure.clone());
+                            pre_write_sqls.push(ledger_upsert.clone());
+                        }
+                        crate::execute::retry_backend_call(retry, || {
+                            backend.execute_write_with_bookkeeping(
+                                &ensure_sqls,
+                                &pre_write_sqls,
+                                &action_group,
+                            )
+                        })
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                model_name,
+                                action_sql,
+                                e
+                            )
+                        })?;
+                    }
+                    _ => match &ledger_bookkeeping {
+                        Some((ledger_ensure, ledger_upsert)) => {
+                            let ensure_sqls = vec![ledger_ensure.clone()];
+                            let pre_write_sqls = vec![ledger_upsert.clone()];
+                            crate::execute::retry_backend_call(retry, || {
+                                backend.execute_write_with_bookkeeping(
+                                    &ensure_sqls,
+                                    &pre_write_sqls,
+                                    &action_group,
+                                )
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                    model_name,
+                                    action_sql,
+                                    e
+                                )
+                            })?;
+                        }
+                        None => {
+                            crate::execute::retry_backend_call(retry, || {
+                                backend.execute_statement_group(&action_group)
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                    model_name,
+                                    action_sql,
+                                    e
+                                )
+                            })?;
+                        }
+                    },
+                }
             }
         }
 
@@ -549,6 +814,16 @@ pub async fn run_windowed_keyed_maintenance(
 /// incremental` requires a declared grain) or the admitted technique has no
 /// `IncrementalStrategy` counterpart (a targeted-write technique never
 /// serves the creation trigger's region-recompute corner).
+/// The creation trigger's cell (whichever `Trigger::NewData` sibling this
+/// resolver reads) is resolved through the SAME override ladder the
+/// mutation/column-added paths already consult
+/// (`smelt_logical::maintenance::choice::resolve_cell_choice`) rather than a
+/// raw `cell.technique` read: a declared `cells[].write` pin, a hard
+/// `cells[].technique` pin (refusing loudly when the resolvable set does not
+/// contain it), a soft `defaults.prefer`/`cells[].prefer`, then the cell's
+/// own admitted-and-live technique, then region recompute
+/// (`incremental_models.md` §Design "Absent a cost model: the fixed
+/// preference order").
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_incremental_strategy(
     sql: &str,
@@ -556,39 +831,277 @@ pub fn resolve_incremental_strategy(
     metadata: &smelt_core::ModelMetadata,
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     backend_default: IncrementalStrategy,
-) -> IncrementalStrategy {
+    backend_supports_column_scoped_merge: bool,
+) -> Result<IncrementalStrategy> {
+    let result = if model_edges.is_empty() {
+        smelt_db::queries::maintenance::derive_model_maintenance_plan(
+            sql,
+            table,
+            metadata,
+            sources,
+            explicitly_mutable,
+            // See the analogous call in `resolve_live_column_scoped_cell` above.
+            None,
+            // Not (yet) plumbed with declared `key_recurrence` bounds at this
+            // call site — this resolver only reads the creation cell's
+            // `Technique`, which route 3's declared sub-route does not affect
+            // (a locality refusal already yields an empty-cells plan either
+            // way, falling back to `backend_default` below).
+            &[],
+            // This resolver only reads the creation (`NewData`) cell — a
+            // `ColumnAdded` trigger never affects it, so no deployed-schema
+            // snapshot is needed here.
+            &[],
+            &SourceReferentialIntegrity::new(),
+            None,
+            None,
+        )
+    } else {
+        // Edge-aware derivation — the SAME derivation
+        // `resolve_live_delta_restriction_facts` uses, never a second one.
+        smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+            sql,
+            table,
+            metadata,
+            sources,
+            explicitly_mutable,
+            model_edges,
+            None,
+            &[],
+            &[],
+            &SourceReferentialIntegrity::new(),
+            None,
+            None,
+        )
+    };
+    let Some(result) = result else {
+        return Ok(backend_default);
+    };
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    // The whole-row creation cell's own `group` is the fixed cosmetic label
+    // `{*}` (`derive_new_data`'s `Grain::Partition` arm), never one of the
+    // model's own derived payload [`ColumnGroup`]s — so a `cells[].technique`
+    // override naming a real output column is matched against the UNION of
+    // every derived group's columns (every column the whole-row write
+    // touches), not any single group's own members.
+    let all_columns: Vec<String> = result
+        .column_groups
+        .iter()
+        .flat_map(|g| g.columns.iter().cloned())
+        .collect();
+
+    if let Some(driving_edge) = model_edges.first() {
+        let driving_trigger = Trigger::NewData {
+            source: driving_edge.name.clone(),
+        };
+        if let Some(cell) = result.plan.cell_for(&driving_trigger) {
+            return resolve_creation_cell_strategy(
+                cell,
+                &driving_edge.name,
+                metadata,
+                cells_cfg,
+                &result.column_groups,
+                &all_columns,
+                backend_default,
+                backend_supports_column_scoped_merge,
+            );
+        }
+        let driving_edge_refused = result.plan.refusals.iter().any(|r| {
+            matches!(
+                r,
+                smelt_logical::maintenance::Refusal::ReachNotDerivable { edge, .. }
+                    if edge == &driving_edge.name
+            )
+        });
+        let other_creation_cell =
+            result.plan.cells.iter().any(|c| {
+                matches!(&c.trigger, Trigger::NewData { .. }) && c.trigger != driving_trigger
+            });
+        if driving_edge_refused && !other_creation_cell {
+            bail!(
+                "model '{table}' cannot be maintained: upstream maintained model edge '{}' \
+                 declares no timeseries clock and none is inferable, so its creation-trigger \
+                 edge cannot be clamped to the output partition axis, and no other \
+                 creation-trigger cell admits a technique for this run \
+                 (docs/specs/incremental_models.md §\"Upstream model edges\")",
+                driving_edge.name
+            );
+        }
+        // The driving edge's own cell is absent but there is another
+        // admissible creation-trigger cell (or the refusal is unrelated to
+        // the driving edge) — fall through to the first-`NewData`-match
+        // below, mirroring pre-edge-aware behaviour.
+    }
+
+    let creation_cell = result
+        .plan
+        .cells
+        .iter()
+        .find(|c| matches!(c.trigger, Trigger::NewData { .. }));
+    match creation_cell {
+        Some(cell) => {
+            let Trigger::NewData { source } = &cell.trigger else {
+                unreachable!("filtered to Trigger::NewData above")
+            };
+            resolve_creation_cell_strategy(
+                cell,
+                source,
+                metadata,
+                cells_cfg,
+                &result.column_groups,
+                &all_columns,
+                backend_default,
+                backend_supports_column_scoped_merge,
+            )
+        }
+        None => Ok(backend_default),
+    }
+}
+
+/// Resolve the technique the creation-trigger `cell` should actually
+/// execute, consulting the SAME override ladder
+/// (`smelt_logical::maintenance::choice::resolve_cell_choice`) every other
+/// per-cell dispatch resolver uses: a validated `cells[].write` pin, a hard
+/// `cells[].technique` pin (refusing loudly when the resolvable set does not
+/// contain it), a soft `defaults.prefer`/`cells[].prefer`, then the cell's
+/// own admitted-and-live technique, then region recompute
+/// (`incremental_models.md` §Design "Absent a cost model: the fixed
+/// preference order"). `IncrementalStrategy` has exactly one live variant
+/// (`DeleteInsert`) today, so every non-`DeleteInsert` choice maps to
+/// `backend_default` — the caller's own region-recompute fallback.
+#[allow(clippy::too_many_arguments)]
+fn resolve_creation_cell_strategy(
+    cell: &PlanCell,
+    trigger_address: &str,
+    metadata: &smelt_core::ModelMetadata,
+    cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
+    column_groups: &[smelt_logical::maintenance::ColumnGroup],
+    all_columns: &[String],
+    backend_default: IncrementalStrategy,
+    backend_supports_column_scoped_merge: bool,
+) -> Result<IncrementalStrategy> {
+    let write_pin =
+        smelt_db::queries::maintenance::matching_write_pin(cell, column_groups, cells_cfg)
+            .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+    let overrides = effective_override(
+        metadata
+            .maintenance
+            .as_ref()
+            .and_then(|m| m.defaults.as_ref()),
+        cells_cfg,
+        trigger_address,
+        all_columns,
+    );
+    let chosen = resolve_cell_choice(
+        Some(cell),
+        &cell.trigger,
+        &overrides,
+        write_pin,
+        backend_supports_column_scoped_merge,
+    )
+    .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+    Ok(match chosen {
+        ChosenTechnique::Admitted(Technique::DeleteInsert) => IncrementalStrategy::DeleteInsert,
+        _ => backend_default,
+    })
+}
+
+/// Resolve the plain `Trigger::NewData` incremental fold's own per-cell
+/// `deferral` scheduling verdict (`docs/outcomes/20260815-definition-delta-
+/// migrate/phases/14-plan.md`) — the only trigger family where
+/// `contract.cells[].deferral` is validly declarable (`resolve_deferral`
+/// requires an interval-representable clock; every other live per-cell
+/// dispatch resolver serves an inadmissible trigger, see phase 12's
+/// decision log). Thin: derives the model's maintenance plan the same way
+/// [`resolve_incremental_strategy`] does, reads its own column groups (the
+/// fold's own groups — creation is whole-row, so a group here is exactly
+/// one payload column-group the model derives, never re-implemented here),
+/// and hands both that and the caller-resolved `cell_decisions` (already
+/// licensed via `contract_probes::deferral_cell_decisions`'s own lag
+/// comparison — this function makes no independent lag judgement) to
+/// `smelt_logical::contract::deferral::fold_deferral_verdict`, the
+/// single-owner coverage rule.
+///
+/// Returns `(Proceed, [])` whenever the model declares no cell-level
+/// `deferral` at all, or has no `Trigger::NewData` cell to serve — never a
+/// silent skip for an undeclared model.
+pub fn resolve_fold_deferral(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    cell_decisions: &[crate::contract_probes::CellDeferralDecision],
+) -> (
+    smelt_logical::contract::deferral::FoldDeferralVerdict,
+    Vec<String>,
+) {
+    use smelt_logical::contract::deferral::{
+        cell_address, fold_deferral_verdict, DeclaredFoldCell, FoldDeferralVerdict, RunLicense,
+    };
+
+    let no_deferral = (FoldDeferralVerdict::Proceed, Vec::new());
+
+    let Some(cells_cfg) = metadata.contract.as_ref().map(|c| c.cells.as_slice()) else {
+        return no_deferral;
+    };
+    let declared: Vec<DeclaredFoldCell> = cells_cfg
+        .iter()
+        .filter(|cell_cfg| cell_cfg.deferral.is_some())
+        .filter_map(|cell_cfg| {
+            let address = cell_address(&cell_cfg.columns, &cell_cfg.on);
+            let decision = cell_decisions.iter().find(|d| d.address == address)?;
+            Some(DeclaredFoldCell {
+                address,
+                columns: cell_cfg.columns.clone(),
+                on: cell_cfg.on.clone(),
+                skip_licensed: matches!(decision.license, RunLicense::Skip { .. }),
+            })
+        })
+        .collect();
+    if declared.is_empty() {
+        return no_deferral;
+    }
+
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
         table,
         metadata,
         sources,
         explicitly_mutable,
-        // See the analogous call in `resolve_live_column_scoped_cell` above.
         None,
-        // Not (yet) plumbed with declared `key_recurrence` bounds at this
-        // call site — this resolver only reads the creation cell's
-        // `Technique`, which route 3's declared sub-route does not affect
-        // (a locality refusal already yields an empty-cells plan either
-        // way, falling back to `backend_default` below).
         &[],
-        // This resolver only reads the creation (`NewData`) cell — a
-        // `ColumnAdded` trigger never affects it, so no deployed-schema
-        // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
+        None,
     ) else {
-        return backend_default;
+        return no_deferral;
     };
-    let creation_cell = result
-        .plan
-        .cells
+    let Some(creation_source) = result.plan.cells.iter().find_map(|c| match &c.trigger {
+        Trigger::NewData { source } => Some(source.clone()),
+        _ => None,
+    }) else {
+        return no_deferral;
+    };
+    let fold_groups: Vec<(Vec<String>, String)> = result
+        .column_groups
         .iter()
-        .find(|c| matches!(c.trigger, Trigger::NewData { .. }));
-    match creation_cell.map(|c| &c.technique) {
-        Some(Technique::DeleteInsert) => IncrementalStrategy::DeleteInsert,
-        _ => backend_default,
-    }
+        .map(|g| (g.columns.clone(), creation_source.clone()))
+        .collect();
+
+    let verdict = fold_deferral_verdict(&declared, &fold_groups);
+    let addresses = match &verdict {
+        FoldDeferralVerdict::SkipFold { addresses } => addresses.clone(),
+        FoldDeferralVerdict::Proceed => Vec::new(),
+    };
+    (verdict, addresses)
 }
 
 /// Which physical technique actually executes for one plan cell, resolved
@@ -827,6 +1340,8 @@ pub fn resolve_live_column_scoped_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
+        None,
     ) else {
         return Ok(None);
     };
@@ -952,45 +1467,23 @@ pub fn resolve_live_column_scoped_cell(
             if chosen != ChosenTechnique::Admitted(Technique::ColumnScopedMerge) {
                 continue;
             }
-            let comparability = model_property_vector(sql, &JoinContext::new())
-                .map(|v| v.comparability)
-                .unwrap_or_default();
-            let raw_suppression =
-                resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
-            // Fold the first-build/definition-change-backfill posture (or an
-            // explicit `prefer`/`technique` override on this dimension) into
-            // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
-            // or `Trigger::Backfill` — no prior stored state on this group to
-            // diff against) resolves the unconditional matched arm by default,
-            // exactly as if the P2/P3 proof itself had refused — unless an
-            // explicit pin/preference overrides that default. This is the
-            // resolver's own rule, never a runtime special case here.
+            // Fold the write-suppression proof (P2/P3) and its variant
+            // resolution (first-build/definition-change-backfill posture, or
+            // an explicit `prefer`/`technique` override on this dimension)
+            // into one shared resolver — the same one the `--show-sql`
+            // preview builder calls, so a printed statement can never drift
+            // from what this live run executes
+            // (`incremental_models.md` §"Statement emission (single owner)").
             //
             // A `technique: suppress` pin forcing suppression on over a genuine
-            // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
-            // dimension just resolved above — where `resolve_cell_choice`'s
-            // refusal is now a real run error — there is currently NO
-            // pre-execution diagnostic gate for this write-*variant* pin
-            // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
-            // `continue` below on `Err` is a REAL silent fallback: an
-            // inadmissible variant pin is not refused here, it just falls
-            // through to the safe region-recompute batch loop instead of
-            // failing the run loudly. This is a known gap, not by design; see
-            // `docs/specs/incremental_models.md` §"Known Divergences" and
-            // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
-            // Phase G1 for the tracked follow-up to extend the diagnostic gate
-            // to this dimension — out of scope for Phase 2 of
-            // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
-            // family (Fold/Recompute/RederiveColumns) dimension.
-            let write_variant_result = resolve_write_variant(
-                &raw_suppression,
-                &cell.trigger,
-                cell.ledger_catch_up,
-                &overrides,
-            );
-            let Ok((suppression, _variant_reason)) = write_variant_result else {
-                continue;
-            };
+            // P2/P3 proof failure is a hard `ChoiceRefusal`, propagated as a
+            // real run error below — mirroring how the family dimension's
+            // own `resolve_cell_choice` refusal above already fails the run,
+            // never a silent fallback to region recompute
+            // (`incremental_models.md` §"Per-cell write addressing" →
+            // "User pins").
+            let suppression = resolve_cell_write_suppression(sql, group_columns, cell, &overrides)
+                .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
             return Ok(Some((source.clone(), cell.clone(), suppression)));
         }
     }
@@ -1045,6 +1538,8 @@ pub fn resolve_live_in_place_update_cell(
         &[],
         deployed_column_names,
         &SourceReferentialIntegrity::new(),
+        None,
+        None,
     )?;
     let cell = result
         .plan
@@ -1066,53 +1561,17 @@ pub fn resolve_live_in_place_update_cell(
     Some((cell, assignments))
 }
 
-/// Execute the `Technique::InPlaceUpdate` cell [`resolve_live_in_place_update_cell`]
-/// resolved: an unconditional (whole-table) `UPDATE` backfilling every
-/// added column's own defining expression over every currently-stored row.
-/// Unconditional (not partition-scoped) because a definition-change
-/// backfill is a one-time migration over the model's *existing* rows — the
-/// same posture `schema_evolution`'s own `ALTER TABLE ... ADD COLUMN`
-/// (which must already have run first, physically creating the column) —
-/// not a windowed catch-up over a moving horizon (`docs/specs/
-/// definition_deltas.md` §"The verdict per column group": "instantiating
-/// their ledger entries at `S = ∅`").
-///
-/// The statement is built and executed exactly once via
-/// [`emit_in_place_update`] — the single-owner emitter — never
-/// re-authored here (`CLAUDE.md` §"Maintenance-plan purity").
-pub async fn execute_in_place_update(
-    backend: &dyn Backend,
-    schema: &str,
-    table: &str,
-    assignments: &[(String, String)],
-    retry: &crate::execute::RetryPolicy<'_>,
-) -> Result<ExecutionResult> {
-    let start = Instant::now();
-    let full_table = format!("{schema}.{table}");
-    let group = StatementGroup {
-        statements: emit_in_place_update(&full_table, assignments, None)
-            .into_iter()
-            .map(|sql| MaintenanceStatement { sql })
-            .collect(),
-        transactional: false,
-    };
-    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
-        .await
-        .map_err(|e| anyhow::anyhow!("in-place UPDATE failed for '{full_table}': {e}"))?;
-    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
-    Ok(ExecutionResult {
-        model_name: table.to_string(),
-        duration: start.elapsed(),
-        row_count,
-        preview: None,
-    })
-}
-
 /// Find the first `explicitly_mutable` source whose `Trigger::
-/// UpstreamMutation` cell resolves live to `Technique::DeleteInsert` over a
-/// proven `RowIdentity::Key` — the membership-sensitive counterpart of
-/// [`resolve_live_column_scoped_cell`] above, added for the **keyed run
-/// loop only** (`docs/plans/20260808-membership-sensitivity.md` Phase 2).
+/// UpstreamMutation` cell resolves live to `Technique::DeleteInsert` — the
+/// membership-sensitive counterpart of [`resolve_live_column_scoped_cell`]
+/// above, added for the keyed run loop (`docs/plans/
+/// 20260808-membership-sensitivity.md` Phase 2) and extended to the keyless
+/// (`RowIdentity::WholeRow`) shape by `docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md` — this function's
+/// caller in `execute.rs`'s non-keyed batch loop consumes only the keyless
+/// arm (`MembershipRecomputeWrite::StagedKeyless`); the keyed
+/// (`StagedRecompute`/`DiffPatch`) arms stay the keyed-run-loop's own
+/// concern, called from `execute.rs`'s `plan_is_keyed` branch.
 ///
 /// Per `incremental_models.md` §"The plan matrix": "A membership-sensitive
 /// group … must be repaired by a technique that can create and delete rows:
@@ -1122,18 +1581,17 @@ pub async fn execute_in_place_update(
 /// now assigns exactly such a cell `Technique::DeleteInsert` +
 /// `Corner::RecomputeRegion` for a membership-sensitive column group.
 ///
-/// A `Technique::DeleteInsert` cell is deliberately **not** surfaced here
-/// unless the cell's own [`RowIdentity`] proved a real `Key(_)` — a `grain:
-/// partition` output's `WholeRow` identity has no key
-/// `smelt_logical::maintenance::emit::emit_staged_candidate_conditional` can
-/// join stored rows to candidate rows on (that emitter panics on an empty
-/// key), and the whole-row `EXCEPT ALL`-both-ways realisation for a keyless
-/// region remains unbuilt (`docs/specs/model_transforms.md` §Known
-/// Divergences). A `grain: partition` model's `DeleteInsert` membership cell
-/// is left to the existing unconditional region `DELETE`+`INSERT` batch loop
-/// (`execute.rs`'s plain incremental path, unchanged by this phase) — the
-/// always-correct, always-available fallback the plan matrix names for
-/// exactly this shape.
+/// A `Technique::DeleteInsert` cell with `RowIdentity::Key(key)` where `key`
+/// is empty is skipped (a degenerate proof this resolver has never had a
+/// lowering for) — every other `Key(_)`/`WholeRow` cell is surfaced, with
+/// the row-identity shape deciding which `MembershipRecomputeWrite` arm the
+/// caller receives: `Key(_)` resolves through the same keyed proof this
+/// function always ran (`resolve_cell_write_suppression`/`emit_staged_
+/// candidate_conditional_recompute`); `WholeRow` resolves through
+/// `smelt_logical::maintenance::choice::resolve_keyless_staged_suppression`
+/// over the model's full payload column set and
+/// `smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_keyless`.
 ///
 /// This function only ever surfaces a cell when [`resolve_write_variant`]
 /// resolves `WriteSuppression::Suppressed` — `emit_staged_candidate_
@@ -1152,6 +1610,40 @@ pub async fn execute_in_place_update(
 /// it has genuinely *departed* (e.g. the dimension row a fact joined on was
 /// itself deleted) rather than merely being out of a run's touched region,
 /// and the recompute variant's extra anti-join `DELETE` removes it.
+/// The write route a live membership-sensitive `Technique::DeleteInsert`
+/// cell ([`resolve_live_membership_recompute_cell`]) resolves to — the
+/// staged-candidate conditional recompute
+/// ([`execute_staged_membership_recompute`]), or a `write: diff_patch` pin
+/// over that same cell, routed through [`execute_diff_patch`] instead
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`).
+/// The `diff_patch` leg's delete-leg completeness is sound unconditionally:
+/// this resolver's candidate is always the model's own FULL (unwindowed)
+/// recompute — a region recompute's own coverage IS its slice, by
+/// construction, mirroring `resolve_cell_choice`'s `DeleteLeg::Complete`
+/// grant for the region `DeleteInsert` default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MembershipRecomputeWrite {
+    /// `emit_staged_candidate_conditional_recompute`'s change-suppressed
+    /// conditional `DELETE`+`INSERT`.
+    StagedRecompute { compared_columns: Vec<String> },
+    /// [`emit_diff_patch`]'s diff-then-patch pattern, admitted via
+    /// [`smelt_logical::maintenance::diff_patch::admit_diff_patch`].
+    DiffPatch { compared_columns: Vec<String> },
+    /// [`smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless`]'s
+    /// region-grained whole-row conditional `DELETE`+`INSERT`
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/27c-plan.md`)
+    /// — the `RowIdentity::WholeRow` realisation, reached only when
+    /// [`smelt_logical::maintenance::choice::resolve_keyless_staged_suppression`]
+    /// admits over the model's full payload column set.
+    StagedKeyless { compared_columns: Vec<String> },
+}
+
+/// A live membership-recompute cell as
+/// [`resolve_live_membership_recompute_cell`] returns it: the trigger's
+/// source name, the cell itself, its column group's own derived columns,
+/// and the resolved write route.
+pub type LiveMembershipRecomputeCell = (String, PlanCell, Vec<String>, MembershipRecomputeWrite);
+
 pub fn resolve_live_membership_recompute_cell(
     sql: &str,
     table: &str,
@@ -1159,7 +1651,7 @@ pub fn resolve_live_membership_recompute_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
-) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
+) -> Result<Option<LiveMembershipRecomputeCell>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
         table,
@@ -1173,6 +1665,8 @@ pub fn resolve_live_membership_recompute_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
+        None,
     ) else {
         return Ok(None);
     };
@@ -1238,12 +1732,18 @@ pub fn resolve_live_membership_recompute_cell(
             if cell.technique != Technique::DeleteInsert {
                 continue;
             }
-            let RowIdentity::Key(key) = &cell.row_identity.identity else {
-                continue;
+            // A proven `RowIdentity::Key` (non-empty) routes through the
+            // keyed staged-candidate/diff_patch legs below; `RowIdentity::
+            // WholeRow` routes through the keyless leg (`docs/outcomes/
+            // 20260815-definition-delta-migrate/phases/27c-plan.md`) instead
+            // of being skipped outright — a `Key(vec![])` is a degenerate
+            // proof this resolver has never had a lowering for and stays
+            // skipped.
+            let key: Option<&Vec<String>> = match &cell.row_identity.identity {
+                RowIdentity::Key(key) if !key.is_empty() => Some(key),
+                RowIdentity::Key(_) => continue,
+                RowIdentity::WholeRow => None,
             };
-            if key.is_empty() {
-                continue;
-            }
             let write_pin = smelt_db::queries::maintenance::matching_write_pin(
                 cell,
                 &result.column_groups,
@@ -1284,33 +1784,108 @@ pub fn resolve_live_membership_recompute_cell(
                 false,
             )
             .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
-            if chosen != ChosenTechnique::Admitted(Technique::DeleteInsert) {
-                continue;
-            }
             let comparability = model_property_vector(sql, &JoinContext::new())
                 .map(|v| v.comparability)
                 .unwrap_or_default();
-            let raw_suppression =
-                resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
-            let write_variant_result = resolve_write_variant(
-                &raw_suppression,
-                &cell.trigger,
-                cell.ledger_catch_up,
-                &overrides,
-            );
-            let Ok((suppression, _variant_reason)) = write_variant_result else {
-                continue;
-            };
-            // `emit_staged_candidate_conditional` has no unconditional
-            // counterpart (unlike `emit_column_scoped_merge`/`emit_column_
-            // scoped_merge_suppressed`) — an `Unconditional` verdict here has no
-            // sound lowering this resolver can hand the caller, so it is treated
-            // exactly like a refused write-variant: skip this source, fall
-            // through to the caller's safe default.
-            if !matches!(suppression, WriteSuppression::Suppressed { .. }) {
-                continue;
+            match chosen {
+                ChosenTechnique::Admitted(Technique::DeleteInsert) if key.is_some() => {
+                    // A `technique: suppress` pin whose P2/P3 proof refused
+                    // propagates as a real run error (`incremental_models.md`
+                    // §"Per-cell write addressing" → "User pins") — never a
+                    // silent fallback to region recompute.
+                    let suppression =
+                        resolve_cell_write_suppression(sql, group_columns, cell, &overrides)
+                            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+                    // `emit_staged_candidate_conditional` has no
+                    // unconditional counterpart (unlike
+                    // `emit_column_scoped_merge`/`emit_column_scoped_merge_
+                    // suppressed`) — an `Unconditional` verdict here has no
+                    // sound lowering this resolver can hand the caller, so
+                    // it is treated exactly like a refused write-variant:
+                    // skip this source, fall through to the caller's safe
+                    // default.
+                    let WriteSuppression::Suppressed { compared_columns } = suppression else {
+                        continue;
+                    };
+                    return Ok(Some((
+                        source.clone(),
+                        cell.clone(),
+                        group_columns.clone(),
+                        MembershipRecomputeWrite::StagedRecompute { compared_columns },
+                    )));
+                }
+                ChosenTechnique::Admitted(Technique::DeleteInsert) => {
+                    // `key.is_none()` here — a `RowIdentity::WholeRow` cell
+                    // (`docs/outcomes/20260815-definition-delta-migrate/
+                    // phases/27c-plan.md`). `resolve_write_suppression`
+                    // (the keyed proof `resolve_cell_write_suppression`
+                    // calls) refuses solely because the identity is
+                    // `WholeRow`, before it ever inspects column
+                    // comparability — so this arm never calls it, and
+                    // instead runs the keyless proof directly over the
+                    // model's full payload column set (every selected
+                    // column participates in a whole-row diff, not just this
+                    // cell's own mutation-sensitive group).
+                    let output_columns: Vec<String> = result
+                        .column_groups
+                        .iter()
+                        .flat_map(|g| g.columns.clone())
+                        .collect();
+                    let suppression =
+                        smelt_logical::maintenance::choice::resolve_keyless_staged_suppression(
+                            &output_columns,
+                            &comparability,
+                            &cell.row_identity,
+                        );
+                    let WriteSuppression::Suppressed { compared_columns } = suppression else {
+                        continue;
+                    };
+                    return Ok(Some((
+                        source.clone(),
+                        cell.clone(),
+                        group_columns.clone(),
+                        MembershipRecomputeWrite::StagedKeyless { compared_columns },
+                    )));
+                }
+                ChosenTechnique::DiffPatch {
+                    recompute: Technique::DeleteInsert,
+                    delete_leg,
+                } => {
+                    // The candidate this resolver's caller writes is always
+                    // the model's own FULL unwindowed recompute — a region
+                    // recompute's own coverage IS its slice, so the delete
+                    // leg is sound regardless of what `resolve_cell_choice`
+                    // proved (it already grants `Complete` here too, but
+                    // this arm does not depend on that — it re-derives its
+                    // own completeness argument rather than trusting an
+                    // upstream `Omitted` it would otherwise have to refuse
+                    // on for no real reason).
+                    let _ = delete_leg;
+                    let admitted = smelt_logical::maintenance::diff_patch::admit_diff_patch(
+                        group_columns,
+                        &comparability,
+                        &cell.row_identity,
+                        Ok(()),
+                    )
+                    .map_err(|refusal| {
+                        anyhow::anyhow!(
+                            "MaintenanceDiffPatchRefused: a `write: diff_patch` pin over a \
+                             membership-sensitive Technique::DeleteInsert cell for group '{}' \
+                             could not be admitted: {refusal:?}",
+                            cell.group,
+                        )
+                    })?;
+                    return Ok(Some((
+                        source.clone(),
+                        cell.clone(),
+                        group_columns.clone(),
+                        MembershipRecomputeWrite::DiffPatch {
+                            compared_columns: admitted.compared_columns,
+                        },
+                    )));
+                }
+                _ => continue,
             }
-            return Ok(Some((source.clone(), cell.clone(), suppression)));
         }
     }
     Ok(None)
@@ -1331,7 +1906,17 @@ pub fn resolve_live_membership_recompute_cell(
 /// newly-admitted key is represented correctly, and the recompute variant's
 /// own anti-join `DELETE` removes a departed key rather than leaving it
 /// stale. `compared_columns` is the already fail-closed-admitted
-/// `WriteSuppression::Suppressed` set.
+/// `WriteSuppression::Suppressed` set — this write is always conditional
+/// (`resolve_live_membership_recompute_cell` above only ever returns a cell
+/// once suppression proved `Suppressed`; an `Unconditional` verdict has no
+/// sound lowering and is skipped before reaching here), so its observed
+/// output delta is recorded in the SAME backend transaction as the write
+/// (T5, `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+/// deltas on model edges") unconditionally, matching
+/// [`execute_column_scoped_write_with_observed_delta`]'s posture for its
+/// own `Suppressed` arm. `window` identifies the run window this write
+/// covers — the observed-delta table's own idempotent-replace key.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_staged_membership_recompute(
     backend: &dyn Backend,
     schema: &str,
@@ -1339,6 +1924,7 @@ pub async fn execute_staged_membership_recompute(
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
+    window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
@@ -1353,10 +1939,90 @@ pub async fn execute_staged_membership_recompute(
         compared_columns,
         dialect,
     );
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(anyhow::anyhow!(
+            "{}",
+            BackendError::unsupported(
+                backend.dialect().name(),
+                "observed-delta recording for a staged-candidate membership recompute (T5)",
+            )
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+    let partition_column = if window.column.is_empty() {
+        None
+    } else {
+        Some(window.column.as_str())
+    };
+    let changed_keys_query = staged_candidate_changed_keys_select(
+        &full_table,
+        key,
+        candidate_select,
+        compared_columns,
+        partition_column,
+    );
+    let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+        schema,
+        table,
+        &window.start,
+        &window.end,
+        &changed_keys_query,
+    );
+    crate::execute::retry_backend_call(retry, || {
+        backend.execute_conditional_write_and_record_observed_delta(
+            &ensure_sql,
+            &group,
+            &record_sql,
+        )
+    })
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!("staged-candidate membership recompute failed for '{full_table}': {e}")
+    })?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
+/// Execute a live, membership-sensitive `Technique::DeleteInsert` cell whose
+/// row identity is `RowIdentity::WholeRow` (`resolve_live_membership_
+/// recompute_cell`'s keyless arm, `docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md`) via
+/// [`smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless`] —
+/// the region-grained whole-row conditional `DELETE`+`INSERT`. Mirrors
+/// [`execute_staged_membership_recompute`] minus the observed-delta leg: a
+/// keyless write has no key columns the observed-delta table (T5) could
+/// record against, so this executor never calls
+/// `execute_conditional_write_and_record_observed_delta`, only the plain
+/// `execute_statement_group`.
+pub async fn execute_staged_keyless_recompute(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    candidate_select: &str,
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = format!("__smelt_staged_{table}");
+    let sentinel_relation = format!("__smelt_sentinel_{table}");
+    let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless(
+        &full_table,
+        &staged_relation,
+        &sentinel_relation,
+        None,
+        candidate_select,
+        dialect,
+    );
     crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
         .await
         .map_err(|e| {
-            anyhow::anyhow!("staged-candidate membership recompute failed for '{full_table}': {e}")
+            anyhow::anyhow!("staged-candidate keyless recompute failed for '{full_table}': {e}")
         })?;
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {
@@ -1577,6 +2243,8 @@ pub fn resolve_live_per_group_recompute_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
+        None,
     ) else {
         return Ok(None);
     };
@@ -1724,26 +2392,41 @@ pub fn resolve_live_per_group_recompute_cell(
                 // source"): a source with no native change feed and no
                 // tombstone/change history needs the group-grain sidecar
                 // diff to witness a wholly-deleted group; every other
-                // posture keeps the ordinary clamped current-source scan.
-                let discovery =
-                    if discovery_posture(facts.mutation) == RepairDiscoveryPosture::SidecarDiff {
-                        if dialect != SqlDialect::DuckDB {
-                            return Err(BackendError::unsupported(
-                                dialect.name(),
-                                "group-grain fingerprint-sidecar affected-key discovery for a \
+                // posture keeps the ordinary clamped current-source scan. A
+                // `ChangeFeed` source has no discovery posture at all — the
+                // repair family is refused for it upstream at derivation
+                // time (`derive::derive_new_data`), so a live cell here
+                // should never carry one; a `None` posture bails loud
+                // rather than silently defaulting to a scan that may drop
+                // rows.
+                let Some(posture) = discovery_posture(facts.mutation) else {
+                    bail!(
+                        "MaintenanceRepairDiscoveryPostureMissing: a Technique::\
+                         PerGroupRecompute cell for group '{}' resolved a change_feed source \
+                         '{}' — the repair family has no fingerprint-sidecar discovery for a \
+                         change feed and should never have admitted this cell",
+                        cell.group,
+                        facts.name,
+                    );
+                };
+                let discovery = if posture == RepairDiscoveryPosture::SidecarDiff {
+                    if dialect != SqlDialect::DuckDB {
+                        return Err(BackendError::unsupported(
+                            dialect.name(),
+                            "group-grain fingerprint-sidecar affected-key discovery for a \
                              mutable_snapshot repair source (P9)",
-                            )
-                            .into());
-                        }
-                        let digest_columns: Vec<String> =
-                            match cell.fingerprint_projections.get(&facts.name) {
-                                Some(FingerprintProjection::Columns(cols)) => {
-                                    cols.iter().cloned().collect()
-                                }
-                                _ => Vec::new(),
-                            };
-                        if digest_columns.is_empty() {
-                            bail!(
+                        )
+                        .into());
+                    }
+                    let digest_columns: Vec<String> =
+                        match cell.fingerprint_projections.get(&facts.name) {
+                            Some(FingerprintProjection::Columns(cols)) => {
+                                cols.iter().cloned().collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                    if digest_columns.is_empty() {
+                        bail!(
                             "MaintenanceRepairDigestColumnsMissing: a Technique::PerGroupRecompute \
                              cell for group '{}' resolved a MutableSnapshot delta posture on \
                              source '{}' with no P4 fingerprint projection columns — the \
@@ -1751,11 +2434,11 @@ pub fn resolve_live_per_group_recompute_cell(
                             cell.group,
                             facts.name,
                         );
-                        }
-                        RepairDiscovery::SidecarDiff { digest_columns }
-                    } else {
-                        RepairDiscovery::ClampedScan
-                    };
+                    }
+                    RepairDiscovery::SidecarDiff { digest_columns }
+                } else {
+                    RepairDiscovery::ClampedScan
+                };
                 return Ok(Some((
                     facts.name.clone(),
                     cell.clone(),
@@ -2069,15 +2752,20 @@ pub async fn execute_diff_patch(
 /// [`resolve_live_key_addressed_model_edge_cell`] returns it: the upstream
 /// edge's own name (`== key_scope.from`), the cell itself, its `KeyScope`
 /// (the downstream's own key columns to restrict the recompute to), the
-/// upstream's own `KeyedUpsert` key columns (the group-grain sidecar's own
-/// `group_key`), the digest column set the sidecar hashes (derived from the
-/// downstream's own CLEAN sql — never recomputed against compiled SQL, which
-/// carries physical table names rather than `smelt.*` refs the walk-backed
-/// fingerprint classifier matches against), and the resolved write leg.
+/// upstream's own `KeyedUpsert` key columns, the group-grain sidecar's
+/// **own** grouping key (`key_scope.keys` for
+/// [`KeyDiscovery::DownstreamGrainOverUpstream`], the upstream's own key
+/// columns for [`KeyDiscovery::UpstreamKeyed`] — the two coincide only for
+/// the upstream-keyed route), the digest column set the sidecar hashes
+/// (derived from the downstream's own CLEAN sql — never recomputed against
+/// compiled SQL, which carries physical table names rather than `smelt.*`
+/// refs the walk-backed fingerprint classifier matches against), and the
+/// resolved write leg.
 pub type LiveKeyAddressedModelEdgeCell = (
     String,
     PlanCell,
     smelt_logical::maintenance::KeyScope,
+    Vec<String>,
     Vec<String>,
     Vec<String>,
     RepairWrite,
@@ -2125,6 +2813,8 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
+        None,
     ) else {
         return Ok(None);
     };
@@ -2170,10 +2860,19 @@ pub fn resolve_live_key_addressed_model_edge_cell(
             )
             .into());
         }
-        if !key_scope
-            .keys
-            .iter()
-            .all(|k| upstream_keys.iter().any(|u| u.eq_ignore_ascii_case(k)))
+        // The upstream-keyed route's own subset obligation: `key_scope.keys`
+        // was resolved by projecting through the upstream's own key
+        // columns, so it must literally be a subset of them. The
+        // grain-over-upstream route poses no such obligation — its
+        // `key_scope` is the downstream's own grain, admitted by
+        // `admit_key_addressed_recompute` against the upstream relation's
+        // columns directly, not against `upstream_keys`
+        // (`docs/specs/incremental_models.md` §"Upstream model edges").
+        if key_scope.discovery == KeyDiscovery::UpstreamKeyed
+            && !key_scope
+                .keys
+                .iter()
+                .all(|k| upstream_keys.iter().any(|u| u.eq_ignore_ascii_case(k)))
         {
             bail!(
                 "MaintenanceKeyScopeColumnMissing: a key-addressed model-edge cell for upstream \
@@ -2185,6 +2884,16 @@ pub fn resolve_live_key_addressed_model_edge_cell(
                 upstream_keys,
             );
         }
+        // The group-grain sidecar's own grouping key: the upstream's key
+        // columns for the upstream-keyed route (unchanged from before this
+        // discovery route existed), or the downstream's own grain
+        // (`key_scope.keys`) for the grain-over-upstream route — the sidecar
+        // must diff at whichever grain the cell was actually admitted
+        // against, never a re-derived one.
+        let group_key = match key_scope.discovery {
+            KeyDiscovery::UpstreamKeyed => upstream_keys.clone(),
+            KeyDiscovery::DownstreamGrainOverUpstream => key_scope.keys.clone(),
+        };
         let comparability = model_property_vector(sql, &JoinContext::new())
             .map(|v| v.comparability)
             .unwrap_or_default();
@@ -2231,6 +2940,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
             cell.clone(),
             key_scope,
             upstream_keys.clone(),
+            group_key,
             digest_columns,
             write,
         )));
@@ -2241,15 +2951,21 @@ pub fn resolve_live_key_addressed_model_edge_cell(
 /// The affected-key relation a key-addressed model-edge cell reads
 /// (`docs/specs/incremental_models.md` §"Upstream model edges"): the
 /// group-grain fingerprint sidecar diff over the upstream's own output
-/// table, at the upstream's `KeyedUpsert` key grain, projected onto the
-/// downstream's own key columns
-/// ([`smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select`]).
-/// A DuckDB-only discovery route — `resolve_live_key_addressed_model_edge_cell`
-/// already refused a non-DuckDB dialect before any backend call is reached.
+/// table, grouped at `group_key` — the upstream's own `KeyedUpsert` key
+/// columns for [`KeyDiscovery::UpstreamKeyed`] (whose changed keys are then
+/// forward-projected onto the downstream's own key columns via
+/// [`smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select`]),
+/// or the downstream's own grain for
+/// [`KeyDiscovery::DownstreamGrainOverUpstream`] (whose diff's own
+/// changed-key set already **is** the downstream's affected-key set, so no
+/// forward-projection `SELECT` runs — [`repair_keys_literal_select`] wraps
+/// the resolved literals directly). A DuckDB-only discovery route —
+/// `resolve_live_key_addressed_model_edge_cell` already refused a
+/// non-DuckDB dialect before any backend call is reached.
 ///
 /// Returns an empty resolved key list when the sidecar diff discovers no
-/// changed upstream keys — the caller reports a no-op rather than executing
-/// an empty-but-real write.
+/// changed keys — the caller reports a no-op rather than executing an
+/// empty-but-real write.
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_key_addressed_affected_keys(
     backend: &dyn Backend,
@@ -2257,9 +2973,10 @@ pub async fn resolve_key_addressed_affected_keys(
     upstream_source_address: &str,
     upstream_table: &str,
     upstream_output_table: &str,
-    upstream_keys: &[String],
+    group_key: &[String],
     digest_columns: &[String],
     downstream_keys: &[String],
+    discovery: KeyDiscovery,
     model_sql: &str,
 ) -> std::result::Result<(Vec<String>, String), BackendError> {
     let changed_keys = diff_repair_group_sidecar_changed_keys(
@@ -2268,20 +2985,26 @@ pub async fn resolve_key_addressed_affected_keys(
         upstream_source_address,
         upstream_table,
         upstream_output_table,
-        upstream_keys,
+        group_key,
         digest_columns,
         model_sql,
     )
     .await?;
     let dialect = maintenance_dialect(backend.dialect());
-    let affected_keys_select =
-        smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
-            upstream_table,
-            upstream_keys,
-            downstream_keys,
-            &changed_keys,
-            dialect,
-        );
+    let affected_keys_select = match discovery {
+        KeyDiscovery::UpstreamKeyed => {
+            smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
+                upstream_table,
+                group_key,
+                downstream_keys,
+                &changed_keys,
+                dialect,
+            )
+        }
+        KeyDiscovery::DownstreamGrainOverUpstream => {
+            repair_keys_literal_select(&changed_keys, dialect)
+        }
+    };
     Ok((changed_keys, affected_keys_select))
 }
 
@@ -2310,9 +3033,10 @@ pub async fn execute_key_addressed_model_edge_cell(
     table: &str,
     upstream_source_address: &str,
     upstream_table: &str,
-    upstream_keys: &[String],
+    group_key: &[String],
     digest_columns: &[String],
     downstream_keys: &[String],
+    discovery: KeyDiscovery,
     clean_model_sql: &str,
     compiled_model_sql: &str,
     write: &RepairWrite,
@@ -2325,9 +3049,10 @@ pub async fn execute_key_addressed_model_edge_cell(
         upstream_source_address,
         upstream_table,
         &full_table,
-        upstream_keys,
+        group_key,
         digest_columns,
         downstream_keys,
+        discovery,
         clean_model_sql,
     )
     .await
@@ -2346,7 +3071,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         schema,
         source_address: upstream_source_address,
         source_table: upstream_table,
-        group_key: upstream_keys,
+        group_key,
         digest_columns,
         model_sql: clean_model_sql,
     };
@@ -2515,32 +3240,173 @@ pub fn changed_keys_select(
     compared_columns: &[String],
     partition_column: Option<&str>,
 ) -> String {
+    let predicate = changed_row_predicate("target", "source", compared_columns);
+    changed_keys_select_over_predicate(
+        table,
+        unique_key,
+        source_select,
+        "source",
+        &predicate,
+        partition_column,
+    )
+}
+
+/// The shared "new-or-changed keys, projected to their touched partition"
+/// query shape both [`changed_keys_select`] (column-scoped MERGE, raw
+/// column comparison) and [`keyed_fold_changed_keys_select`] (keyed fold,
+/// fold-expression comparison) build — the two differ only in the
+/// candidate-relation alias and the predicate text, never in the join/
+/// key-projection shape itself.
+fn changed_keys_select_over_predicate(
+    table: &str,
+    unique_key: &[String],
+    candidate_select: &str,
+    candidate_alias: &str,
+    predicate: &str,
+    partition_column: Option<&str>,
+) -> String {
     let on = unique_key
         .iter()
-        .map(|k| format!("target.{k} = source.{k}"))
+        .map(|k| format!("target.{k} = {candidate_alias}.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
     let key_expr = if unique_key.len() == 1 {
-        format!("CAST(source.{} AS VARCHAR)", unique_key[0])
+        format!("CAST({candidate_alias}.{} AS VARCHAR)", unique_key[0])
     } else {
         let parts = unique_key
             .iter()
-            .map(|k| format!("CAST(source.{k} AS VARCHAR)"))
+            .map(|k| format!("CAST({candidate_alias}.{k} AS VARCHAR)"))
             .collect::<Vec<_>>()
             .join(", '\u{1}', ");
         format!("CONCAT({parts})")
     };
     let partition_expr = match partition_column {
-        Some(col) => format!("CAST(source.{col} AS VARCHAR)"),
+        Some(col) => format!("CAST({candidate_alias}.{col} AS VARCHAR)"),
         None => "NULL".to_string(),
     };
     let first_key = &unique_key[0];
-    let suppression = changed_row_predicate("target", "source", compared_columns);
     format!(
         "SELECT {key_expr} AS delta_key, {partition_expr} AS delta_partition FROM \
-         ({source_select}) AS source LEFT JOIN {table} AS target ON {on} \
-         WHERE target.{first_key} IS NULL OR ({suppression})"
+         ({candidate_select}) AS {candidate_alias} LEFT JOIN {table} AS target ON {on} \
+         WHERE target.{first_key} IS NULL OR ({predicate})"
     )
+}
+
+/// Build the `target.c IS DISTINCT FROM (<fold_expr>)` OR-predicate over
+/// `compared_columns` — the SAME shape [`smelt_logical::maintenance::emit::
+/// emit_keyed_fold_suppressed`] guards its matched arm with (one
+/// comparison, two consumers, `docs/specs/incremental_models.md` §"The
+/// graph layer" — "Observed deltas on model edges"; kept from drifting off
+/// the write's own guard by
+/// `crates/smelt-runtime/tests/statement_parity.rs`). Unlike
+/// [`changed_row_predicate`]'s raw-column comparison (the column-scoped
+/// MERGE's matched arm compares source vs. target directly), a keyed fold's
+/// matched arm compares the target's stored value against the FOLDED
+/// (combiner-applied) delta value — `folds` supplies each compared column's
+/// already-rendered fold expression (`target.c op delta.c`, as
+/// `smelt_logical::maintenance::emit::expand_aggregator_column_folds`
+/// renders it).
+pub fn keyed_fold_changed_row_predicate(
+    compared_columns: &[String],
+    folds: &[(String, String)],
+) -> String {
+    compared_columns
+        .iter()
+        .map(|c| {
+            let expr = folds
+                .iter()
+                .find(|(col, _)| col == c)
+                .map(|(_, expr)| expr.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "keyed_fold_changed_row_predicate: compared column '{c}' is not among \
+                         the fold's own columns"
+                    )
+                });
+            format!("target.{c} IS DISTINCT FROM ({expr})")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// The changed-key `SELECT` for a suppressed keyed fold's observed delta:
+/// every delta row that is new (no matching target key) or whose applied
+/// fold changes at least one comparable column — the same rowset
+/// [`smelt_logical::maintenance::emit::emit_keyed_fold_suppressed`]'s
+/// matched arm actually updates, restricted to comparable columns
+/// ([`keyed_fold_changed_row_predicate`]). `delta_select` is aliased
+/// `delta` (not `source`), matching the fold expressions' own
+/// `target.c`/`delta.c` qualification.
+pub fn keyed_fold_changed_keys_select(
+    table: &str,
+    unique_key: &[String],
+    delta_select: &str,
+    compared_columns: &[String],
+    folds: &[(String, String)],
+    partition_column: Option<&str>,
+) -> String {
+    let predicate = keyed_fold_changed_row_predicate(compared_columns, folds);
+    changed_keys_select_over_predicate(
+        table,
+        unique_key,
+        delta_select,
+        "delta",
+        &predicate,
+        partition_column,
+    )
+}
+
+/// The changed-key `SELECT` for a staged-candidate conditional recompute's
+/// observed delta (T5): every key whose applied effect was NOT the
+/// identity — new (in the candidate, not the target), changed (in both,
+/// but at least one comparable column differs — the same `IS DISTINCT
+/// FROM` guard [`smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_recompute`]'s `delete_changed`
+/// statement uses), or departed (in the target, not the candidate — the
+/// same anti-join its `delete_departed` statement uses). A key present in
+/// both with no comparable-column difference (untouched) never appears —
+/// its applied effect IS the identity. `partition_column`, when `Some`,
+/// projects the candidate side's own partition column for a new/changed
+/// key; a departed key (no candidate row to read a partition value from)
+/// always reports `NULL` (folded to an empty `partitions` array by the
+/// upsert), matching the write's own inability to name a partition for a
+/// row it no longer has any relation over.
+fn staged_candidate_changed_keys_select(
+    table: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    partition_column: Option<&str>,
+) -> String {
+    let predicate = changed_row_predicate("target", "candidate", compared_columns);
+    let new_or_changed = changed_keys_select_over_predicate(
+        table,
+        key,
+        candidate_select,
+        "candidate",
+        &predicate,
+        partition_column,
+    );
+    let departed_on = key
+        .iter()
+        .map(|k| format!("target.{k} = candidate.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_expr = if key.len() == 1 {
+        format!("CAST(target.{} AS VARCHAR)", key[0])
+    } else {
+        let parts = key
+            .iter()
+            .map(|k| format!("CAST(target.{k} AS VARCHAR)"))
+            .collect::<Vec<_>>()
+            .join(", '\u{1}', ");
+        format!("CONCAT({parts})")
+    };
+    let departed = format!(
+        "SELECT {key_expr} AS delta_key, NULL AS delta_partition FROM {table} AS target WHERE \
+         NOT EXISTS (SELECT 1 FROM ({candidate_select}) AS candidate WHERE {departed_on})"
+    );
+    format!("{new_or_changed} UNION ALL {departed}")
 }
 
 /// Execute a live `ColumnScopedMerge` cell's write, and — when the cell's
@@ -2657,6 +3523,61 @@ pub async fn read_observed_delta_changed_keys(
     window_start: &str,
     window_end: &str,
 ) -> std::result::Result<Option<Vec<String>>, BackendError> {
+    Ok(
+        read_observed_delta(backend, schema, model, window_start, window_end)
+            .await?
+            .map(|od| od.changed_keys),
+    )
+}
+
+/// Decode a single `VARCHAR[]` column of an observed-delta result batch
+/// into owned strings, skipping a null list entry or a non-string-array
+/// column shape (defensive — the DDL guarantees `VARCHAR[] NOT NULL`, but
+/// this never panics on an unexpected shape).
+fn decode_string_list_column(batch: &arrow::array::RecordBatch, column: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(col) = batch.column_by_name(column) else {
+        return out;
+    };
+    let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
+        return out;
+    };
+    for i in 0..list.len() {
+        if list.is_null(i) {
+            continue;
+        }
+        let values = list.value(i);
+        let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() else {
+            continue;
+        };
+        for j in 0..strings.len() {
+            if !strings.is_null(j) {
+                out.push(strings.value(j).to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Read the exact observed delta (both `changed_keys` and `partitions`) an
+/// upstream driving model edge recorded for `[window_start, window_end)` —
+/// the single decode site [`read_observed_delta_changed_keys`] and
+/// [`crate::propagation::load_observed_delta_lookup`] both re-express
+/// themselves over. `None` = no row was ever recorded for this window (the
+/// widen-never-narrow fallback trigger); `Some` — even with both vectors
+/// empty — means a row exists (§"Empty and absent are distinct").
+///
+/// DuckDB-only, matching every other `_smelt_observed_delta` consumer in
+/// this module: a missing delta on the read side is always a legal
+/// fallback trigger, so a non-DuckDB backend reads back `None` rather than
+/// erroring.
+pub async fn read_observed_delta(
+    backend: &dyn Backend,
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+) -> std::result::Result<Option<ddl_duckdb::ObservedDelta>, BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
         return Ok(None);
     }
@@ -2671,30 +3592,16 @@ pub async fn read_observed_delta_changed_keys(
         return Ok(None);
     }
 
-    let mut keys = Vec::new();
+    let mut changed_keys = Vec::new();
+    let mut partitions = Vec::new();
     for batch in &batches {
-        let Some(col) = batch.column_by_name("changed_keys") else {
-            continue;
-        };
-        let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
-            continue;
-        };
-        for i in 0..list.len() {
-            if list.is_null(i) {
-                continue;
-            }
-            let values = list.value(i);
-            let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() else {
-                continue;
-            };
-            for j in 0..strings.len() {
-                if !strings.is_null(j) {
-                    keys.push(strings.value(j).to_string());
-                }
-            }
-        }
+        changed_keys.extend(decode_string_list_column(batch, "changed_keys"));
+        partitions.extend(decode_string_list_column(batch, "partitions"));
     }
-    Ok(Some(keys))
+    Ok(Some(ddl_duckdb::ObservedDelta {
+        changed_keys,
+        partitions,
+    }))
 }
 
 // ── F3: fingerprint sidecar — synthesized external change feed ─────────
@@ -3224,6 +4131,18 @@ pub async fn refresh_repair_group_sidecar(
 /// restriction`] then always resolves `Unrestricted`, so a dry-run's
 /// reported text is always the ordinary widened scan (the honest choice:
 /// a dry-run cannot know whether a live run's delta read would restrict).
+///
+/// `region_write` is the region family's own change-suppressed conditional
+/// variant ([`RegionWrite`], `docs/specs/model_transforms.md` §"Change-
+/// suppressed MERGE and the staged-candidate conditional DELETE+INSERT") —
+/// consulted only when the delta-restriction arm above does not apply
+/// (delta restriction narrows the scan itself, strictly cheaper, so it
+/// always wins when both are admitted). A `RegionWrite::Suppressed` verdict
+/// realises [`emit_diff_patch`] over the region's own slice predicate,
+/// `DeleteLeg::Complete` (a region recompute's candidate covers its own
+/// slice by construction — the same grant `resolve_cell_choice` already
+/// makes for this corner); `None`/`Unconditional` falls back to today's
+/// byte-identical widened scan.
 #[allow(clippy::too_many_arguments)]
 pub fn build_delete_insert_group_dispatched(
     table: &str,
@@ -3233,6 +4152,7 @@ pub fn build_delete_insert_group_dispatched(
     restrict_column: Option<&str>,
     skeleton_source_closure: Option<&SkeletonSourceClosure>,
     observed_delta: Option<&[String]>,
+    region_write: Option<&RegionWrite>,
     dialect: MaintenanceDialect,
 ) -> StatementGroup {
     let restriction = resolve_recompute_restriction(skeleton_source_closure, observed_delta);
@@ -3248,8 +4168,65 @@ pub fn build_delete_insert_group_dispatched(
                 dialect,
             )
         }
-        _ => emit_delete_insert(table, partition_col, region, body, dialect),
+        _ => match region_write {
+            Some(RegionWrite::Suppressed {
+                key,
+                compared_columns,
+            }) => {
+                // `table` here is already schema-qualified (`emit_delete_insert`'s
+                // own convention for this function's `table` parameter) —
+                // `diff_patch_staged_relation` assumes a bare table name, so a
+                // qualified name is sanitised inline rather than reused
+                // verbatim: an embedded `.` would otherwise parse as a second
+                // schema qualifier on the staged temp relation's own name.
+                let staged_relation = format!("__smelt_diff_patch_{}", table.replace('.', "_"));
+                let slice_predicate = region.predicate(Some(table), partition_col);
+                emit_diff_patch(
+                    table,
+                    &staged_relation,
+                    key,
+                    body,
+                    compared_columns,
+                    &slice_predicate,
+                    &DeleteLeg::Complete,
+                    dialect,
+                )
+            }
+            _ => emit_delete_insert(table, partition_col, region, body, dialect),
+        },
     }
+}
+
+/// Where an exact changed-key delta comes from for
+/// [`execute_delete_insert_with_delta_restriction`]'s restriction attempt —
+/// the T3 model-edge route (`read_observed_delta_changed_keys`, unchanged
+/// from before this variant existed) or the F3/T3-external fingerprint-
+/// sidecar route for a `mutable_snapshot` external source
+/// (`diff_fingerprint_sidecar_changed_keys`). One executor consumes either
+/// shape: the probe dispatch, `resolve_recompute_restriction` call and
+/// emitter path stay identical regardless of which variant is passed
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`).
+#[derive(Debug, Clone, Copy)]
+pub enum RestrictionDeltaSource<'a> {
+    /// The upstream is a maintained model — read its recorded
+    /// `_smelt_observed_delta` row for `[window_start, window_end)`.
+    ModelEdge {
+        /// The driving model edge's bare address.
+        upstream_model: &'a str,
+        window_start: &'a str,
+        window_end: &'a str,
+    },
+    /// The upstream is an external `mutable_snapshot` source with no native
+    /// change feed — diff the fingerprint sidecar against the source's
+    /// current content.
+    ExternalSidecar {
+        source_address: &'a str,
+        source_table: &'a str,
+        source_key: &'a [String],
+        projection: &'a FingerprintProjection,
+        all_source_columns: &'a [String],
+        model_sql: &'a str,
+    },
 }
 
 /// Execute a model-edge creation-trigger region recompute, restricting it to
@@ -3272,6 +4249,11 @@ pub fn build_delete_insert_group_dispatched(
 /// below reads its enrichment join from (`CompiledModel::body_sql`). Never
 /// derive one from the other here — see
 /// `docs/plans/20260819-source-derived-projection.md` Phase 5.
+///
+/// `delta_source` selects where the changed-key set is read from
+/// ([`RestrictionDeltaSource`]) — the acquisition step is the only part of
+/// this function that varies by source; the probe dispatch and emitter path
+/// below are shared unconditionally.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_delete_insert_with_delta_restriction(
     backend: &dyn Backend,
@@ -3283,9 +4265,8 @@ pub async fn execute_delete_insert_with_delta_restriction(
     probe_body: &str,
     restrict_column: Option<&str>,
     skeleton_source_closure: Option<&SkeletonSourceClosure>,
-    upstream_model: &str,
-    window_start: &str,
-    window_end: &str,
+    delta_source: RestrictionDeltaSource<'_>,
+    region_write: Option<&RegionWrite>,
     dialect: MaintenanceDialect,
     retry: &crate::execute::RetryPolicy<'_>,
     probe_policy: &crate::probes::ProbePolicy,
@@ -3293,8 +4274,42 @@ pub async fn execute_delete_insert_with_delta_restriction(
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
     let mut delta = if restrict_column.is_some() && closed {
-        read_observed_delta_changed_keys(backend, schema, upstream_model, window_start, window_end)
-            .await?
+        match delta_source {
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model,
+                window_start,
+                window_end,
+            } => {
+                read_observed_delta_changed_keys(
+                    backend,
+                    schema,
+                    upstream_model,
+                    window_start,
+                    window_end,
+                )
+                .await?
+            }
+            RestrictionDeltaSource::ExternalSidecar {
+                source_address,
+                source_table,
+                source_key,
+                projection,
+                all_source_columns,
+                model_sql,
+            } => Some(
+                diff_fingerprint_sidecar_changed_keys(
+                    backend,
+                    schema,
+                    source_address,
+                    source_table,
+                    source_key,
+                    projection,
+                    all_source_columns,
+                    model_sql,
+                )
+                .await?,
+            ),
+        }
     } else {
         None
     };
@@ -3313,6 +4328,28 @@ pub async fn execute_delete_insert_with_delta_restriction(
             row_preservation: RowPreservation::DeclaredReferentialIntegrity { source },
         }) = skeleton_source_closure
         {
+            // `emit_count_preservation_probe_from_body` matches the join
+            // it finds in `probe_body` against this name, exact-or-last-
+            // segment. For a model edge, `source`'s bare address (the
+            // closure's own logical derivation) is that name — a
+            // maintained model's physical table name has no extra
+            // naming-convention prefix over its bare address. For an
+            // external source, it is NOT: the compiler's `sources_`
+            // naming convention (`<schema>.sources_<address_segments>`)
+            // means "raw.users"'s physical table is "sources_raw_users",
+            // whose own last dot-segment never matches "raw.users"'s
+            // ("users") — so the closure's bare address must be swapped
+            // for `delta_source`'s own already-physical `source_table`
+            // here, or the probe silently never finds its join and the
+            // whole declared-route restriction falls back to the widened
+            // scan on every external-source live run
+            // (`docs/outcomes/20260815-definition-delta-migrate/phases/
+            // 27e-plan.md` — discovered by this phase's own end-to-end
+            // test).
+            let probe_enrichment_source = match delta_source {
+                RestrictionDeltaSource::ExternalSidecar { source_table, .. } => source_table,
+                RestrictionDeltaSource::ModelEdge { .. } => source.as_str(),
+            };
             let ctx = crate::probes::ProbeContext {
                 probe_code: "SourceCountPreservationViolated".to_string(),
                 fact: "referential_integrity".to_string(),
@@ -3334,7 +4371,10 @@ pub async fn execute_delete_insert_with_delta_restriction(
             ) {
                 smelt_logical::maintenance::ProbeDispatch::Skip(_) => {}
                 smelt_logical::maintenance::ProbeDispatch::Dispatch => {
-                    match emit_count_preservation_probe_from_body(probe_body, source) {
+                    match emit_count_preservation_probe_from_body(
+                        probe_body,
+                        probe_enrichment_source,
+                    ) {
                         Some(probe) => {
                             let batches = backend.execute_sql(&probe.sql).await?;
                             let rows = crate::check_runner::batches_to_rows(&batches);
@@ -3363,11 +4403,13 @@ pub async fn execute_delete_insert_with_delta_restriction(
                                     message: format!(
                                         "SourceCountPreservationViolated: '{source}' declares \
                                          referential_integrity, but the enrichment join over the \
-                                         touched region ({window_start}..{window_end}) returned \
+                                         touched region ({}..{}) returned \
                                          {enriched_count} row(s) against {driving_count} driving \
                                          row(s) — some driving row's join key has no match in the \
                                          dimension; correct or backfill the dimension's missing \
                                          key, or drop the declaration.{}",
+                                        region.start,
+                                        region.end,
                                         crate::probes::probe_violation_suffix(&ctx)
                                     ),
                                 });
@@ -3396,6 +4438,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
         restrict_column,
         skeleton_source_closure,
         delta.as_deref(),
+        region_write,
         dialect,
     );
     crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group)).await?;
@@ -3420,6 +4463,12 @@ pub struct DeltaRestrictionFacts {
     /// The cell's P1 skeleton-source-closure verdict, carried through
     /// unchanged for [`resolve_recompute_restriction`] to consult.
     pub skeleton_source_closure: Option<SkeletonSourceClosure>,
+    /// The region family's own change-suppressed conditional-write verdict
+    /// ([`RegionWrite`]), resolved from the SAME `Trigger::NewData` cell
+    /// this struct already reads — the T3 delta-restriction arm wins when
+    /// both are admitted ([`build_delete_insert_group_dispatched`]'s own
+    /// match order), so this is consulted only as the fallback dimension.
+    pub region_write: RegionWrite,
 }
 
 /// Resolve [`DeltaRestrictionFacts`] for a model driven (at least in part)
@@ -3446,6 +4495,15 @@ pub struct DeltaRestrictionFacts {
 /// `metadata`'s resolved grain has no partition axis for a model edge to
 /// clamp to — the caller's safe default in every `None` case is the
 /// ordinary widened scan.
+///
+/// The [`RegionWrite`] variant is resolved from the SAME cell via
+/// [`resolve_region_write_variant`] — composed from the shared P2/P3 proof
+/// (`choice::resolve_write_suppression`/`resolve_write_variant`), never a
+/// fresh derivation. A `technique: suppress`/`unconditional` pin on this
+/// cell's own trigger address is consulted the same way every other
+/// dispatch resolver in this module consults it ([`effective_override`]); an
+/// inadmissible hard pin surfaces as a real `Err`, never a silent fallback
+/// to the unconditional widened scan.
 pub fn resolve_live_delta_restriction_facts(
     sql: &str,
     table: &str,
@@ -3453,9 +4511,11 @@ pub fn resolve_live_delta_restriction_facts(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
-) -> Option<DeltaRestrictionFacts> {
-    let driving_edge = model_edges.first()?;
-    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+) -> Result<Option<DeltaRestrictionFacts>, ChoiceRefusal> {
+    let Some(driving_edge) = model_edges.first() else {
+        return Ok(None);
+    };
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql,
         table,
         metadata,
@@ -3474,19 +4534,245 @@ pub fn resolve_live_delta_restriction_facts(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
-    )?;
-    let cell = result.plan.cell_for(&Trigger::NewData {
+        None,
+        None,
+    ) else {
+        return Ok(None);
+    };
+    let Some(cell) = result.plan.cell_for(&Trigger::NewData {
         source: driving_edge.name.clone(),
-    })?;
+    }) else {
+        return Ok(None);
+    };
     let restrict_column = match &cell.row_identity.identity {
         RowIdentity::Key(cols) if cols.len() == 1 => Some(cols[0].clone()),
         _ => None,
     };
-    Some(DeltaRestrictionFacts {
+    // A model-edge creation cell's `group` is the literal whole-row
+    // placeholder (`"{*}"`, `append_model_edge_cells`'s own `PlanCell`
+    // construction) — there is no NAMED column group in `result.column_
+    // groups` to look it up by, unlike a mutation-sensitive `UpstreamMutation`
+    // cell's own derived group. The region family's write covers the whole
+    // output row, so its own compared-column set is the model's entire
+    // output projection MINUS the proven row-identity's own key columns
+    // (comparing a join key via `IS DISTINCT FROM` against itself is
+    // vacuous — the diff join already pins it equal for every matched row)
+    // — the same `PropertyVector` this call's own comparability read already
+    // derives, read once and reused for both.
+    let vector = model_property_vector(sql, &JoinContext::new());
+    let key_columns: &[String] = match &cell.row_identity.identity {
+        RowIdentity::Key(cols) => cols,
+        RowIdentity::WholeRow => &[],
+    };
+    let group_columns: Vec<String> = vector
+        .as_ref()
+        .map(|v| {
+            v.columns
+                .iter()
+                .filter(|c| !key_columns.iter().any(|k| k.eq_ignore_ascii_case(c)))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let comparability = vector.map(|v| v.comparability).unwrap_or_default();
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let overrides = effective_override(
+        metadata
+            .maintenance
+            .as_ref()
+            .and_then(|m| m.defaults.as_ref()),
+        cells_cfg,
+        &driving_edge.name,
+        &group_columns,
+    );
+    let region_write = resolve_region_write_variant(
+        &group_columns,
+        &comparability,
+        &cell.row_identity,
+        &cell.trigger,
+        cell.ledger_catch_up,
+        &overrides,
+    )?;
+    Ok(Some(DeltaRestrictionFacts {
         upstream_model: driving_edge.name.clone(),
         restrict_column,
         skeleton_source_closure: cell.skeleton_source_closure.clone(),
-    })
+        region_write,
+    }))
+}
+
+/// The facts [`execute_delete_insert_with_delta_restriction`]'s
+/// `RestrictionDeltaSource::ExternalSidecar` arm needs to attempt T3 delta
+/// restriction for a region-family cell driven by an external
+/// `mutable_snapshot` source with no native change feed, resolved by
+/// [`resolve_live_external_delta_restriction_facts`].
+#[derive(Debug, Clone)]
+pub struct ExternalDeltaRestrictionFacts {
+    /// The external source's bare address (`Trigger::UpstreamMutation`'s
+    /// `source` name) — the sidecar partition this cell diffs against.
+    pub source_name: String,
+    /// The model's own region row identity, when it resolves to exactly one
+    /// column — mirrors [`DeltaRestrictionFacts::restrict_column`].
+    pub restrict_column: Option<String>,
+    /// The cell's P1 skeleton-source-closure verdict.
+    pub skeleton_source_closure: Option<SkeletonSourceClosure>,
+    /// The P4 fingerprint projection the sidecar digests over this source.
+    pub projection: FingerprintProjection,
+    /// The region family's own change-suppressed conditional-write verdict,
+    /// resolved from the SAME `Trigger::UpstreamMutation` cell this struct
+    /// already reads.
+    pub region_write: RegionWrite,
+}
+
+/// Resolve [`ExternalDeltaRestrictionFacts`] for a model driven by an
+/// explicitly-mutable **external** source with no maintained-model upstream
+/// (`model_edges` empty is the caller's own gate —
+/// `docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`).
+/// Routes through the SAME edge-aware derivation
+/// [`resolve_live_delta_restriction_facts`] uses
+/// (`derive_model_maintenance_plan_with_edges` → the `Trigger::
+/// UpstreamMutation` cell this source drives), never re-deriving admission
+/// (`CLAUDE.md` §"Maintenance-plan purity").
+///
+/// `explicitly_mutable`'s driving source is picked deterministically
+/// (lexicographically smallest — `HashSet` iteration order is unspecified),
+/// mirroring `resolve_live_delta_restriction_facts`'s `model_edges.first()`
+/// "restrict only against one driving delta in this phase" scoping.
+///
+/// Returns `None` — logging a `tracing::debug!` `why` — when
+/// `supports_fingerprint_sidecar` is `false` for this backend, no
+/// explicitly-mutable source exists, the plan derives no `UpstreamMutation`
+/// cell for it, the closure is `Open`/absent, the source's declared
+/// `unique_key` is composite/undeclared
+/// ([`enrichment_restrict_column`] returns `None`), or no P4 fingerprint
+/// projection resolved for it — every `None` case is the caller's safe
+/// default of falling back to the ordinary widened scan.
+pub fn resolve_live_external_delta_restriction_facts(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    source_referential_integrity: &SourceReferentialIntegrity,
+    supports_fingerprint_sidecar: bool,
+) -> Result<Option<ExternalDeltaRestrictionFacts>, ChoiceRefusal> {
+    if !supports_fingerprint_sidecar {
+        tracing::debug!(
+            table,
+            "backend does not declare supports_fingerprint_sidecar — external delta \
+             restriction stays out of reach, falling back to the widened scan"
+        );
+        return Ok(None);
+    }
+    let mut candidates: Vec<&String> = explicitly_mutable.iter().collect();
+    candidates.sort();
+    let Some(source_name) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(source_facts) = sources.iter().find(|s| &s.name == source_name) else {
+        return Ok(None);
+    };
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        &[],
+        None,
+        &[],
+        &[],
+        source_referential_integrity,
+        None,
+        None,
+    ) else {
+        return Ok(None);
+    };
+    let trigger = Trigger::UpstreamMutation {
+        source: source_name.clone(),
+    };
+    let Some(cell) = result.plan.cell_for(&trigger) else {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "no UpstreamMutation cell admitted for this source — external delta restriction \
+             falls back to the widened scan"
+        );
+        return Ok(None);
+    };
+    if !cell
+        .skeleton_source_closure
+        .as_ref()
+        .is_some_and(|c| c.is_closed())
+    {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "skeleton-source closure is Open/absent — external delta restriction falls back \
+             to the widened scan"
+        );
+        return Ok(None);
+    }
+    let Some(restrict_column) = enrichment_restrict_column(&source_facts.unique_key) else {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "source's declared unique_key is composite or undeclared — external delta \
+             restriction falls back to the widened scan"
+        );
+        return Ok(None);
+    };
+    let Some(projection) = cell.fingerprint_projections.get(source_name).cloned() else {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "no P4 fingerprint projection resolved for this source — external delta \
+             restriction falls back to the widened scan"
+        );
+        return Ok(None);
+    };
+    let group_columns: Vec<String> = result
+        .column_groups
+        .iter()
+        .find(|g| g.name() == cell.group)
+        .map(|g| g.columns.clone())
+        .unwrap_or_default();
+    let comparability = model_property_vector(sql, &JoinContext::new())
+        .map(|v| v.comparability)
+        .unwrap_or_default();
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let overrides = effective_override(
+        metadata
+            .maintenance
+            .as_ref()
+            .and_then(|m| m.defaults.as_ref()),
+        cells_cfg,
+        source_name,
+        &group_columns,
+    );
+    let region_write = resolve_region_write_variant(
+        &group_columns,
+        &comparability,
+        &cell.row_identity,
+        &cell.trigger,
+        cell.ledger_catch_up,
+        &overrides,
+    )?;
+    Ok(Some(ExternalDeltaRestrictionFacts {
+        source_name: source_name.clone(),
+        restrict_column: Some(restrict_column.to_string()),
+        skeleton_source_closure: cell.skeleton_source_closure.clone(),
+        projection,
+        region_write,
+    }))
 }
 
 /// Execute one live `ColumnScopedMerge` cell: build the horizon-clamped
@@ -3585,7 +4871,8 @@ pub async fn execute_column_scoped_merge(
 /// Fail-closed: a dimension with no declared `unique_key` cannot license a
 /// one-to-one proof at all and refuses outright, as does a model whose
 /// outermost `FROM`/`JOIN` carries no join against `dimension_source` at all
-/// ([`find_join_alias`] — a leaf-level parse of exactly the join clause this
+/// ([`smelt_logical::analysis::join_shape::join_alias_for_source`] — a
+/// leaf-level parse of exactly the join clause this
 /// proof cares about, never a re-derivation of admission).
 pub fn dimension_join_contribution(
     sql: &str,
@@ -3599,7 +4886,9 @@ pub fn dimension_join_contribution(
              cannot be proven to fold into the target without needing an inverse"
         ));
     }
-    let Some(alias) = find_join_alias(sql, dimension_source) else {
+    let Some(alias) =
+        smelt_logical::analysis::join_shape::join_alias_for_source(sql, dimension_source)
+    else {
         return ContributionVerdict::Refused(format!(
             "no top-level join against '{dimension_source}' found in the model's own outermost \
              SELECT — the join's cardinality cannot be proven one-to-one, so the mutated \
@@ -3622,35 +4911,6 @@ pub fn dimension_join_contribution(
                 .to_string(),
         ),
     }
-}
-
-/// Find the alias (or bare identifier, when unaliased) `join_shape::fan_out`
-/// keys its `JoinContext` lookup on for the top-level join whose
-/// `smelt.<path>` table ref resolves to `dimension_source` (the bare,
-/// `sources.`-stripped name `SourceFacts::name`/`resolve_live_column_scoped_cell`
-/// use).
-fn find_join_alias(sql: &str, dimension_source: &str) -> Option<String> {
-    let stripped = smelt_parser::strip_frontmatter(sql);
-    let parse = smelt_parser::parse(&stripped);
-    let file = smelt_parser::File::cast(parse.syntax())?;
-    let select = file.select_stmt()?;
-    let from = select.from_clause()?;
-    for join in from.joins() {
-        let table_ref = join.table_ref()?;
-        let Some(resolved) =
-            smelt_logical::analysis::source_bounds::resolve_table_ref_source_name(&table_ref)
-        else {
-            continue;
-        };
-        let matches = resolved == dimension_source
-            || resolved
-                .strip_prefix("sources.")
-                .is_some_and(|bare| bare == dimension_source);
-        if matches {
-            return table_ref.alias().or_else(|| table_ref.identifier());
-        }
-    }
-    None
 }
 
 /// Which physical column-scoped-MERGE corner (MP11,
@@ -3753,6 +5013,170 @@ mod tests {
             model_name: "maintenance-driver-unit-test",
             reporter: &NO_OP_REPORTER,
         }
+    }
+
+    /// Captures `RunReporter::state_structure_unavailable` calls so a test
+    /// can assert on the reported model/structure/dialect without a real
+    /// transport.
+    #[derive(Default)]
+    struct CapturingReporter {
+        events: Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    impl crate::reporter::RunReporter for CapturingReporter {
+        fn state_structure_unavailable(
+            &self,
+            run_id: &str,
+            model: &str,
+            structure: &str,
+            dialect: &str,
+            consequence: &str,
+        ) {
+            self.events.lock().unwrap().push((
+                run_id.to_string(),
+                model.to_string(),
+                structure.to_string(),
+                dialect.to_string(),
+            ));
+            let _ = consequence;
+        }
+    }
+
+    // ── 27e: resolve_live_external_delta_restriction_facts ────────────────
+    // (`docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`)
+
+    /// The real `examples/timeseries/daily_events_enriched.sql` shape's SQL
+    /// body (frontmatter stripped) — the SAME fixture
+    /// `crates/smelt-runtime/tests/technique_lowering.rs`'s
+    /// `external_source_point_lookup_recompute` module reads, so this unit
+    /// test can never silently drift from what that end-to-end suite pins.
+    fn external_facts_model_sql_body() -> (smelt_core::ModelMetadata, String) {
+        let project_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/timeseries")
+            .canonicalize()
+            .expect("examples/timeseries exists");
+        let text = std::fs::read_to_string(project_dir.join("models/daily_events_enriched.sql"))
+            .expect("read daily_events_enriched.sql");
+        let smelt_core::FileMetadata::Single {
+            metadata,
+            sql_offset,
+        } = smelt_core::extract_file_metadata(&text).expect("parse frontmatter")
+        else {
+            panic!("daily_events_enriched.sql must be a single-model file");
+        };
+        (*metadata, text[sql_offset..].to_string())
+    }
+
+    fn external_facts_source_facts(users_unique_key: Vec<String>) -> Vec<SourceFacts> {
+        vec![
+            SourceFacts {
+                name: "raw.events".to_string(),
+                mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
+                partition_col: None,
+                unique_key: vec!["event_id".to_string()],
+                allow_full_scan: false,
+            },
+            SourceFacts {
+                name: "raw.users".to_string(),
+                mutation: smelt_logical::maintenance::MutationProfile::MutableSnapshot,
+                partition_col: None,
+                unique_key: users_unique_key,
+                allow_full_scan: true,
+            },
+        ]
+    }
+
+    fn external_facts_explicitly_mutable() -> HashSet<String> {
+        std::iter::once("raw.users".to_string()).collect()
+    }
+
+    fn external_facts_source_ri() -> SourceReferentialIntegrity {
+        let mut ri = SourceReferentialIntegrity::new();
+        ri.insert("raw.users".to_string(), vec!["user_id".to_string()]);
+        ri
+    }
+
+    /// A declared-RI closure (P1 `Closed`) plus a single-column declared
+    /// `unique_key` resolves external delta-restriction facts for the
+    /// `{user_name}` cell on `raw.users` — the golden path this whole
+    /// mechanism exists for.
+    #[test]
+    fn external_facts_resolve_for_a_declared_mutable_dimension() {
+        let (metadata, sql_body) = external_facts_model_sql_body();
+        let sources = external_facts_source_facts(vec!["user_id".to_string()]);
+        let explicitly_mutable = external_facts_explicitly_mutable();
+        let facts = resolve_live_external_delta_restriction_facts(
+            &sql_body,
+            "daily_events_enriched",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            &external_facts_source_ri(),
+            true,
+        )
+        .expect("resolver does not refuse")
+        .expect("facts resolve for a declared-RI mutable dimension");
+        assert_eq!(facts.source_name, "raw.users");
+        assert_eq!(facts.restrict_column.as_deref(), Some("user_id"));
+        assert_eq!(
+            facts.skeleton_source_closure,
+            Some(SkeletonSourceClosure::Closed {
+                row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                    source: "raw.users".to_string()
+                }
+            })
+        );
+    }
+
+    /// A composite `unique_key` on the driving source makes
+    /// `enrichment_restrict_column` return `None` — this phase's semi-join
+    /// restriction is single-column only — so the resolver returns `None`
+    /// (falling back to the widened scan) rather than a facts value with no
+    /// restrict column.
+    #[test]
+    fn external_facts_refuse_a_composite_dimension_key() {
+        let (metadata, sql_body) = external_facts_model_sql_body();
+        let sources =
+            external_facts_source_facts(vec!["user_id".to_string(), "region".to_string()]);
+        let explicitly_mutable = external_facts_explicitly_mutable();
+        let facts = resolve_live_external_delta_restriction_facts(
+            &sql_body,
+            "daily_events_enriched",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            &external_facts_source_ri(),
+            true,
+        )
+        .expect("resolver does not refuse");
+        assert!(
+            facts.is_none(),
+            "a composite unique_key must fall back to the widened scan, got {facts:?}"
+        );
+    }
+
+    /// `supports_fingerprint_sidecar: false` refuses external delta
+    /// restriction outright — the fallback is capability-driven, not a
+    /// property re-derived from the closure/key facts alone.
+    #[test]
+    fn external_facts_refuse_without_the_sidecar_capability() {
+        let (metadata, sql_body) = external_facts_model_sql_body();
+        let sources = external_facts_source_facts(vec!["user_id".to_string()]);
+        let explicitly_mutable = external_facts_explicitly_mutable();
+        let facts = resolve_live_external_delta_restriction_facts(
+            &sql_body,
+            "daily_events_enriched",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            &external_facts_source_ri(),
+            false,
+        )
+        .expect("resolver does not refuse");
+        assert!(
+            facts.is_none(),
+            "supports_fingerprint_sidecar: false must refuse, got {facts:?}"
+        );
     }
 
     /// The rejection test at the `maintenance_driver` call site: for
@@ -4061,6 +5485,7 @@ mod tests {
             &AlwaysRefuses,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -4079,6 +5504,51 @@ mod tests {
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
+    /// A `write: staged_candidate` pin over an `Unconditional` verdict has no
+    /// sound realisation (`resolve_keyed_write_mechanism`'s own doc comment:
+    /// the staged-candidate emitter has no unconditional shape) — the
+    /// resulting `ChoiceRefusal` must propagate out of
+    /// `run_windowed_keyed_maintenance` as an error naming the model and the
+    /// pin, refused before any backend call, exactly like the combiner-safety
+    /// refusal above (`docs/outcomes/20260815-definition-delta-migrate/
+    /// phases/27g-plan.md`).
+    #[tokio::test]
+    async fn staged_candidate_pin_over_an_unconditional_cell_refuses() {
+        let backend = RecordingBackend::default();
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        let pin = smelt_logical::maintenance::lookup_write_pattern("staged_candidate").unwrap();
+        let result = run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRule,
+            None,
+            &unconditional_suppression(),
+            Some(pin),
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+            &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
+        )
+        .await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("model.under.test"),
+            "error must name the model: {err}"
+        );
+        assert!(
+            err.contains("staged_candidate"),
+            "error must name the pin: {err}"
+        );
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn sequences_create_then_merge_across_partitions_in_temporal_order() {
         let backend = RecordingBackend::default();
@@ -4092,6 +5562,7 @@ mod tests {
             &SumRule,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -4105,7 +5576,16 @@ mod tests {
         .unwrap();
 
         let calls = backend.calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
+        // Each of the 3 steps now also writes a re-run-tolerance bookkeeping
+        // record into the merge ledger (`Backend::execute_write_with_
+        // bookkeeping`'s default fallback: one `execute_sql` for the
+        // ledger's idempotent ensure DDL, one for the `ON CONFLICT DO
+        // NOTHING` upsert, then the create/merge statement itself) —
+        // `SumRule`'s default `ledger_grade()` is `Grade::Idempotent`, and
+        // `RecordingBackend`'s dialect is DuckDB (`docs/specs/
+        // incremental_shapes.md` §"The transactional frontier write (merge
+        // ledger)").
+        assert_eq!(calls.len(), 9);
         // The first-run CREATE now comes from `emit_create_table_as`,
         // executed via `execute_statement_group` (its default sequential
         // fallback routes through `execute_sql`, since `RecordingBackend`
@@ -4113,12 +5593,132 @@ mod tests {
         // `Backend::create_table_as` call for this family
         // (`docs/specs/incremental_models.md` §"Statement emission (single
         // owner)").
-        assert!(calls[0].starts_with("execute_sql: CREATE TABLE main.t AS"));
-        assert!(calls[0].contains("2024-01-01"));
-        assert!(calls[1].starts_with("execute_sql: MERGE INTO main.t"));
-        assert!(calls[1].contains("2024-01-02"));
-        assert!(calls[2].starts_with("execute_sql: MERGE INTO main.t"));
-        assert!(calls[2].contains("2024-01-03"));
+        assert!(calls[0].starts_with("execute_sql: CREATE TABLE IF NOT EXISTS main._smelt_ledger"));
+        assert!(calls[1].starts_with("execute_sql: INSERT INTO main._smelt_ledger"));
+        assert!(calls[1].contains("ON CONFLICT DO NOTHING"));
+        assert!(calls[2].starts_with("execute_sql: CREATE TABLE main.t AS"));
+        assert!(calls[2].contains("2024-01-01"));
+        assert!(calls[3].starts_with("execute_sql: CREATE TABLE IF NOT EXISTS main._smelt_ledger"));
+        assert!(calls[4].starts_with("execute_sql: INSERT INTO main._smelt_ledger"));
+        assert!(calls[4].contains("ON CONFLICT DO NOTHING"));
+        assert!(calls[5].starts_with("execute_sql: MERGE INTO main.t"));
+        assert!(calls[5].contains("2024-01-02"));
+        assert!(calls[6].starts_with("execute_sql: CREATE TABLE IF NOT EXISTS main._smelt_ledger"));
+        assert!(calls[7].starts_with("execute_sql: INSERT INTO main._smelt_ledger"));
+        assert!(calls[7].contains("ON CONFLICT DO NOTHING"));
+        assert!(calls[8].starts_with("execute_sql: MERGE INTO main.t"));
+        assert!(calls[8].contains("2024-01-03"));
+    }
+
+    /// A re-run-tolerant (`Grade::Idempotent`) keyed model on a dialect with
+    /// no merge-ledger substrate (Spark) skips the bookkeeping record but
+    /// still succeeds — this is bookkeeping, not a correctness gate — and
+    /// the omission is reported as a named fact on the run's reporter
+    /// channel rather than silently dropped (`docs/specs/
+    /// incremental_shapes.md` §"The transactional frontier write (merge
+    /// ledger)").
+    #[tokio::test]
+    async fn idempotent_ledger_skip_on_non_duckdb_is_reported() {
+        let backend = RecordingBackend {
+            dialect: SqlDialect::SparkSQL,
+            ..Default::default()
+        };
+        let reporter = CapturingReporter::default();
+        let retry = crate::execute::RetryPolicy {
+            retry_max: 0,
+            base_backoff_ms: 0,
+            run_id: "run-1",
+            model_name: "model.under.test",
+            reporter: &reporter,
+        };
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRule,
+            None,
+            &unconditional_suppression(),
+            None,
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+            &retry,
+            &crate::probes::ProbePolicy::per_run(),
+        )
+        .await
+        .expect("a skipped ledger record must not fail the run");
+
+        let events = reporter.events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one state-structure-unavailable event, got {:?}",
+            events
+        );
+        let (run_id, model, structure, dialect) = &events[0];
+        assert_eq!(run_id, "run-1");
+        assert_eq!(model, "model.under.test");
+        assert_eq!(structure, "merge ledger");
+        assert_eq!(dialect, "Spark SQL");
+
+        let calls = backend.calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.contains("_smelt_ledger")),
+            "no ledger statement must be issued on a ledger-less dialect: {:?}",
+            calls
+        );
+    }
+
+    /// The negative direction of the test above: on DuckDB (which has the
+    /// ledger substrate) the bookkeeping record is written and no
+    /// `state_structure_unavailable` event fires.
+    #[tokio::test]
+    async fn idempotent_ledger_on_duckdb_reports_no_unavailability() {
+        let backend = RecordingBackend::default();
+        let reporter = CapturingReporter::default();
+        let retry = crate::execute::RetryPolicy {
+            retry_max: 0,
+            base_backoff_ms: 0,
+            run_id: "run-1",
+            model_name: "model.under.test",
+            reporter: &reporter,
+        };
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRule,
+            None,
+            &unconditional_suppression(),
+            None,
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+            &retry,
+            &crate::probes::ProbePolicy::per_run(),
+        )
+        .await
+        .unwrap();
+
+        assert!(reporter.events.lock().unwrap().is_empty());
+        let calls = backend.calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.contains("_smelt_ledger")),
+            "the ledger record must be written on DuckDB: {:?}",
+            calls
+        );
     }
 
     /// MP12: an `Additive`-graded rule routes every step's create-or-merge
@@ -4140,6 +5740,7 @@ mod tests {
             &SumRuleAdditive,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -4189,6 +5790,7 @@ mod tests {
             &SumRuleAdditive,
             None,
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -4264,6 +5866,7 @@ mod tests {
             &rule,
             Some(&locality),
             &unconditional_suppression(),
+            None,
             |step| {
                 Ok(format!(
                     "SELECT id, first_seen_at FROM src WHERE d = '{}'",
@@ -4359,6 +5962,7 @@ mod tests {
             column: "changed_at".to_string(),
             before: Seconds::ZERO,
             after: Seconds::hours(24),
+            write_footprint: None,
         }
     }
 

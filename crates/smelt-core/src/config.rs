@@ -944,9 +944,33 @@ pub struct ContractConfig {
     /// `MetadataError::ContractDeferralInvalid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferral: Option<DataLatency>,
+    /// `retain_departed: true` or `retain_departed: {tombstone: <col>}` —
+    /// keeps keys the source no longer carries instead of deleting them at
+    /// reconcile; admitted only on a keyed shape consuming a mutable
+    /// snapshot (checked by
+    /// `smelt_logical::contract::retain_departed::validate`, which needs
+    /// the derived grain, resolved source facts, and inferred output
+    /// schema this pure serde shape does not have). A value that is
+    /// neither a bare bool nor `{tombstone: <col>}`, or a `tombstone`
+    /// naming a column absent from the model's output, is a dedicated
+    /// `MetadataError::ContractRetainDepartedInvalid` rather than the
+    /// generic YAML parse error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_departed: Option<RetainDeparted>,
     /// Per-cell refinement, addressed like `maintenance.cells[]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cells: Vec<ContractCellConfig>,
+}
+
+/// The two admitted `contract.retain_departed` declaration forms
+/// (`incremental_models.md` §"Contract relaxations (`contract:`)"): bare
+/// retention, or retention with departure marked in a named tombstone
+/// column.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum RetainDeparted {
+    Bool(bool),
+    Tombstone { tombstone: String },
 }
 
 /// One `contract.cells[]` entry: a per-`(columns × trigger)` `deferral`
@@ -2172,8 +2196,8 @@ models:
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: incremental + grain: key + batched: must error");
         assert!(
-            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
-            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
+            matches!(err, MetadataError::KeyedForbidsSafetyOverrides),
+            "Expected KeyedForbidsSafetyOverrides, got: {}",
             err
         );
     }
@@ -2731,6 +2755,24 @@ models:
                  the only variant"
             );
         }
+    }
+
+    #[test]
+    fn retain_departed_parses_both_forms() {
+        let cfg: ContractConfig = serde_yaml::from_str("retain_departed: true\n").unwrap();
+        assert_eq!(cfg.retain_departed, Some(RetainDeparted::Bool(true)));
+
+        let cfg: ContractConfig =
+            serde_yaml::from_str("retain_departed:\n  tombstone: is_departed\n").unwrap();
+        assert_eq!(
+            cfg.retain_departed,
+            Some(RetainDeparted::Tombstone {
+                tombstone: "is_departed".to_string()
+            })
+        );
+
+        let cfg: ContractConfig = serde_yaml::from_str("{}\n").unwrap();
+        assert_eq!(cfg.retain_departed, None);
     }
 
     #[test]

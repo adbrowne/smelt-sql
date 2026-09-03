@@ -91,7 +91,7 @@ fn web_analytics_incremental_models_classify_as_safe() {
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None)
         .expect("build explain output");
 
     // Models without a Form B date filter: must stay fully_batch_safe.

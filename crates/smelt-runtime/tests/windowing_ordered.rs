@@ -22,7 +22,7 @@
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 use smelt_logical::analysis::source_bounds::{Seconds, Skew};
-use smelt_runtime::windowing::compute_incremental_windows_ordered;
+use smelt_runtime::windowing::{compute_incremental_windows_ordered, PartitionAxis};
 use smelt_runtime::TimeRange;
 use std::collections::HashMap;
 
@@ -48,6 +48,7 @@ fn make_range(start: &str, end: &str) -> TimeRange {
     TimeRange {
         start: start.to_string(),
         end: end.to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     }
 }
 
@@ -108,6 +109,7 @@ fn test_ordered_self_edge_alone_is_never_a_skew_anchor() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )
@@ -149,6 +151,7 @@ fn test_ordered_genuine_form_b_relation_still_derives_skew() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )
@@ -180,7 +183,7 @@ fn test_ordered_genuine_form_b_relation_still_derives_skew() {
         "rebase must reach one day later than the requested end"
     );
     for batch in &windows.batches {
-        let span_days = (batch.partition_end - batch.partition_start).num_days();
+        let span_days = batch.partition_start.units_between(&batch.partition_end);
         assert_eq!(
             span_days, 1,
             "Ordered must still force single-partition batches over the rebased range"
@@ -225,6 +228,7 @@ fn test_ordered_alias_reuse_in_subquery_keeps_the_genuine_relation() {
         &deps,
         0,
         &range,
+        PartitionAxis::Calendar,
         None,
         false,
     )
@@ -247,5 +251,46 @@ fn test_ordered_alias_reuse_in_subquery_keeps_the_genuine_relation() {
     assert_eq!(
         windows.batches.last().unwrap().partition_end.to_string(),
         "2026-01-05"
+    );
+}
+
+/// A self-join confined to the current partition (no backward reach at all)
+/// is circular, not convergent — the partition's own output would have to
+/// exist before it is written. `compute_incremental_windows_ordered` must
+/// refuse it, not silently force per-partition windows the way it would for
+/// a genuine `Ordered` self-edge.
+#[test]
+fn same_partition_self_read_is_not_eligible_for_batched_execution() {
+    let ts = make_ts("d", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-01-06");
+    let deps = one_source_dep("silver.transactions", "d");
+    let refs = vec![
+        "marts.running_balance".to_string(),
+        "silver.transactions".to_string(),
+    ];
+    let sql = "SELECT bal.d AS d, bal.balance + t.amount AS balance \
+         FROM smelt.marts.running_balance bal \
+         JOIN smelt.marts.running_balance cur ON cur.d = bal.d \
+         JOIN smelt.silver.transactions t ON bal.acct_id = t.acct_id";
+
+    let err = compute_incremental_windows_ordered(
+        "marts.running_balance",
+        &refs,
+        &ts,
+        &inc,
+        sql,
+        &deps,
+        0,
+        &range,
+        PartitionAxis::Calendar,
+        None,
+        false,
+    )
+    .expect_err("a same-partition self-read must not be eligible for batched execution");
+
+    assert!(
+        err.contains("marts.running_balance"),
+        "error must name the model: {err}"
     );
 }

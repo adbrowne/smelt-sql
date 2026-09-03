@@ -7,6 +7,7 @@ use smelt_cli::{
     Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
+use smelt_runtime::execute::BackendFactory;
 use smelt_runtime::types::ExecuteRequest;
 use smelt_state::generate_run_id;
 use std::sync::Arc;
@@ -16,6 +17,22 @@ use tracing::info;
 
 use super::run_setup::*;
 use crate::RunArgs;
+
+/// Classify a `smelt run` error for its exit code (`docs/specs/cli.md`
+/// §"Exit codes" — "`smelt run` specifics"): `3` for a
+/// [`smelt_runtime::definition_delta::DefinitionDeltaPendingError`] refusal
+/// (a correctly-derived state awaiting review, not a data/model failure),
+/// else the shared classifier. Same pattern as `commands::migrate::exit_code_for`.
+pub fn exit_code_for(err: &anyhow::Error) -> u8 {
+    if err
+        .downcast_ref::<smelt_runtime::definition_delta::DefinitionDeltaPendingError>()
+        .is_some()
+    {
+        3
+    } else {
+        smelt_cli::exit_code_for(err)
+    }
+}
 
 pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let run_start = Utc::now();
@@ -157,10 +174,27 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let effective_start = args.start.as_ref().or(args.event_time_start.as_ref());
     let effective_end = args.end.as_ref().or(args.event_time_end.as_ref());
     if let (Some(s), Some(e)) = (effective_start, effective_end) {
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .with_context(|| format!("Invalid start date format: {}. Expected YYYY-MM-DD", s))?;
-        chrono::NaiveDate::parse_from_str(e, "%Y-%m-%d")
-            .with_context(|| format!("Invalid end date format: {}. Expected YYYY-MM-DD", e))?;
+        // A bound is either a calendar date (`YYYY-MM-DD`) or a bare integer
+        // — the two forms a resolved partition axis can be
+        // (`docs/specs/incremental_shapes.md` §"The partition grain" rule
+        // 8a: "--period bounds are read in the same domain"). Per-model axis
+        // resolution happens later in `execute_project`; this is only a
+        // shape pre-check, rejecting neither domain outright.
+        let is_calendar_or_integer = |v: &str| {
+            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_ok() || v.parse::<i64>().is_ok()
+        };
+        if !is_calendar_or_integer(s) {
+            return Err(anyhow::anyhow!(
+                "Invalid start bound: {}. Expected a calendar date (YYYY-MM-DD) or a bare integer",
+                s
+            ));
+        }
+        if !is_calendar_or_integer(e) {
+            return Err(anyhow::anyhow!(
+                "Invalid end bound: {}. Expected a calendar date (YYYY-MM-DD) or a bare integer",
+                e
+            ));
+        }
         info!("Time range: {} to {} (exclusive)", s, e);
     } else if effective_start.is_some() != effective_end.is_some() {
         return Err(anyhow::anyhow!(
@@ -205,7 +239,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         end: end_val,
         batch_size_days: args.batch_size,
         per_partition: args.per_partition,
-        full_refresh: false,
+        full_refresh: args.full_refresh,
         dry_run: args.dry_run,
         enforce_safety: !args.allow_downgrade,
         allow_column_removal: args.allow_column_removal,
@@ -356,9 +390,116 @@ async fn run_since_upstream(
         .execution_order()
         .with_context(|| "Failed to compute execution order")?;
 
-    let plan =
-        smelt_runtime::propagation::plan_since_upstream(models, &source_infos, &order, &deltas)
+    // Read the recorded observed-delta table live before planning (spec
+    // §"Observed deltas on model edges"): a model-address delta origin
+    // narrows to its recorded partitions rather than always falling back to
+    // the declared `--landed` window. The backend built here is used only
+    // for this read — the run loop below builds its own via
+    // `backend_factory` exactly as before this phase. A backend that
+    // cannot be created here must fail loud, not silently fall back to an
+    // empty lookup, since the run itself needs that same backend moments
+    // later.
+    let lookup_backend_factory = CliBackendFactory {
+        database_override: args.database.clone(),
+    };
+    let target_config = &config.targets[&args.target];
+    let lookup_backend = lookup_backend_factory
+        .create(&args.target, target_config, project_dir)
+        .await
+        .with_context(|| "Failed to create backend for observed-delta lookup")?;
+    let model_names: std::collections::BTreeSet<String> =
+        models.iter().map(|m| m.canonical_path()).collect();
+    let observed = smelt_runtime::propagation::load_observed_delta_lookup(
+        lookup_backend.as_ref(),
+        &target_config.schema,
+        &deltas,
+        &model_names,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Drop the lookup connection before the run loop opens its own backend
+    // connection to the same database file — DuckDB's embedded engine does
+    // not support two independent live connections to one file from the
+    // same process.
+    drop(lookup_backend);
+
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let mut plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
+        models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+        &now,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // `--select`/`--exclude` scoping (`incremental_models.md` §CLI):
+    // propagation itself stays whole-workspace above — dirt must compose
+    // through unselected intermediates — but only the selected models
+    // execute. Resolved through the SAME selector-resolution + selection
+    // pass the ordinary run path uses (`cli.md` §"Argument resolution"), not
+    // a parallel model-name filter.
+    if !args.select.is_empty() || !args.exclude.is_empty() {
+        let had_runs_before_scoping = !plan.runs.is_empty();
+
+        let sel_db = smelt_cli::init_db(project_dir, models);
+        let sel_ws = smelt_db::Workspace::try_get(&sel_db).ok_or_else(|| {
+            anyhow::anyhow!("workspace not initialized for --select/--exclude resolution")
+        })?;
+        let sel_project = sel_db.project_input(project_dir).ok_or_else(|| {
+            anyhow::anyhow!("project not initialized for --select/--exclude resolution")
+        })?;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.to_path_buf());
+        let active_scope = compute_scope(project_dir, &cwd, &config.paths, None);
+        let resolved_select = resolve_selector_args(
+            &sel_db,
+            sel_ws,
+            sel_project,
+            active_scope.as_ref(),
+            &args.select,
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let resolved_exclude = resolve_selector_args(
+            &sel_db,
+            sel_ws,
+            sel_project,
+            active_scope.as_ref(),
+            &args.exclude,
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let selection_plan = smelt_runtime::select::select_executable_models(
+            &graph,
+            config,
+            &smelt_runtime::select::SelectionRequest {
+                select: resolved_select,
+                exclude: resolved_exclude,
+                target: args.target.clone(),
+            },
+        )?;
+        let selected: std::collections::BTreeSet<String> =
+            selection_plan.ordered_models.into_iter().collect();
+
+        let upstreams: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            graph
+                .all_model_names()
+                .into_iter()
+                .map(|m| {
+                    let ups = graph.get_upstream(&m).into_iter().collect();
+                    (m, ups)
+                })
+                .collect();
+
+        plan = smelt_runtime::propagation::scope_plan_to_selection(&plan, &selected, &upstreams)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if had_runs_before_scoping && plan.runs.is_empty() {
+            print!("{}", plan.dirty_set_report);
+            eprintln!("smelt: no models matched the selector(s)");
+            return Ok(());
+        }
+    }
 
     print!("{}", plan.dirty_set_report);
     if plan.runs.is_empty() {
@@ -390,11 +531,17 @@ async fn run_since_upstream(
     };
 
     for run in &plan.runs {
+        let resolved = smelt_runtime::propagation::resolve_run_window(run, &now)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         info!(
             "[--since-upstream] running {} over {}",
             run.model,
             match (&run.start, &run.end) {
                 (Some(s), Some(e)) => format!("[{s}, {e})"),
+                (Some(s), None) => format!(
+                    "[{s}, →) → [{s}, {})",
+                    resolved.end.as_deref().unwrap_or("")
+                ),
                 _ => "whole table".to_string(),
             }
         );
@@ -402,11 +549,11 @@ async fn run_since_upstream(
             target: args.target.clone(),
             select: vec![run.model.clone()],
             exclude: vec![],
-            start: run.start.clone(),
-            end: run.end.clone(),
+            start: resolved.start.clone(),
+            end: resolved.end.clone(),
             batch_size_days: args.batch_size,
             per_partition: args.per_partition,
-            full_refresh: false,
+            full_refresh: args.full_refresh,
             dry_run: args.dry_run,
             enforce_safety: !args.allow_downgrade,
             allow_column_removal: args.allow_column_removal,

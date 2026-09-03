@@ -3,7 +3,7 @@
 //! All SQL strings sent to BigQuery are built here, making them independently
 //! testable without a Python runtime or a live warehouse.
 
-use smelt_backend::PartitionRange;
+use smelt_backend::{partition_literal, PartitionRange};
 
 /// Build a fully qualified, backtick-quoted table name: `` `project.dataset.table` ``.
 ///
@@ -95,16 +95,19 @@ pub fn insert_into(table_name: &str, query: &str) -> String {
     format!("INSERT INTO {} {}", table_name, query)
 }
 
-/// DELETE over a half-open partition range `[start, end)`.
-pub fn delete_partitions_range(table_name: &str, partition: &PartitionRange) -> String {
-    format!(
-        "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
-        table_name,
-        partition.column,
-        partition.start.replace('\'', "''"),
-        partition.column,
-        partition.end.replace('\'', "''")
-    )
+/// DELETE over a half-open partition range `[start, end)`, rendered through
+/// the single-owner axis renderer (quoted on the calendar axis, bare on the
+/// integer axis).
+pub fn delete_partitions_range(
+    table_name: &str,
+    partition: &PartitionRange,
+) -> Result<String, String> {
+    let start_lit = partition_literal(partition.axis, &partition.start)?;
+    let end_lit = partition_literal(partition.axis, &partition.end)?;
+    Ok(format!(
+        "DELETE FROM {} WHERE {} >= {} AND {} < {}",
+        table_name, partition.column, start_lit, partition.column, end_lit
+    ))
 }
 
 /// Truncate SQL for log output.

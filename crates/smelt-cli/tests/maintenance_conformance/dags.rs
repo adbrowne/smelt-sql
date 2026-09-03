@@ -25,7 +25,7 @@ use tempfile::TempDir;
 
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_logical::maintenance::edge_type::Addressing;
-use smelt_logical::maintenance::propagate::{day_ordinal, DayInterval};
+use smelt_logical::maintenance::propagate::{day_ordinal, day_start, PartitionInterval};
 use smelt_maintenance_testkit::dag::{
     chain_dag, classify_node, diamond_dag, fetch_node_multiset, insert_rows, keyed_chain_dag,
     keyed_partition_sink_dag, keyed_sink_dag, leak_dag, stage_dag, DagRecipe,
@@ -36,6 +36,7 @@ use smelt_maintenance_testkit::verdict::Verdict;
 use smelt_runtime::propagation::{
     build_forward_graph, plan_since_upstream, resolve_build_plan, SourceDelta,
 };
+use smelt_runtime::types::ExecuteRequest;
 
 /// Deterministic case count — DAG cases stage TWO independent projects and
 /// drive `execute_project` multiple times each, roughly 2-3x a single-model
@@ -49,6 +50,22 @@ fn case_count() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_CASES)
+}
+
+/// [`base_request`] with `--full-refresh` set. The `dag_kchain_a`/
+/// `dag_kpart_a` node in [`keyed_chain_dag`]/[`keyed_partition_sink_dag`]
+/// reads directly off the clocked `events` source with no declared window —
+/// a window-forward keyed model (`docs/specs/incremental_shapes.md` §"The
+/// key grain") that now refuses a windowless run unless `--full-refresh` is
+/// passed. Harmless for the rest of each DAG: `request.full_refresh` is only
+/// consulted by that one windowless-keyed-run branch in `execute.rs`, so a
+/// downstream node's own repair/fold dispatch (the thing these tests are
+/// actually pinning) is unaffected.
+fn keyed_full_refresh_request(target: &str) -> ExecuteRequest {
+    ExecuteRequest {
+        full_refresh: true,
+        ..base_request(target)
+    }
 }
 
 fn base_day() -> NaiveDate {
@@ -82,9 +99,13 @@ struct WindowRows {
 fn landed_delta(source: &str, w: &WindowRows) -> SourceDelta {
     SourceDelta {
         source: source.to_string(),
-        landed: DayInterval::new(
-            day_ordinal(w.start.year() as i64, w.start.month(), w.start.day()),
-            day_ordinal(w.end.year() as i64, w.end.month(), w.end.day()),
+        landed: PartitionInterval::new(
+            day_start(day_ordinal(
+                w.start.year() as i64,
+                w.start.month(),
+                w.start.day(),
+            )),
+            day_start(day_ordinal(w.end.year() as i64, w.end.month(), w.end.day())),
         ),
     }
 }
@@ -328,17 +349,17 @@ fn include_upstreams_resolved_slices_suffice() {
         let (partial, full) = stage_pair(&dag, &tmp, i).expect("stage pair");
 
         let (models, source_infos) = discover(&partial.project_dir).expect("discover partial");
-        let period_interval = DayInterval::new(
-            day_ordinal(
+        let period_interval = PartitionInterval::new(
+            day_start(day_ordinal(
                 period.start.year() as i64,
                 period.start.month(),
                 period.start.day(),
-            ),
-            day_ordinal(
+            )),
+            day_start(day_ordinal(
                 period.end.year() as i64,
                 period.end.month(),
                 period.end.day(),
-            ),
+            )),
         );
         let resolved = resolve_build_plan(&models, &source_infos, "dag_chain_b", period_interval)
             .unwrap_or_else(|e| panic!("case {i}: resolve_build_plan failed: {e}"));
@@ -616,23 +637,32 @@ fn keyed_chain_fold_matches_full_refresh_oracle() {
             let conn = inc.connect().expect("connect inc");
             insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into inc");
         }
-        rt.block_on(inc.run_quiet(&format!("kchain-{i}-init"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+        rt.block_on(inc.run_quiet(
+            &format!("kchain-{i}-init"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
 
         {
             let conn = inc.connect().expect("connect inc");
             insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into inc");
         }
-        rt.block_on(inc.run_quiet(&format!("kchain-{i}-repair"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
+        rt.block_on(inc.run_quiet(
+            &format!("kchain-{i}-repair"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
 
         {
             let conn = full.connect().expect("connect full");
             insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into full");
             insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into full");
         }
-        rt.block_on(full.run_quiet(&format!("kchain-{i}-full"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
+        rt.block_on(full.run_quiet(
+            &format!("kchain-{i}-full"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
         assert_every_node_equal(&dag, &inc, &full, i, "keyed chain").expect("compare nodes");
     }
@@ -665,8 +695,11 @@ fn keyed_chain_maintains_only_the_changed_keys() {
             let conn = inc.connect().expect("connect inc");
             insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows");
         }
-        rt.block_on(inc.run_quiet(&format!("kchain-only-{i}-init"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+        rt.block_on(inc.run_quiet(
+            &format!("kchain-only-{i}-init"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
 
         let conn = inc.connect().expect("connect inc for before-snapshot");
         let before: std::collections::BTreeMap<i64, Vec<Vec<String>>> = kcase
@@ -684,8 +717,11 @@ fn keyed_chain_maintains_only_the_changed_keys() {
             let conn = inc.connect().expect("connect inc");
             insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows");
         }
-        rt.block_on(inc.run_quiet(&format!("kchain-only-{i}-repair"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
+        rt.block_on(inc.run_quiet(
+            &format!("kchain-only-{i}-repair"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
 
         let conn = inc.connect().expect("connect inc for after-snapshot");
         for &id in &kcase.untouched_ids {
@@ -733,23 +769,32 @@ fn keyed_upstream_partition_downstream_matches_oracle() {
             let conn = inc.connect().expect("connect inc");
             insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into inc");
         }
-        rt.block_on(inc.run_quiet(&format!("kpart-{i}-init"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+        rt.block_on(inc.run_quiet(
+            &format!("kpart-{i}-init"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
 
         {
             let conn = inc.connect().expect("connect inc");
             insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into inc");
         }
-        rt.block_on(inc.run_quiet(&format!("kpart-{i}-repair"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
+        rt.block_on(inc.run_quiet(
+            &format!("kpart-{i}-repair"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
 
         {
             let conn = full.connect().expect("connect full");
             insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into full");
             insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into full");
         }
-        rt.block_on(full.run_quiet(&format!("kpart-{i}-full"), base_request("dev")))
-            .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
+        rt.block_on(full.run_quiet(
+            &format!("kpart-{i}-full"),
+            keyed_full_refresh_request("dev"),
+        ))
+        .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
         assert_every_node_equal(&dag, &inc, &full, i, "keyed partition sink").expect("compare");
     }

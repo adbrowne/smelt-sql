@@ -55,6 +55,26 @@ pub enum MutationProfile {
     /// The table is a mutable snapshot: rows may be updated or deleted in
     /// place with no change history.
     MutableSnapshot,
+    /// The source exposes its own change-data feed (CDC/CDF), declared
+    /// explicitly (`sources.md` §"`mutation_profile` — the structured
+    /// block"). Admitted conservatively as full-input re-derivation — no
+    /// live fold over the feed's own delta rows exists yet
+    /// (`incremental_models.md` §Known Divergences).
+    ChangeFeed,
+}
+
+impl MutationProfile {
+    /// Single-owner answer to "is this posture mutable?" — every plan-layer
+    /// site that widens a value/membership-sensitivity set or a repair
+    /// posture to cover both `MutableSnapshot` and `ChangeFeed` consults
+    /// this rather than restating the two-variant comparison at each call
+    /// site.
+    pub fn is_mutable(self) -> bool {
+        matches!(
+            self,
+            MutationProfile::MutableSnapshot | MutationProfile::ChangeFeed
+        )
+    }
 }
 
 /// The facts about one input source that admission consults.
@@ -215,36 +235,33 @@ pub struct ScanClamp {
     pub column: String,
     pub before: crate::analysis::source_bounds::Seconds,
     pub after: crate::analysis::source_bounds::Seconds,
+    /// The derived write footprint (`model_properties.md` §"Footprint
+    /// reflection / bounded write footprint"), or `None` when the footprint
+    /// question was never posed (a bare keyed output with no declared
+    /// event-time axis). Populated once, at clamp construction
+    /// (`derive::project_source_link`), from
+    /// [`crate::analysis::footprint::reflect_footprint`]'s own
+    /// `FootprintResult::Bounded{before, after}` value — never re-derived
+    /// from this clamp's own read-side `before`/`after` margins.
+    pub write_footprint: Option<(
+        crate::analysis::source_bounds::Seconds,
+        crate::analysis::source_bounds::Seconds,
+    )>,
 }
 
 impl ScanClamp {
-    /// The derived write footprint (`model_properties.md` §"Footprint
-    /// reflection / bounded write footprint"): a delta of this source at
-    /// time `t` writes output over `[t − after, t + before]`.
-    ///
-    /// For a **partition-addressed output** this is the *derived* verdict,
-    /// not an assumed mirror: clamp construction (`derive::project_source_link`)
-    /// consults [`crate::analysis::footprint::reflect_footprint`] and only
-    /// builds a clamp when the derived footprint is
-    /// [`crate::analysis::footprint::FootprintResult::Bounded`] — whose
-    /// value is by definition the mirror `(after, before)` of the read
-    /// reach this clamp carries, so reading the mirror here IS reading the
-    /// derived value. A source whose derived footprint is `Unbounded` (a
-    /// trajectory column) or `NotDerivable` never receives a clamp at all;
-    /// its cell falls back to the fail-closed non-local verdict instead.
-    ///
-    /// For a **keyed-grain output** (no output partition axis) the footprint
-    /// question is not posed at clamp construction, so this mirror is
-    /// unverified there — a locality-admitted keyed model's propagation
-    /// edges still size dirt intervals from it. Recorded as a residue in
-    /// `model_properties.md` §Known Divergences.
+    /// The derived write footprint, or `None` when it was never posed
+    /// (`write_footprint`'s own doc comment). A consumer reading `None`
+    /// widens rather than treating an absent claim as zero-width
+    /// (`model_properties.md` §"Footprint reflection / bounded write
+    /// footprint").
     pub fn footprint(
         &self,
-    ) -> (
+    ) -> Option<(
         crate::analysis::source_bounds::Seconds,
         crate::analysis::source_bounds::Seconds,
-    ) {
-        (self.after, self.before)
+    )> {
+        self.write_footprint
     }
 }
 
@@ -347,15 +364,58 @@ pub struct PlanCell {
 pub struct KeyScope {
     pub keys: Vec<String>,
     pub from: String,
+    /// Which of [`crate::maintenance::repair::admit_key_addressed_recompute`]'s
+    /// two discovery routes admitted this cell — plan data, not re-derived by
+    /// the runtime (maintenance-plan purity).
+    pub discovery: KeyDiscovery,
+}
+
+/// The discovery route [`crate::maintenance::repair::admit_key_addressed_recompute`]
+/// used to resolve a key-addressed model edge's affected-key set
+/// (`docs/specs/incremental_models.md` §"Upstream model edges").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum KeyDiscovery {
+    /// The downstream's own grain resolves through the upstream's own
+    /// `KeyedUpsert` key columns directly — the group-grain sidecar groups
+    /// at the upstream's key columns, and changed upstream keys are
+    /// projected forward onto the downstream's own key columns.
+    UpstreamKeyed,
+    /// The downstream's grain columns are columns of the upstream relation
+    /// itself (not the upstream's own key columns) — the group-grain
+    /// sidecar groups directly at the downstream's own grain, projected
+    /// over the upstream relation, and the diff's own changed-key set is
+    /// the downstream's affected-key set with no forward projection.
+    DownstreamGrainOverUpstream,
 }
 
 /// A fail-loud refusal: the trigger has no admissible technique, or admitting
 /// one would be dishonest (`01-framework.md` §10; `06-proof-obligations.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// A field was added in a skeleton position — a grain change, not a
-    /// column backfill (EX-39).
-    SkeletonColumnAdded { column: String },
+    /// A field was added or changed in a skeleton position — a grain
+    /// change, not a column backfill (EX-39).
+    SkeletonChanged { column: String },
+    /// The model's skeleton *clause* itself changed against a prior
+    /// deployed snapshot (a changed `GROUP BY`, a changed `FROM` target, a
+    /// changed join shape) — a grain change proven by
+    /// [`crate::backbuild::diff::definition_diff`]'s clause-level factoring
+    /// rather than by a `Trigger::ColumnAdded` landing in a skeleton
+    /// position. Maps onto the same `MaintenanceSkeletonChanged` diagnostic
+    /// code as [`Refusal::SkeletonChanged`] — one code, two refusal shapes
+    /// (`docs/specs/definition_deltas.md` §"Detection").
+    SkeletonClauseChanged { reason: String },
+    /// A `grain: partition` model's declared `timeseries.partition_column` —
+    /// the address every partition-grain maintenance write targets — differs
+    /// from the column recorded in the deployed-schema snapshot at last
+    /// deploy. Unlike `SkeletonClauseChanged`, this is not a proof over SQL
+    /// text: the address is a world-fact carried on
+    /// [`super::derive::ModelInputs::old_partition_col`], compared
+    /// case-insensitively against the output's own current
+    /// `partition_col`. Maps onto `MaintenancePartitionColumnChanged`
+    /// (`docs/specs/incremental_shapes.md` §"The partition grain"). Fails
+    /// closed: `old_partition_col: None` (no snapshot, or one written before
+    /// this field existed) derives no refusal.
+    PartitionColumnChanged { from: String, to: String },
     /// The derived scan/footprint cannot be partition-bounded and the K8
     /// guardrail (`require: partition_local`, the ratified default) refuses
     /// rather than shipping a silent full-table operation.
@@ -384,6 +444,12 @@ pub enum Refusal {
     /// diagnostic (`locality::LocalityRefusal::message`): it names all
     /// three routes and the nearest missing fact.
     LocalityNotEstablished { message: String },
+    /// A `grain: key` model declares no top-level `unique_key:` and its own
+    /// outermost SELECT's `GROUP BY` derives no key either (empty or
+    /// absent) — there is no identity to maintain against. Maps onto the
+    /// `GrainAssertionMismatch` diagnostic code, naming the asserted grain
+    /// and the empty derived key (`models.md` §"Constraint violations").
+    IdentityNotDerivable { message: String },
     /// The repair family's affected-key obligation (P7,
     /// `model_properties.md` §"Affected-key discovery") could not resolve a
     /// finite key set for `source`'s delta — the
@@ -395,6 +461,37 @@ pub enum Refusal {
     /// (no reach / key-temporal-locality route applies) — the
     /// `MaintenanceRepairSliceUnbounded` diagnostic.
     RepairSliceUnbounded { source: String, why: String },
+    /// A non-skeleton `Trigger::ColumnAdded` column cannot be backfilled in
+    /// place — an unbounded scan for the column-scoped merge, no admissible
+    /// technique, an unresolvable expression, or added columns in one group
+    /// disagreeing on their definition-change classification. Unlike every
+    /// other `Refusal` variant, this one does NOT block the model's ongoing
+    /// maintenance plan: a run proceeds, ALTERs the column in, and leaves
+    /// historical rows `NULL` until `smelt migrate` backfills them — the
+    /// posture `docs/specs/definition_deltas.md` §"Detection" states, and
+    /// mirrors `smelt-runtime`'s own run gate, which already exempts a pure
+    /// column addition outright. Reported as a Warning
+    /// (`MaintenanceColumnAddNotBackfillable`), never an Error.
+    DefinitionChangeNotBackfillable { columns: Vec<String>, why: String },
+    /// A `grain: key` model folds a retractable enrichment-join contribution
+    /// (`analysis::join_shape::join_contribution_monotone` refuses it — a
+    /// fanned-out or otherwise non-monotone join feeding a combiner that
+    /// cannot undo a retraction) into a source whose repair admission
+    /// (`repair::admit_per_group_recompute`) also cannot cover that
+    /// retraction with a per-group recompute — the
+    /// `KeyedRetractableContribution` diagnostic
+    /// (`incremental_shapes.md` §"Enrichment joins"). Names the source, the
+    /// affected fold column(s), and why (the join-contribution reason plus
+    /// the failing repair obligation, verbatim). Always pushed alongside the
+    /// pre-existing `NoAdmissibleTechnique` + `RepairKeysNotDiscoverable`/
+    /// `RepairSliceUnbounded` refusals for the same trigger — additive, not
+    /// a replacement. Steers toward `refresh: materialized_view` or
+    /// composing the enrichment as a separate model.
+    KeyedRetractableContribution {
+        source: String,
+        columns: Vec<String>,
+        why: String,
+    },
 }
 
 /// The admitted key-temporal-locality verdict for a `grain: key` model that
@@ -501,6 +598,18 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
     MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::LocalityNotEstablished { message }],
+        key_locality: None,
+    }
+}
+
+/// The plan derived when a `grain: key` model has no derivable identity at
+/// all — no declared top-level `unique_key:` and an empty GROUP-BY-derived
+/// key. Bypasses [`derive::derive_maintenance_plan`] entirely — there is no
+/// identity to fold cells around.
+pub fn identity_not_derivable_plan(message: String) -> MaintenancePlan {
+    MaintenancePlan {
+        cells: Vec::new(),
+        refusals: vec![Refusal::IdentityNotDerivable { message }],
         key_locality: None,
     }
 }
@@ -887,6 +996,121 @@ pub fn resolve_write_pin(
         });
     }
     Ok(pattern)
+}
+
+/// The per-cell equivalence-invariant proof a `write:` pin's
+/// `cell_can_uphold_equivalence` hook ([`resolve_write_pin`]) delegates to —
+/// single owner of "does this cell's own derived facts uphold the pattern's
+/// equivalence obligation" (`incremental_models.md` §"Per-cell write
+/// addressing" → "User pins"). A **compare-based** pattern (`diff_patch`,
+/// `keyed_conditional`, `staged_candidate` — the write mechanisms whose
+/// physical form diffs a candidate row against prior state before writing)
+/// delegates to [`choice::resolve_write_suppression`]'s P2 (row identity)/P3
+/// (column comparability) proof and maps a
+/// [`choice::WriteSuppression::Unconditional`] verdict to `Err`; every other
+/// registry pattern (plain `region`/`keyed`/`column`/`update`/`full_rebuild`,
+/// none of which compares against prior state) has no comparability
+/// obligation at all and is unconditionally `Ok`.
+pub fn cell_equivalence_proof(
+    pattern: &WritePattern,
+    group_columns: &[String],
+    comparability: &[ColumnComparability],
+    row_identity: &RowIdentityVerdict,
+) -> Result<(), String> {
+    match pattern.name {
+        "diff_patch" | "keyed_conditional" | "staged_candidate" => {
+            match choice::resolve_write_suppression(group_columns, comparability, row_identity) {
+                choice::WriteSuppression::Suppressed { .. } => Ok(()),
+                choice::WriteSuppression::Unconditional { why } => Err(why),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod cell_equivalence_proof_tests {
+    use super::*;
+
+    fn comparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Comparable,
+        }
+    }
+
+    fn incomparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Incomparable,
+        }
+    }
+
+    fn keyed_identity() -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::Key(vec!["id".to_string()]),
+            proven_mismatch: None,
+        }
+    }
+
+    #[test]
+    fn compare_based_pattern_refuses_an_incomparable_group() {
+        let pattern = lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let err = cell_equivalence_proof(
+            pattern,
+            &["amount".to_string()],
+            &[incomparable("amount")],
+            &keyed_identity(),
+        )
+        .expect_err("an incomparable compared column must refuse");
+        assert!(
+            err.contains("amount"),
+            "refusal must name the incomparable column: {err}"
+        );
+    }
+
+    #[test]
+    fn compare_based_pattern_accepts_a_fully_comparable_group() {
+        let pattern = lookup_write_pattern("keyed_conditional").expect("registered");
+        cell_equivalence_proof(
+            pattern,
+            &["amount".to_string()],
+            &[comparable("amount")],
+            &keyed_identity(),
+        )
+        .expect("a fully comparable group over a proven key must be admitted");
+    }
+
+    #[test]
+    fn region_and_full_rebuild_patterns_need_no_comparability_proof() {
+        let region = lookup_write_pattern("region").expect("registered");
+        let full_rebuild = lookup_write_pattern("full_rebuild").expect("registered");
+        let whole_row = RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        };
+        cell_equivalence_proof(region, &[], &[], &whole_row)
+            .expect("region has no comparability obligation");
+        cell_equivalence_proof(full_rebuild, &[], &[], &whole_row)
+            .expect("full_rebuild has no comparability obligation");
+    }
+
+    #[test]
+    fn compare_based_pattern_refuses_a_whole_row_cell() {
+        let pattern = lookup_write_pattern("staged_candidate").expect("registered");
+        let whole_row = RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        };
+        let err = cell_equivalence_proof(
+            pattern,
+            &["amount".to_string()],
+            &[comparable("amount")],
+            &whole_row,
+        )
+        .expect_err("no proven row identity must refuse regardless of comparability");
+        assert!(err.contains("row identity"), "got: {err}");
+    }
 }
 
 #[cfg(test)]

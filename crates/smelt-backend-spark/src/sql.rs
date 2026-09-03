@@ -3,7 +3,7 @@
 //! All SQL strings sent to Spark are built here, making them
 //! independently testable without a Python runtime or Spark cluster.
 
-use smelt_backend::{PartitionRange, PartitionSpec};
+use smelt_backend::{partition_literal, PartitionRange, PartitionSpec};
 
 /// Build a fully qualified table name: catalog.schema.table
 pub fn qualified_name(catalog: &str, schema: &str, name: &str) -> String {
@@ -66,16 +66,19 @@ pub fn delete_partitions(table_name: &str, partition: &PartitionSpec) -> String 
     )
 }
 
-/// DELETE FROM table WHERE partition_col >= start AND partition_col < end
-pub fn delete_partitions_range(table_name: &str, partition: &PartitionRange) -> String {
-    format!(
-        "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
-        table_name,
-        partition.column,
-        partition.start.replace('\'', "''"),
-        partition.column,
-        partition.end.replace('\'', "''"),
-    )
+/// DELETE FROM table WHERE partition_col >= start AND partition_col < end,
+/// rendered through the single-owner axis renderer (quoted on the calendar
+/// axis, bare on the integer axis).
+pub fn delete_partitions_range(
+    table_name: &str,
+    partition: &PartitionRange,
+) -> Result<String, String> {
+    let start_lit = partition_literal(partition.axis, &partition.start)?;
+    let end_lit = partition_literal(partition.axis, &partition.end)?;
+    Ok(format!(
+        "DELETE FROM {} WHERE {} >= {} AND {} < {}",
+        table_name, partition.column, start_lit, partition.column, end_lit,
+    ))
 }
 
 /// INSERT INTO table (query)

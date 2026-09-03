@@ -68,3 +68,40 @@ fn frozen_horizon_unparseable_is_not_misattributed_to_deferral() {
         "expected ContractFrozenHorizonInvalid, got {err:?}"
     );
 }
+
+#[test]
+fn retain_departed_malformed_raises_contract_error() {
+    let sql = "---\ncontract:\n  retain_departed: 'yes'\n---\nSELECT 1";
+    let err = extract_file_metadata(sql).expect_err("must be a fail-loud error, not Ok");
+    assert!(
+        matches!(err, MetadataError::ContractRetainDepartedInvalid { .. }),
+        "expected ContractRetainDepartedInvalid, got {err:?}"
+    );
+}
+
+#[test]
+fn retain_departed_parses_both_forms() {
+    let sql = "---\ncontract:\n  retain_departed: true\n---\nSELECT 1";
+    let metadata = match extract_file_metadata(sql) {
+        Ok(FileMetadata::Single { metadata, .. }) => *metadata,
+        other => panic!("expected Single metadata, got {other:?}"),
+    };
+    let contract = metadata.contract.expect("contract must be Some");
+    assert_eq!(
+        contract.retain_departed,
+        Some(smelt_core::config::RetainDeparted::Bool(true))
+    );
+
+    let sql = "---\ncontract:\n  retain_departed:\n    tombstone: is_departed\n---\nSELECT 1";
+    let metadata = match extract_file_metadata(sql) {
+        Ok(FileMetadata::Single { metadata, .. }) => *metadata,
+        other => panic!("expected Single metadata, got {other:?}"),
+    };
+    let contract = metadata.contract.expect("contract must be Some");
+    assert_eq!(
+        contract.retain_departed,
+        Some(smelt_core::config::RetainDeparted::Tombstone {
+            tombstone: "is_departed".to_string()
+        })
+    );
+}

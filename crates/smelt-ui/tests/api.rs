@@ -215,10 +215,12 @@ fn assemble_diagnostics_independently(
         .unwrap_or_else(|| panic!("model `{model_name}` not found"));
     let file = db.source_file(&model.path).expect("model file registered");
 
-    let plan_cells: Vec<smelt_logical::maintenance::PlanCell> =
-        smelt_db::maintenance_plan_report(&db, ws, file)
-            .map(|result| result.plan.cells)
-            .unwrap_or_default();
+    let (plan_cells, column_groups): (
+        Vec<smelt_logical::maintenance::PlanCell>,
+        Vec<smelt_logical::maintenance::ColumnGroup>,
+    ) = smelt_db::maintenance_plan_report(&db, ws, file)
+        .map(|result| (result.plan.cells, result.column_groups))
+        .unwrap_or_default();
 
     let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
     let upstream = graph.get_upstream(model_name);
@@ -300,6 +302,7 @@ fn assemble_diagnostics_independently(
         dialect,
         &source_timeseries,
         &unique_key,
+        &column_groups,
     )
     .expect("build diagnostics");
 

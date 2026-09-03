@@ -169,6 +169,9 @@ fn v1_without_lateness_clamp_is_not_partition_local() {
         column_groups: vec![base_group()],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -200,6 +203,9 @@ fn v2_lateness_clamp_derives_the_forward_arrival_scan() {
         column_groups: vec![base_group()],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -218,7 +224,7 @@ fn v2_lateness_clamp_derives_the_forward_arrival_scan() {
         assert_eq!(clamp.before, Seconds::ZERO);
         assert_eq!(clamp.after, Seconds::days(2));
         // Reflection: an arrival at t writes event_date in [t − 2d, t].
-        assert_eq!(clamp.footprint(), (Seconds::days(2), Seconds::ZERO));
+        assert_eq!(clamp.footprint(), Some((Seconds::days(2), Seconds::ZERO)));
     }
 }
 
@@ -237,6 +243,9 @@ fn v3_dedup_keeps_the_v2_plan_shape() {
         column_groups: vec![base_group()],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -274,6 +283,9 @@ fn v4_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -315,7 +327,7 @@ fn v4_without_the_explicit_partition_predicate_refuses_scan_unbounded() {
     );
     assert!(plan.cells.is_empty(), "cells: {:?}", plan.cells);
     assert!(
-        matches!(&plan.refusals[..], [Refusal::ScanUnbounded { source, .. }] if source == "sessions"),
+        matches!(&plan.refusals[..], [Refusal::DefinitionChangeNotBackfillable { columns, .. }] if columns == &["session_id".to_string()]),
         "refusals: {:?}",
         plan.refusals
     );
@@ -346,6 +358,9 @@ fn v4_without_the_explicit_partition_predicate_but_declared_full_scan_admits() {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -400,6 +415,9 @@ fn v5_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -445,7 +463,7 @@ fn v5_ongoing_conversion_arrival_has_the_reflected_footprint() {
     // Scan (0, 14d) reflects to footprint (14d, 0): a conversion at t
     // repairs events over [t − 14d, t].
     let clamp = clamp_for(&cell.scans, "conversions");
-    assert_eq!(clamp.footprint(), (Seconds::days(14), Seconds::ZERO));
+    assert_eq!(clamp.footprint(), Some((Seconds::days(14), Seconds::ZERO)));
 }
 
 #[test]
@@ -465,6 +483,6 @@ fn v4_and_v5_adds_are_payload_but_a_dedup_key_add_refuses() {
         }],
     );
     assert!(
-        matches!(&plan.refusals[..], [Refusal::SkeletonColumnAdded { column }] if column == "device_id")
+        matches!(&plan.refusals[..], [Refusal::SkeletonChanged { column }] if column == "device_id")
     );
 }

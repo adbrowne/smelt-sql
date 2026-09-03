@@ -11,10 +11,10 @@ use smelt_logical::maintenance::emit::{
     emit_append_only_posture_probe, emit_bounded_domain_probe, emit_column_scoped_merge,
     emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
     emit_functional_dependency_probe, emit_in_place_update, emit_keyed_fold,
-    emit_monotonicity_probe, emit_recurrence_bound_probe, emit_staged_candidate_conditional,
-    emit_staged_candidate_conditional_recompute, presentation_projection,
-    state_augmented_projection, AppendOnlyBaselinePartition, MaintenanceDialect,
-    PresentationRefusal, Region, StateAugmentRefusal,
+    emit_monotonicity_probe, emit_recurrence_bound_probe, emit_source_mutation_fingerprint,
+    emit_staged_candidate_conditional, emit_staged_candidate_conditional_recompute,
+    presentation_projection, state_augmented_projection, AppendOnlyBaselinePartition,
+    MaintenanceDialect, PresentationRefusal, Region, StateAugmentRefusal,
 };
 use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
 use std::collections::{BTreeMap, HashMap};
@@ -1613,4 +1613,97 @@ fn count_preservation_probe_from_body_does_not_recurse_past_one_cast_wrap_level(
         emit_count_preservation_probe_from_body(&twice_wrapped, "main.dim").is_none(),
         "a doubly-nested cast wrap must fail closed rather than recursing past one level"
     );
+}
+
+/// The whole-source mutation-fingerprint emitter's DuckDB shape: no
+/// `GROUP BY`, no partition column — just a COUNT(*) and an order-independent
+/// sha256 aggregate fingerprint over the digest columns.
+#[test]
+fn source_mutation_fingerprint_duckdb_shape() {
+    let stmt = emit_source_mutation_fingerprint(
+        "main.raw_events",
+        &["event_id".to_string(), "amount".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(stmt.sql.contains("SELECT COUNT(*) AS current_count"));
+    assert!(stmt.sql.contains("AS current_fingerprint"));
+    assert!(stmt.sql.contains("sha256(STRING_AGG("));
+    assert!(stmt.sql.contains("FROM main.raw_events"));
+    assert!(!stmt.sql.contains("GROUP BY"));
+}
+
+/// Spark shape: `CONCAT_WS`/`SORT_ARRAY`/`COLLECT_LIST` in place of DuckDB's
+/// `STRING_AGG … ORDER BY`, matching `emit_append_only_baseline_snapshot`'s
+/// own per-dialect split.
+#[test]
+fn source_mutation_fingerprint_spark_shape() {
+    let stmt = emit_source_mutation_fingerprint(
+        "main.raw_events",
+        &["event_id".to_string()],
+        MaintenanceDialect::Spark,
+    );
+    assert!(stmt
+        .sql
+        .contains("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST("));
+    assert!(!stmt.sql.contains("GROUP BY"));
+}
+
+/// BigQuery shape: `TO_HEX(SHA256(...))` wrapping to keep the fingerprint a
+/// STRING like every other dialect's.
+#[test]
+fn source_mutation_fingerprint_bigquery_shape() {
+    let stmt = emit_source_mutation_fingerprint(
+        "main.raw_events",
+        &["event_id".to_string()],
+        MaintenanceDialect::BigQuery,
+    );
+    assert!(stmt.sql.contains("TO_HEX(SHA256(STRING_AGG("));
+    assert!(!stmt.sql.contains("GROUP BY"));
+}
+
+#[test]
+#[should_panic(expected = "non-empty digest column set")]
+fn source_mutation_fingerprint_panics_on_empty_digest_columns() {
+    emit_source_mutation_fingerprint("main.t", &[], MaintenanceDialect::DuckDb);
+}
+
+/// `docs/specs/incremental_shapes.md` §"The partition grain" rule 8a — a
+/// partition literal renders in its axis's own domain: quoted and escaped
+/// on the calendar axis, bare on the integer axis, and `Err` for a
+/// non-integer value on the integer axis.
+#[test]
+fn partition_literal_renders_per_axis() {
+    use smelt_logical::maintenance::emit::partition_literal;
+    use smelt_logical::PartitionAxis;
+
+    assert_eq!(
+        partition_literal(PartitionAxis::Calendar, "2026-01-01").unwrap(),
+        "'2026-01-01'"
+    );
+    assert_eq!(
+        partition_literal(PartitionAxis::Calendar, "it's").unwrap(),
+        "'it''s'"
+    );
+    assert_eq!(partition_literal(PartitionAxis::Integer, "7").unwrap(), "7");
+    assert_eq!(
+        partition_literal(PartitionAxis::Integer, "-3").unwrap(),
+        "-3"
+    );
+    assert!(partition_literal(PartitionAxis::Integer, "2026-01-01").is_err());
+    assert!(partition_literal(PartitionAxis::Integer, "not-a-number").is_err());
+}
+
+#[test]
+fn region_for_axis_renders_per_axis() {
+    use smelt_logical::PartitionAxis;
+
+    let calendar = Region::for_axis(PartitionAxis::Calendar, "2026-01-01", "2026-01-02").unwrap();
+    assert_eq!(calendar.start, "'2026-01-01'");
+    assert_eq!(calendar.end, "'2026-01-02'");
+
+    let integer = Region::for_axis(PartitionAxis::Integer, "1", "2").unwrap();
+    assert_eq!(integer.start, "1");
+    assert_eq!(integer.end, "2");
+
+    assert!(Region::for_axis(PartitionAxis::Integer, "1", "not-a-number").is_err());
 }

@@ -200,7 +200,7 @@ pub async fn insert_fact_row_for(
             name = recipe.fact.name,
             d = row.d.format("%Y-%m-%d"),
             id = row.id,
-            val = row.val,
+            val = row.val_sql(),
         ))
         .await
         .map_err(|e| anyhow::anyhow!("insert mixed fact row: {e}"))?;

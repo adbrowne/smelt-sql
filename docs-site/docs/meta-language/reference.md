@@ -447,8 +447,10 @@ See [Reflection — Meta-`Text`-as-identifier lift](reflection.md#meta-text-as-i
 | `materialization` | `Text` | No | `"view"` |
 | `tags` | `List<Text>` | No | `[]` |
 | `description` | `Text` | No | `""` |
+| `timeseries` | `Record{event_time_column: Text, partition_column: Text, granularity: Text, week_start: Text?, assert_monotonic: Bool?}` | No | inherits the generator file's frontmatter `timeseries:` block |
+| `safety_overrides` | `Record{allow_window_functions: Bool?, allow_having: Bool?, allow_limit: Bool?, allow_subqueries: Bool?, allow_nondeterministic: Bool?, allow_distinct: Bool?}` | No | inherits the generator file's frontmatter `safety_overrides:` block |
 
-Constructing a `ModelDef` literal outside a generator file body emits `ModelDefOutsideGeneratorFile`.
+Constructing a `ModelDef` literal outside a generator file body emits `ModelDefOutsideGeneratorFile`. `timeseries` / `safety_overrides`, when present, **replace** the generator file's corresponding frontmatter block in full for that emission only (not a key-level merge), and are valid only when `materialization` is `'incremental'` — otherwise `ModelDefOverrideRequiresIncremental` fires.
 
 **Example:**
 ```sql
@@ -461,7 +463,29 @@ generates: models
 ]
 ```
 
-**Editor support:** hover on the opening `{` of a `ModelDef` literal shows the emitted smelt path (when `name` is statically known); completion at `ModelDef { <cursor>` offers the five fields, required fields first.
+**Per-cohort override example** — two incremental emissions from one generator, each with its own event-time column:
+
+```sql
+---
+generates: models
+refresh: incremental
+grain: partition
+---
+[
+  ModelDef {
+    name: 'us_west', body: SELECT * FROM smelt.sources.raw.orders_us,
+    materialization: 'incremental',
+    timeseries: { event_time_column: 'order_ts', partition_column: 'order_ts', granularity: 'day' }
+  },
+  ModelDef {
+    name: 'eu', body: SELECT * FROM smelt.sources.raw.orders_eu,
+    materialization: 'incremental',
+    timeseries: { event_time_column: 'created_at', partition_column: 'created_at', granularity: 'day' }
+  }
+]
+```
+
+**Editor support:** hover on the opening `{` of a `ModelDef` literal shows the emitted smelt path (when `name` is statically known); completion at `ModelDef { <cursor>` offers the seven fields, required fields first.
 
 See [Generator Files](generators.md) for the full multi-model production surface.
 
@@ -1437,6 +1461,18 @@ See [Generator Files](generators.md).
 **Message:** `ModelDef literals are only valid inside a \`generates: models\` file body`
 
 **Fix:** move the `ModelDef` literal into a generator file (frontmatter `generates: models`).
+
+See [Generator Files](generators.md).
+
+---
+
+### `ModelDefOverrideRequiresIncremental`
+
+**When:** A `ModelDef` literal's `timeseries` or `safety_overrides` field is present but `materialization` is not `'incremental'`.
+
+**Message:** `ModelDef.{field} is only valid when materialization is 'incremental'`
+
+**Fix:** set `materialization: 'incremental'`, or remove the `timeseries`/`safety_overrides` field.
 
 See [Generator Files](generators.md).
 

@@ -559,6 +559,16 @@ pub enum MetadataError {
     #[error("PartitionGrainRequiresRefreshIncremental: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
     PartitionGrainRequiresRefreshIncremental,
 
+    /// A key-addressed model (`resolved_grain() == Some(Grain::Key)`) declares
+    /// `safety_overrides:` (top-level, or the folded `batched.safety_overrides`
+    /// sub-block). Every keyed rejection guards the equivalence invariant — a
+    /// keyed model has no partition-shaped output for a safety override to
+    /// widen or narrow. The escape is to remodel the output as
+    /// partition-shaped (not `grain: partition`, which only asserts an
+    /// already-derived label) or move to `refresh: materialized_view`.
+    #[error("KeyedForbidsSafetyOverrides: key-addressed models (grain: key) cannot declare `safety_overrides:` — a keyed model has no partition-shaped output for a safety override to apply to; remodel the output as partition-shaped or use refresh: materialized_view")]
+    KeyedForbidsSafetyOverrides,
+
     /// A model declares both the top-level `safety_overrides:` key and a
     /// non-default `batched.safety_overrides` sub-block. The two spellings
     /// are the same fact (`docs/specs/models.md` §"The Relation Contract");
@@ -705,6 +715,21 @@ pub enum MetadataError {
     /// diagnostic code.
     #[error("ContractDeferralInvalid: contract.deferral is not a valid interval — {why}")]
     ContractDeferralInvalid { why: String },
+
+    /// A `contract.retain_departed` value is neither a bare bool nor
+    /// `{tombstone: <col>}` (`docs/specs/incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Raised at frontmatter-parse time by
+    /// `extract_single_model`'s strict pre-validation, the same pattern as
+    /// `ContractFrozenHorizonInvalid`/`ContractDeferralInvalid`. Posture
+    /// admissibility (declared on anything but a keyed shape consuming a
+    /// mutable snapshot) and a tombstone column absent from the model's
+    /// output are distinct checks made downstream by
+    /// `smelt_logical::contract::retain_departed::validate` (needs the
+    /// derived grain, resolved source facts, and the inferred output
+    /// schema, unavailable to this pure parse) — all three surface under
+    /// the same `ContractRetainDepartedInvalid` diagnostic code.
+    #[error("ContractRetainDepartedInvalid: contract.retain_departed is invalid — {why}")]
+    ContractRetainDepartedInvalid { why: String },
 }
 
 /// Disambiguates a `contract:` block's `"invalid data_latency"` deserialize
@@ -753,6 +778,39 @@ fn classify_contract_data_latency_error(value: &serde_yaml::Value, why: String) 
         return MetadataError::ContractDeferralInvalid { why };
     }
     MetadataError::ContractFrozenHorizonInvalid { why }
+}
+
+/// Whether `value`'s `retain_departed` key (if present) is not one of the
+/// two admitted declaration forms — a bare bool or `{tombstone: <col>}` —
+/// and, if so, a message naming what was found instead. Mirrors
+/// `classify_contract_data_latency_error`'s "walk the still-unvalidated
+/// mapping directly" approach, since serde_yaml's untagged-enum failure
+/// carries no field path either. `None` when `retain_departed` is absent or
+/// already well-formed (the caller only reaches this on a failed
+/// `ContractConfig` deserialize whose message didn't match the
+/// `DataLatency` case, so a well-formed `retain_departed` here means some
+/// *other* field is at fault).
+fn bad_retain_departed_reason(value: &serde_yaml::Value) -> Option<String> {
+    let mapping = value.as_mapping()?;
+    let v = mapping.get(serde_yaml::Value::String("retain_departed".to_string()))?;
+    if v.as_bool().is_some() {
+        return None;
+    }
+    if let Some(m) = v.as_mapping() {
+        let tombstone_ok = m.len() == 1
+            && m.get(serde_yaml::Value::String("tombstone".to_string()))
+                .and_then(|t| t.as_str())
+                .is_some();
+        if tombstone_ok {
+            return None;
+        }
+        return Some(format!(
+            "expected `true` or `{{tombstone: <column>}}`, found a mapping shaped {m:?}"
+        ));
+    }
+    Some(format!(
+        "expected `true` or `{{tombstone: <column>}}`, found {v:?}"
+    ))
 }
 
 /// Build the fix-it message for a refused `batched:` sub-block, naming each
@@ -1083,10 +1141,29 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
+    // Rule: batched: block on a key-addressed effective shape →
+    // KeyedForbidsSafetyOverrides (a dedicated, correctly-named refusal — the
+    // generic PartitionGrainRequiresRefreshIncremental message below tells
+    // the author to add `grain: partition`, the opposite of the keyed rule).
+    // Routed through `resolved_grain()`, not the declared `grain:` field
+    // alone, so a `timeseries:` + `refresh: incremental` model with no
+    // written `grain:` (an effective partition shape) isn't mistaken for
+    // keyed here. Both arms still require `refresh: incremental` explicitly
+    // (not just an incremental-shaped set of facts) — a model with no
+    // `refresh:` key at all is a plain table build, and `batched:` on it is
+    // still the generic refusal regardless of what `resolved_grain()` would
+    // derive if it WERE incremental.
+    //
     // Rule: batched: block without refresh: incremental + grain: partition →
     // PartitionGrainRequiresRefreshIncremental
-    if metadata.batched.is_some() && !metadata.is_partition_grain() {
-        return Err(MetadataError::PartitionGrainRequiresRefreshIncremental);
+    if metadata.batched.is_some() {
+        let is_incremental = metadata.refresh == Some(RefreshStrategy::Incremental);
+        if is_incremental && metadata.resolved_grain() == Some(crate::config::Grain::Key) {
+            return Err(MetadataError::KeyedForbidsSafetyOverrides);
+        }
+        if !is_incremental || metadata.resolved_grain() != Some(crate::config::Grain::Partition) {
+            return Err(MetadataError::PartitionGrainRequiresRefreshIncremental);
+        }
     }
 
     // Rule: refresh: incremental + grain: partition without timeseries: →
@@ -1739,6 +1816,9 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     let msg = e.to_string();
                     if msg.contains("invalid data_latency") {
                         return Err(classify_contract_data_latency_error(value, msg));
+                    }
+                    if let Some(why) = bad_retain_departed_reason(value) {
+                        return Err(MetadataError::ContractRetainDepartedInvalid { why });
                     }
                     return Err(MetadataError::YamlParseError(e));
                 }
@@ -3327,8 +3407,8 @@ GROUP BY device_id, user_id"#;
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: keyed + batched: must error");
         assert!(
-            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
-            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
+            matches!(err, MetadataError::KeyedForbidsSafetyOverrides),
+            "Expected KeyedForbidsSafetyOverrides, got: {}",
             err
         );
     }

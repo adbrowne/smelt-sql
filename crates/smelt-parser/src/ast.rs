@@ -1626,6 +1626,10 @@ impl FromClause {
     pub fn text(&self) -> String {
         self.0.text().to_string()
     }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
 }
 
 /// JOIN clause (JOIN type + table + condition)
@@ -2068,6 +2072,10 @@ impl WhereClause {
     #[allow(dead_code)] // Keep for debugging, but prefer expression()
     pub fn text(&self) -> String {
         self.0.text().to_string()
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 }
 

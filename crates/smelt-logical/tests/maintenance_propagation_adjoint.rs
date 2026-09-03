@@ -18,45 +18,56 @@ use smelt_logical::analysis::output_delta::OutputDelta;
 use smelt_logical::maintenance::edge_type::{Addressing, EdgeComponent};
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::propagate::{
-    project_observed_delta, propagate, required_inputs, DayInterval, Edge, KeyedDirt,
-    PartitionGrain,
+    project_observed_delta, propagate, required_inputs, Edge, KeyedDirt, PartitionGrain,
+    PartitionInterval, DAY_SECONDS,
 };
 
-fn iv(start: i64, end: i64) -> DayInterval {
-    DayInterval::new(start, end)
+/// Day-ordinal fixture helper — `iv(a, b)` reads as "day `a` to day `b`",
+/// scaled to the exact-seconds representation `PartitionInterval` actually
+/// carries. Every edge in this file defaults to Day grain, so the scaling
+/// is a no-op through `align_outward` and every existing (day-scale)
+/// assertion in this file holds unchanged.
+fn iv(start_day: i64, end_day: i64) -> PartitionInterval {
+    PartitionInterval::new(start_day * DAY_SECONDS, end_day * DAY_SECONDS)
 }
 
-fn deltas(items: &[(&str, DayInterval)]) -> BTreeMap<String, Vec<DayInterval>> {
-    let mut m: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+fn deltas(items: &[(&str, PartitionInterval)]) -> BTreeMap<String, Vec<PartitionInterval>> {
+    let mut m: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for (name, interval) in items {
         m.entry(name.to_string()).or_default().push(*interval);
     }
     m
 }
 
+/// `before_days`/`after_days` in whole days, scaled to exact seconds — see
+/// `iv`'s own doc comment.
 fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> Edge {
+    let before_seconds = before_days * DAY_SECONDS;
+    let after_seconds = after_days * DAY_SECONDS;
     Edge {
         upstream: upstream.to_string(),
         downstream: downstream.to_string(),
-        before_days,
-        after_days,
+        before_seconds,
+        after_seconds,
         upstream_grain: Default::default(),
         downstream_grain: Default::default(),
         components: Vec::new(),
+        footprint_seconds: Some((after_seconds, before_seconds)),
+        dirtied_groups: None,
     }
 }
 
 /// Resolve `required_inputs` for `target`/`period`, replay every raw
 /// source's resolved slice as a forward delta, and assert the forward
 /// result's dirt on `target` contains `period`.
-fn assert_forward_backward_containment(edges: &[Edge], target: &str, period: DayInterval) {
+fn assert_forward_backward_containment(edges: &[Edge], target: &str, period: PartitionInterval) {
     let resolved = required_inputs(edges, target, period).expect("resolve");
 
     // Raw sources are exactly the required nodes that never appear as a
     // downstream of any edge.
     let downstreams: std::collections::BTreeSet<&str> =
         edges.iter().map(|e| e.downstream.as_str()).collect();
-    let mut replay: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut replay: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for (node, intervals) in &resolved.required {
         if !downstreams.contains(node.as_str()) {
             replay.insert(node.clone(), intervals.clone());
@@ -259,8 +270,8 @@ fn two_composed_stages_adjoint_with_a_widened_first_hop() {
 /// law, through the same `source -> composed -> rollup` chain shape.
 #[test]
 fn composed_projection_adjoint() {
-    for (before_days, after_days) in [(0, 0), (3, 1)] {
-        let into_composed = edge("source", "composed", before_days, after_days);
+    for (before_seconds, after_seconds) in [(0, 0), (3, 1)] {
+        let into_composed = edge("source", "composed", before_seconds, after_seconds);
         let out_of_composed = edge("composed", "rollup", 0, 0);
         let edges = vec![into_composed, out_of_composed];
         assert_forward_backward_containment(&edges, "rollup", iv(100, 103));
@@ -326,7 +337,7 @@ fn bare_keyed_node_still_refuses_with_refined_message() {
 // ---------------------------------------------------------------------------
 // Phase D3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
 // the adjointness law extended over an observed-delta-fed composed edge —
-// the origin's own delta is no longer a hand-typed `DayInterval`, but
+// the origin's own delta is no longer a hand-typed `PartitionInterval`, but
 // `project_observed_delta`'s own output (a composed model's recorded
 // key-level observed delta, projected to partition-day intervals via its
 // established locality route). `forward(backward(P)) ⊇ P` must still hold
@@ -375,7 +386,7 @@ fn observed_delta_fed_composed_edge_satisfies_adjointness_exact_route() {
             .get("composed")
             .cloned()
             .unwrap_or_default();
-        let replay: BTreeMap<String, Vec<DayInterval>> =
+        let replay: BTreeMap<String, Vec<PartitionInterval>> =
             [("composed".to_string(), composed_required)]
                 .into_iter()
                 .collect();
@@ -427,9 +438,10 @@ fn observed_delta_fed_composed_edge_satisfies_adjointness_widened_route() {
         .get("composed")
         .cloned()
         .unwrap_or_default();
-    let replay: BTreeMap<String, Vec<DayInterval>> = [("composed".to_string(), composed_required)]
-        .into_iter()
-        .collect();
+    let replay: BTreeMap<String, Vec<PartitionInterval>> =
+        [("composed".to_string(), composed_required)]
+            .into_iter()
+            .collect();
     let forward = propagate(&edges, &replay).expect("propagate");
     let dirty = forward
         .dirty
@@ -603,6 +615,120 @@ fn required_inputs_over_a_keyed_ancestor_requires_the_whole_table() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Phase 21 (`docs/outcomes/20260815-definition-delta-migrate/outcome.md`):
+// the keyed dirt-set channel cascades past a node dirtied ONLY through it —
+// before this phase, a node with `keyed_dirty` but no `dirty` entry (both
+// endpoints of its own inbound edge keyed-grain) was a one-hop dead end:
+// `propagate`'s own node walk skipped it, so its own outbound edges were
+// never classified or reflected.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keyed_dirt_cascades_past_one_hop() {
+    // "source" plays the keyed-grain-origin role `adjoint_property_holds_
+    // with_keyed_edges_present` already establishes for "agg": fed directly
+    // as a delta, per the real graph shape where a bare keyed node's own
+    // inbound edges are never assembled.
+    let mut source_to_a = edge("source", "A", 0, 0);
+    source_to_a.upstream_grain = PartitionGrain::Keyed;
+    source_to_a.downstream_grain = PartitionGrain::Keyed;
+    source_to_a.components = vec![keyed_component(&["user_id"])];
+
+    let mut a_to_b = edge("A", "B", 0, 0);
+    a_to_b.upstream_grain = PartitionGrain::Keyed;
+    a_to_b.downstream_grain = PartitionGrain::Keyed;
+    a_to_b.components = vec![keyed_component(&["user_id"])];
+
+    let edges = vec![source_to_a, a_to_b];
+    let result = propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("propagate");
+
+    assert!(
+        !result
+            .keyed_dirty
+            .get("A")
+            .map(Vec::is_empty)
+            .unwrap_or(true),
+        "A must carry keyed dirt from source: {result:?}"
+    );
+    assert!(
+        !result
+            .keyed_dirty
+            .get("B")
+            .map(Vec::is_empty)
+            .unwrap_or(true),
+        "B must carry keyed dirt cascaded through A, not just A: {result:?}"
+    );
+}
+
+#[test]
+fn keyed_only_node_widens_to_whole_table_for_a_clocked_reader() {
+    let mut source_to_a = edge("source", "A", 0, 0);
+    source_to_a.upstream_grain = PartitionGrain::Keyed;
+    source_to_a.downstream_grain = PartitionGrain::Keyed;
+    source_to_a.components = vec![keyed_component(&["user_id"])];
+
+    // A -> C: A is keyed-grain upstream, C is an ordinary clocked (Day
+    // grain) reader.
+    let mut a_to_c = edge("A", "C", 0, 0);
+    a_to_c.upstream_grain = PartitionGrain::Keyed;
+    a_to_c.components = vec![keyed_component(&["user_id"])];
+
+    let edges = vec![source_to_a, a_to_c];
+    let result = propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("propagate");
+
+    assert!(
+        !result.dirty.contains_key("A"),
+        "A itself carries no interval dirt — only keyed dirt: {result:?}"
+    );
+    let c_dirty = result.dirty.get("C").expect("C must be dirty");
+    assert!(
+        c_dirty.iter().any(|d| d.is_whole()),
+        "a clocked reader of a keyed-only-dirty node must get whole-table dirt: {c_dirty:?}"
+    );
+}
+
+#[test]
+fn keyed_cascade_terminates_on_a_cycle_free_graph() {
+    // Diamond: source -> A, source -> B, A -> D, B -> D. Each node is
+    // visited once by the topological walk; D's keyed_dirty must carry
+    // exactly the two (deduplicated) records from A and B, not an
+    // exponential fan-out.
+    let mut source_to_a = edge("source", "A", 0, 0);
+    source_to_a.upstream_grain = PartitionGrain::Keyed;
+    source_to_a.downstream_grain = PartitionGrain::Keyed;
+    source_to_a.components = vec![keyed_component(&["user_id"])];
+
+    let mut source_to_b = edge("source", "B", 0, 0);
+    source_to_b.upstream_grain = PartitionGrain::Keyed;
+    source_to_b.downstream_grain = PartitionGrain::Keyed;
+    source_to_b.components = vec![keyed_component(&["user_id"])];
+
+    let mut a_to_d = edge("A", "D", 0, 0);
+    a_to_d.upstream_grain = PartitionGrain::Keyed;
+    a_to_d.downstream_grain = PartitionGrain::Keyed;
+    a_to_d.components = vec![keyed_component(&["user_id"])];
+
+    let mut b_to_d = edge("B", "D", 0, 0);
+    b_to_d.upstream_grain = PartitionGrain::Keyed;
+    b_to_d.downstream_grain = PartitionGrain::Keyed;
+    b_to_d.components = vec![keyed_component(&["user_id"])];
+
+    let edges = vec![source_to_a, source_to_b, a_to_d, b_to_d];
+    let result = propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("propagate");
+
+    let d_dirt = result.keyed_dirty.get("D").expect("D must be keyed-dirty");
+    assert_eq!(
+        d_dirt.len(),
+        2,
+        "D must carry exactly one deduplicated record per inbound edge (A and B), not an \
+         exponential fan-out: {d_dirt:?}"
+    );
+    let froms: std::collections::BTreeSet<&str> =
+        d_dirt.iter().map(|kd| kd.from.as_str()).collect();
+    assert_eq!(froms, std::collections::BTreeSet::from(["A", "B"]));
+}
+
 /// The adjointness law over a graph mixing a window-addressed edge and a
 /// keyed-addressed edge: `bronze -> silver` (ordinary interval math) feeds
 /// `silver`'s own dirt, while `agg` (a separate keyed-grain origin, fed
@@ -622,7 +748,7 @@ fn adjoint_property_holds_with_keyed_edges_present() {
     let period = iv(20, 21);
     let resolved = required_inputs(&edges, "rollup", period).expect("resolve");
 
-    let mut replay: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut replay: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for node in ["bronze", "agg"] {
         if let Some(required) = resolved.required.get(node) {
             replay.insert(node.to_string(), required.clone());
@@ -636,5 +762,124 @@ fn adjoint_property_holds_with_keyed_edges_present() {
             .iter()
             .any(|d| d.start <= period.start && period.end <= d.end),
         "forward(backward(P)) must contain P: {dirty:?} vs {period:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 22 (`docs/outcomes/20260815-definition-delta-migrate/phases/22-plan.md`):
+// time-unrolled self-edges — `incremental_models.md` §"Time-unrolled
+// self-edges". A backward-bounded self-referential model (`e.upstream ==
+// e.downstream`) is admitted into the propagation graph as a day-unrolled
+// edge rather than refused as a table-graph cycle.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn self_edge_is_not_a_table_graph_cycle() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let edges = vec![src_to_n, self_edge];
+    let result = propagate(&edges, &deltas(&[("src", iv(10, 11))]));
+    assert!(
+        result.is_ok(),
+        "a self-edge must not read as a table-graph cycle: {result:?}"
+    );
+
+    // A genuine two-node cycle must still error.
+    let x_to_y = edge("x", "y", 0, 0);
+    let y_to_x = edge("y", "x", 0, 0);
+    let cyclic = vec![x_to_y, y_to_x];
+    let cyclic_result = propagate(&cyclic, &deltas(&[("x", iv(10, 11))]));
+    assert!(
+        cyclic_result.is_err(),
+        "a genuine multi-node cycle must still be refused"
+    );
+}
+
+#[test]
+fn self_edge_widens_forward_dirt_to_the_frontier() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let edges = vec![src_to_n, self_edge];
+    let result = propagate(&edges, &deltas(&[("src", iv(10, 11))])).expect("propagate");
+
+    let n_dirty = result.dirty.get("n").expect("n must be dirty");
+    assert_eq!(
+        n_dirty.len(),
+        1,
+        "expected a single merged interval: {n_dirty:?}"
+    );
+    assert_eq!(
+        n_dirty[0].start,
+        10 * DAY_SECONDS,
+        "the interval's start must be unchanged"
+    );
+    assert!(
+        n_dirty[0].is_open_ended(),
+        "a self-edge's forward dirt must widen open-ended to the frontier: {n_dirty:?}"
+    );
+}
+
+#[test]
+fn self_edge_forward_dirt_reaches_downstreams_open_ended() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let n_to_reader = edge("n", "reader", 1, 0);
+    let edges = vec![src_to_n, self_edge, n_to_reader];
+    let result = propagate(&edges, &deltas(&[("src", iv(10, 11))])).expect("propagate");
+
+    let reader_dirty = result.dirty.get("reader").expect("reader must be dirty");
+    assert!(
+        reader_dirty.iter().any(|iv| iv.is_open_ended()),
+        "a reader of a self-referential node must inherit open-ended dirt: {reader_dirty:?}"
+    );
+}
+
+#[test]
+fn forward_reaching_self_edge_is_refused() {
+    let forward_reaching = vec![edge("n", "n", 2, 1)];
+    let result = propagate(&forward_reaching, &deltas(&[("n", iv(10, 11))]));
+    match result {
+        Err(reason) => assert!(reason.contains('n'), "reason must name the model: {reason}"),
+        Ok(_) => panic!("a forward-reaching self-edge must be refused"),
+    }
+
+    let mut keyed_self = edge("k", "k", 2, 0);
+    keyed_self.upstream_grain = PartitionGrain::Keyed;
+    keyed_self.downstream_grain = PartitionGrain::Keyed;
+    let keyed_result = propagate(&[keyed_self], &deltas(&[("k", iv(10, 11))]));
+    assert!(
+        keyed_result.is_err(),
+        "a Keyed-grain self-edge must be refused, not silently treated as a day axis"
+    );
+}
+
+#[test]
+fn required_inputs_self_edge_reaches_the_basis_once() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let edges = vec![src_to_n, self_edge];
+
+    let resolved = required_inputs(&edges, "n", iv(50, 51)).expect("resolve");
+
+    let n_required = resolved
+        .required
+        .get("n")
+        .expect("n must have a requirement");
+    assert!(
+        n_required
+            .iter()
+            .any(|iv| iv.start <= 48 * DAY_SECONDS && iv.end >= 51 * DAY_SECONDS),
+        "n's own requirement must widen backward by the self-edge's clamp: {n_required:?}"
+    );
+
+    let src_required = resolved
+        .required
+        .get("src")
+        .expect("src must inherit the widened requirement through n's inbound edge");
+    assert!(
+        src_required
+            .iter()
+            .any(|iv| iv.start <= 48 * DAY_SECONDS && iv.end >= 51 * DAY_SECONDS),
+        "the widened requirement must flow up n's inbound source edge: {src_required:?}"
     );
 }

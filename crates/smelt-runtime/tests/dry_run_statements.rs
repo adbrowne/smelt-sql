@@ -74,6 +74,19 @@ fn write_model(project_dir: &Path, name: &str, content: &str) {
     std::fs::write(path, content).expect("write model file");
 }
 
+/// Writes a model under a `schema.name` address (e.g. `silver.upstream` →
+/// `models/silver/upstream.sql`) — address segments come from directory
+/// structure, not dots in a flat filename.
+fn write_nested_model(project_dir: &Path, addr: &str, content: &str) {
+    let mut segs: Vec<&str> = addr.split('.').collect();
+    let leaf = segs.pop().expect("address has at least one segment");
+    let dir = segs
+        .iter()
+        .fold(project_dir.join("models"), |acc, s| acc.join(s));
+    std::fs::create_dir_all(&dir).expect("mkdir nested model dir");
+    std::fs::write(dir.join(format!("{leaf}.sql")), content).expect("write nested model file");
+}
+
 fn build_db_and_graph(
     project_dir: &Path,
     config: &Config,
@@ -289,5 +302,112 @@ async fn dry_run_executes_nothing() {
             .await
             .unwrap_or(false),
         "dry-run must not materialise the target table"
+    );
+}
+
+/// A dry-run over a model-edge-sourced region recompute with a proven row
+/// identity and comparable column group reports the SAME change-suppressed
+/// `emit_diff_patch` group a live run's `execute_delete_insert_with_delta_
+/// restriction` would dispatch (`docs/outcomes/20260815-definition-delta-
+/// migrate/phases/27b-plan.md`) — both routes call `build_delete_insert_
+/// group_dispatched`, so the reported and executed text can never
+/// structurally diverge.
+#[tokio::test]
+async fn dry_run_prints_the_region_conditional_form() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    let db_path = project_dir.join("run.duckdb");
+
+    write_nested_model(
+        project_dir,
+        "silver.upstream",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT * FROM (VALUES (DATE '2024-01-01', 'e1', 10)) AS \
+         t(event_date, event_id, amount)",
+    );
+    write_nested_model(
+        project_dir,
+        "silver.downstream",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT event_id, event_date, SUM(amount) AS amount FROM smelt.silver.upstream \
+         GROUP BY event_id, event_date",
+    );
+
+    let smelt_yml = format!(
+        "name: dry_run_region_conditional\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let reporter = RecordingReporter::default();
+
+    execute_project(
+        "dry-run-region-conditional".to_string(),
+        dry_run_request("2024-01-01", "2024-01-02"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &PanicBackendFactory,
+        &reporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("dry-run execute_project");
+
+    let calls = reporter.calls.lock().unwrap();
+    let groups: Vec<_> = calls
+        .iter()
+        .filter(|(m, _, _)| m == "silver.downstream")
+        .collect();
+    assert_eq!(
+        groups.len(),
+        1,
+        "one window over the downstream model emits exactly one group: {:?}",
+        calls
+    );
+    let (_, _, group) = groups[0];
+
+    assert!(
+        group.statements[0]
+            .sql
+            .starts_with("CREATE TEMP TABLE __smelt_diff_patch_main_silver_downstream"),
+        "the reported group must be the staged diff_patch form, not the widened scan: {:?}",
+        group.statements
+    );
+    assert!(
+        group
+            .statements
+            .iter()
+            .any(|s| s.sql.contains("IS DISTINCT FROM")),
+        "the update leg must guard on IS DISTINCT FROM: {:?}",
+        group.statements
+    );
+    assert!(
+        group.statements.iter().any(|s| {
+            s.sql
+                .starts_with("DELETE FROM main.silver_downstream WHERE")
+                && !s.sql.contains("USING")
+        }),
+        "the complete delete leg must be present: {:?}",
+        group.statements
     );
 }

@@ -216,6 +216,9 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -316,6 +319,9 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -417,6 +423,9 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -529,6 +538,9 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
 
     // Introduction: catch up the added column per partition with the derived
@@ -605,7 +617,9 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
         .iter()
         .find(|c| c.group == "{conversion_score}")
         .expect("conversion_score mutation cell");
-    let (fp_before, fp_after) = clamp_for(&mutation_cell.scans, "conversions").footprint();
+    let (fp_before, fp_after) = clamp_for(&mutation_cell.scans, "conversions")
+        .footprint()
+        .expect("partition-addressed clamp carries a derived footprint");
     assert_eq!(fp_after.0, 0);
     let repair = Region {
         start: format!("DATE '2026-01-08' - INTERVAL '{} seconds'", fp_before.0),

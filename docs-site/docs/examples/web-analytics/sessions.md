@@ -49,6 +49,20 @@ timeseries:
   event_time_column: session_start_date
   partition_column: session_start_date
   granularity: day
+# `smelt.functions.sessionize`'s body computes session_start_ts (and hence
+# session_start_date) via a window `OVER (PARTITION BY device_id,
+# CAST(event_ts AS DATE))` — necessarily partitioned by the *input* event
+# date, not by `session_start_date`, since the window's own job is to derive
+# that column. Function-call expansion (phase 2, `docs/outcomes/
+# 20260815-partition-grain-residue`) now classifies this window from the
+# expanded body, where it was previously invisible to the alignment check.
+# The model is safe via the declared `RANGE BETWEEN INTERVAL '2 days'
+# PRECEDING` lookback frame and the explicit `HAVING` cap below (see the
+# closed-form proof this file cites), not via partition-alignment — the
+# override below asserts that alternate safety argument explicitly, matching
+# `silver/events_parsed.sql`'s precedent for its own non-aligned window.
+safety_overrides:
+  allow_window_functions: true
 ---
 WITH sessionized AS (
     SELECT
@@ -219,7 +233,7 @@ COMMIT
                   ELSE MIN(event_ts) OVER (PARTITION BY device_id, CAST(event_ts AS DATE))
               END AS session_start_ts
           FROM _deadlined
-      )) AS __smelt_t2529)
+      )) AS __smelt_t3452)
       SELECT
           CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_start_ts AS VARCHAR)) AS session_id,
           device_id,
@@ -310,7 +324,7 @@ COMMIT
                   ELSE MIN(event_ts) OVER (PARTITION BY device_id, CAST(event_ts AS DATE))
               END AS session_start_ts
           FROM _deadlined
-      )) AS __smelt_t2529)
+      )) AS __smelt_t3452)
       SELECT
           CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_start_ts AS VARCHAR)) AS session_id,
           device_id,

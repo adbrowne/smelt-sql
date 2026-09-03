@@ -85,6 +85,17 @@ For the `timeseries:` fields (`event_time_column`, `partition_column`, `granular
 - **`quarter`** -- One partition per calendar quarter.
 - **`year`** -- One partition per calendar year.
 
+### Renaming `partition_column`
+
+Once a partition-grain model's table has been deployed, changing `timeseries.partition_column`
+is refused: `smelt run` (and `smelt build`) reports `MaintenancePartitionColumnChanged`, naming
+the recorded and the current column. This refusal fires even for a rename that repoints the
+address at a column your query already projects — a column-set diff alone can't see it, but the
+partition address is still a world fact that changed. No run flag bypasses it (the analyzer gate
+refuses on any Error-severity diagnostic unconditionally). To accept the rename, delete the
+model's recorded snapshot at `.smelt/targets/<target>/schemas/<model>.json` and re-run — the
+next run addresses the table under the new column and records a fresh snapshot.
+
 ## Running incremental models
 
 ### Explicit time range
@@ -697,12 +708,12 @@ The partitions a run actually writes — the **output window** — are not alway
 
 The output window is what the `DELETE` and the output clamp both key off; every written partition's **scan** is sized from the output window's own reach (plus any further lookback the model's SQL declares), never from the narrower run window. Backfill chunking still applies to the derived output window exactly as it does to a plain run window — a wide skew or lookback is split into several bounded sequential updates rather than one large one.
 
-## Backbuilding
+## Rebuilding
 
-Backbuilding rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
+`smelt rebuild` rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
 
 ```bash
-smelt backbuild +daily_revenue --start 2025-01-01 --end 2025-02-01
+smelt rebuild +daily_revenue --start 2025-01-01 --end 2025-02-01
 ```
 
 The `+` prefix means "include upstream dependencies." smelt will:
@@ -711,9 +722,9 @@ The `+` prefix means "include upstream dependencies." smelt will:
 2. Process each upstream model for the specified time range, in topological order.
 3. Process the target model last.
 
-Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
+Rebuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
-Backbuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
+Rebuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
 
 ## Incremental strategies
 
@@ -770,7 +781,7 @@ Once the cell is admitted (and the target table already exists), a plain `smelt 
 
 Declaring the dimension's [referential integrity](sources.md#declaring-referential-integrity) narrows the enrichment `MERGE`'s recompute further, down to a point lookup: renaming exactly one user out of a million-row dimension only ever needs to touch the fact rows for that one user, not the fact table's whole event-time window. smelt derives this from two facts together — the enrichment join provably preserves every driving row (licensed by a `LEFT JOIN`, or by a declared `referential_integrity:` on an inner join), and the dimension's own current-vs-previously-seen content diff names exactly which key(s) changed. `smelt explain` reports the row-preservation verdict for the join; the count-preservation check the declaration is paired with re-verifies it against every touched region on each run, and fails the run loudly rather than silently trusting a declaration a data change has since made false.
 
-That content diff is the **fingerprint sidecar**: for a `mutation_profile: mutable_snapshot` source with no native change feed, smelt maintains a per-row content digest alongside the table it reads, and diffs each run's current digests against the previous run's to synthesize exactly which keys changed — the same "which key(s) changed" a real change-data-capture feed would hand you, derived instead of declared. You never configure it directly; it's a byproduct of the mutable-dimension declaration above, refreshed transactionally alongside the write it rides with. If its stored identity stamp ever mismatches what a fresh computation expects — the enrichment projection changed, or the model that consumes it was redefined — that partition's diff degrades to the same whole-table delta an absent sidecar would produce, logged loudly rather than silently trusted.
+That content diff is the **fingerprint sidecar**: for a `mutation_profile: mutable_snapshot` source with no native change feed, smelt maintains a per-row content digest alongside the table it reads, and diffs each run's current digests against the previous run's to synthesize exactly which keys changed — the same "which key(s) changed" a real change-data-capture feed would hand you, derived instead of declared. You never configure it directly; it's a byproduct of the mutable-dimension declaration above, refreshed transactionally alongside the write it rides with. If its stored identity stamp ever mismatches what a fresh computation expects — the enrichment projection changed, or the model that consumes it was redefined — that partition's diff degrades to the same whole-table delta an absent sidecar would produce, logged loudly rather than silently trusted. The same sidecar diff also narrows a region `DELETE`+`INSERT` recompute (in place of the column-scoped `MERGE` above, when that technique isn't available) to just the changed dimension rows — DuckDB-only today (`BackendCapabilities::supports_fingerprint_sidecar`); a Spark or BigQuery target keeps the widened-scan recompute for that cell.
 
 ### The reconciliation ledger
 
@@ -798,6 +809,8 @@ cell routes through the reconciliation ledger via the `ledger_catch_up` flag on 
 
 - Use `grain: partition` when the answer to "what did this partition produce?" is well-defined and stable.
 - Use `grain: key` when the answer is "what's the running total per key?".
+
+A `grain: key` model's identity comes from a top-level `unique_key:` or, absent that, its own `GROUP BY` columns — declaring `grain: key` with neither (no `unique_key:` and no `GROUP BY` in the model's SQL) is a hard error naming the asserted grain and the empty derived key, checked at frontmatter time (no run required).
 
 See the [materializations guide](materializations.md#grain-partition-vs-grain-key) for a side-by-side comparison.
 
@@ -885,6 +898,12 @@ Chain a few of these stages together and the payoff compounds: a stable upstream
 `smelt explain <model>` surfaces both halves directly. Each `ColumnScopedMerge` cell — the only technique family recording is wired for today; `KeyedFold` and the staged-candidate write family do not record yet, so their cells print no such line at all — prints an `observed-delta recording:` line. That line reads `yes` only when the cell's matched arm actually suppresses (the same two proofs above: a proven per-row identity, `region key: Key(...)`, over columns all proven comparable across runs); a `WholeRow`-identity cell, or one with an incomparable compared column, prints `no` — there's nothing to record when the write always rewrites every matched row unconditionally. A composed model's `Key temporal locality:` block prints an `observed-delta projection:` line alongside its route and settle bound: `exact (key-embedded)` / `exact (key-determined)` for routes 1–2, `` widened by `r` + margins `` for route 3. A bare keyed model (no established locality) prints no projection line at all — there's no partition axis to project onto.
 
 Recording and projection are both static facts about the derived plan — `smelt explain` never opens a backend connection, so it reports what a cell's technique *would* record and how its route *would* project, not what a specific past run actually recorded. Reading the live recorded delta for a specific run is `smelt run --since-upstream`'s job, not `explain`'s.
+
+**What a recorded delta narrows.** `smelt run --since-upstream --source <model-address> --landed <a>..<b>` reads the recorded delta for that exact `(model, window)` before propagating: absent, it falls back to the declared `--landed` window unchanged; present-and-empty, it propagates nothing downstream; present-and-non-empty, it narrows to the recorded partitions (projected per the routes above). This read is DuckDB-scoped today, matching the write side — a non-DuckDB target reads back "absent" and falls back rather than erroring. `smelt build <model> --period <a>..<b> --include-upstreams` (backward resolution) never consults a recorded delta at all — it answers "what must exist over this period", a question a change record can't soundly narrow.
+
+**Which writes record a delta.** Three write families record their observed output delta in the same backend transaction as the write: the column-scoped conditional `MERGE`, the change-suppressed keyed fold, and the staged-candidate conditional recompute (whose recorded delta also includes any departed key — present before the run, absent from the candidate set). An unconditional write of any family never records one — the record is a byproduct of a conditional write's own change detection, never derived after the fact. A non-DuckDB backend refuses fail-loud on a write that would otherwise record a delta, rather than silently writing without recording one.
+
+**Settled vs. unsettled empty.** A present-and-empty recorded delta composes with the model's own derived settle bound (the key temporal locality section above): once the delta's window has passed the settle bound, no later-arriving row can still touch it, so the dirty-set report names it a **settled no-op** rather than merely empty-this-run. This is a reporting distinction only — both cases already propagate zero dirt; the settle bound never prunes further work beyond what an empty delta already prunes.
 
 ## Repairing only the affected groups
 

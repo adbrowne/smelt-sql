@@ -1,7 +1,7 @@
 # Outcome: Close the key grain's implementation-only residues
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** blocked
 **Source:** `docs/specs/incremental_shapes.md` §"The key grain" §Known Divergences;
 `docs/outcomes/20260815-definition-delta-migrate/outcome.md` §"Out of scope"
 **Spec anchors:** `docs/specs/incremental_shapes.md`, `docs/specs/incremental_models.md`
@@ -57,19 +57,226 @@ conservative v1, self-referential keyed models, and run-pinning alignment for `N
 in keyed models (today a deliberate hard refusal, `KeyedForbidsNondeterministic` — relaxing it
 changes stated behaviour, not just fills a gap).
 
+Also out of scope, discovered by phase 1: `repair::admit_per_group_recompute` passes an empty
+`JoinContext` and never projects a join's own `ON` columns, so per-group repair can never admit
+for a source reached only through a JOIN. It is a real limitation, but it belongs to the repair
+family's admission width (`docs/outcomes/20260809-repair-family`), not to any of this outcome's
+six success criteria — criterion 1 is already met end-to-end without it.
+
 ## Phases
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | pending |
-| 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | pending |
-| 3 | Transactional ledger fold on every shipped backend | pending |
-| 4 | Derive and print execution postures (order-independence) in `smelt explain` | pending |
-| 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | pending |
-| 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
+| 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
+| 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
+| 3 | Transactional ledger fold on every shipped backend | blocked |
+| 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
+| 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
+| 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | done |
+| 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | done |
+| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | done |
 
 ## Decision log
+
+- 2026-09-04 — Phase 8 (validate + close out) done: `/smelt:validate incremental_shapes` found
+  no drift attributable to phases 1/2/4/5/7 (spec §References gained the code/test entries those
+  phases introduced; §Known Divergences already reflected each phase's landed state; no
+  timeless-oracle leakage). All standing gates green. Every phase row is now `done` except row 3
+  (`blocked`), which is pending the human decision recorded in §Blocked's 2026-09-03 entry —
+  outcome Status flipped `active` → `blocked` since no further row is workable without that
+  decision. Criterion 3 stays the one open success criterion.
+- 2026-09-03 — Outcome activated. Phase 1 planned with no reshape: no prior phase summary exists
+  in this outcome, and the six phase rows still match the success criteria one-for-one. Phase 1's
+  derivation seam was fixed to the key-grain `NewData` handler's repair-refusal arm in
+  `smelt-logical/src/maintenance/derive.rs` — the only site where both halves of
+  `KeyedRetractableContribution`'s stated firing condition (a retractable enrichment-join
+  contribution; a repair family that cannot admit a per-group recompute) are already computed, so
+  no new admission rule is invented.
+- 2026-09-03 — Phase 1 implemented and closed out (all green:
+  `.claude/scripts/verify-phase.sh`, `repair_wiring`, `maintenance_diagnostics`,
+  `statement_parity`, `technique_lowering`, `maintenance_conformance`, `join_shape` unit tests).
+  Discovered (not fixed, out of scope for this phase): `repair::admit_per_group_recompute` always
+  passes an empty `JoinContext` to affected-key discovery and never projects a join's own `ON`
+  columns, so per-group repair can never admit for a source reached only through a JOIN — flagged
+  for the next planner as a candidate follow-up phase.
+
+- 2026-09-03 — Phase 2 planned. No reshape of the remaining rows: phase 1's summary surfaced one
+  new limitation (empty `JoinContext` in per-group repair admission), which serves none of the
+  six success criteria and is recorded under "## Out of scope" pointing at the repair-family
+  outcome. Phase 2's design was fixed to generalising the existing
+  `execute_conditional_write_and_record_observed_delta` backend seam into
+  `execute_write_with_bookkeeping` (one transactional implementation) rather than adding a
+  parallel ledger-write method, and to writing the bookkeeping record with **no** `state.mode`
+  gate — `state.md` §"`state.mode` and what each posture provides" already places correctness
+  structures in every posture.
+
+- 2026-09-03 — Phase 2 implemented and closed out (all green: `verify-phase.sh`,
+  `keyed_frontier_bookkeeping`, `statement_parity`, `execute_parity`, `maintenance_conformance`,
+  `smelt-backend-duckdb`, `smelt-state`). Generalised
+  `execute_conditional_write_and_record_observed_delta` into `Backend::execute_write_with_bookkeeping`
+  as planned, and the `Grade::Idempotent` arm now writes an `ON CONFLICT DO NOTHING` merge-ledger
+  record for every step (including the table-creating first one), keyed identically to the `Additive`
+  arm. A pre-existing unit test (`sequences_create_then_merge_across_partitions_in_temporal_order`)
+  needed its call-count assertions updated — an intentional consequence of this phase, not a
+  regression. No new limitations discovered.
+
+- 2026-09-03 — Phase 3 blocked at planning, not implemented. Criterion 3 as worded presumes a
+  Spark/BigQuery ledger substrate, but `docs/research/20260816-open-questions-triage.md` item 12
+  records an explicit user decision to defer exactly that ("yes - let's put this future
+  extensions"), and `incremental_models.md` §Known Divergences cites that record as the reason the
+  Spark-dialect ledger builder is *deliberately* deferred. The alternative reading — implement
+  `state.md` §"The degradation contract" instead — is a real, unowned feature (availability
+  resolution does not exist at all; `state.md` §Known Divergences says so). Either way the choice
+  is a product call this outcome cannot make. Rows 4-6 are unaffected and stay workable; criterion
+  3 will be unmet at row 6 unless this is resolved first. Full entry under "- 2026-09-04 — Phase 6 planned, with a reshape adding two rows before close-out. (a) Phase 5's
+  summary reported that `cargo check -p smelt-cli --tests --features smelt-cli/spark` (and the
+  BigQuery twin) fail to compile on a pre-existing stale call in
+  `smelt-maintenance-testkit/src/families/gate_composed.rs` — the whole `families/` module is
+  `#![cfg(any(feature = "spark", feature = "bigquery"))]`, so no default-feature build ever
+  compiles it and the call site rotted silently when `run_windowed_keyed_maintenance` gained its
+  `write_pin` parameter. That is squarely criterion 6 ("all standing gates green"): a gate that
+  cannot compile is not green, and no later phase of this outcome can honestly verify itself under
+  those features. It becomes row 6, and its scope includes a per-PR compile guard so the same rot
+  cannot recur silently. (b) Phase 3's blocked entry names a "minimum fix regardless of option" —
+  the silent `tracing::warn` skip phase 2 left in the `Grade::Idempotent` arm on non-DuckDB
+  backends — which is residue this outcome itself created and conflicts with CLAUDE.md
+  §"Fail-loud discipline"; it needs no part of phase 3's deferred product decision, so it becomes
+  row 7 rather than being deferred out. Close-out moves to row 8. Nothing left the outcome.
+
+## Blocked".
+
+- 2026-09-03 — Phase 4 planned. No reshape: phase 2's summary surfaced no new work, phase 3's
+  blocked entry already records its own decision, and rows 4-6 still map one-for-one onto criteria
+  4, 5 and 6. Phase 4's design was fixed to a single pure derivation in `smelt-logical`
+  (`rules::cumulative::execution_postures` over `&[AggregatorColumn]`, beside `state_column_summary`)
+  that the runtime's existing `ledger_grade` then *delegates* to — the re-run-tolerance verdict
+  exists today only inside `smelt-runtime`, so deriving it there again would violate
+  maintenance-plan purity. One spec clarification is decided here rather than deferred: §"Derived
+  execution postures"'s qualifying enumeration omits the additive fold, but its own formal rule
+  ("holds iff every combiner is order-independent") plus its admission of decomposed fold (whose
+  state columns are additive) already decide that `+`/`XOR` are order-independent; the enumeration
+  is a partial gloss and is made explicit. Criterion 4's "not assumed sequential by default" is read
+  as the *verdict* being derived and printed — actually applying windows out of order stays an
+  unused optimisation and is retained honestly in §Known Divergences.
+
+- 2026-09-03 — Phase 4 implemented and closed out (all green: `verify-phase.sh`,
+  `execution_postures`/`keyed_families` (46), `smelt-runtime --lib cumulative` (25),
+  `explain_maintenance`/`explain_model`/`cli_docs_coverage`, `maintenance_conformance` (74),
+  `smelt-lsp --test example_workspaces` (35)). `execution_postures` derived once in
+  `smelt-logical`; `WindowedKeyedRule::ledger_grade` now delegates to it. `smelt explain` prints
+  an `Execution postures:` block (text and `--json`). The tutorial doc-sync gate required one
+  regeneration (`deduplication.md` picked up the new block) — expected, not a regression. No new
+  limitations discovered.
+
+- 2026-09-04 — Phase 5 planned. No reshape: phase 4's summary explicitly reports no new
+  limitations and states rows 5-6 are unaffected; rows 5 and 6 still map onto criteria 5 and 6.
+  Two scoping decisions fixed here. (a) The nullable payload lands as a TYPE change on `GenRow`
+  (`val: Option<i64>`) threaded through every testkit and gate site, but `arb_payload_value()` —
+  the general append-only pool's draw — keeps producing non-NULL values: criterion 5 names the
+  once-write NULL direction, and drawing NULLs across every combiner family would change what the
+  additive/idempotent/decomposed families are asserting, which is hardening beyond this outcome
+  rather than work its criteria require. (b) The proof moves into a dedicated world-fact-preserving
+  generator (`arb_once_write_null_schedule`) driven through the existing `STracker` oracle, and the
+  hand-written case is retained as a pinned minimal witness with its now-false "GenRow::val is
+  non-nullable" rationale rewritten.
+
+- 2026-09-04 — Phase 5 implemented and closed out (all green: `verify-phase.sh`,
+  `smelt-maintenance-testkit` (56), `smelt-cli --test maintenance_conformance` (75),
+  `cargo check -p smelt-cli --tests` clean). `GenRow::val` is now `Option<i64>`, threaded through
+  every construction/read site plus a new `arb_once_write_null_schedule` generator and four new
+  tests. `incremental_shapes.md`'s "generative conformance pool cannot stage NULL payloads" bullet
+  is deleted. Discovered (not fixed, out of scope for this phase): `cargo check -p smelt-cli --tests
+  --features smelt-cli/spark` (and the BigQuery twin) fail to compile on a PRE-EXISTING, unrelated
+  bug in `smelt-maintenance-testkit/src/families/gate_composed.rs`'s call to
+  `run_windowed_keyed_maintenance` (arg-count/closure-type mismatch against the function's current
+  signature) — confirmed pre-existing by re-running the same check against the base commit with
+  this phase's changes stashed out (identical errors, none about `GenRow`/`Option`/`val`). Flagged
+  for the next planner as a candidate short follow-up phase; it blocks that specific gated-twin
+  compile check for any change until fixed.
+
+- 2026-09-04 — Phase 6 implemented and closed out (all green: `verify-phase.sh`,
+  `smelt-maintenance-testkit --features spark` (69), `smelt-cli --test maintenance_conformance`
+  (75, unchanged), `cargo check -p smelt-maintenance-testkit --features spark,bigquery
+  --all-targets` clean, `cargo check -p smelt-cli --tests --features smelt-cli/spark` and the
+  `bigquery` twin clean). The single missing `write_pin: None` argument at
+  `gate_composed.rs:343` was the root cause of all 5 reported errors; no further rot was found.
+  Added a per-PR "Gated conformance twin compile check" step to the `Lint` job in
+  `.github/workflows/test.yml`. No new limitations discovered.
+
+- 2026-09-04 — Phase 7 planned. No reshape: phase 6's summary reports no new limitations and rows
+  7-8 still map onto the residue named in phase 3's blocked entry plus close-out. Phase 7's design
+  was fixed to a defaulted `RunReporter::state_structure_unavailable` event carried on the
+  `RetryPolicy` the driver already receives (reporter, run id and model name are all in scope), so
+  no call site of `run_windowed_keyed_maintenance` gains a parameter — deliberately avoiding the
+  arg-drift that caused phase 6's rot — with the buffered `ReporterEvent` twin added so a
+  `--jobs > 1` run does not lose the fact. Scope is explicitly the *visibility* of the skip only:
+  the skip itself stays a skip, because deciding otherwise is phase 3's blocked product call.
+
+- 2026-09-04 — Phase 7 implemented and closed out (all green: `verify-phase.sh`,
+  `smelt-runtime --lib maintenance_driver` (28), `keyed_frontier_bookkeeping`/`statement_parity`/
+  `execute_parity` (33), `smelt-cli --test maintenance_conformance` (75), `cargo check -p
+  smelt-maintenance-testkit --features spark,bigquery --all-targets` clean). The non-DuckDB
+  `Grade::Idempotent` skip now calls `RunReporter::state_structure_unavailable` (new defaulted
+  trait method, buffered/replayed through `EventSink` for `--jobs > 1`, surfaced by `CliReporter`
+  as a `tracing::warn!`) instead of a bare `tracing::warn!` with no reporter involvement; the run
+  still succeeds. `smelt-ui`'s `BroadcastReporter` intentionally gets no override (it doesn't
+  forward events verbatim). No new limitations discovered.
+
+- 2026-09-04 — Phase 8 planned. No reshape: phase 7's summary reports nothing new discovered and
+  names row 8 as next, and rows 1-7 are all `done` or `blocked`, so the remaining table is a single
+  close-out row that already maps onto criterion 6. Phase 8's scope was fixed to *validation plus
+  outcome-attributable fixes only*: drift the report surfaces that belongs to another outcome is
+  reported with its owner rather than fixed here, since fixing it would widen this outcome past its
+  six criteria. Criterion 3 is deliberately left unmet — phase 3's Blocked entry records a human
+  decision among three candidate options — and phase 8's summary states that per-criterion verdict
+  explicitly so the close-out step can judge the Success criteria on evidence.
 
 ## Blocked
 
 <!-- Dated entries: phase, reason, candidate options. -->
+
+- 2026-09-03 — **Phase 3, "Transactional ledger fold on every shipped backend".**
+
+  **Decision needed:** what "transactional on every shipped backend" means for the merge ledger,
+  given that a recorded user decision already rules out the reading criterion 3 assumes.
+
+  **Why the outcome cannot answer it.** The outcome frames criterion 3 as a pure conformance gap
+  ("the DuckDB-only override is the gap, not the target"), inferred from
+  `incremental_shapes.md` §"The transactional frontier write (merge ledger)"'s phrase
+  "backend-resident and transactional with the write it describes". But
+  `docs/research/20260816-open-questions-triage.md` item 12 asks this exact question ("A
+  transactional ledger for Spark") and records the decision "yes - let's put this future
+  extensions"; `incremental_models.md` §Known Divergences ("The ledger's warehouse substrate is
+  DuckDB-only") cites that record and states the deferral is deliberate, with the recorded
+  `MaintenanceStateDowngraded` downgrade — not a Spark builder — as the intended behaviour. A
+  recorded user decision outranks an outcome's inference, so building the Spark/BigQuery ledger
+  would knowingly contradict it.
+
+  **Additional engineering fact.** Spark/Delta has no cross-statement transaction and no enforced
+  `PRIMARY KEY`, so the additive grade's never-fold-twice guarantee (an `INSERT` that violates a
+  primary key inside the same transaction as the write) has no faithful Spark realisation at all.
+  Criterion 3's literal form is not merely deferred there; it is unachievable without inventing a
+  different mechanism — itself a new product decision.
+
+  **Candidate options (for a human):**
+  1. **Amend criterion 3** to the already-decided target: on a ledger-less backend the cell takes
+     the specified, recorded, explain-visible downgrade, and "transactional" binds only where the
+     fold actually happens. Then phase 3 becomes "ledger-structure availability resolution":
+     a `merge_ledger` availability bit threaded like the existing `BackendWriteCapabilities`
+     precedent (`smelt-logical/src/maintenance/mod.rs`), a downgrade recorded as pure plan data,
+     a warning-level `MaintenanceStateDowngraded` diagnostic, and removal of the driver's
+     `Grade::Additive` `bail!` and `Grade::Idempotent` silent `tracing::warn` skip
+     (`smelt-runtime/src/maintenance_driver.rs`). Note this is a sizeable slice of `state.md`
+     §"The degradation contract", which today has no implementation and no owning outcome —
+     it may deserve its own outcome rather than a row here.
+  2. **Reverse triage item 12** and build the Spark (and BigQuery) ledger builders plus their
+     folds, accepting that Spark's fold cannot be transactional and that the additive grade must
+     therefore stay refused there — i.e. only the re-run-tolerant grade actually lands.
+  3. **Drop criterion 3 from this outcome** and record it under "## Out of scope" pointing at
+     triage item 12's future-extensions decision, leaving criteria 1, 2, 4, 5 as the outcome's
+     content.
+
+  **Minimum fix regardless of option:** phase 2 left a silent `tracing::warn` skip in the
+  `Grade::Idempotent` arm on non-DuckDB backends. Whatever is decided, a silent skip of a
+  correctness structure conflicts with `CLAUDE.md` §"Fail-loud discipline" and should become a
+  recorded, visible fact.

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use smelt_backend::{Backend, SqlDialect};
 use smelt_core::config::TableFormat;
-use smelt_core::metadata::ModelMetadata;
+use smelt_core::metadata::{ModelMetadata, SchemaEvolutionStrategy};
 use smelt_dialect::BackendCapabilities;
 use smelt_logical::maintenance::emit::{MaintenanceStatement, StatementGroup};
 use smelt_state::ddl_spark::SparkTableFormat;
@@ -161,6 +161,71 @@ pub fn columns_from_inferred(columns: &[(String, Option<String>, bool)]) -> Vec<
         .collect()
 }
 
+/// Whether a `schema_evolution: strategy: full_refresh` model must rebuild
+/// under its new definition this run.
+///
+/// A model that opts out of `ALTER`-based evolution has no migration path of
+/// its own; per `docs/specs/definition_deltas.md` §"The atomicity rule", it
+/// rebuilds instead of falling through to a non-atomic standalone backfill.
+/// Only relevant when the deployed and inferred schemas actually diverge —
+/// an unchanged model still runs incrementally.
+pub fn full_refresh_escape_requires_rebuild(
+    strategy: Option<&SchemaEvolutionStrategy>,
+    deployed: &[DeployedColumn],
+    inferred: &[DeployedColumn],
+) -> bool {
+    if !matches!(strategy, Some(SchemaEvolutionStrategy::FullRefresh)) {
+        return false;
+    }
+    !diff_schemas(deployed, inferred).is_empty()
+}
+
+/// Extract the column name a single-column `ADD COLUMN <name> ...` statement
+/// targets, or `None` for anything else (a multi-column `ADD COLUMNS (...)`
+/// form, a nested dot-path `ADD COLUMN parent.child ...`, or a non-`ADD
+/// COLUMN` statement such as the backfill `UPDATE`).
+fn single_add_column_name(statement: &str) -> Option<String> {
+    let upper = statement.to_uppercase();
+    let idx = upper.find("ADD COLUMN")?;
+    // Reject the plural "ADD COLUMNS (...)" multi-column form — not safe to
+    // reconcile column-by-column here.
+    if upper[idx..].starts_with("ADD COLUMNS") {
+        return None;
+    }
+    let rest = statement[idx + "ADD COLUMN".len()..].trim_start();
+    let token = rest.split_whitespace().next()?;
+    let name = token.trim_matches(|c| c == '"' || c == '`');
+    if name.contains('.') {
+        // A nested dot-path targets a sub-field of an already-present
+        // top-level column — never reconcile it away by the parent's name.
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Reconcile a migration group's derived statements against the target's
+/// *physical* columns, dropping an `ADD COLUMN` whose column is already
+/// present while keeping its backfill `UPDATE`.
+///
+/// Repairs a partially-applied migration on a backend without transactional
+/// DDL: the `ADD COLUMN` committed, the group's own backfill statement (or a
+/// later one) failed, and a naive retry would re-emit the same `ADD COLUMN`
+/// against a column that now already exists. Identity fn on the ordinary
+/// (nothing partially applied) path — see
+/// `docs/specs/definition_deltas.md` §"The atomicity rule".
+pub fn reconcile_add_columns(statements: &[String], physical_columns: &[String]) -> Vec<String> {
+    statements
+        .iter()
+        .filter(|stmt| match single_add_column_name(stmt) {
+            Some(name) => !physical_columns
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&name)),
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
 /// Check for schema evolution and apply migrations if needed.
 ///
 /// `ddl_backend` selects the DDL generator (DuckDB vs Spark+Delta/Parquet).
@@ -247,6 +312,38 @@ pub async fn check_and_migrate(
                 });
             }
 
+            // Reconcile the derived statements against the target's
+            // physical columns before executing — repairs a migration
+            // group that partially applied on a backend without
+            // transactional DDL (docs/specs/definition_deltas.md §"The
+            // atomicity rule"). `information_schema.columns` is read rather
+            // than a `SELECT * ... LIMIT 0` projection because a zero-row
+            // result set legitimately produces zero Arrow record batches
+            // (no batch means no schema to read), while an
+            // `information_schema` row exists per column regardless of the
+            // table's own row count.
+            let probe_sql = format!(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_schema = '{schema}' AND table_name = '{model_name}'"
+            );
+            let probe_batches = backend
+                .execute_sql(&probe_sql)
+                .await
+                .with_context(|| format!("Failed to read physical schema for {model_name}"))?;
+            let mut physical_columns: Vec<String> = Vec::new();
+            for batch in &probe_batches {
+                use arrow::array::Array;
+                let strings = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .with_context(|| {
+                        format!("information_schema.columns probe for {model_name} returned a non-string column_name")
+                    })?;
+                physical_columns.extend((0..strings.len()).map(|i| strings.value(i).to_string()));
+            }
+            let statements = reconcile_add_columns(&statements, &physical_columns);
+
             // Execute ALTER TABLE statements
             let use_transaction = backend.capabilities().supports_transactional_ddl;
 
@@ -287,6 +384,8 @@ pub async fn check_and_migrate(
                 version: deployed_schema.version + 1,
                 deployed_at: Utc::now(),
                 model_hash,
+                model_sql: Some(model_sql.to_string()),
+                partition_column: deployed_schema.partition_column.clone(),
                 columns: inferred_columns.to_vec(),
             };
             file_store
@@ -344,6 +443,7 @@ pub fn save_deployed_schema(
     model_sql: &str,
     columns: &[DeployedColumn],
     existing_version: Option<u32>,
+    partition_column: Option<&str>,
 ) -> Result<()> {
     let model_hash = compute_model_hash(model_sql);
     let schema = DeployedSchema {
@@ -351,6 +451,8 @@ pub fn save_deployed_schema(
         version: existing_version.map_or(1, |v| v + 1),
         deployed_at: Utc::now(),
         model_hash,
+        model_sql: Some(model_sql.to_string()),
+        partition_column: partition_column.map(str::to_string),
         columns: columns.to_vec(),
     };
     file_store
@@ -363,6 +465,73 @@ mod tests {
     use super::*;
     use smelt_state::ddl_spark::SparkTableFormat;
     use smelt_state::schema_tracking::DdlBackend;
+
+    #[test]
+    fn reconcile_add_columns_skips_physically_present_column() {
+        let statements = vec![
+            "ALTER TABLE main.t ADD COLUMN val_doubled BIGINT".to_string(),
+            "UPDATE main.t SET val_doubled = val * 2".to_string(),
+        ];
+        let physical_columns = vec![
+            "event_date".to_string(),
+            "val".to_string(),
+            "val_doubled".to_string(),
+        ];
+        let reconciled = reconcile_add_columns(&statements, &physical_columns);
+        assert_eq!(
+            reconciled,
+            vec!["UPDATE main.t SET val_doubled = val * 2".to_string()],
+            "the ADD COLUMN for an already-present column must be dropped, the backfill kept"
+        );
+    }
+
+    #[test]
+    fn reconcile_add_columns_is_identity_when_nothing_present() {
+        let statements = vec![
+            "ALTER TABLE main.t ADD COLUMN val_doubled BIGINT".to_string(),
+            "UPDATE main.t SET val_doubled = val * 2".to_string(),
+        ];
+        let physical_columns = vec!["event_date".to_string(), "val".to_string()];
+        let reconciled = reconcile_add_columns(&statements, &physical_columns);
+        assert_eq!(reconciled, statements);
+    }
+
+    #[test]
+    fn full_refresh_escape_forces_rebuild_only_when_schema_changed() {
+        let deployed = vec![DeployedColumn {
+            name: "val".to_string(),
+            data_type: "BIGINT".to_string(),
+            nullable: false,
+        }];
+        let inferred_unchanged = deployed.clone();
+        assert!(!full_refresh_escape_requires_rebuild(
+            Some(&SchemaEvolutionStrategy::FullRefresh),
+            &deployed,
+            &inferred_unchanged,
+        ));
+
+        let inferred_changed = vec![
+            deployed[0].clone(),
+            DeployedColumn {
+                name: "val_doubled".to_string(),
+                data_type: "BIGINT".to_string(),
+                nullable: true,
+            },
+        ];
+        assert!(full_refresh_escape_requires_rebuild(
+            Some(&SchemaEvolutionStrategy::FullRefresh),
+            &deployed,
+            &inferred_changed,
+        ));
+
+        // A non-`FullRefresh` strategy never triggers this escape, even
+        // with a schema change.
+        assert!(!full_refresh_escape_requires_rebuild(
+            None,
+            &deployed,
+            &inferred_changed,
+        ));
+    }
 
     #[test]
     fn test_ddl_backend_duckdb() {
@@ -449,5 +618,32 @@ mod tests {
             }
             _ => panic!("Expected Spark backend"),
         }
+    }
+
+    #[test]
+    fn save_deployed_schema_records_the_definition_sql() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_store = FileStore::new(dir.path(), "dev");
+        let sql = "SELECT id, amount - discount AS net_amount FROM orders";
+
+        save_deployed_schema(
+            &file_store,
+            "net_orders",
+            sql,
+            &[DeployedColumn {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+            }],
+            None,
+            None,
+        )
+        .expect("save_deployed_schema");
+
+        let loaded = file_store
+            .load_schema("net_orders")
+            .expect("load_schema")
+            .expect("schema present");
+        assert_eq!(loaded.model_sql, Some(sql.to_string()));
     }
 }

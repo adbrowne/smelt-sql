@@ -26,7 +26,7 @@ use crate::rules::incremental::trace_union_branches;
 use crate::types::PartitionGrainConfig;
 
 // ── Parser imports for event-time injectability check ──────────────────────
-use smelt_parser::{parse, File};
+use smelt_parser::{parse, Cte, File};
 
 /// Severity of a planner-rule diagnostic. `smelt-db` maps this onto its own
 /// `DiagnosticSeverity`. Only `Error` blocks the build (Diagnostic parity
@@ -322,10 +322,132 @@ fn check_event_time_injectable(
                     });
                 }
             }
+        } else if let Some(diag) =
+            check_cte_from_injectable(&stmt, from_clause, event_time_column, model_name)
+        {
+            return Some(diag);
         }
     }
 
     None
+}
+
+/// Case 3 of [`check_event_time_injectable`]: the FROM clause names a CTE
+/// (rather than a bare parenthesized subquery) that does not project
+/// `event_time_column`. Only fires when the outer FROM is a single table
+/// expression naming a CTE declared in the statement's own (non-recursive)
+/// `WITH` clause — a join, an unresolved name, or a `WITH RECURSIVE` all stay
+/// conservative (accepted), since the column may come from elsewhere or the
+/// recursive shape can't be safely walked.
+fn check_cte_from_injectable(
+    stmt: &smelt_parser::SelectStmt,
+    from_clause: smelt_parser::FromClause,
+    event_time_column: &str,
+    model_name: &str,
+) -> Option<RuleDiagnostic> {
+    let with_clause = stmt.with_clause()?;
+    if with_clause.is_recursive() {
+        return None; // conservative: recursive CTEs are not walked
+    }
+    let mut table_refs = from_clause.table_refs();
+    let table_ref = table_refs.next()?;
+    if table_refs.next().is_some() || from_clause.joins().next().is_some() {
+        return None; // conservative: more than one table expression
+    }
+    let ident = table_ref.identifier()?;
+    let cte_map: std::collections::HashMap<String, Cte> = with_clause
+        .ctes()
+        .filter_map(|c| c.name().map(|n| (n.to_lowercase(), c)))
+        .collect();
+    if !cte_map.contains_key(&ident.to_lowercase()) {
+        return None; // conservative: not a CTE reference (or unresolvable)
+    }
+    let col_lower = event_time_column.to_lowercase();
+    let mut visited = BTreeSet::new();
+    if resolve_cte_projects_column(&cte_map, &ident, &col_lower, &mut visited, 0) {
+        return None;
+    }
+    Some(RuleDiagnostic {
+        code: RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect,
+        severity: RuleSeverity::Error,
+        message: format!(
+            "Model '{}': `event_time_column` '{}' is not projected by CTE '{}' named in the \
+             FROM clause — it cannot be filtered at the outer SELECT. Add '{}' to '{}'s SELECT \
+             list.",
+            model_name, event_time_column, ident, event_time_column, ident
+        ),
+    })
+}
+
+/// Returns `true` when `event_time_column` (already lower-cased, `col_lower`)
+/// is projected by the CTE named `name`, or when the answer can't be proven
+/// either way and the conservative (accepting) verdict applies: a wildcard
+/// projection, a set-operation body, an unresolvable/cyclic chained
+/// reference, or the depth cap. `visited` guards against a cycle turning this
+/// into an infinite recursion; the cap is a second, depth-based guard for the
+/// same hazard.
+fn resolve_cte_projects_column(
+    cte_map: &std::collections::HashMap<String, Cte>,
+    name: &str,
+    col_lower: &str,
+    visited: &mut BTreeSet<String>,
+    depth: usize,
+) -> bool {
+    const MAX_CHAIN_DEPTH: usize = 16;
+    let name_lower = name.to_lowercase();
+    if depth > MAX_CHAIN_DEPTH || !visited.insert(name_lower.clone()) {
+        return true; // conservative: depth cap or cycle
+    }
+    let Some(cte) = cte_map.get(&name_lower) else {
+        return true; // conservative: unresolvable name
+    };
+
+    let declared = cte.column_names();
+    if !declared.is_empty() {
+        return declared.iter().any(|c| c.to_lowercase() == col_lower);
+    }
+
+    let Some(body) = cte.query().and_then(|q| q.select_stmt()) else {
+        return true; // conservative: e.g. a VALUES clause
+    };
+    if body.has_set_operation() {
+        return true; // conservative
+    }
+    let Some(select_list) = body.select_list() else {
+        return true; // conservative
+    };
+    for item in select_list.items() {
+        if item.is_wildcard() {
+            return true;
+        }
+        if let Some(colname) = item.column_name() {
+            if colname.to_lowercase() == *col_lower {
+                return true;
+            }
+        }
+    }
+
+    // Not directly projected — follow a chained single-table CTE reference.
+    if let Some(inner_from) = body.from_clause() {
+        let mut inner_refs = inner_from.table_refs();
+        if let Some(inner_ref) = inner_refs.next() {
+            if inner_refs.next().is_none() && inner_from.joins().next().is_none() {
+                if let Some(inner_ident) = inner_ref.identifier() {
+                    if cte_map.contains_key(&inner_ident.to_lowercase()) {
+                        return resolve_cte_projects_column(
+                            cte_map,
+                            &inner_ident,
+                            col_lower,
+                            visited,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Case 1 (UNION ALL) of [`check_event_time_injectable`]: returns
@@ -1109,6 +1231,161 @@ mod tests {
                 .iter()
                 .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
             "must not fire when subquery projects the event_time_column; got: {diags:?}"
+        );
+    }
+
+    /// Shared harness for the CTE-only outer-visibility cases below: builds a
+    /// minimal `RuleContext` around `sql` with `event_time_column` as both the
+    /// event-time and partition column, and returns whatever `detect_builtin_rules`
+    /// produces.
+    fn run_cte_check(sql: &str, event_time_column: &str) -> Vec<RuleDiagnostic> {
+        let refs = collect_path_refs(sql);
+        let ts_cfg = smelt_core::config::TimeseriesConfig {
+            event_time_column: event_time_column.to_string(),
+            partition_column: event_time_column.to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        };
+        let inc_cfg = PartitionGrainConfig {
+            unique_key: vec![event_time_column.to_string()],
+            nondeterministic_columns_retired: (),
+            safety_overrides: Default::default(),
+        };
+        let ts_map: SourceTimeseriesMap = HashMap::new();
+        let ctx = RuleContext {
+            model_name: "cte_case",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&ts_cfg),
+            incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
+        };
+        detect_builtin_rules(&ctx)
+    }
+
+    #[test]
+    fn cte_not_projecting_event_time_is_rejected() {
+        let sql = "WITH recent AS (SELECT user_id, amount FROM smelt.orders) \
+                   SELECT user_id, SUM(amount) AS total FROM recent GROUP BY user_id";
+        let diags = run_cte_check(sql, "event_ts");
+        let hit = diags
+            .iter()
+            .find(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect);
+        assert!(
+            hit.is_some(),
+            "CTE not projecting event_time_column must be rejected; got: {diags:?}"
+        );
+        assert!(
+            hit.unwrap().message.contains("recent"),
+            "message must name the offending CTE: {}",
+            hit.unwrap().message
+        );
+    }
+
+    #[test]
+    fn cte_projecting_event_time_is_accepted() {
+        let sql = "WITH recent AS (SELECT user_id, event_ts, amount FROM smelt.orders) \
+                   SELECT user_id, SUM(amount) AS total FROM recent GROUP BY user_id";
+        let diags = run_cte_check(sql, "event_ts");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "CTE projecting event_time_column must not be rejected; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn cte_wildcard_projection_is_accepted() {
+        let sql = "WITH recent AS (SELECT * FROM smelt.orders) \
+                   SELECT user_id, SUM(amount) AS total FROM recent GROUP BY user_id";
+        let diags = run_cte_check(sql, "event_ts");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "wildcard-projecting CTE must be a conservative accept; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn chained_cte_missing_event_time_is_rejected() {
+        let sql = "WITH a AS (SELECT user_id FROM smelt.orders), \
+                        b AS (SELECT user_id FROM a) \
+                   SELECT user_id FROM b";
+        let diags = run_cte_check(sql, "event_ts");
+        let hit = diags
+            .iter()
+            .find(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect);
+        assert!(
+            hit.is_some(),
+            "chained CTE that never projects event_time_column must be rejected; got: {diags:?}"
+        );
+        assert!(
+            hit.unwrap().message.contains('b'),
+            "message must name the CTE the outer FROM binds ('b'), not the root ('a'): {}",
+            hit.unwrap().message
+        );
+    }
+
+    #[test]
+    fn cte_column_list_alias_is_used_for_projection() {
+        let sql = "WITH recent(user_id, event_ts) AS (SELECT a, b FROM smelt.orders) \
+                   SELECT user_id, event_ts FROM recent";
+        let diags = run_cte_check(sql, "event_ts");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "declared column list, not the body's select list, is the CTE's projection; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn multi_table_from_with_cte_is_not_rejected() {
+        let sql = "WITH recent AS (SELECT user_id FROM smelt.orders) \
+                   SELECT recent.user_id, o.amount FROM recent \
+                   JOIN smelt.orders o ON recent.user_id = o.user_id";
+        let diags = run_cte_check(sql, "event_ts");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "a joined outer FROM must be a conservative accept — the column may come from the \
+             other side; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn recursive_cte_is_not_rejected() {
+        let sql = "WITH RECURSIVE cte AS ( \
+                       SELECT user_id, event_ts FROM smelt.orders \
+                       UNION ALL \
+                       SELECT c.user_id, c.event_ts FROM cte c JOIN smelt.orders o \
+                           ON c.user_id = o.user_id \
+                   ) SELECT user_id FROM cte";
+        let diags = run_cte_check(sql, "event_ts");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "a recursive WITH must be a conservative accept, not walked; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn plain_table_from_is_unaffected() {
+        let sql = "SELECT event_ts, SUM(amount) AS total FROM smelt.orders GROUP BY 1";
+        let diags = run_cte_check(sql, "event_ts");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "a plain table FROM (no CTE) must be unaffected by the CTE case; got: {diags:?}"
         );
     }
 }

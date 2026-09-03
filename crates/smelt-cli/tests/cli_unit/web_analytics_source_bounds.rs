@@ -61,7 +61,7 @@ fn test_explain_json_exposes_bounds() {
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None)
         .expect("build explain output");
 
     // sessions is the canonical incremental model with a timeseries upstream.
@@ -152,7 +152,7 @@ fn test_explain_json_events_parsed_late_window_bound() {
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None)
         .expect("build explain output");
 
     // After LogicalGraph canonical-path rekey (Phase 3), the key is "silver.events_parsed".

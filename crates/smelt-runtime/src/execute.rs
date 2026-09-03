@@ -40,8 +40,8 @@ use crate::compile::CompilerRegistry;
 use crate::reporter::RunReporter;
 use crate::safety::{build_model_graph, check_bound_derivation, check_planner_safety};
 use crate::schema_evolution::{
-    check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
-    SchemaEvolutionResult,
+    check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps,
+    full_refresh_escape_requires_rebuild, infer_deployed_columns, SchemaEvolutionResult,
 };
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{
@@ -50,7 +50,9 @@ use crate::transformer::{
 };
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::windowing::{compute_incremental_windows_ordered, IncrementalBatch};
-use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
+use crate::{
+    build_fn_body_map, expand_function_calls, EphemeralResolver, SqlCompiler, UpstreamSchemas,
+};
 
 /// Plan for one model's execution. Internal to `execute_project` — the
 /// public API is `ExecuteRequest` in / `RunOutcome` out.
@@ -157,6 +159,11 @@ enum ReporterEvent {
         retry_max: u32,
         error: String,
     },
+    StateStructureUnavailable {
+        structure: String,
+        dialect: String,
+        consequence: String,
+    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -237,6 +244,17 @@ impl EventSink {
                     retry_max,
                     error,
                 } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
+                ReporterEvent::StateStructureUnavailable {
+                    structure,
+                    dialect,
+                    consequence,
+                } => reporter.state_structure_unavailable(
+                    run_id,
+                    model,
+                    structure,
+                    dialect,
+                    consequence,
+                ),
             }
         }
     }
@@ -319,6 +337,21 @@ impl RunReporter for EventSink {
             attempt,
             retry_max,
             error: error.to_string(),
+        });
+    }
+
+    fn state_structure_unavailable(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        structure: &str,
+        dialect: &str,
+        consequence: &str,
+    ) {
+        self.push(ReporterEvent::StateStructureUnavailable {
+            structure: structure.to_string(),
+            dialect: dialect.to_string(),
+            consequence: consequence.to_string(),
         });
     }
 }
@@ -571,7 +604,7 @@ pub async fn execute_project(
     // identically to a live run. This mirrors the CLI's original behaviour
     // where `--dry-run` runs through compilation and thus through the planner.
     {
-        let model_graph = build_model_graph(&selected, &graph_lock, &config);
+        let model_graph = build_model_graph(&selected, &graph_lock, &config, &fn_bodies);
         check_planner_safety(&model_graph, request.enforce_safety)?;
         check_bound_derivation(&model_graph, request.enforce_safety)?;
     }
@@ -594,6 +627,19 @@ pub async fn execute_project(
     let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
     let source_key_recurrence = build_source_key_recurrence_map(&source_infos);
 
+    // Each selected model's `partition_column` axis (`docs/specs/timeseries.md`
+    // §"Validation rules" rule 9), resolved from its output schema — reuses
+    // the same `resolved_model_schema` Salsa read `UpstreamSchemas::from_database`
+    // performs, rather than building a second `UpstreamSchemas`. A model
+    // missing from this map (unresolvable type) falls back inside
+    // `build_model_plans` to the axis implied by the run-window literal's
+    // own form.
+    let partition_axes = {
+        let db_guard = db.lock().await;
+        let db_ref: &smelt_db::Database = &db_guard;
+        resolve_partition_axes(db_ref, &selected, &graph_lock, &config)
+    };
+
     let (model_plans, total_batches) = build_model_plans(
         &selected,
         &graph_lock,
@@ -603,6 +649,7 @@ pub async fn execute_project(
         start_date,
         end_date,
         &request,
+        &partition_axes,
     )?;
 
     // ── Dry-run: build PlanSummary, compile models, and return without any backend call ──────
@@ -852,29 +899,39 @@ pub async fn execute_project(
                 let delta_facts_dry = if model_edges_dry.is_empty() {
                     None
                 } else {
-                    model_file.metadata.as_deref().and_then(|metadata| {
-                        let (sources, explicitly_mutable) =
-                            build_maint_source_facts(model_file, &source_infos);
-                        crate::maintenance_driver::resolve_live_delta_restriction_facts(
-                            &clean_sql,
-                            &model_file.db_name_owned(),
-                            metadata,
-                            &sources,
-                            &explicitly_mutable,
-                            &model_edges_dry,
-                        )
-                    })
+                    match model_file.metadata.as_deref() {
+                        Some(metadata) => {
+                            let (sources, explicitly_mutable) =
+                                build_maint_source_facts(model_file, &source_infos);
+                            crate::maintenance_driver::resolve_live_delta_restriction_facts(
+                                &clean_sql,
+                                &model_file.db_name_owned(),
+                                metadata,
+                                &sources,
+                                &explicitly_mutable,
+                                &model_edges_dry,
+                            )
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
+                        None => None,
+                    }
                 };
-                let (restrict_column_dry, skeleton_source_closure_dry) = match delta_facts_dry {
-                    Some(facts) => (facts.restrict_column, facts.skeleton_source_closure),
-                    None => (None, None),
-                };
+                let (restrict_column_dry, skeleton_source_closure_dry, region_write_dry) =
+                    match delta_facts_dry {
+                        Some(facts) => (
+                            facts.restrict_column,
+                            facts.skeleton_source_closure,
+                            Some(facts.region_write),
+                        ),
+                        None => (None, None, None),
+                    };
                 for (batch_idx, batch) in inc.batches.iter().enumerate() {
-                    let start = batch.partition_start.format("%Y-%m-%d").to_string();
-                    let end = batch.partition_end.format("%Y-%m-%d").to_string();
+                    let start = batch.partition_start.to_string();
+                    let end = batch.partition_end.to_string();
                     let run_range = TimeRange {
                         start: start.clone(),
                         end: end.clone(),
+                        axis: batch.partition_start.axis(),
                     };
                     let filtered_sql = derive_batch_filtered_sql(
                         &clean_sql,
@@ -890,10 +947,12 @@ pub async fn execute_project(
                         &filtered_sql,
                         resolver,
                     )?;
-                    let region = smelt_logical::maintenance::emit::Region {
-                        start: format!("'{}'", start.replace('\'', "''")),
-                        end: format!("'{}'", end.replace('\'', "''")),
-                    };
+                    let region = smelt_logical::maintenance::emit::Region::for_axis(
+                        run_range.axis,
+                        &start,
+                        &end,
+                    )
+                    .map_err(anyhow::Error::msg)?;
                     let group = crate::maintenance_driver::build_delete_insert_group_dispatched(
                         &table_name,
                         partition_col,
@@ -902,6 +961,7 @@ pub async fn execute_project(
                         restrict_column_dry.as_deref(),
                         skeleton_source_closure_dry.as_ref(),
                         None,
+                        region_write_dry.as_ref(),
                         dialect,
                     );
                     let chunk = crate::reporter::ChunkInfo {
@@ -1094,10 +1154,22 @@ pub async fn execute_project(
 
     let file_store = FileStore::new(project_dir, &request.target);
 
-    // Models declaring `contract.deferral` at model granularity
-    // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
-    // below to widen the `upstream_map` build condition, since a deferral
-    // skip must also propagate to dependents.
+    // Legacy `sources.yml` — best-effort input to the definition-delta gate's
+    // upstream-facts map (`docs/specs/definition_deltas.md` §"The migration
+    // plan"), same posture as `smelt migrate`'s own load: a missing or
+    // unparseable file just means fewer admitted techniques, never a
+    // hard failure.
+    let legacy_sources_config = smelt_core::sources::SourcesConfig::load(project_dir).ok();
+
+    // Models declaring `contract.deferral` at model granularity, or
+    // `contract.cells[].deferral` at cell granularity — the latter is only
+    // ever validly declared on a plain `Trigger::NewData` fold cell over a
+    // clocked source (`docs/outcomes/20260815-definition-delta-migrate/
+    // phases/14-plan.md`); this set's only job here is widening the
+    // `upstream_map` build condition and the pre-run snapshot loop below,
+    // since a deferral skip (model- or cell-level) must also propagate to
+    // dependents (`docs/specs/incremental_models.md` §"The contract
+    // lattice").
     let deferral_declared: HashSet<String> = model_plans
         .iter()
         .filter(|p| {
@@ -1105,8 +1177,9 @@ pub async fn execute_project(
                 .metadata
                 .as_deref()
                 .and_then(|m| m.contract.as_ref())
-                .and_then(|c| c.deferral.as_ref())
-                .is_some()
+                .is_some_and(|c| {
+                    c.deferral.is_some() || c.cells.iter().any(|c| c.deferral.is_some())
+                })
         })
         .map(|p| p.name.clone())
         .collect();
@@ -1246,21 +1319,45 @@ pub async fn execute_project(
     // to skip on its own declaration; `deferral_pending` is every declaring
     // model's pending window (`None` when nothing is pending), consulted
     // later to prove work subsumption on a covering run.
-    let (deferral_own_skip, deferral_pending): (
+    // Named so the `let` below stays under clippy's `type_complexity` gate —
+    // both maps are per-model cell-address lists, one for the addresses a
+    // `SkipFold` verdict named, one for every declaring address a model
+    // that reached the fold-deferral branch owns (see the field's own doc
+    // comment a few lines down).
+    type PerModelCellAddresses = HashMap<String, Vec<String>>;
+    let (deferral_own_skip, deferral_pending, deferral_skipped_cells, deferral_fold_addresses): (
         HashSet<String>,
         HashMap<String, smelt_logical::contract::deferral::PendingWindow>,
+        PerModelCellAddresses,
+        PerModelCellAddresses,
     ) = if deferral_declared.is_empty() {
-        (HashSet::new(), HashMap::new())
+        (
+            HashSet::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
     } else {
         let interval_store = file_store.load_intervals().unwrap_or_default();
         let landed_deltas = file_store.load_landed_deltas().unwrap_or_default();
         let mut own_skip = HashSet::new();
         let mut pending = HashMap::new();
+        let mut skipped_cells: HashMap<String, Vec<String>> = HashMap::new();
+        // Every declaring `contract.cells[].deferral` address for a model
+        // that reaches the fold-deferral branch below, independent of the
+        // resolved verdict — a fold that actually runs (`Proceed`, or a
+        // later catch-up run past a prior skip) advances ALL of its own
+        // declaring cells' frontiers, since the plain fold's write is
+        // whole-row (`incremental_models.md` §Known Divergences: "its
+        // frontier advances with the rest"). Consulted from the incremental
+        // success path below, not re-derived per model.
+        let mut fold_addresses: HashMap<String, Vec<String>> = HashMap::new();
         for plan in model_plans.iter() {
             if !deferral_declared.contains(&plan.name) {
                 continue;
             }
-            let (source_facts, _) = build_maint_source_facts(&plan.model_file, &source_infos);
+            let (source_facts, explicitly_mutable) =
+                build_maint_source_facts(&plan.model_file, &source_infos);
             let clocked_source_addresses: Vec<String> = source_facts
                 .iter()
                 .filter(|sf| {
@@ -1292,8 +1389,73 @@ pub async fn execute_project(
                     pending.insert(plan.name.clone(), window);
                 }
             }
+
+            // `contract.cells[].deferral` on the plain `Trigger::NewData`
+            // fold — the per-cell counterpart of the model-level decision
+            // above, licensed independently (`docs/outcomes/
+            // 20260815-definition-delta-migrate/phases/14-plan.md`). A model
+            // already licensed to skip at model granularity has nothing more
+            // to resolve here.
+            if own_skip.contains(&plan.name) {
+                continue;
+            }
+            if let Some(metadata) = plan.model_file.metadata.as_deref() {
+                if metadata
+                    .contract
+                    .as_ref()
+                    .is_some_and(|c| c.cells.iter().any(|cell| cell.deferral.is_some()))
+                {
+                    let cell_decisions = crate::contract_probes::deferral_cell_decisions(
+                        &plan.name,
+                        Some(metadata),
+                        &interval_store,
+                        &landed_deltas,
+                    );
+                    let declared_addresses: Vec<String> = metadata
+                        .contract
+                        .as_ref()
+                        .map(|c| {
+                            c.cells
+                                .iter()
+                                .filter(|cell| cell.deferral.is_some())
+                                .map(|cell| {
+                                    smelt_logical::contract::deferral::cell_address(
+                                        &cell.columns,
+                                        &cell.on,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !declared_addresses.is_empty() {
+                        fold_addresses.insert(plan.name.clone(), declared_addresses);
+                    }
+                    let (verdict, addresses) = crate::maintenance_driver::resolve_fold_deferral(
+                        &plan.sql,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &source_facts,
+                        &explicitly_mutable,
+                        &cell_decisions,
+                    );
+                    if let smelt_logical::contract::deferral::FoldDeferralVerdict::SkipFold {
+                        ..
+                    } = verdict
+                    {
+                        tracing::info!(
+                            "Deferring model '{}''s plain incremental fold — every column \
+                             group is covered by a skip-licensed contract.cells[].deferral \
+                             declaration ({:?})",
+                            plan.name,
+                            addresses
+                        );
+                        own_skip.insert(plan.name.clone());
+                        skipped_cells.insert(plan.name.clone(), addresses);
+                    }
+                }
+            }
         }
-        (own_skip, pending)
+        (own_skip, pending, skipped_cells, fold_addresses)
     };
 
     // A deferral skip propagates to dependents (`docs/outcomes/
@@ -1372,12 +1534,16 @@ pub async fn execute_project(
     let source_key_recurrence = &source_key_recurrence;
     let upstream_schemas_for_bootstrap = &upstream_schemas_for_bootstrap;
     let db = &db;
+    let legacy_sources_config = &legacy_sources_config;
+    let all_models = &all_models;
     let state_io_lock = &state_io_lock;
     let model_plans = &model_plans;
     let resume_skip_set = &resume_skip_set;
     let deferral_own_skip = &deferral_own_skip;
     let deferral_skip_set = &deferral_skip_set;
     let deferral_pending = &deferral_pending;
+    let deferral_skipped_cells = &deferral_skipped_cells;
+    let deferral_fold_addresses = &deferral_fold_addresses;
 
     // ── Per-model execution unit ──────────────────────────────────────────
     // Runs one model to completion (or cancellation, or failure) and returns
@@ -1446,6 +1612,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1494,6 +1661,13 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    // Empty for an upstream-propagated skip (`own == false`)
+                    // — only the model that itself declared+resolved the
+                    // per-cell skip names its own addresses.
+                    deferred_cells: deferral_skipped_cells
+                        .get(&plan.name)
+                        .cloned()
+                        .unwrap_or_default(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1526,6 +1700,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1591,6 +1766,67 @@ pub async fn execute_project(
         } else {
             None
         };
+
+        // ── Definition-delta gate (`docs/specs/definition_deltas.md` §"Detection") ──
+        // A maintained (incremental) model whose stored table already exists
+        // refuses to fold a data delta over a pending, non-eclipsed,
+        // unapproved definition delta rather than silently maintaining a
+        // table whose definition no longer matches its contents.
+        // `--full-refresh` is not a fold and is never gated; `--dry-run`
+        // executes nothing to gate. Detection failures degrade to a warning
+        // and the run proceeds — never break a run on a diff this module
+        // cannot factor.
+        if plan.incremental.is_some() && !request.full_refresh && !request.dry_run {
+            if let Ok(true) = backend
+                .table_exists(schema, &plan.model_file.db_name_owned())
+                .await
+            {
+                let status = {
+                    let db_guard = db.lock().await;
+                    crate::definition_delta::detect_definition_delta(
+                        file_store,
+                        &plan.model_file,
+                        all_models,
+                        legacy_sources_config.as_ref(),
+                        &db_guard,
+                    )
+                };
+                match status {
+                    // A pure column addition is exempt: the maintenance
+                    // driver's own live `Trigger::ColumnAdded` dispatch
+                    // (below, the "Definition-change trigger" fallback)
+                    // already handles this shape safely and atomically as
+                    // part of an ordinary run — this is the documented
+                    // narrower third mechanism (`docs/specs/
+                    // definition_deltas.md` §"Detection") that predates and
+                    // coexists with `smelt migrate`.
+                    Ok(crate::definition_delta::DefinitionDeltaStatus::Pending {
+                        pure_column_addition: true,
+                        ..
+                    }) => {}
+                    Ok(crate::definition_delta::DefinitionDeltaStatus::Pending {
+                        verdict,
+                        plan_hash,
+                        ..
+                    }) => {
+                        return Err(crate::definition_delta::DefinitionDeltaPendingError {
+                            model: plan.name.clone(),
+                            verdict,
+                            plan_hash,
+                        }
+                        .into());
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "Definition-delta detection failed for '{}': {}. Continuing.",
+                            plan.name,
+                            e
+                        );
+                    }
+                }
+            }
+        }
 
         // ── Schema evolution gate (incremental models only) ──────────────
         // For incremental models that have a deployed schema, check whether
@@ -1710,28 +1946,61 @@ pub async fn execute_project(
                         }
                     }
                 }
+            } else if let Ok(true) = backend
+                .table_exists(schema, &plan.model_file.db_name_owned())
+                .await
+            {
+                // `schema_evolution: strategy: full_refresh` opts out of
+                // `ALTER`-based evolution — it has no migration path of its
+                // own, so a schema change forces a rebuild under the new
+                // definition instead of silently taking neither route
+                // (`docs/specs/definition_deltas.md` §"The atomicity rule").
+                let inferred_columns = {
+                    let db_guard = db.lock().await;
+                    infer_deployed_columns(&db_guard, &plan.model_file)
+                };
+                if !inferred_columns.is_empty() {
+                    if let Ok(Some(deployed_schema)) =
+                        file_store.load_schema(&plan.model_file.db_name_owned())
+                    {
+                        if full_refresh_escape_requires_rebuild(
+                            evolution_strategy,
+                            &deployed_schema.columns,
+                            &inferred_columns,
+                        ) {
+                            tracing::warn!(
+                                "Schema changed for '{}' under schema_evolution: strategy: \
+                                 full_refresh — rebuilding under the new definition instead of \
+                                 an ALTER migration.",
+                                plan.name
+                            );
+                            force_full_refresh = true;
+                        }
+                    }
+                }
             }
         }
 
         // ── Definition-change trigger (Trigger::ColumnAdded → Technique::
-        // InPlaceUpdate), FALLBACK dispatch ───────────────────────────────
+        // InPlaceUpdate) ───────────────────────────────────────────────────
         // Runs once per incremental model per run, common to both the keyed
         // and non-keyed branches below — a one-time migration-style
         // backfill over the model's existing rows, orthogonal to whichever
         // window/creation/mutation technique the rest of this run
-        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per column group"). The cell was already resolved once,
-        // above, before the migration gate ran — reused here, never
-        // re-derived. Any column the migration gate already folded into
-        // its own `StatementGroup` (`migration_backfilled_columns`) is
-        // skipped — dispatching it again here would be a redundant,
-        // non-atomic re-run of a backfill that already committed
-        // atomically with its `ADD COLUMN`
-        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). This
-        // standalone path remains the ONLY route when the migration gate
-        // did not run at all this run (e.g. `schema_evolution: strategy:
-        // full_refresh` on the model, or the target table not yet
-        // existing) — see `docs/specs/incremental_models.md` §"Known
-        // Divergences" for that residual non-atomicity.
+        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per
+        // column group"). The cell was already resolved once, above, before
+        // the migration gate ran — reused here, never re-derived. Any
+        // column the migration gate already folded into its own
+        // `StatementGroup` (`migration_backfilled_columns`) is skipped —
+        // re-dispatching it here would be a redundant, non-atomic re-run of
+        // a backfill that already committed atomically with its `ADD
+        // COLUMN`. A column that was NOT folded (the migration gate didn't
+        // run this run — e.g. `schema_evolution: strategy: full_refresh`,
+        // or a column the gate couldn't fold) is never backfilled by a
+        // standalone `UPDATE` against a schema that may not carry it: the
+        // model force-full-refreshes instead, which is always correct and
+        // always atomic (`docs/specs/definition_deltas.md` §"The atomicity
+        // rule").
         let mut used_in_place_update = false;
         if let Some((_cell, assignments)) = &in_place_update_cell {
             let remaining: Vec<(String, String)> = assignments
@@ -1743,18 +2012,20 @@ pub async fn execute_project(
                 used_in_place_update = true; // some/all columns already backfilled atomically above
             }
             if !remaining.is_empty() {
-                let retry_policy =
-                    RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                crate::maintenance_driver::execute_in_place_update(
-                    backend,
-                    schema,
-                    &plan.model_file.db_name_owned(),
-                    &remaining,
-                    &retry_policy,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-                used_in_place_update = true;
+                if let Ok(true) = backend
+                    .table_exists(schema, &plan.model_file.db_name_owned())
+                    .await
+                {
+                    tracing::warn!(
+                        "Definition-change backfill for '{}' (columns: {:?}) could not be \
+                         folded into an atomic migration this run — forcing a full refresh \
+                         instead of a non-atomic standalone UPDATE.",
+                        plan.name,
+                        remaining.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>()
+                    );
+                    force_full_refresh = true;
+                }
+                // Table absent: no rows to backfill, nothing to dispatch.
             }
         }
 
@@ -1843,10 +2114,12 @@ pub async fn execute_project(
             // corrupted stored state. It is still ordered after those two
             // in the ladder in the sense that matters — a source they
             // already claim carries an `UpstreamMutation` cell, never a
-            // repair cell (repair is only derived for a CLOCKED mutable
-            // source, and `derive_model_maintenance_plan` derives an
-            // `UpstreamMutation` trigger only for an UNCLOCKED one), so the
-            // three can never contend for the same source.
+            // repair cell: `derive_mutation` narrows a source already
+            // covered by a `Trigger::NewData`/`Technique::PerGroupRecompute`
+            // repair cell out of the wider `UpstreamMutation` admission rule
+            // (`derive_triggers`'s own doc comment — the clock is NOT part
+            // of that rule since phase 19), so the two can never both be
+            // derived for the same source in the first place.
             let per_group_recompute_cell = match plan.model_file.metadata.as_deref() {
                 Some(metadata) => {
                     crate::maintenance_driver::resolve_live_per_group_recompute_cell(
@@ -1869,24 +2142,26 @@ pub async fn execute_project(
             // the sibling of `per_group_recompute_cell` above for this
             // model's upstream MODEL edges rather than its declared sources.
             let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
-            let key_addressed_edge_cell = if keyed_model_edges.is_empty() {
-                None
-            } else {
-                match plan.model_file.metadata.as_deref() {
-                    Some(metadata) => {
-                        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
-                            &clean_sql_for_merge,
-                            &db_table_name,
-                            metadata,
-                            &maint_source_facts,
-                            &explicitly_mutable,
-                            &keyed_model_edges,
-                            backend.dialect(),
-                        )?
-                    }
-                    None => None,
-                }
-            };
+            let key_edge_dispatch = resolve_and_dispatch_key_addressed_edge_cell(
+                backend,
+                schema,
+                &plan.name,
+                &plan.model_file,
+                &clean_sql_for_merge,
+                &db_table_name,
+                &maint_source_facts,
+                &explicitly_mutable,
+                &keyed_model_edges,
+                table_exists_before_run,
+                model_by_addr,
+                config,
+                request,
+                compiler,
+                resolver,
+                run_id,
+                reporter,
+            )
+            .await?;
 
             // Classify up front, regardless of window presence, so the
             // derived run shape (`docs/specs/incremental_shapes.md` §"The
@@ -1917,6 +2192,12 @@ pub async fn execute_project(
 
             let mut used_per_group_recompute = false;
             let mut used_diff_patch = false;
+            // Populated only by the snapshot-reconcile arm's declared
+            // `contract.retain_departed` point (phase 34): the reconcile
+            // anti-join probe's outcome, threaded to this model's manifest
+            // entry below instead of being dropped after only a
+            // `tracing::info!`.
+            let mut retain_departed_probes: Vec<smelt_state::ProbeRecord> = Vec::new();
             // A key-addressed model-edge cell has no run-window axis at all
             // (its bounded read is the upstream's own affected key set, not
             // an interval) — checked BEFORE the `(start_date, end_date)`
@@ -1932,75 +2213,11 @@ pub async fn execute_project(
             // own create path is what materializes the table
             // (`table_exists_before_run` was captured before any of this
             // model's writes).
-            let exec_result = match key_addressed_edge_cell
-                .as_ref()
-                .filter(|_| table_exists_before_run)
-            {
-                Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) => {
-                    used_per_group_recompute = matches!(
-                        write,
-                        crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
-                    );
-                    used_diff_patch = matches!(
-                        write,
-                        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
-                    );
-                    let retry_policy =
-                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "keyed run path: model '{}' resolved a live key-addressed model-edge \
-                             cell on upstream '{edge_name}', but that upstream has no resolved \
-                             ModelFile — internal inconsistency",
-                            plan.name
-                        )
-                    })?;
-                    let upstream_target = config.get_target(
-                        edge_name,
-                        upstream_model.metadata.as_deref(),
-                        &request.target,
-                    );
-                    let upstream_schema = &config.targets[&upstream_target].schema;
-                    let upstream_table =
-                        format!("{upstream_schema}.{}", upstream_model.db_name_owned());
-                    let upstream_source_address = format!("smelt.models.{edge_name}");
-                    let compiled = compiler.compile_with_sql_and_ephemerals(
-                        &plan.model_file,
-                        schema,
-                        &clean_sql_for_merge,
-                        resolver,
-                    )?;
-                    match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
-                        backend,
-                        schema,
-                        &db_table_name,
-                        &upstream_source_address,
-                        &upstream_table,
-                        upstream_keys,
-                        digest_columns,
-                        &key_scope.keys,
-                        &clean_sql_for_merge,
-                        &compiled.sql,
-                        write,
-                        &retry_policy,
-                    )
-                    .await
-                    {
-                        Ok(Some(result)) => Ok(result),
-                        Ok(None) => {
-                            let row_count = backend
-                                .get_row_count(schema, &db_table_name)
-                                .await
-                                .unwrap_or(0);
-                            Ok(smelt_backend::ExecutionResult {
-                                model_name: db_table_name.clone(),
-                                duration: StdDuration::default(),
-                                row_count,
-                                preview: None,
-                            })
-                        }
-                        Err(e) => Err(e),
-                    }
+            let exec_result = match key_edge_dispatch {
+                Some(dispatch) => {
+                    used_per_group_recompute = dispatch.used_per_group_recompute;
+                    used_diff_patch = dispatch.used_diff_patch;
+                    Ok(dispatch.result)
                 }
                 None => match (start_date, end_date) {
                 (Some(s), Some(e)) => {
@@ -2016,6 +2233,7 @@ pub async fn execute_project(
                     let time_range = TimeRange {
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
+                        axis: smelt_logical::PartitionAxis::Calendar,
                     };
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
@@ -2256,13 +2474,36 @@ pub async fn execute_project(
                         schema,
                         &db_table_name,
                         &classification,
+                        &mut retain_departed_probes,
                     )
                     .await
                 }
+                _ if !request.full_refresh => {
+                    // No run window, window-forward run shape, no
+                    // `--full-refresh`: refuse rather than silently
+                    // drop+recreating from a whole-source SELECT
+                    // (`docs/specs/incremental_shapes.md` §"The key grain" —
+                    // a window-forward keyed run requires both
+                    // `--event-time-start`/`--event-time-end`; the
+                    // `--full-refresh` escape below is the only intentional
+                    // rebuild path). Mirrors the snapshot-reconcile arm
+                    // above's plain-`bail!` shape.
+                    anyhow::bail!(
+                        "Model '{}' derives the window-forward run shape (a clocked driving \
+                         source, `docs/specs/incremental_models.md` §\"The two run shapes\") \
+                         and was run with no event-time window — both \
+                         --event-time-start/--event-time-end are required, or pass \
+                         --full-refresh to intentionally rebuild the whole target from a \
+                         whole-source SELECT (`docs/specs/incremental_shapes.md` §\"The key \
+                         grain\").",
+                        plan.name
+                    );
+                }
                 _ => {
-                    // No run window, window-forward run shape: single-shot
-                    // full refresh of the keyed SELECT. Matches CLI's
-                    // behaviour for `smelt build` / `smelt run` without an
+                    // No run window, window-forward run shape,
+                    // `--full-refresh`: single-shot full refresh of the
+                    // keyed SELECT. Matches CLI's behaviour for
+                    // `smelt build` / `smelt run --full-refresh` without an
                     // event-time window.
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
                     let compiled = compiler.compile_with_sql_and_ephemerals(
@@ -2364,6 +2605,33 @@ pub async fn execute_project(
             let mut used_column_scoped_merge = false;
             if let Some((source, cell, suppression)) = column_scoped_cell.as_ref() {
                 if table_exists_before_run {
+                    // Mutation-happened discrimination
+                    // (`docs/specs/incremental_models.md` §"When a mutation
+                    // cell dispatches"): before dispatching the technique
+                    // this live `UpstreamMutation` cell licenses, compare
+                    // `source`'s current whole-source fingerprint against
+                    // its recorded baseline. `None` here (no declared
+                    // columns for the source) is treated the same as
+                    // `Dispatch` — nothing to fingerprint means no evidence
+                    // to skip on, same fail-open-to-dispatch posture the
+                    // spec's "no recorded baseline at all" clause takes.
+                    let mutation_gate =
+                        resolve_upstream_mutation_gate(
+                            backend,
+                            &plan.name,
+                            source_infos,
+                            source,
+                            model_target,
+                            schema,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await?;
+                    let mutation_should_dispatch = !matches!(
+                        mutation_gate.as_ref().map(|(v, _)| v),
+                        Some(crate::mutation_probe::MutationVerdict::NoOp)
+                    );
+                    if mutation_should_dispatch {
                     // The mutated dimension's own declared `unique_key`
                     // (`sources.md` §"Row identity") — same lookup the
                     // non-keyed incremental branch performs, needed only for
@@ -2430,6 +2698,7 @@ pub async fn execute_project(
                             column: String::new(),
                             start: window_start,
                             end: window_end,
+                            axis: smelt_backend::PartitionAxis::Calendar,
                         };
                         let retry_policy =
                             RetryPolicy::from_request(request, run_id, &plan.name, reporter);
@@ -2473,6 +2742,14 @@ pub async fn execute_project(
                         };
                         used_column_scoped_merge = true;
                         total_rows = merge_result.row_count;
+                        record_upstream_mutation_baseline(
+                            mutation_gate,
+                            source,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await;
+                    }
                     }
                 }
             }
@@ -2490,24 +2767,36 @@ pub async fn execute_project(
             // SAME derived plan), so this never double-dispatches a source
             // `column_scoped_cell` already handled.
             let mut used_membership_recompute = false;
-            if let Some((_source, cell, suppression)) = membership_recompute_cell.as_ref() {
+            if let Some((source, cell, _group_columns, write)) =
+                membership_recompute_cell.as_ref()
+            {
                 if table_exists_before_run && !used_column_scoped_merge {
-                    let smelt_logical::maintenance::choice::WriteSuppression::Suppressed {
-                        compared_columns,
-                    } = suppression
-                    else {
-                        unreachable!(
-                            "resolve_live_membership_recompute_cell only ever returns \
-                             WriteSuppression::Suppressed"
-                        );
-                    };
-                    let smelt_logical::maintenance::RowIdentity::Key(key) =
-                        &cell.row_identity.identity
-                    else {
-                        unreachable!(
-                            "resolve_live_membership_recompute_cell only ever returns a cell \
-                             with a proven RowIdentity::Key"
-                        );
+                    let mutation_gate = resolve_upstream_mutation_gate(
+                        backend,
+                        &plan.name,
+                        source_infos,
+                        source,
+                        model_target,
+                        schema,
+                        file_store,
+                        state_io_lock,
+                    )
+                    .await?;
+                    let mutation_should_dispatch = !matches!(
+                        mutation_gate.as_ref().map(|(v, _)| v),
+                        Some(crate::mutation_probe::MutationVerdict::NoOp)
+                    );
+                    if mutation_should_dispatch {
+                    // `resolve_live_membership_recompute_cell` returns a
+                    // `RowIdentity::Key` cell for the keyed staged-recompute/
+                    // diff_patch legs below, or a `RowIdentity::WholeRow`
+                    // cell for the keyless leg (`docs/outcomes/
+                    // 20260815-definition-delta-migrate/phases/27c-plan.md`)
+                    // — never a bare `Key(vec![])`, the resolver's own
+                    // degenerate-proof skip.
+                    let key: Option<&Vec<String>> = match &cell.row_identity.identity {
+                        smelt_logical::maintenance::RowIdentity::Key(key) => Some(key),
+                        smelt_logical::maintenance::RowIdentity::WholeRow => None,
                     };
                     // The model's own FULL, unwindowed recompute — same
                     // `clean_sql_for_merge` source text `column_scoped_cell`'s
@@ -2522,20 +2811,110 @@ pub async fn execute_project(
                     )?;
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    let recompute_result =
-                        crate::maintenance_driver::execute_staged_membership_recompute(
-                            backend,
-                            schema,
-                            &db_table_name,
-                            key,
-                            &compiled.sql,
+                    // Same `start_date`/`end_date` → `PartitionRange`
+                    // construction the column-scoped call site above uses —
+                    // a bare `grain: key` output has no partition column of
+                    // its own, so `column: String::new()` (T5's
+                    // observed-delta recording keys on `[start, end)`
+                    // alone).
+                    let (window_start, window_end) = match (start_date, end_date) {
+                        (Some(s), Some(e)) => (
+                            s.format("%Y-%m-%d").to_string(),
+                            e.format("%Y-%m-%d").to_string(),
+                        ),
+                        _ => (String::new(), String::new()),
+                    };
+                    let window = smelt_backend::PartitionRange {
+                        column: String::new(),
+                        start: window_start,
+                        end: window_end,
+                        axis: smelt_backend::PartitionAxis::Calendar,
+                    };
+                    let row_count = match write {
+                        crate::maintenance_driver::MembershipRecomputeWrite::StagedRecompute {
                             compared_columns,
-                            &retry_policy,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        } => {
+                            let key = key.expect(
+                                "resolve_live_membership_recompute_cell only ever returns \
+                                 StagedRecompute for a proven RowIdentity::Key cell",
+                            );
+                            crate::maintenance_driver::execute_staged_membership_recompute(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                key,
+                                &compiled.sql,
+                                compared_columns,
+                                &window,
+                                &retry_policy,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .row_count
+                        }
+                        crate::maintenance_driver::MembershipRecomputeWrite::DiffPatch {
+                            compared_columns,
+                        } => {
+                            let key = key.expect(
+                                "resolve_live_membership_recompute_cell only ever returns \
+                                 DiffPatch for a proven RowIdentity::Key cell",
+                            );
+                            // The candidate select IS the model's full
+                            // admitted state — nothing is excluded from the
+                            // comparison, so the slice predicate that scopes
+                            // the delete leg is the trivial "whole table"
+                            // predicate (`docs/outcomes/
+                            // 20260815-definition-delta-migrate/
+                            // phases/12-plan.md`).
+                            used_diff_patch = true;
+                            crate::maintenance_driver::execute_diff_patch(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                key,
+                                &compiled.sql,
+                                compared_columns,
+                                "TRUE",
+                                &smelt_logical::maintenance::diff_patch::DeleteLeg::Complete,
+                                &retry_policy,
+                                None,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .row_count
+                        }
+                        crate::maintenance_driver::MembershipRecomputeWrite::StagedKeyless {
+                            compared_columns: _,
+                        } => {
+                            // No key at all — this is the `RowIdentity::
+                            // WholeRow` region-grained realisation
+                            // (`docs/outcomes/20260815-definition-delta-migrate/
+                            // phases/27c-plan.md`); `compared_columns` is the
+                            // model's full payload column set, already
+                            // implicit in `candidate_select`'s own shape, so
+                            // the executor needs nothing further from it.
+                            crate::maintenance_driver::execute_staged_keyless_recompute(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                &compiled.sql,
+                                &retry_policy,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .row_count
+                        }
+                    };
                     used_membership_recompute = true;
-                    total_rows = recompute_result.row_count;
+                    total_rows = row_count;
+                    record_upstream_mutation_baseline(
+                        mutation_gate,
+                        source,
+                        file_store,
+                        state_io_lock,
+                    )
+                    .await;
+                    }
                 }
             }
             if !used_column_scoped_merge && !used_membership_recompute {
@@ -2574,12 +2953,16 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: sink.retry_count(),
-                    // The cumulative arm dispatches no declared-fact probes
-                    // today — an empty array here is accurate, not a gap
-                    // (`docs/outcomes/20260809-probe-backed-facts/phases/
-                    // 08-plan.md`).
-                    probes: Vec::new(),
+                    // Every other cumulative-arm dispatch declares no
+                    // fact probe today; `retain_departed_probes` carries
+                    // the snapshot-reconcile arm's declared
+                    // `contract.retain_departed` probe record when that
+                    // point fired (`docs/outcomes/
+                    // 20260815-definition-delta-migrate/phases/
+                    // 34-plan.md`), and stays empty otherwise.
+                    probes: retain_departed_probes,
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
@@ -2711,18 +3094,6 @@ pub async fn execute_project(
                         Some(bare)
                     })
                     .collect();
-                let resolved_strategy = match plan.model_file.metadata.as_deref() {
-                    Some(metadata) => crate::maintenance_driver::resolve_incremental_strategy(
-                        &sql_for_bounds,
-                        &plan.model_file.db_name_owned(),
-                        metadata,
-                        &maint_source_facts,
-                        &explicitly_mutable,
-                        backend_default_strategy.clone(),
-                    ),
-                    None => backend_default_strategy,
-                };
-
                 // T3 (`docs/plans/20260715-composed-axes-conditional-
                 // maintenance.md` Phase E3): the model-edge-sourced creation
                 // cell's delta-restriction facts, resolved once per model
@@ -2733,21 +3104,91 @@ pub async fn execute_project(
                 // plan derives no creation cell for the driving edge, or the
                 // model's own row identity is not a single column — the
                 // batch loop below then always takes the ordinary widened
-                // scan, unchanged from before this phase.
+                // scan, unchanged from before this phase. Hoisted above
+                // `resolved_strategy` below so both consult the same
+                // `model_edges` list without computing it twice.
                 let model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+                let resolved_strategy = match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => crate::maintenance_driver::resolve_incremental_strategy(
+                        &sql_for_bounds,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &model_edges,
+                        backend_default_strategy.clone(),
+                        backend.capabilities().supports_column_scoped_merge,
+                    )?,
+                    None => backend_default_strategy,
+                };
+
                 let delta_restriction_facts = if model_edges.is_empty() {
                     None
                 } else {
-                    plan.model_file.metadata.as_deref().and_then(|metadata| {
-                        crate::maintenance_driver::resolve_live_delta_restriction_facts(
-                            &sql_for_bounds,
-                            &plan.model_file.db_name_owned(),
-                            metadata,
-                            &maint_source_facts,
-                            &explicitly_mutable,
-                            &model_edges,
-                        )
-                    })
+                    match plan.model_file.metadata.as_deref() {
+                        Some(metadata) => {
+                            crate::maintenance_driver::resolve_live_delta_restriction_facts(
+                                &sql_for_bounds,
+                                &plan.model_file.db_name_owned(),
+                                metadata,
+                                &maint_source_facts,
+                                &explicitly_mutable,
+                                &model_edges,
+                            )
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
+                        None => None,
+                    }
+                };
+                // 27e (`docs/outcomes/20260815-definition-delta-migrate/
+                // phases/27e-plan.md`): when this model reads NO maintained-
+                // model upstream (`model_edges` empty — the model-edge route
+                // above never resolves), it may still be driven by an
+                // external `mutable_snapshot` source with no native change
+                // feed. `resolve_live_external_delta_restriction_facts`
+                // consults the SAME derived plan's `UpstreamMutation` cell
+                // for that source; `None` in every case where the model-edge
+                // route would also fall back — the caller's safe default
+                // stays the ordinary widened scan.
+                let external_delta_restriction_facts = if !model_edges.is_empty() {
+                    None
+                } else {
+                    match plan.model_file.metadata.as_deref() {
+                        Some(metadata) => {
+                            // Real declared `referential_integrity:` facts
+                            // (`sources.md` §"Referential integrity") — keyed
+                            // the same bare-address way `maint_source_facts`
+                            // above is, so the `DeclaredReferentialIntegrity`
+                            // P1 route is actually reachable live, not only
+                            // through a hand-built fixture.
+                            let source_ri: smelt_logical::maintenance::derive::SourceReferentialIntegrity =
+                                source_infos
+                                    .iter()
+                                    .filter_map(|info| {
+                                        let ri = info.referential_integrity.clone()?;
+                                        let segs = &info.address_segments;
+                                        let bare = match segs.split_first() {
+                                            Some((first, rest)) if first == "sources" => {
+                                                rest.join(".")
+                                            }
+                                            _ => segs.join("."),
+                                        };
+                                        Some((bare, ri))
+                                    })
+                                    .collect();
+                            crate::maintenance_driver::resolve_live_external_delta_restriction_facts(
+                                &sql_for_bounds,
+                                &plan.model_file.db_name_owned(),
+                                metadata,
+                                &maint_source_facts,
+                                &explicitly_mutable,
+                                &source_ri,
+                                backend.capabilities().supports_fingerprint_sidecar,
+                            )
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
+                        None => None,
+                    }
                 };
                 // Live dispatch is licensed only for a DuckDB target running
                 // the creation trigger's `DeleteInsert` strategy — the same
@@ -2760,6 +3201,13 @@ pub async fn execute_project(
                 // transactional` override — e.g. Spark's — must stay
                 // reachable unchanged).
                 let use_delta_restricted_dispatch = delta_restriction_facts.is_some()
+                    && backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                    && matches!(
+                        resolved_strategy,
+                        smelt_backend::IncrementalStrategy::DeleteInsert
+                    );
+                let use_external_delta_restricted_dispatch = external_delta_restriction_facts
+                    .is_some()
                     && backend.dialect() == smelt_backend::SqlDialect::DuckDB
                     && matches!(
                         resolved_strategy,
@@ -2789,6 +3237,47 @@ pub async fn execute_project(
                         backend.capabilities().supports_column_scoped_merge,
                         &request.technique_overrides,
                     )?,
+                    None => None,
+                };
+
+                // The keyless (`RowIdentity::WholeRow`) counterpart of
+                // `column_scoped_cell` above (`docs/outcomes/
+                // 20260815-definition-delta-migrate/phases/27c-plan.md`): a
+                // `grain: partition` output has no `unique_key`, so a
+                // membership-sensitive `UpstreamMutation` cell can never
+                // resolve `Technique::ColumnScopedMerge` (that family needs a
+                // proven row identity too) — before this phase it fell
+                // through to the ordinary unconditional widened-scan
+                // DELETE+INSERT every run. `resolve_live_membership_
+                // recompute_cell` derives both the keyed (`StagedRecompute`/
+                // `DiffPatch`, the keyed run loop's own concern) and keyless
+                // (`StagedKeyless`) arms from the SAME plan; only the keyless
+                // arm is consumed here — a `RowIdentity::Key` result stays
+                // out of scope for this (non-keyed) branch, unchanged from
+                // before this phase.
+                let membership_recompute_keyless_cell = match plan.model_file.metadata.as_deref()
+                {
+                    Some(metadata) => {
+                        crate::maintenance_driver::resolve_live_membership_recompute_cell(
+                            &sql_for_bounds,
+                            &plan.model_file.db_name_owned(),
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &request.technique_overrides,
+                        )?
+                        .filter(|(_, cell, _, write)| {
+                            matches!(
+                                cell.row_identity.identity,
+                                smelt_logical::maintenance::RowIdentity::WholeRow
+                            ) && matches!(
+                                write,
+                                crate::maintenance_driver::MembershipRecomputeWrite::StagedKeyless {
+                                    ..
+                                }
+                            )
+                        })
+                    }
                     None => None,
                 };
 
@@ -2901,6 +3390,216 @@ pub async fn execute_project(
                         None => None,
                     };
 
+                // Mutation-happened discrimination
+                // (`docs/specs/incremental_models.md` §"When a mutation
+                // cell dispatches"): resolved ONCE for the whole run
+                // (matching `column_merge_dispatch`'s own once-per-run
+                // decision above) — the source's fingerprint does not
+                // change across this run's own batches. A `NoOp` verdict
+                // overrides `column_merge_dispatch` to `None`, so every
+                // batch below falls through to its ordinary DELETE+INSERT
+                // path exactly as if no live cell had resolved.
+                let mutation_gate = match column_scoped_cell.as_ref() {
+                    Some((source, _cell, _suppression)) => {
+                        resolve_upstream_mutation_gate(
+                            backend,
+                            &plan.name,
+                            source_infos,
+                            source,
+                            model_target,
+                            schema,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
+                let column_merge_dispatch = if matches!(
+                    mutation_gate.as_ref().map(|(v, _)| v),
+                    Some(crate::mutation_probe::MutationVerdict::NoOp)
+                ) {
+                    None
+                } else {
+                    column_merge_dispatch
+                };
+
+                // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
+                // §"Upstream model edges") has no run-window axis of its own —
+                // its bounded read is the upstream's own affected key set, not
+                // a `[start, end)` interval — so it is resolved and (if live)
+                // dispatched HERE, before this branch's own self-ref bootstrap
+                // or its per-batch DELETE+INSERT loop, and takes this run in
+                // place of either regardless of this downstream's own declared
+                // `grain:`. `table_exists_before_run` is captured before any
+                // write this run performs, INCLUDING the self-ref bootstrap
+                // below (which may itself create the table on a first run) —
+                // never on the creation run, mirroring the keyed branch's own
+                // capture (`docs/outcomes/20260815-definition-delta-migrate/
+                // phases/11-plan.md`).
+                let table_exists_before_run = backend
+                    .table_exists(schema, &plan.model_file.db_name_owned())
+                    .await
+                    .unwrap_or(false);
+                let key_edge_dispatch = resolve_and_dispatch_key_addressed_edge_cell(
+                    backend,
+                    schema,
+                    &plan.name,
+                    &plan.model_file,
+                    &sql_for_bounds,
+                    &plan.model_file.db_name_owned(),
+                    &maint_source_facts,
+                    &explicitly_mutable,
+                    &model_edges,
+                    table_exists_before_run,
+                    model_by_addr,
+                    config,
+                    request,
+                    compilers.get(model_target),
+                    &ephemeral_resolvers[model_target],
+                    run_id,
+                    reporter,
+                )
+                .await?;
+                // Mutual exclusion with `column_scoped_cell`/`delta_restriction_
+                // facts` above: a key-addressed cell is keyed on the upstream
+                // MODEL's bare name, the others on declared SOURCES, so the
+                // resolvers read disjoint trigger-name spaces and can never
+                // contend for the same trigger by construction — bail loudly
+                // rather than silently preferring one if that invariant is
+                // ever violated.
+                if let (Some(dispatch), Some((source, _, _))) =
+                    (key_edge_dispatch.as_ref(), column_scoped_cell.as_ref())
+                {
+                    if *source == dispatch.edge_name {
+                        anyhow::bail!(
+                            "internal inconsistency: model '{}' resolved BOTH a key-addressed \
+                             model-edge cell and a column-scoped-merge cell for the same trigger \
+                             name '{}' — these must be disjoint (model edges vs declared \
+                             sources)",
+                            plan.name,
+                            dispatch.edge_name
+                        );
+                    }
+                }
+
+                'run_dispatch_or_batches: {
+                if let Some(dispatch) = key_edge_dispatch {
+                    let strategy = if dispatch.used_diff_patch {
+                        "diff_patch".to_string()
+                    } else {
+                        "per_group_recompute".to_string()
+                    };
+                    total_rows = dispatch.result.row_count;
+                    manifest_entries.insert(
+                        plan.name.clone(),
+                        ModelRunRecord {
+                            strategy,
+                            time_range: None,
+                            partitions_updated: vec![],
+                            row_count: total_rows,
+                            duration_ms: model_start.elapsed().as_millis() as u64,
+                            batch_safety: None,
+                            outcome: smelt_state::RunOutcomeKind::Success,
+                            definition_hash: compute_model_hash(&plan.sql),
+                            error: None,
+                            retry_count: sink.retry_count(),
+                            probes: Vec::new(),
+                            subsumed: None,
+                            deferred_cells: Vec::new(),
+                        },
+                    );
+                    break 'run_dispatch_or_batches;
+                }
+
+                // The keyless membership-recompute dispatch
+                // (`membership_recompute_keyless_cell` above): a live
+                // `RowIdentity::WholeRow` `UpstreamMutation` cell replaces
+                // the whole run — never dispatched on the creation run
+                // (`table_exists_before_run`), and never when the mutated
+                // source's own fingerprint shows no real change since the
+                // last recorded baseline (mirrors `column_scoped_cell`'s own
+                // `mutation_gate` posture above).
+                if let Some((source, _cell, _group_columns, write)) =
+                    membership_recompute_keyless_cell.as_ref()
+                {
+                    if table_exists_before_run {
+                        let mutation_gate = resolve_upstream_mutation_gate(
+                            backend,
+                            &plan.name,
+                            source_infos,
+                            source,
+                            model_target,
+                            schema,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await?;
+                        let mutation_should_dispatch = !matches!(
+                            mutation_gate.as_ref().map(|(v, _)| v),
+                            Some(crate::mutation_probe::MutationVerdict::NoOp)
+                        );
+                        if mutation_should_dispatch {
+                            let crate::maintenance_driver::MembershipRecomputeWrite::StagedKeyless {
+                                compared_columns: _,
+                            } = write
+                            else {
+                                unreachable!(
+                                    "membership_recompute_keyless_cell is filtered to \
+                                     StagedKeyless only"
+                                );
+                            };
+                            let compiler = compilers.get(model_target);
+                            let resolver = &ephemeral_resolvers[model_target];
+                            let compiled = compiler.compile_with_sql_and_ephemerals(
+                                &plan.model_file,
+                                schema,
+                                &sql_for_bounds,
+                                resolver,
+                            )?;
+                            let retry_policy =
+                                RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                            let result =
+                                crate::maintenance_driver::execute_staged_keyless_recompute(
+                                    backend,
+                                    schema,
+                                    &plan.model_file.db_name_owned(),
+                                    &compiled.sql,
+                                    &retry_policy,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            total_rows = result.row_count;
+                            record_upstream_mutation_baseline(
+                                mutation_gate,
+                                source,
+                                file_store,
+                                state_io_lock,
+                            )
+                            .await;
+                            manifest_entries.insert(
+                                plan.name.clone(),
+                                ModelRunRecord {
+                                    strategy: "delete_insert_suppressed".to_string(),
+                                    time_range: None,
+                                    partitions_updated: vec![],
+                                    row_count: total_rows,
+                                    duration_ms: model_start.elapsed().as_millis() as u64,
+                                    batch_safety: None,
+                                    outcome: smelt_state::RunOutcomeKind::Success,
+                                    definition_hash: compute_model_hash(&plan.sql),
+                                    error: None,
+                                    retry_count: sink.retry_count(),
+                                    probes: Vec::new(),
+                                    subsumed: None,
+                                    deferred_cells: Vec::new(),
+                                },
+                            );
+                            break 'run_dispatch_or_batches;
+                        }
+                    }
+                }
+
                 // First-run bootstrap for a self-referential model
                 // (`docs/specs/incremental_shapes.md` §"First-run and backfill"
                 // — "First-run bootstrap for a self-referential model"):
@@ -2962,8 +3661,9 @@ pub async fn execute_project(
                     // window so the source scan tracks the partition being produced,
                     // not the potentially wider DELETE range.
                     let run_range = TimeRange {
-                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
-                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                        start: batch.partition_start.to_string(),
+                        end: batch.partition_end.to_string(),
+                        axis: smelt_logical::PartitionAxis::Calendar,
                     };
 
                     // Two-layer widened-scan + exact output clamp
@@ -3024,8 +3724,8 @@ pub async fn execute_project(
                             "{}.{} batch [{}, {})",
                             schema,
                             plan.model_file.db_name_owned(),
-                            batch.partition_start.format("%Y-%m-%d"),
-                            batch.partition_end.format("%Y-%m-%d"),
+                            batch.partition_start,
+                            batch.partition_end,
                         ),
                         plan.model_file.metadata.as_deref(),
                         Some(&inc_plan.timeseries),
@@ -3062,8 +3762,8 @@ pub async fn execute_project(
                                 "{}.{} batch [{}, {})",
                                 schema,
                                 plan.model_file.db_name_owned(),
-                                batch.partition_start.format("%Y-%m-%d"),
-                                batch.partition_end.format("%Y-%m-%d"),
+                                batch.partition_start,
+                                batch.partition_end,
                             ),
                             &plan.model_file,
                             source_infos,
@@ -3114,8 +3814,8 @@ pub async fn execute_project(
                                 "{}.{} batch [{}, {})",
                                 schema,
                                 plan.model_file.db_name_owned(),
-                                batch.partition_start.format("%Y-%m-%d"),
-                                batch.partition_end.format("%Y-%m-%d"),
+                                batch.partition_start,
+                                batch.partition_end,
                             ),
                             &plan.model_file,
                             plan.model_file.metadata.as_deref(),
@@ -3176,8 +3876,8 @@ pub async fn execute_project(
                                 "{}.{} batch [{}, {})",
                                 schema,
                                 plan.model_file.db_name_owned(),
-                                batch.partition_start.format("%Y-%m-%d"),
-                                batch.partition_end.format("%Y-%m-%d"),
+                                batch.partition_start,
+                                batch.partition_end,
                             ),
                             plan.model_file.metadata.as_deref(),
                         );
@@ -3217,8 +3917,9 @@ pub async fn execute_project(
                     // own — silently corrupting it.
                     let partition = PartitionRange {
                         column: inc_plan.timeseries.partition_column.clone(),
-                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
-                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                        start: batch.partition_start.to_string(),
+                        end: batch.partition_end.to_string(),
+                        axis: batch.partition_start.axis(),
                     };
 
                     // T3: re-checked per batch (not hoisted with
@@ -3240,6 +3941,24 @@ pub async fn execute_project(
                             .unwrap_or(false);
                         if exists {
                             delta_restriction_facts.as_ref()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    // Same re-checked-per-batch reasoning as
+                    // `restricted_facts_this_batch` above, for the external-
+                    // sidecar route.
+                    let external_restricted_facts_this_batch: Option<
+                        &crate::maintenance_driver::ExternalDeltaRestrictionFacts,
+                    > = if use_external_delta_restricted_dispatch {
+                        let exists = backend
+                            .table_exists(schema, &plan.model_file.db_name_owned())
+                            .await
+                            .unwrap_or(false);
+                        if exists {
+                            external_delta_restriction_facts.as_ref()
                         } else {
                             None
                         }
@@ -3286,8 +4005,9 @@ pub async fn execute_project(
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
                             }
                             crate::maintenance_driver::ColumnMergeDispatch::Clamped(scan) => {
-                                let batch_width_days = (batch.partition_end - batch.partition_start)
-                                    .num_days()
+                                let batch_width_days = batch
+                                    .partition_start
+                                    .units_between(&batch.partition_end)
                                     .max(0)
                                     as u64;
                                 let batch_width =
@@ -3305,7 +4025,7 @@ pub async fn execute_project(
                                 // not a second, independent re-derivation.
                                 let contribution =
                                     smelt_logical::analysis::join_shape::ContributionVerdict::Monotone;
-                                let conv_ts = batch.partition_end.format("%Y-%m-%d").to_string();
+                                let conv_ts = batch.partition_end.to_string();
                                 crate::maintenance_driver::execute_column_scoped_merge(
                                     backend,
                                     schema,
@@ -3350,10 +4070,12 @@ pub async fn execute_project(
                         // the closure is `Open`/absent, the delta is absent
                         // or empty, or the model's row identity is not a
                         // single column — never a silent skip.
-                        let region = smelt_logical::maintenance::emit::Region {
-                            start: format!("'{}'", partition.start.replace('\'', "''")),
-                            end: format!("'{}'", partition.end.replace('\'', "''")),
-                        };
+                        let region = smelt_logical::maintenance::emit::Region::for_axis(
+                            partition.axis,
+                            &partition.start,
+                            &partition.end,
+                        )
+                        .map_err(anyhow::Error::msg)?;
                         let group =
                             crate::maintenance_driver::execute_delete_insert_with_delta_restriction(
                                 backend,
@@ -3365,15 +4087,130 @@ pub async fn execute_project(
                                 &compiled.body_sql,
                                 facts.restrict_column.as_deref(),
                                 facts.skeleton_source_closure.as_ref(),
-                                &facts.upstream_model,
-                                &partition.start,
-                                &partition.end,
+                                crate::maintenance_driver::RestrictionDeltaSource::ModelEdge {
+                                    upstream_model: &facts.upstream_model,
+                                    window_start: &partition.start,
+                                    window_end: &partition.end,
+                                },
+                                Some(&facts.region_write),
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let chunk = crate::reporter::ChunkInfo {
+                            index: batch_idx,
+                            total: inc_plan.batches.len(),
+                            start: partition.start.clone(),
+                            end: partition.end.clone(),
+                        };
+                        reporter.maintenance_statements(run_id, &plan.name, Some(&chunk), &group);
+                        let row_count = backend
+                            .get_row_count(schema, &plan.model_file.db_name_owned())
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        smelt_backend::ExecutionResult {
+                            model_name: plan.name.clone(),
+                            duration: batch_start_time.elapsed(),
+                            row_count,
+                            preview: None,
+                        }
+                    } else if let Some(facts) = external_restricted_facts_this_batch {
+                        // 27e: this model's `UpstreamMutation` cell is driven
+                        // by an external `mutable_snapshot` source with no
+                        // native change feed — the fingerprint sidecar's own
+                        // diff (`RestrictionDeltaSource::ExternalSidecar`)
+                        // may license restricting this batch's recompute to
+                        // the synthesized changed-key set, resolved inside
+                        // `execute_delete_insert_with_delta_restriction`
+                        // itself. `external_restricted_facts_this_batch` is
+                        // `None` (falling through to the ordinary branch
+                        // below) under the same conditions as the model-edge
+                        // route above.
+                        let source_info = source_infos
+                            .iter()
+                            .find(|info| {
+                                let segs = &info.address_segments;
+                                let bare = match segs.split_first() {
+                                    Some((first, rest)) if first == "sources" => rest.join("."),
+                                    _ => segs.join("."),
+                                };
+                                bare == facts.source_name
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "model '{}' resolved a live external delta-restriction cell \
+                                     on source '{}', but that source has no resolved physical \
+                                     table",
+                                    plan.name,
+                                    facts.source_name
+                                )
+                            })?;
+                        let source_table = source_info.db_name_for_target(model_target, schema);
+                        let source_address = format!("smelt.sources.{}", facts.source_name);
+                        let all_source_columns: Vec<String> = source_info
+                            .columns
+                            .iter()
+                            .map(|c| c.name.clone())
+                            .collect();
+                        let source_key: Vec<String> = maint_source_facts
+                            .iter()
+                            .find(|s| s.name == facts.source_name)
+                            .map(|s| s.unique_key.clone())
+                            .unwrap_or_default();
+                        let region = smelt_logical::maintenance::emit::Region::for_axis(
+                            partition.axis,
+                            &partition.start,
+                            &partition.end,
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                        let group =
+                            crate::maintenance_driver::execute_delete_insert_with_delta_restriction(
+                                backend,
+                                schema,
+                                &plan.model_file.db_name_owned(),
+                                &partition.column,
+                                &region,
+                                &compiled.sql,
+                                &compiled.body_sql,
+                                facts.restrict_column.as_deref(),
+                                facts.skeleton_source_closure.as_ref(),
+                                crate::maintenance_driver::RestrictionDeltaSource::ExternalSidecar {
+                                    source_address: &source_address,
+                                    source_table: &source_table,
+                                    source_key: &source_key,
+                                    projection: &facts.projection,
+                                    all_source_columns: &all_source_columns,
+                                    model_sql: &compiled.body_sql,
+                                },
+                                Some(&facts.region_write),
+                                smelt_backend::maintenance_dialect(backend.dialect()),
+                                &retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        // Refresh the sidecar to the source's CURRENT
+                        // content only after the write that consumed the
+                        // diff has succeeded — riding the same ordering the
+                        // repair family's own sidecar refresh follows
+                        // (`RepairSidecarRefresh`'s doc comment), so a
+                        // failed write never advances the sidecar past a
+                        // change it did not actually consume.
+                        crate::maintenance_driver::refresh_fingerprint_sidecar(
+                            backend,
+                            schema,
+                            &source_address,
+                            &source_table,
+                            &source_key,
+                            &facts.projection,
+                            &all_source_columns,
+                            &compiled.body_sql,
+                            &group,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                         let chunk = crate::reporter::ChunkInfo {
                             index: batch_idx,
                             total: inc_plan.batches.len(),
@@ -3418,10 +4255,12 @@ pub async fn execute_project(
                         {
                             let table_name =
                                 format!("{schema}.{}", plan.model_file.db_name_owned());
-                            let region = smelt_logical::maintenance::emit::Region {
-                                start: format!("'{}'", partition.start.replace('\'', "''")),
-                                end: format!("'{}'", partition.end.replace('\'', "''")),
-                            };
+                            let region = smelt_logical::maintenance::emit::Region::for_axis(
+                                partition.axis,
+                                &partition.start,
+                                &partition.end,
+                            )
+                            .map_err(anyhow::Error::msg)?;
                             let group = smelt_logical::maintenance::emit::emit_delete_insert(
                                 &table_name,
                                 &partition.column,
@@ -3476,6 +4315,24 @@ pub async fn execute_project(
                         exec_result.row_count,
                         batch_duration,
                     );
+                }
+
+                // Recorded once for the whole run — the observed fingerprint
+                // `mutation_gate` carries was itself computed once, before
+                // the batch loop, and every batch that dispatched the merge
+                // did so against that SAME observed state
+                // (`docs/specs/incremental_models.md` §"When a mutation
+                // cell dispatches").
+                if used_column_scoped_merge {
+                    if let Some((source, _cell, _suppression)) = column_scoped_cell.as_ref() {
+                        record_upstream_mutation_baseline(
+                            mutation_gate,
+                            source,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await;
+                    }
                 }
 
                 // Manifest entry for the model
@@ -3542,6 +4399,7 @@ pub async fn execute_project(
                         retry_count: sink.retry_count(),
                         probes: model_probe_records,
                         subsumed,
+                        deferred_cells: Vec::new(),
                     },
                 );
 
@@ -3564,6 +4422,25 @@ pub async fn execute_project(
                         let model_hash = compute_model_hash(&plan.sql);
                         let intervals = interval_store.get_or_create(&plan.name, &model_hash);
                         intervals.record_interval(&start_str, &end_str);
+                        // `contract.cells[].deferral`: this fold just ran,
+                        // so every one of this model's own declaring cells
+                        // (resolved once in the pre-run pass, not
+                        // re-derived here) advances its frontier to this
+                        // run's own end — a run past the cell window (or an
+                        // unlicensed `Proceed`) always folds the whole row,
+                        // so every declaring cell is caught up regardless of
+                        // which one(s) actually licensed the coverage check
+                        // (`docs/outcomes/20260815-definition-delta-migrate/
+                        // phases/14-plan.md`).
+                        if let Some(addresses) = deferral_fold_addresses.get(&plan.name) {
+                            crate::contract_probes::advance_cell_frontiers(
+                                &mut interval_store,
+                                &plan.name,
+                                &model_hash,
+                                addresses,
+                                &end_str,
+                            );
+                        }
                         let _ = file_store.save_intervals(&interval_store);
                     }
                 }
@@ -3595,7 +4472,11 @@ pub async fn execute_project(
                                     smelt_logical::maintenance::MutationProfile::AppendOnly => {
                                         SourceMutationPosture::AppendOnly
                                     }
-                                    smelt_logical::maintenance::MutationProfile::MutableSnapshot => {
+                                    smelt_logical::maintenance::MutationProfile::MutableSnapshot
+                                    // A change feed has no interval representation
+                                    // either — its landed delta is recorded the same
+                                    // whole-table way a mutable snapshot's is.
+                                    | smelt_logical::maintenance::MutationProfile::ChangeFeed => {
                                         SourceMutationPosture::MutableSnapshot
                                     }
                                 }
@@ -3647,6 +4528,7 @@ pub async fn execute_project(
                         let _ = file_store.save_reconciliation_store(&reconciliation);
                     }
                 }
+                } // 'run_dispatch_or_batches
 
                 Ok(())
             }
@@ -3866,6 +4748,18 @@ pub async fn execute_project(
                             &plan.sql,
                             &inferred_columns,
                             existing_version,
+                            // Read from the model's own declared metadata,
+                            // not `plan.incremental` — a first-ever run of
+                            // a `refresh: incremental` model executes via
+                            // this full-refresh save path (no existing
+                            // table to incrementally build against yet),
+                            // where `plan.incremental` is `None` even
+                            // though the model does declare `timeseries:`.
+                            plan.model_file
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.timeseries.as_ref())
+                                .map(|ts| ts.partition_column.as_str()),
                         ) {
                             tracing::warn!(
                                 "Failed to save deployed schema for '{}': {}",
@@ -3897,6 +4791,7 @@ pub async fn execute_project(
                         retry_count: sink.retry_count(),
                         probes: model_probe_records,
                         subsumed: None,
+                        deferred_cells: Vec::new(),
                     },
                 );
 
@@ -3935,6 +4830,9 @@ pub async fn execute_project(
                         &plan.sql,
                         &inferred_columns,
                         None,
+                        plan.incremental
+                            .as_ref()
+                            .map(|inc| inc.timeseries.partition_column.as_str()),
                     ) {
                         tracing::warn!("Failed to save deployed schema for '{}': {}", plan.name, e);
                     }
@@ -4125,6 +5023,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -4177,6 +5076,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 }
             });
         }
@@ -4197,6 +5097,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -4262,17 +5163,165 @@ pub async fn execute_project(
 fn parse_run_window(request: &ExecuteRequest) -> Result<(Option<NaiveDate>, Option<NaiveDate>)> {
     match (request.start.as_deref(), request.end.as_deref()) {
         (Some(s), Some(e)) => {
-            let sd = NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .with_context(|| format!("Invalid start date: {s}"))?;
-            let ed = NaiveDate::parse_from_str(e, "%Y-%m-%d")
-                .with_context(|| format!("Invalid end date: {e}"))?;
-            if sd >= ed {
-                anyhow::bail!("Start date must be before end date");
+            match (
+                NaiveDate::parse_from_str(s, "%Y-%m-%d"),
+                NaiveDate::parse_from_str(e, "%Y-%m-%d"),
+            ) {
+                (Ok(sd), Ok(ed)) => {
+                    if sd >= ed {
+                        anyhow::bail!("Start date must be before end date");
+                    }
+                    Ok((Some(sd), Some(ed)))
+                }
+                // Not calendar-shaped — the run window may still be valid on
+                // an integer partition axis (`docs/specs/timeseries.md`
+                // §"Validation rules" rule 9). This function only serves the
+                // calendar-axis-only consumers of `start_date`/`end_date`
+                // (key-grain dispatch, `PartitionRange` construction, etc.);
+                // `build_model_plans` re-resolves the raw `request.start`/
+                // `request.end` strings per model against that model's own
+                // resolved axis (`resolve_partition_axes`), so returning
+                // `(None, None)` here for a bare-integer pair does not lose
+                // the window for those integer-axis models — it just means
+                // this global NaiveDate view has nothing to say about it.
+                // A pair that is neither calendar-shaped nor a valid
+                // increasing integer pair is still a hard, fail-loud error.
+                _ => match (s.parse::<i64>(), e.parse::<i64>()) {
+                    (Ok(si), Ok(ei)) if si < ei => Ok((None, None)),
+                    (Ok(_), Ok(_)) => {
+                        anyhow::bail!("Start must be before end (got start={s}, end={e})")
+                    }
+                    _ => {
+                        anyhow::bail!(
+                            "Invalid time range bounds '{s}'/'{e}': expected both to be \
+                             calendar dates (YYYY-MM-DD) or both to be bare integers (for an \
+                             integer partition axis)"
+                        )
+                    }
+                },
             }
-            Ok((Some(sd), Some(ed)))
         }
         (None, None) => Ok((None, None)),
         _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
+    }
+}
+
+/// Parse `request.start`/`request.end` (raw strings) against a specific
+/// model's resolved partition axis — the generalization of
+/// [`parse_run_window`] task 7 calls for. Unlike `parse_run_window` (which
+/// serves every calendar-only consumer of the global `start_date`/`end_date`
+/// pair), this is called once per selected partition-grain model inside
+/// [`build_model_plans`], so a run mixing a calendar-axis model and an
+/// integer-axis model resolves each bound correctly for its own model
+/// rather than forcing one global domain.
+fn parse_run_window_in_axis(
+    request: &ExecuteRequest,
+    axis: smelt_logical::PartitionAxis,
+) -> Result<
+    Option<(
+        crate::windowing::PartitionPoint,
+        crate::windowing::PartitionPoint,
+    )>,
+> {
+    match (request.start.as_deref(), request.end.as_deref()) {
+        (Some(s), Some(e)) => {
+            let start = crate::windowing::PartitionPoint::parse_in_axis(s, axis)
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+            let end = crate::windowing::PartitionPoint::parse_in_axis(e, axis)
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+            Ok(Some((start, end)))
+        }
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
+    }
+}
+
+/// Resolve each selected model's `partition_column` axis from its output
+/// schema (`docs/specs/timeseries.md` §"Validation rules" rule 9). Reuses
+/// the same `smelt_db::resolved_model_schema` Salsa read
+/// `UpstreamSchemas::from_database` performs, rather than building a second
+/// `UpstreamSchemas` — the schema this reads is the same one that read
+/// would compute. A model absent from the returned map means the type
+/// could not be resolved (no `timeseries:`, unresolved column, or
+/// `Unknown` type); `build_model_plans` falls back for that model to the
+/// axis implied by the run-window literal's own form, with a
+/// `tracing::warn!` — an undecidable type is not a positive disproof of
+/// either domain, matching the existing fail-open posture of
+/// `derive_partition_grid_unit`.
+fn resolve_partition_axes(
+    db: &smelt_db::Database,
+    selected: &[String],
+    graph_lock: &DependencyGraph,
+    config: &Config,
+) -> HashMap<String, smelt_logical::PartitionAxis> {
+    let mut out = HashMap::new();
+    let Some(workspace) = smelt_db::Workspace::try_get(db) else {
+        return out;
+    };
+    for model_name in selected {
+        let Ok(model) = graph_lock.get_model(model_name) else {
+            continue;
+        };
+        let metadata = model.metadata.as_deref();
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+        let Some(ts) = ts_config else {
+            continue;
+        };
+        let Some(file) = db.source_file(&model.path) else {
+            continue;
+        };
+        let resolved = smelt_db::resolved_model_schema(db, workspace, file);
+        let Some(col) = resolved
+            .columns
+            .iter()
+            .find(|c| c.name == ts.partition_column)
+        else {
+            continue;
+        };
+        let Some(typed) = &col.data_type else {
+            continue;
+        };
+        if let Some(axis) = smelt_logical::partition_axis_for_type(&typed.data_type) {
+            out.insert(model_name.clone(), axis);
+        }
+    }
+    out
+}
+
+/// Resolve the effective run-window bounds for one model's axis. Calendar
+/// axis reads the already-globally-parsed `start_date`/`end_date`
+/// (unchanged — every existing calendar-axis model resolves its window
+/// exactly as before parse_run_window's leniency was added). Integer axis
+/// re-parses `request.start`/`request.end` (the raw strings) directly
+/// against that axis, since the global calendar-only parse in
+/// [`parse_run_window`] returns `(None, None)` for a non-calendar-shaped
+/// pair. `None` means no run window was supplied for this model at all;
+/// `Err` means one was supplied but doesn't parse in this model's axis
+/// (fail-closed, `docs/specs/incremental_shapes.md` §"The partition grain"
+/// rule 8a).
+fn window_for_axis(
+    axis: smelt_logical::PartitionAxis,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    request: &ExecuteRequest,
+) -> Result<
+    Option<(
+        crate::windowing::PartitionPoint,
+        crate::windowing::PartitionPoint,
+    )>,
+> {
+    match axis {
+        smelt_logical::PartitionAxis::Calendar => Ok(match (start_date, end_date) {
+            (Some(s), Some(e)) => Some((
+                crate::windowing::PartitionPoint::Date(s),
+                crate::windowing::PartitionPoint::Date(e),
+            )),
+            _ => None,
+        }),
+        smelt_logical::PartitionAxis::Integer => parse_run_window_in_axis(request, axis),
     }
 }
 
@@ -4282,7 +5331,7 @@ fn parse_run_window(request: &ExecuteRequest) -> Result<(Option<NaiveDate>, Opti
 /// project-wide source-timeseries map — so both the dry-run statement-emission
 /// branch and the real run share the identical chunk decomposition
 /// (`docs/specs/cli.md` §"`--dry-run` prints the maintenance statements":
-/// backbuild's per-chunk boundaries under `--dry-run` are the real chunks).
+/// rebuild's per-chunk boundaries under `--dry-run` are the real chunks).
 /// Returns the plans plus the total batch count (for `run_started`).
 #[allow(clippy::too_many_arguments)]
 fn build_model_plans(
@@ -4294,6 +5343,7 @@ fn build_model_plans(
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
     request: &ExecuteRequest,
+    partition_axes: &HashMap<String, smelt_logical::PartitionAxis>,
 ) -> Result<(Vec<ModelPlan>, usize)> {
     let mut model_plans: Vec<ModelPlan> = Vec::new();
     let mut total_batches: usize = 0;
@@ -4314,8 +5364,48 @@ fn build_model_plans(
 
         let refresh = config.get_refresh_with_metadata(model_name, metadata);
 
-        match (inc_config, ts_config, start_date, end_date) {
-            (Some(inc), Some(ts), Some(start_date), Some(end_date)) => {
+        // Resolve this model's partition axis (`docs/specs/timeseries.md`
+        // §"Validation rules" rule 9) and, in that axis's domain, the
+        // effective run-window bounds — `None` when no run window was
+        // supplied, or the run-window literal doesn't parse in this
+        // model's resolved axis (`window_for_axis`, which itself is `Err`
+        // for a malformed-but-present window).
+        type AxisWindow<'a> = (
+            smelt_logical::PartitionAxis,
+            &'a smelt_core::config::TimeseriesConfig,
+            Option<(
+                crate::windowing::PartitionPoint,
+                crate::windowing::PartitionPoint,
+            )>,
+        );
+        let axis_and_window: Option<AxisWindow> = match &ts_config {
+            None => None,
+            Some(ts) => {
+                let axis = partition_axes.get(model_name).copied().unwrap_or_else(|| {
+                    // Undecidable type — not a positive disproof of either
+                    // domain (same fail-open posture as
+                    // `derive_partition_grid_unit`). Fall back to the axis
+                    // implied by the run-window literal's own form so a
+                    // first-run without a resolvable schema still works for
+                    // the common calendar case.
+                    let implied =
+                        crate::windowing::axis_implied_by_literal_form(request.start.as_deref());
+                    warn!(
+                        "model '{model_name}': partition column '{}' type could not be \
+                         resolved from the output schema; falling back to the axis implied \
+                         by the run-window literal's form ({:?})",
+                        ts.partition_column, implied
+                    );
+                    implied
+                });
+                let window = window_for_axis(axis, start_date, end_date, request)?;
+                Some((axis, ts, window))
+            }
+        };
+
+        match (inc_config, axis_and_window) {
+            (Some(inc), Some((axis, ts, Some((window_start, window_end))))) => {
+                let ts = ts.clone();
                 // Resolve data latency from model column metadata for the event-time column.
                 let data_latency_days = metadata
                     .and_then(|m| m.columns.get(&ts.event_time_column))
@@ -4328,34 +5418,65 @@ fn build_model_plans(
                 // (`contract:`)"): narrows the requested range's start to
                 // `end - H`, never widens. The pure transform is single-owned
                 // in `smelt-logical`; this call site only converts dates to
-                // the day-count unit it operates on.
-                let clamped_start_date = metadata
-                    .and_then(|m| m.contract.as_ref())
-                    .and_then(|c| c.frozen_horizon.as_ref())
-                    .and_then(|fh| {
-                        let h_days = fh.to_days() as i64;
-                        let start_days = start_date.num_days_from_ce() as i64;
-                        let end_days = end_date.num_days_from_ce() as i64;
-                        let clamped_days = smelt_logical::clamp_frozen_horizon_write_range(
-                            start_days, end_days, h_days,
-                        );
-                        if clamped_days > start_days {
-                            info!(
-                                "model '{model_name}': frozen_horizon ({} days) narrows the \
-                                 requested write range start to {}",
-                                h_days,
+                // the day-count unit it operates on. Calendar axis only — a
+                // `frozen_horizon` declared on an integer-axis model is a
+                // hard refusal below (`docs/specs/incremental_shapes.md`
+                // §"The partition grain" rule 8a: its horizon is a day count
+                // with no conversion into partition units).
+                if axis == smelt_logical::PartitionAxis::Integer
+                    && metadata
+                        .and_then(|m| m.contract.as_ref())
+                        .and_then(|c| c.frozen_horizon.as_ref())
+                        .is_some()
+                {
+                    return Err(anyhow::anyhow!(
+                        "model '{model_name}': contract.frozen_horizon is declared, but \
+                         partition column '{}' resolves to an integer partition axis; a \
+                         frozen_horizon (a day count) has no conversion into partition units \
+                         and is refused rather than silently unclamped",
+                        ts.partition_column,
+                    ));
+                }
+                let full_range = match (window_start, window_end) {
+                    (
+                        crate::windowing::PartitionPoint::Date(start_date),
+                        crate::windowing::PartitionPoint::Date(end_date),
+                    ) => {
+                        let clamped_start_date = metadata
+                            .and_then(|m| m.contract.as_ref())
+                            .and_then(|c| c.frozen_horizon.as_ref())
+                            .and_then(|fh| {
+                                let h_days = fh.to_days() as i64;
+                                let start_days = start_date.num_days_from_ce() as i64;
+                                let end_days = end_date.num_days_from_ce() as i64;
+                                let clamped_days = smelt_logical::clamp_frozen_horizon_write_range(
+                                    start_days, end_days, h_days,
+                                );
+                                if clamped_days > start_days {
+                                    info!(
+                                        "model '{model_name}': frozen_horizon ({} days) narrows the \
+                                         requested write range start to {}",
+                                        h_days,
+                                        NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
+                                            .map(|d| d.format("%Y-%m-%d").to_string())
+                                            .unwrap_or_default()
+                                    );
+                                }
                                 NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
-                                    .map(|d| d.format("%Y-%m-%d").to_string())
-                                    .unwrap_or_default()
-                            );
-                        }
-                        NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
-                    })
-                    .unwrap_or(start_date);
+                            })
+                            .unwrap_or(start_date);
 
-                let full_range = TimeRange {
-                    start: clamped_start_date.format("%Y-%m-%d").to_string(),
-                    end: end_date.format("%Y-%m-%d").to_string(),
+                        TimeRange {
+                            start: clamped_start_date.format("%Y-%m-%d").to_string(),
+                            end: end_date.format("%Y-%m-%d").to_string(),
+                            axis: smelt_logical::PartitionAxis::Calendar,
+                        }
+                    }
+                    (start, end) => TimeRange {
+                        start: start.to_string(),
+                        end: end.to_string(),
+                        axis: start.axis(),
+                    },
                 };
 
                 // Use bound-aware windowing: SQL temporal dependencies + data latency
@@ -4402,6 +5523,7 @@ fn build_model_plans(
                     &dep_ts,
                     data_latency_days,
                     &full_range,
+                    axis,
                     request.batch_size_days,
                     request.per_partition,
                 )
@@ -4439,9 +5561,10 @@ fn build_model_plans(
                     refresh: refresh.clone(),
                 });
             }
-            (Some(_inc), Some(_ts), _, _) => {
-                // Incremental config present but no time window. Fall back to
-                // full refresh; the model still compiles and executes.
+            (Some(_inc), Some((_axis, _ts, None))) => {
+                // Incremental config present but no time window resolved for
+                // this model's axis. Fall back to full refresh; the model
+                // still compiles and executes.
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),
                     sql: model.content.clone(),
@@ -4451,7 +5574,7 @@ fn build_model_plans(
                     refresh: refresh.clone(),
                 });
             }
-            (Some(_inc), None, _, _) => {
+            (Some(_inc), None) => {
                 warn!(
                     "model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
                 );
@@ -4464,7 +5587,7 @@ fn build_model_plans(
                     refresh: refresh.clone(),
                 });
             }
-            (None, _, _, _) => {
+            (None, _) => {
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),
                     sql: model.content.clone(),
@@ -4687,6 +5810,225 @@ fn model_edges_for(
         });
     }
     edges
+}
+
+/// Outcome of a live key-addressed model-edge repair cell
+/// ([`resolve_and_dispatch_key_addressed_edge_cell`]) that actually executed
+/// a write this run (an empty changed-key set resolves to `Ok(None)` from
+/// the underlying dispatch and is reported by the caller as the ordinary
+/// zero-row no-op, not this variant).
+struct KeyAddressedEdgeDispatch {
+    result: smelt_backend::ExecutionResult,
+    used_per_group_recompute: bool,
+    used_diff_patch: bool,
+    /// The upstream model's bare name the cell is keyed on — used by callers
+    /// to assert mutual exclusion against a declared-source cell resolved
+    /// for the same trigger name.
+    edge_name: String,
+}
+
+/// Resolve and (if live, and the target table already exists) dispatch a
+/// key-addressed model-edge repair cell (`docs/specs/incremental_models.md`
+/// §"Upstream model edges") — the SAME resolve-then-execute body the keyed
+/// run branch and the non-keyed (window-forward) incremental branch both
+/// need, factored out here so the two cannot silently diverge the way they
+/// did before this cell was dispatched on both branches
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/11-plan.md`).
+///
+/// The cell has no run-window axis of its own — its bounded read is the
+/// upstream's own affected key set, not a `[start, end)` interval — so it
+/// dispatches identically regardless of which run shape the downstream's
+/// OWN driving trigger classifies as, and regardless of the downstream's
+/// declared `grain:`. Never dispatched on the creation run: `table_exists_
+/// before_run` must be captured by the caller BEFORE any write this run
+/// performs, since there is nothing to repair yet and the fold/batch loop's
+/// own create path is what materializes the table.
+/// Mutation-happened discrimination
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches"):
+/// resolve `source`'s `SourceInfo` (same bare-address lookup every
+/// `UpstreamMutation` dispatch site already performs), and — only if it
+/// declares digest columns — probe its current whole-source fingerprint
+/// against the recorded baseline. Returns `None` when the source has no
+/// declared columns to fingerprint (nothing to compare against, so the
+/// caller treats it the same as `Dispatch`) or is not found in
+/// `source_infos` at all.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_upstream_mutation_gate(
+    backend: &dyn Backend,
+    model: &str,
+    source_infos: &[smelt_core::sources::SourceInfo],
+    source: &str,
+    model_target: &str,
+    schema: &str,
+    file_store: &FileStore,
+    state_io_lock: &tokio::sync::Mutex<()>,
+) -> Result<
+    Option<(
+        crate::mutation_probe::MutationVerdict,
+        smelt_state::source_mutations::SourceMutationBaseline,
+    )>,
+> {
+    let Some(info) = source_infos.iter().find(|info| {
+        let segs = &info.address_segments;
+        let bare = match segs.split_first() {
+            Some((first, rest)) if first == "sources" => rest.join("."),
+            _ => segs.join("."),
+        };
+        bare == source
+    }) else {
+        return Ok(None);
+    };
+    if info.columns.is_empty() {
+        return Ok(None);
+    }
+    let digest_columns: Vec<String> = info.columns.iter().map(|c| c.name.clone()).collect();
+    let source_table = info.db_name_for_target(model_target, schema);
+    let _io_guard = state_io_lock.lock().await;
+    let mutation_baselines = file_store
+        .load_source_mutations()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let (verdict, refreshed) = crate::mutation_probe::gate_upstream_mutation_dispatch(
+        backend,
+        model,
+        source,
+        &source_table,
+        &digest_columns,
+        smelt_backend::maintenance_dialect(backend.dialect()),
+        mutation_baselines.get(source),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(Some((verdict, refreshed)))
+}
+
+/// Record the refreshed baseline `resolve_upstream_mutation_gate` returned —
+/// called only after the licensed technique's write actually succeeded
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches":
+/// "a failed run cannot suppress the next run's cell"). A `None` gate or a
+/// `NoOp` verdict records nothing — the recorded baseline changes only on a
+/// genuine dispatch.
+async fn record_upstream_mutation_baseline(
+    mutation_gate: Option<(
+        crate::mutation_probe::MutationVerdict,
+        smelt_state::source_mutations::SourceMutationBaseline,
+    )>,
+    source: &str,
+    file_store: &FileStore,
+    state_io_lock: &tokio::sync::Mutex<()>,
+) {
+    let Some((crate::mutation_probe::MutationVerdict::Dispatch, refreshed)) = mutation_gate else {
+        return;
+    };
+    let _io_guard = state_io_lock.lock().await;
+    if let Ok(mut mutation_baselines) = file_store.load_source_mutations() {
+        mutation_baselines.record(source, refreshed);
+        let _ = file_store.save_source_mutations(&mutation_baselines);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_and_dispatch_key_addressed_edge_cell(
+    backend: &dyn Backend,
+    schema: &str,
+    plan_name: &str,
+    model_file: &smelt_core::ModelFile,
+    clean_sql: &str,
+    db_table_name: &str,
+    maint_source_facts: &[smelt_logical::maintenance::SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+    table_exists_before_run: bool,
+    model_by_addr: &HashMap<String, smelt_core::ModelFile>,
+    config: &Config,
+    request: &ExecuteRequest,
+    compiler: &SqlCompiler,
+    resolver: &EphemeralResolver,
+    run_id: &str,
+    reporter: &dyn RunReporter,
+) -> Result<Option<KeyAddressedEdgeDispatch>> {
+    if model_edges.is_empty() || !table_exists_before_run {
+        return Ok(None);
+    }
+    let Some(metadata) = model_file.metadata.as_deref() else {
+        return Ok(None);
+    };
+    let Some((edge_name, _cell, key_scope, _upstream_keys, group_key, digest_columns, write)) =
+        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
+            clean_sql,
+            db_table_name,
+            metadata,
+            maint_source_facts,
+            explicitly_mutable,
+            model_edges,
+            backend.dialect(),
+        )?
+    else {
+        return Ok(None);
+    };
+
+    let used_per_group_recompute = matches!(
+        write,
+        crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
+    );
+    let used_diff_patch = matches!(
+        write,
+        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+    );
+    let retry_policy = RetryPolicy::from_request(request, run_id, plan_name, reporter);
+    let upstream_model = model_by_addr.get(&edge_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "model '{plan_name}' resolved a live key-addressed model-edge cell on upstream \
+             '{edge_name}', but that upstream has no resolved ModelFile — internal \
+             inconsistency"
+        )
+    })?;
+    let upstream_target = config.get_target(
+        &edge_name,
+        upstream_model.metadata.as_deref(),
+        &request.target,
+    );
+    let upstream_schema = &config.targets[&upstream_target].schema;
+    let upstream_table = format!("{upstream_schema}.{}", upstream_model.db_name_owned());
+    let upstream_source_address = format!("smelt.models.{edge_name}");
+    let compiled =
+        compiler.compile_with_sql_and_ephemerals(model_file, schema, clean_sql, resolver)?;
+    let result = match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
+        backend,
+        schema,
+        db_table_name,
+        &upstream_source_address,
+        &upstream_table,
+        &group_key,
+        &digest_columns,
+        &key_scope.keys,
+        key_scope.discovery,
+        clean_sql,
+        &compiled.sql,
+        &write,
+        &retry_policy,
+    )
+    .await?
+    {
+        Some(result) => result,
+        None => {
+            let row_count = backend
+                .get_row_count(schema, db_table_name)
+                .await
+                .unwrap_or(0);
+            smelt_backend::ExecutionResult {
+                model_name: db_table_name.to_string(),
+                duration: StdDuration::default(),
+                row_count,
+                preview: None,
+            }
+        }
+    };
+    Ok(Some(KeyAddressedEdgeDispatch {
+        result,
+        used_per_group_recompute,
+        used_diff_patch,
+        edge_name,
+    }))
 }
 
 /// Build the per-model `SourceFacts` list and the explicitly-mutable
@@ -5104,4 +6446,145 @@ pub fn build_source_key_recurrence_map(
         }
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reporter::RunReporter;
+    use std::sync::Mutex;
+
+    /// `docs/outcomes/20260815-partition-grain-residue/phases/05a-plan.md`
+    /// §Tests — `parse_run_window_in_axis` (the generalization of
+    /// `parse_run_window` task 7 calls for) parses `--event-time-start 1
+    /// --event-time-end 4` into two `PartitionPoint::Integer`s when the
+    /// resolved axis is `Integer`.
+    fn test_request(start: &str, end: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            target: "dev".to_string(),
+            select: vec![],
+            exclude: vec![],
+            start: Some(start.to_string()),
+            end: Some(end.to_string()),
+            batch_size_days: None,
+            per_partition: false,
+            full_refresh: false,
+            dry_run: true,
+            enforce_safety: false,
+            allow_column_removal: false,
+            allow_full_refresh: false,
+            ephemeral_seed_ctes: vec![],
+            run_checks: false,
+            checks: vec![],
+            jobs: None,
+            retry_max: None,
+            retry_backoff_ms: None,
+            resume: false,
+            technique_overrides: vec![],
+        }
+    }
+
+    #[test]
+    fn parse_run_window_accepts_integer_bounds() {
+        let request = test_request("1", "4");
+        let (start, end) =
+            parse_run_window_in_axis(&request, smelt_logical::PartitionAxis::Integer)
+                .expect("integer bounds must parse")
+                .expect("both bounds supplied");
+        assert_eq!(start, crate::windowing::PartitionPoint::Integer(1));
+        assert_eq!(end, crate::windowing::PartitionPoint::Integer(4));
+    }
+
+    /// `docs/outcomes/20260815-partition-grain-residue/phases/05b-plan.md`
+    /// §Tests — the `Region` built for an integer-axis batch (via the same
+    /// `Region::for_axis(batch.partition_start.axis(), ...)` call
+    /// `execute.rs`'s batch loop makes) carries bare literals, not quoted
+    /// ones.
+    #[test]
+    fn integer_axis_region_is_bare() {
+        let batch = crate::windowing::PartitionPoint::Integer(1);
+        let region = smelt_logical::maintenance::emit::Region::for_axis(
+            batch.axis(),
+            &batch.to_string(),
+            &crate::windowing::PartitionPoint::Integer(2).to_string(),
+        )
+        .expect("integer literals must render");
+        assert_eq!(region.start, "1");
+        assert_eq!(region.end, "2");
+    }
+
+    #[test]
+    fn parse_run_window_in_axis_refuses_calendar_bounds_on_integer_axis() {
+        let request = test_request("2026-01-01", "2026-01-04");
+        let err = parse_run_window_in_axis(&request, smelt_logical::PartitionAxis::Integer)
+            .expect_err("a calendar-shaped bound must be refused on an integer axis");
+        assert!(
+            err.to_string().contains("bare integer"),
+            "error must explain the axis mismatch, got: {err}"
+        );
+    }
+
+    /// `(run_id, model, structure, dialect, consequence)` — one captured
+    /// `state_structure_unavailable` call.
+    type CapturedEvent = (String, String, String, String, String);
+
+    /// Captures `RunReporter::state_structure_unavailable` calls so the
+    /// replay test can assert exactly what reached the downstream reporter.
+    #[derive(Default)]
+    struct CapturingReporter {
+        events: Mutex<Vec<CapturedEvent>>,
+    }
+
+    impl RunReporter for CapturingReporter {
+        fn state_structure_unavailable(
+            &self,
+            run_id: &str,
+            model: &str,
+            structure: &str,
+            dialect: &str,
+            consequence: &str,
+        ) {
+            self.events.lock().unwrap().push((
+                run_id.to_string(),
+                model.to_string(),
+                structure.to_string(),
+                dialect.to_string(),
+                consequence.to_string(),
+            ));
+        }
+    }
+
+    /// `EventSink` buffers per-model reporter callbacks under a `--jobs > 1`
+    /// wavefront run and replays them onto the real reporter in
+    /// `execution_order` sequence — `state_structure_unavailable` must
+    /// survive that buffer/replay round-trip like every other event, so a
+    /// concurrent run does not silently lose the fact that a state
+    /// structure was skipped.
+    #[test]
+    fn buffered_state_structure_unavailable_replays_to_reporter() {
+        let sink = EventSink::default();
+        sink.state_structure_unavailable(
+            "run-1",
+            "model-a",
+            "merge ledger",
+            "Spark SQL",
+            "re-run-tolerant keyed model merge-ledger bookkeeping record skipped",
+        );
+
+        let reporter = CapturingReporter::default();
+        sink.replay(&reporter, "run-1", "model-a");
+
+        let events = reporter.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one replayed event: {:?}", events);
+        assert_eq!(
+            events[0],
+            (
+                "run-1".to_string(),
+                "model-a".to_string(),
+                "merge ledger".to_string(),
+                "Spark SQL".to_string(),
+                "re-run-tolerant keyed model merge-ledger bookkeeping record skipped".to_string(),
+            )
+        );
+    }
 }

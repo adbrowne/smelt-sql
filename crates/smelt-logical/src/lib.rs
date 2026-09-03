@@ -15,7 +15,10 @@ pub use analysis::monotonicity::{
     Offset,
 };
 pub use analysis::output_delta::{derive_output_delta, OutputDelta, OutputDeltaFacts};
-pub use analysis::source_bounds::{BoundContext, BoundResult, InjectionPoint, Seconds};
+pub use analysis::partition_axis::{partition_axis_for_type, PartitionAxis};
+pub use analysis::source_bounds::{
+    resolve_scan_window, BoundContext, BoundResult, InjectionPoint, ScanWindowVerdict, Seconds,
+};
 pub use analysis::temporal::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days,
     EffectiveWindow, TemporalDependency, TemporalOffset, TemporalSource,
@@ -25,6 +28,7 @@ pub use contract::deferral::validate_deferral;
 pub use contract::frozen_horizon::{
     clamp_write_range as clamp_frozen_horizon_write_range, validate_frozen_horizon,
 };
+pub use contract::retain_departed::validate as validate_retain_departed;
 pub use data_tests::{
     lower_column_test, resolve_not_null_verdict, resolve_unique_verdict, ScanLowering, TestVerdict,
 };
@@ -37,9 +41,10 @@ pub use lowering::as_struct::{as_struct_to_sql, backend_supports_struct_literal}
 pub use maintenance::edge_type::{type_edge, Addressing, EdgeComponent};
 pub use plan_builder::{build_logical_plan_pure, FnCallInput};
 pub use rules::cumulative::{
-    classify_cumulative, combiner_for, group_by_unique_key, state_column_summary, AggregatorColumn,
-    CrossPartitionCombiner, CumulativeClassification, DrivingSource, KeyedDiagnostic,
-    SourceTimeseriesMap, StateColumnSummary,
+    classify_cumulative, combiner_for, execution_postures, group_by_unique_key,
+    state_column_summary, AggregatorColumn, CrossPartitionCombiner, CumulativeClassification,
+    DrivingSource, ExecutionPostures, KeyedDiagnostic, PostureVerdict, SourceTimeseriesMap,
+    StateColumnSummary,
 };
 pub use rules::incremental::{
     analyze_batch_safety, batch_safety_from_bounds, derive_model_source_bounds, BatchSafety,

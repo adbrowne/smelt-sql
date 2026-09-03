@@ -210,7 +210,7 @@ fn composed_delta_values_sql(dialect: smelt_core::config::BackendType, rows: &[G
             vec![
                 r.id.to_string(),
                 format!("DATE '{}'", r.d.format("%Y-%m-%d")),
-                r.val.to_string(),
+                r.val_sql(),
             ]
         })
         .collect();
@@ -303,7 +303,7 @@ async fn insert_composed_rows_via_backend_for(
                 recipe.source.name,
                 row.d.format("%Y-%m-%d"),
                 row.id,
-                row.val,
+                row.val_sql(),
             ))
             .await
             .map_err(|e| anyhow::anyhow!("insert composed route-3 oracle row: {e}"))?;
@@ -349,6 +349,8 @@ async fn drive_composed_route3_and_assert_for(
             &classification,
             Some(&slice),
             &composed_route3_suppression(),
+            // The route-3 composed recipe stages no `maintenance.cells[].write` pin.
+            None,
             compile_step,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -464,12 +466,12 @@ mod tests {
             GenRow {
                 d: chrono::NaiveDate::from_ymd_opt(2024, 3, 1).expect("valid date"),
                 id: 900,
-                val: 10,
+                val: Some(10),
             },
             GenRow {
                 d: chrono::NaiveDate::from_ymd_opt(2024, 3, 2).expect("valid date"),
                 id: 5000,
-                val: 1,
+                val: Some(1),
             },
         ]
     }

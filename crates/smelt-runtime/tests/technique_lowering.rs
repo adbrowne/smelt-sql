@@ -94,6 +94,7 @@ fn test_window() -> smelt_backend::PartitionRange {
         column: String::new(),
         start: "2024-01-01".to_string(),
         end: "2024-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     }
 }
 
@@ -363,6 +364,153 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
     );
 }
 
+/// Sibling of `column_scoped_merge_matches_full_refresh_after_dimension_
+/// mutation` above, proving the mutation-happened discrimination gate
+/// (`smelt_runtime::mutation_probe`, `docs/specs/incremental_models.md`
+/// §"When a mutation cell dispatches") actually skips the MERGE when the
+/// mutated dimension is unchanged since the last recorded baseline: run once
+/// (records the baseline), re-run with the dimension untouched → the gate
+/// reports `NoOp` and the merge does not execute (result still equal to the
+/// full-refresh oracle, since nothing needed to change), then mutate the
+/// dimension and re-run → the gate reports `Dispatch` again.
+#[tokio::test]
+async fn column_scoped_merge_skipped_when_dimension_unmutated() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.events_enriched (d DATE, user_id BIGINT, val DOUBLE, tier VARCHAR)",
+        )
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.events_enriched VALUES \
+             (DATE '2024-01-01', 1, 10.0, 'bronze'), \
+             (DATE '2024-01-01', 2, 20.0, 'silver')",
+        )
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create dim table");
+    backend
+        .execute_sql("INSERT INTO main.sources_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .expect("seed dim table (unmutated — matches events_enriched already)");
+
+    let digest_columns = vec!["user_id".to_string(), "tier".to_string()];
+    let dialect = smelt_backend::MaintenanceDialect::DuckDb;
+
+    // First gate call: no recorded baseline, so it always dispatches.
+    let (verdict1, baseline1) = smelt_runtime::mutation_probe::gate_upstream_mutation_dispatch(
+        &backend,
+        "events_enriched",
+        "users",
+        "main.sources_users",
+        &digest_columns,
+        dialect,
+        None,
+    )
+    .await
+    .expect("gate must succeed");
+    assert_eq!(
+        verdict1,
+        smelt_runtime::mutation_probe::MutationVerdict::Dispatch
+    );
+
+    // Second gate call against the JUST-recorded baseline, dimension still
+    // unchanged: must report NoOp — the cell is a no-op this run.
+    let (verdict2, _baseline2) = smelt_runtime::mutation_probe::gate_upstream_mutation_dispatch(
+        &backend,
+        "events_enriched",
+        "users",
+        "main.sources_users",
+        &digest_columns,
+        dialect,
+        Some(&baseline1),
+    )
+    .await
+    .expect("gate must succeed");
+    assert_eq!(
+        verdict2,
+        smelt_runtime::mutation_probe::MutationVerdict::NoOp,
+        "an unmutated dimension must not re-dispatch the column-scoped merge"
+    );
+
+    // The dimension is now genuinely mutated (user 1: bronze -> gold).
+    backend
+        .execute_sql("UPDATE main.sources_users SET tier = 'gold' WHERE user_id = 1")
+        .await
+        .expect("mutate dimension");
+
+    let (verdict3, baseline3) = smelt_runtime::mutation_probe::gate_upstream_mutation_dispatch(
+        &backend,
+        "events_enriched",
+        "users",
+        "main.sources_users",
+        &digest_columns,
+        dialect,
+        Some(&baseline1),
+    )
+    .await
+    .expect("gate must succeed");
+    assert_eq!(
+        verdict3,
+        smelt_runtime::mutation_probe::MutationVerdict::Dispatch,
+        "a genuinely mutated dimension must dispatch again"
+    );
+    assert_ne!(
+        baseline3.recorded_fingerprint,
+        baseline1.recorded_fingerprint
+    );
+
+    // Actually dispatching the merge now (as the run driver would on
+    // `Dispatch`) picks up the mutated value, matching the full-refresh
+    // oracle — the gate's `NoOp` above did not corrupt or stale-cache
+    // anything a subsequent genuine dispatch relies on.
+    let contribution = ContributionVerdict::Monotone;
+    let bound = BoundResult::Bounded {
+        source_partition_col: "d".to_string(),
+        before: Seconds::ZERO,
+        after: Seconds::hours(24),
+    };
+    let dimension_batch_sql = "SELECT e.d, e.user_id, e.val, u.tier \
+         FROM main.events_enriched e JOIN main.sources_users u ON e.user_id = u.user_id";
+    execute_column_scoped_merge(
+        &backend,
+        "main",
+        "events_enriched",
+        &["user_id".to_string()],
+        &contribution,
+        &bound,
+        "d",
+        "2024-01-01 12:00:00",
+        dimension_batch_sql,
+        &[],
+        &unconditional(),
+        &test_window(),
+        &no_retry_policy(),
+    )
+    .await
+    .expect("column-scoped merge must succeed");
+
+    let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+    let maintained_tier_1: String = conn
+        .query_row(
+            "SELECT tier FROM main.events_enriched WHERE user_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read maintained tier for user 1");
+    assert_eq!(maintained_tier_1, "gold");
+}
+
 /// The `PartitionLocal::Yes` corner's physical mechanism, end-to-end against
 /// a real DuckDB backend: `decide_column_merge_dispatch` selects
 /// `ColumnMergeDispatch::Clamped`, `widen_horizon_for_batch` derives the
@@ -419,6 +567,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
             column: "changed_at".to_string(),
             before: Seconds::ZERO,
             after: Seconds::hours(24),
+            write_footprint: None,
         }],
         ledger_catch_up: false,
         row_identity: RowIdentityVerdict {
@@ -1165,7 +1314,7 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let sources =
+    let (sources, _scan_bounds_warnings) =
         smelt_db::queries::maintenance::build_source_facts(&source_refs, model_scan_bounds, None);
     let explicitly_mutable: std::collections::HashSet<String> = source_refs
         .iter()
@@ -1189,6 +1338,8 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         &[],
         &[],
         &std::collections::BTreeMap::new(),
+        None,
+        None,
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 
@@ -1241,29 +1392,17 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
 /// unclocked `raw.users`, which only ever derives the accepted-full-scan
 /// corner (`PartitionLocal::No`).
 ///
-/// **Known production gap** (documented here, not silently worked around):
-/// `smelt_db::queries::maintenance::derive_model_maintenance_plan`'s own
-/// trigger-list construction only ever emits a `Trigger::UpstreamMutation`
-/// for a source with `partition_col.is_none()` (see that function's doc
-/// comment: "a clocked enrichment join's own scan-bound derivation is
-/// deferred") — so a clocked source's `UpstreamMutation` cell is never
-/// derived through the production wrapper today, regardless of how the
-/// runtime dispatches on it. `crates/smelt-db` is outside this phase's
-/// allowed files. This test therefore reconstructs the SAME
-/// `ModelInputs` the wrapper builds (`build_source_facts`,
-/// `skeleton_columns`, `derive_column_groups` — all public
-/// `smelt-logical`/`smelt-db` functions, no logic reimplemented) and calls
-/// `smelt_logical::maintenance::derive::derive_maintenance_plan` directly
-/// with the fuller trigger list the wrapper does not yet construct,
-/// proving: (a) this fixture is correctly engineered to derive
-/// `PartitionLocal::Yes` once that trigger-list gate is lifted, and (b) the
-/// runtime dispatch mechanism this phase wires
-/// (`maintenance_driver::decide_column_merge_dispatch`/
-/// `execute_column_scoped_merge`, exercised end-to-end against a real
-/// DuckDB backend in `yes_corner_matches_full_refresh_after_dimension_mutation`
-/// below) is fed the correct shape the moment that gap closes.
+/// Obtains the plan from the production wrapper
+/// (`smelt_db::queries::maintenance::derive_model_maintenance_plan`), which
+/// now derives its trigger list via the pure, clock-blind
+/// `smelt_logical::maintenance::derive::derive_triggers`
+/// (`docs/outcomes/20260815-definition-delta-migrate` phase 19) — a clocked
+/// explicitly-mutable source gets an `UpstreamMutation` cell exactly like an
+/// unclocked one, so this corner is reachable through the real production
+/// path, not only by hand-building a fuller trigger list than the wrapper
+/// constructs.
 #[test]
-fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
+fn real_fixture_daily_events_status_admits_partition_local_yes_cell() {
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/timeseries")
         .canonicalize()
@@ -1303,56 +1442,35 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let sources =
+    let (sources, _scan_bounds_warnings) =
         smelt_db::queries::maintenance::build_source_facts(&source_refs, model_scan_bounds, None);
+    let explicitly_mutable: std::collections::HashSet<String> = source_refs
+        .iter()
+        .filter(|(_, info)| {
+            info.as_ref().is_some_and(|i| {
+                i.mutation_profile
+                    .as_ref()
+                    .is_some_and(|m| m.kind == smelt_core::sources::MutationProfile::Mutable)
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
 
-    let partition_col = metadata
-        .timeseries
-        .as_ref()
-        .map(|t| t.partition_column.clone());
-    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql_body,
+        "daily_events_status",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        None,
         &[],
-        partition_col.as_deref(),
-    );
-    let grouping =
-        smelt_logical::maintenance::grouping::derive_column_groups(sql_body, &sources, &skeleton);
-    assert!(
-        grouping.degenerate.is_empty(),
-        "expected no degenerate column-group collapses: {:?}",
-        grouping.degenerate
-    );
-
-    let inputs = smelt_logical::maintenance::derive::ModelInputs {
-        sql: sql_body,
-        output: smelt_logical::maintenance::OutputSpec {
-            table: "daily_events_status".to_string(),
-            grain: smelt_logical::maintenance::Grain::Partition {
-                partition_col: partition_col.clone().unwrap_or_default(),
-            },
-            skeleton_columns: skeleton,
-        },
-        sources: sources.clone(),
-        column_groups: grouping.groups.clone(),
-        fold: None,
-        old_columns: Vec::new(),
-    };
-
-    let plan = smelt_logical::maintenance::derive::derive_maintenance_plan(
-        &inputs,
-        &[
-            Trigger::NewData {
-                source: "raw.events".to_string(),
-            },
-            Trigger::NewData {
-                source: "raw.user_status".to_string(),
-            },
-            Trigger::UpstreamMutation {
-                source: "raw.user_status".to_string(),
-            },
-            Trigger::Backfill,
-        ],
-    );
+        &[],
+        &std::collections::BTreeMap::new(),
+        None,
+        None,
+    )
+    .expect("daily_events_status has a maintenance plan (refresh: incremental + grain set)");
+    let plan = result.plan;
 
     assert!(
         plan.refusals.is_empty(),
@@ -1734,15 +1852,14 @@ mod column_scoped_merge_e2e {
     /// `Technique::DeleteInsert`, never `ColumnScopedMerge`
     /// (`real_fixture_examples_timeseries_admits_membership_recompute_cell`
     /// above proves the derivation). This is a `grain: partition` output
-    /// with `WholeRow` row identity (no declared `unique_key`) — Phase 2's
-    /// new staged-candidate recompute dispatch requires a proven
-    /// `RowIdentity::Key` (`maintenance_driver::
-    /// resolve_live_membership_recompute_cell`'s own doc comment), so this
-    /// shape is deliberately left to the EXISTING, always-correct,
-    /// unconditional region `DELETE`+`INSERT` batch loop
-    /// (`execute.rs`'s plain incremental path) — unchanged by Phase 2, and
-    /// already reported as `RunOutcome.models["daily_events_enriched"]
-    /// .strategy == "deleteinsert"` for every batch, mutation or not.
+    /// with `WholeRow` row identity (no declared `unique_key`) — since
+    /// `docs/outcomes/20260815-definition-delta-migrate/phases/27c-plan.md`
+    /// this shape dispatches the keyless (whole-row) staged-candidate
+    /// conditional write (`maintenance_driver::execute_staged_keyless_
+    /// recompute`), reported as `RunOutcome.models["daily_events_enriched"]
+    /// .strategy == "delete_insert_suppressed"` on any run where the
+    /// dimension mutation is live (never on the creation run, which has no
+    /// prior state to diff against).
     #[tokio::test]
     async fn membership_recompute_dispatches_through_execute_project() {
         let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1862,10 +1979,11 @@ mod column_scoped_merge_e2e {
             .get("daily_events_enriched")
             .expect("daily_events_enriched ran");
         assert_eq!(
-            record.strategy, "deleteinsert",
-            "a membership-sensitive dimension mutation dispatches the regular incremental run \
-             through the SAME region DELETE+INSERT technique every batch already uses — never \
-             column-scoped MERGE, which cannot repair which rows exist"
+            record.strategy, "delete_insert_suppressed",
+            "a membership-sensitive dimension mutation over a WholeRow-identity cell dispatches \
+             the keyless staged-candidate conditional write — never column-scoped MERGE, which \
+             cannot repair which rows exist, and never the plain unconditional DELETE+INSERT \
+             now that a live dispatch exists for this shape"
         );
 
         let conn = duckdb::Connection::open(&db_path).expect("reconnect");
@@ -1953,10 +2071,11 @@ mod keyed_membership_recompute_e2e {
     use smelt_core::config::Config;
     use smelt_core::graph::DependencyGraph;
     use smelt_core::ModelDiscovery;
-    use smelt_logical::maintenance::choice::WriteSuppression;
     use smelt_logical::maintenance::{MutationProfile, SourceFacts};
     use smelt_runtime::execute::{BackendFactory, BackendFuture};
-    use smelt_runtime::maintenance_driver::resolve_live_membership_recompute_cell;
+    use smelt_runtime::maintenance_driver::{
+        resolve_live_membership_recompute_cell, MembershipRecomputeWrite,
+    };
     use smelt_runtime::types::ExecuteRequest;
     use smelt_runtime::{execute_project, NoOpReporter};
     use tokio_util::sync::CancellationToken;
@@ -1984,6 +2103,8 @@ mod keyed_membership_recompute_e2e {
            scan_bounds:\n    \
              per_source:\n      \
                raw.users:\n        \
+                 allow_full_scan: true\n      \
+               raw.transactions:\n        \
                  allow_full_scan: true\n\
          ---\n";
 
@@ -2031,7 +2152,7 @@ mod keyed_membership_recompute_e2e {
         let mut explicitly_mutable = HashSet::new();
         explicitly_mutable.insert("raw.users".to_string());
 
-        let (source, cell, suppression) = resolve_live_membership_recompute_cell(
+        let (source, cell, _group_columns, write) = resolve_live_membership_recompute_cell(
             sql_body,
             "user_lifetime_status",
             &metadata,
@@ -2052,8 +2173,8 @@ mod keyed_membership_recompute_e2e {
             smelt_logical::maintenance::RowIdentity::Key(vec!["user_id".to_string()])
         );
         assert!(
-            matches!(suppression, WriteSuppression::Suppressed { .. }),
-            "expected the change-suppressed matched arm, got {suppression:?}"
+            matches!(write, MembershipRecomputeWrite::StagedRecompute { .. }),
+            "expected the change-suppressed matched arm, got {write:?}"
         );
     }
 
@@ -2169,11 +2290,13 @@ mod keyed_membership_recompute_e2e {
     /// status"].strategy == "delete_insert_suppressed"`) — never the default
     /// `cumulative_aggregate` fold label a plain keyed run would otherwise
     /// report every time. A THIRD run (no data changes at all since the
-    /// second) must still dispatch the same technique (the known "fires on
-    /// every run, not gated on a genuine change" divergence,
-    /// `incremental_models.md` §Known Divergences) and must write ZERO
-    /// affected rows — the change-suppressed staged-candidate `DELETE`+
-    /// `INSERT` actually suppressing, read directly off DuckDB via the SAME
+    /// second) must NOT dispatch the technique at all — mutation-happened
+    /// discrimination (`docs/specs/incremental_models.md` §"When a mutation
+    /// cell dispatches") recognizes `raw.users`'s fingerprint is unchanged
+    /// from the baseline run 2 recorded, so the cell is a no-op and the run
+    /// falls back to the ordinary `cumulative_aggregate` label — and,
+    /// independently, the staged-candidate recompute (were it to run) would
+    /// still find ZERO affected rows, read directly off DuckDB via the SAME
     /// staged-candidate shape (`super::staged_candidate_affected_row_counts`).
     #[tokio::test]
     async fn keyed_run_loop_dispatches_membership_recompute_through_execute_project() {
@@ -2337,9 +2460,15 @@ mod keyed_membership_recompute_e2e {
              event_count — both users still show exactly the one event staged for them"
         );
 
-        // Third run: no data change since run 2 at all. The dispatch still
-        // fires (known divergence — unconditional per-run dispatch), but
-        // the change-suppressed arm must write zero affected rows.
+        // Third run: no data change since run 2 at all. Mutation-happened
+        // discrimination (`docs/specs/incremental_models.md` §"When a
+        // mutation cell dispatches") now closes the divergence the comment
+        // above used to document: the recorded baseline from run 2 matches
+        // `raw.users`'s current fingerprint exactly, so the cell is a no-op
+        // this run and the run falls back to the ordinary cumulative-fold
+        // label — no `DELETE`+`INSERT` for this cell executes at all
+        // (strictly stronger than run 2's own change-suppressed zero-row
+        // write).
         {
             let (db, graph) = build_db_and_graph(&project_dir, &config);
             let outcome = execute_project(
@@ -2359,7 +2488,10 @@ mod keyed_membership_recompute_e2e {
                 .models
                 .get("user_lifetime_status")
                 .expect("user_lifetime_status ran");
-            assert_eq!(record.strategy, "delete_insert_suppressed");
+            assert_eq!(
+                record.strategy, "cumulative_aggregate",
+                "an unchanged source's UpstreamMutation cell must be a no-op, not re-dispatch"
+            );
         }
 
         let backend = DuckDbBackend::new(&db_path, "main")
@@ -2383,8 +2515,243 @@ mod keyed_membership_recompute_e2e {
         assert_eq!(
             (deleted, inserted),
             (0, 0),
-            "an unchanged redelivery must write zero rows through the change-suppressed \
-             staged-candidate DELETE+INSERT"
+            "an unchanged redelivery must write zero rows — the cell didn't dispatch at all this \
+             run, so the staged-candidate recompute itself independently finds nothing to change \
+             either"
+        );
+    }
+
+    /// `write: diff_patch` pin over the region `DeleteInsert` default
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`,
+    /// test 8): RED before this phase — the pin was silently ignored
+    /// (`resolve_live_membership_recompute_cell` `continue`d past a
+    /// `ChosenTechnique::DiffPatch` choice) and the run fell through to the
+    /// default `cumulative_aggregate` fold label with no membership-recompute
+    /// dispatch at all. GREEN after: the run's manifest records
+    /// `strategy == "diff_patch"`, and the diff-then-patch write leaves an
+    /// unchanged row's `event_count` untouched (only the genuinely differing
+    /// rows are ever candidates for the update leg).
+    const MODEL_FILE_DIFF_PATCH: &str = "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: user_id\n\
+         maintenance:\n  \
+           scan_bounds:\n    \
+             per_source:\n      \
+               raw.users:\n        \
+                 allow_full_scan: true\n      \
+               raw.transactions:\n        \
+                 allow_full_scan: true\n  \
+           cells:\n    \
+             - columns: [event_count]\n      \
+               on: raw.users\n      \
+               write: diff_patch\n\
+         ---\n";
+
+    fn model_file_text_diff_patch() -> String {
+        format!("{MODEL_FILE_DIFF_PATCH}{MODEL_SQL}\n")
+    }
+
+    #[tokio::test]
+    async fn diff_patch_pin_over_region_delete_insert_default_writes_only_the_difference() {
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/timeseries")
+            .canonicalize()
+            .expect("examples/timeseries exists");
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        copy_dir_recursive(&source_dir, &project_dir);
+        std::fs::write(
+            project_dir.join("models/user_lifetime_status.sql"),
+            model_file_text_diff_patch(),
+        )
+        .expect("write diff_patch-pinned keyed model fixture");
+
+        let db_path = tmp.path().join("run.duckdb");
+        let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+        let backend_factory = DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        };
+
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_transactions (transaction_id INTEGER, \
+                     user_id INTEGER, amount DECIMAL(10,2), transaction_timestamp TIMESTAMP, \
+                     transaction_type VARCHAR)",
+                )
+                .await
+                .expect("create transactions source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_transactions VALUES \
+                     (1, 1, 10.00, TIMESTAMP '2025-01-10 08:00:00', 'purchase'), \
+                     (2, 2, 20.00, TIMESTAMP '2025-01-10 09:00:00', 'purchase')",
+                )
+                .await
+                .expect("seed transactions");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                     signup_date DATE)",
+                )
+                .await
+                .expect("create users source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_users VALUES \
+                     (1, 'Alice', DATE '2025-01-01'), (2, 'Bob', DATE '2025-01-02')",
+                )
+                .await
+                .expect("seed users");
+        }
+
+        // First run: creation via the ordinary KeyedFold path.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            execute_project(
+                "run-1".to_string(),
+                request_for_day("2025-01-10", "2025-01-11"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first run must succeed");
+        }
+
+        // Mutate the dimension so the `raw.users` `UpstreamMutation` cell is
+        // live for run 2 — same narrative as the sibling module test above.
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            backend
+                .execute_sql(
+                    "UPDATE main.sources_raw_users SET user_name = 'Alicia' WHERE user_id = 1",
+                )
+                .await
+                .expect("mutate dimension");
+        }
+
+        // Second run: the diff_patch pin must be enforced, not silently
+        // ignored.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-2".to_string(),
+                request_for_day("2025-01-11", "2025-01-12"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("second run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(
+                record.strategy, "diff_patch",
+                "a `write: diff_patch` pin over the region DeleteInsert default must be \
+                 enforced, not silently ignored (RED before this phase: the run fell through \
+                 to the default `cumulative_aggregate` fold label)"
+            );
+        }
+
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+        let (user1_count, user2_count): (i64, i64) = {
+            let c1: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 1 event_count");
+            let c2: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 2",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 2 event_count");
+            (c1, c2)
+        };
+        assert_eq!(
+            (user1_count, user2_count),
+            (1, 1),
+            "the diff_patch write must not corrupt the fact-derived event_count — both users \
+             still show exactly the one event staged for them"
+        );
+
+        // Third run: no data change at all since run 2. Mutation-happened
+        // discrimination (`docs/specs/incremental_models.md` §"When a
+        // mutation cell dispatches") now recognizes `raw.users`'s
+        // fingerprint is unchanged from the baseline run 2 recorded, so the
+        // cell is a no-op and the `diff_patch` write never dispatches at
+        // all this run — stronger than the diff-then-patch pattern's own
+        // zero-affected-row leg, which never gets a chance to run.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-3".to_string(),
+                request_for_day("2025-01-12", "2025-01-13"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("third run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(
+                record.strategy, "cumulative_aggregate",
+                "an unchanged source's UpstreamMutation cell must be a no-op, not re-dispatch"
+            );
+        }
+
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect after run 3");
+        let (user1_count_after, user2_count_after): (i64, i64) = {
+            let c1: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 1 event_count");
+            let c2: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 2",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 2 event_count");
+            (c1, c2)
+        };
+        assert_eq!(
+            (user1_count_after, user2_count_after),
+            (1, 1),
+            "an unchanged redelivery through the diff_patch write must leave both rows exactly \
+             as they were — only a genuine difference is ever written"
         );
     }
 
@@ -3121,7 +3488,7 @@ mod external_source_point_lookup_recompute {
     };
     use smelt_runtime::maintenance_driver::{
         diff_fingerprint_sidecar_changed_keys, execute_delete_insert_with_delta_restriction,
-        refresh_fingerprint_sidecar,
+        refresh_fingerprint_sidecar, RestrictionDeltaSource,
     };
 
     /// Seed the observed-delta table for `upstream_model`'s `[window_start,
@@ -3243,6 +3610,9 @@ mod external_source_point_lookup_recompute {
             column_groups: grouping.groups,
             fold: None,
             old_columns: Vec::new(),
+            old_sql: None,
+            keyed_time_axis: None,
+            old_partition_col: None,
         };
 
         let mut source_ri = BTreeMap::new();
@@ -3320,6 +3690,9 @@ mod external_source_point_lookup_recompute {
             column_groups: grouping.groups,
             fold: None,
             old_columns: Vec::new(),
+            old_sql: None,
+            keyed_time_axis: None,
+            old_partition_col: None,
         };
         let trigger = Trigger::UpstreamMutation {
             source: "raw.users".to_string(),
@@ -3777,9 +4150,12 @@ mod external_source_point_lookup_recompute {
             &body,
             Some("user_id"),
             Some(&closure),
-            "raw.events",
-            "2025-01-10",
-            "2025-01-11",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: "raw.events",
+                window_start: "2025-01-10",
+                window_end: "2025-01-11",
+            },
+            None,
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -3861,9 +4237,12 @@ mod external_source_point_lookup_recompute {
             &body,
             Some("user_id"),
             Some(&closure),
-            "raw.events",
-            "2025-01-10",
-            "2025-01-11",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: "raw.events",
+                window_start: "2025-01-10",
+                window_end: "2025-01-11",
+            },
+            None,
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -3940,9 +4319,12 @@ mod external_source_point_lookup_recompute {
             &body,
             Some("user_id"),
             Some(&closure),
-            "raw.events",
-            "2025-01-10",
-            "2025-01-11",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: "raw.events",
+                window_start: "2025-01-10",
+                window_end: "2025-01-11",
+            },
+            None,
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -4090,6 +4472,7 @@ mod in_place_update_lowering {
             MaintenanceDialect::DuckDb,
             &[],
             &source_timeseries,
+            &[],
         );
 
         let preview = diagnostics

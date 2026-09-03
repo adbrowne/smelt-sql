@@ -1,0 +1,44 @@
+definition_deltas	-	Resume is approval-marker-based, not frontier-region-scoped	no	501
+incremental_models	-	The determinism scope is unimplemented.	no	2041
+incremental_models	-	The scheduler does not yet consume delta signatures end to end.	no	2047
+incremental_models	-	`smelt explain` does not yet print the delta-signature headline	no	2055
+incremental_models	-	A `contract.cells[].deferral` cell addressing a strict subset of the plain fold's own column groups cannot decline the fold's whole-row write.	no	2059
+incremental_models	-	`diff_patch` over the region `DeleteInsert` default has a runtime lowering for the membership-sensitive (`grain: key`, `UpstreamMutation`-triggered) case only	no	2077
+incremental_models	-	Emission remainders	no	2086
+incremental_models	-	The ledger's warehouse substrate is DuckDB-only	no	2089
+incremental_models	-	Graph-layer gaps	no	2096
+incremental_models	-	Delta detection for `--since-upstream` is explicit-only in v1	no	2101
+incremental_models	-	Straddle attribution without locality is scoped out of the ledger's v1	no	2104
+incremental_models	-	The derived model-wide horizon is under construction	no	2107
+incremental_models	-	A `change_feed` source's mutation cell always re-derives from the full input	no	2109
+incremental_models	-	Conditional-maintenance gaps	no	2114
+incremental_shapes	The partition grain	Per-column `data_latency` is unimplemented	no	1204
+incremental_shapes	The partition grain	Non-deterministic row-set-membership or grouping is out of scope	no	1206
+incremental_shapes	The partition grain	Schema evolution on the partition grain is largely a definition delta now	no	1209
+incremental_shapes	The partition grain	The `PartitionGrainForbidsMetrics` refusal is unimplemented	no	1212
+incremental_shapes	The partition grain	The sub-`g_part` rejection does not yet name the coarsened window	no	1217
+incremental_shapes	The partition grain	`NOW()`/`CURRENT_*` are still compile-time-pinned	no	1221
+incremental_shapes	The key grain	The once-write classifier has no nullability route around the fallback case	no	1228
+incremental_shapes	The key grain	The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is transactional, and the ledger table itself exists, on DuckDB only (Open Question)	yes	1237
+incremental_shapes	The key grain	`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward reach (Open Question)	yes	1246
+incremental_shapes	The key grain	Key temporal locality route 2 admits only a declared functional dependency (Open Question)	yes	1249
+incremental_shapes	The key grain	Locality machinery gaps	no	1252
+incremental_shapes	The key grain	Order-independence is not yet acted on	no	1261
+incremental_shapes	The key grain	The pattern-function template file does not exist	no	1267
+incremental_shapes	The key grain	`NOW()`/`CURRENT_*` are still rejected in keyed models	no	1272
+incremental_shapes	The key grain	Ladder rungs 3–4 remain specified ahead of this profile's use of them	no	1276
+incremental_shapes	The key grain	The `key_per_partition` grain derives no plan	no	1281
+model_properties	-	Several declared proofs have no consumer wired yet.	no	347
+model_properties	-	`EffectiveWindow` and `BoundResult` remain two separate walks (Open Question).	yes	356
+model_properties	-	The composition walk is not yet the sole source of every property.	no	361
+model_properties	-	Declared source lateness reaches no live scan today (Open Question)	yes	369
+model_properties	-	`cumulative.rs`'s whole-SQL window-function admission scan is not yet classified onto the walk	no	372
+model_properties	-	`INTERSECT`/`EXCEPT` are unclassified for filter distribution	no	377
+model_properties	-	Additive-only model-diff can't detect a semantic change under an unchanged expression (Open Question)	yes	382
+model_properties	-	Skeleton-source closure v1 is restricted to non-aggregating enrichment scopes (Open Question)	yes	386
+model_properties	-	Only one maintenance-cell route consults a declared-RI closure today	no	390
+model_properties	-	Fingerprint projection (P4) has no consumer yet	no	395
+model_properties	-	The append-only posture probe does not consult declared lateness	no	397
+model_properties	-	`SourceUniqueKeyViolated` remains the one probe-registry row with no emitter at all (Open Question)	yes	402
+model_properties	-	Output-delta shape is derived, typed onto propagation edges, and acted on by dirt propagation, but the keyed dirt-set remains symbolic.	no	405
+model_properties	-	The grammar boundary between `columns.<c>.contract` and a future column `tests:` block is deliberately deferred (Open Question)	yes	413

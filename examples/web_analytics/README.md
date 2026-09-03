@@ -572,7 +572,7 @@ The lateness/redelivery/attribution/enrichment slice of this pipeline (the
 maintenance-plan machinery in particular) has a generated walkthrough at
 [`docs-site/docs/examples/web-analytics-maintenance.md`](../../docs-site/docs/examples/web-analytics-maintenance.md),
 rendered by [`generate_tutorial.py`](generate_tutorial.py) from real
-`smelt explain --show-sql` / `smelt backbuild --dry-run` output — the
+`smelt explain --show-sql` / `smelt rebuild --dry-run` output — the
 embedded SQL is never hand-pasted. Regenerate it after changing any of the
 models it names:
 

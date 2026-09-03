@@ -26,7 +26,8 @@ use smelt_core::metadata::ModelMetadata;
 use smelt_core::sources::SourceInfo;
 use smelt_core::ModelFile;
 use smelt_logical::contract::deferral::{
-    deferral_violations, pending_window, run_license, subsumption, PendingWindow, RunLicense,
+    cell_address, deferral_violations, pending_window, run_license, subsumption, PendingWindow,
+    RunLicense,
 };
 use smelt_logical::contract::frozen_horizon::{
     emit_frozen_band_snapshot, frozen_band_before, late_arrivals, PartitionCount,
@@ -195,6 +196,7 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
                     fact: probe.ctx.fact.clone(),
                     probe: probe.ctx.probe_code.clone(),
                     outcome: ProbeRecordOutcome::Skipped,
+                    observed: None,
                 });
                 continue;
             }
@@ -256,6 +258,7 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
                 fact: probe.ctx.fact.clone(),
                 probe: probe.ctx.probe_code.clone(),
                 outcome: ProbeRecordOutcome::Dispatched,
+                observed: None,
             });
             continue;
         }
@@ -266,6 +269,7 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
             fact: probe.ctx.fact.clone(),
             probe: probe.ctx.probe_code.clone(),
             outcome: ProbeRecordOutcome::Dispatched,
+            observed: None,
         });
 
         if !arrivals.is_empty() {
@@ -383,6 +387,7 @@ pub fn evaluate_deferral(
                     fact: probe.ctx.fact.clone(),
                     probe: probe.ctx.probe_code.clone(),
                     outcome: ProbeRecordOutcome::Skipped,
+                    observed: None,
                 });
                 continue;
             }
@@ -393,6 +398,7 @@ pub fn evaluate_deferral(
             fact: probe.ctx.fact.clone(),
             probe: probe.ctx.probe_code.clone(),
             outcome: ProbeRecordOutcome::Dispatched,
+            observed: None,
         });
 
         if let Some(violation) = deferral_violations(
@@ -483,6 +489,60 @@ pub fn deferral_decision(
     })
 }
 
+/// One `contract.cells[].deferral` entry's own scheduling decision — the
+/// per-cell counterpart of [`DeferralDecision`]
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`).
+/// `address` is [`cell_address`]'s stable `(columns × trigger)` identity —
+/// the ledger key [`Self`]'s caller records a skipped/advanced frontier
+/// under.
+#[derive(Debug, Clone)]
+pub struct CellDeferralDecision {
+    pub address: String,
+    pub license: RunLicense,
+}
+
+/// Build every `contract.cells[].deferral` decision for `model_name`,
+/// independently per cell — a cell's own maintained frontier
+/// (`IntervalStore`'s per-model `cell_frontiers[address]`) against its own
+/// `on:` trigger's landed frontier, mirroring [`deferral_decision`]'s
+/// model-level shape but never conflating one cell's lag with another's
+/// (`incremental_models.md` §"The contract lattice", deferral paragraph:
+/// "a skip is decided per cell"). Returns one entry per `contract.cells[]`
+/// entry that itself declares `deferral` — a cell with no `deferral`
+/// override is not a deferral decision at all (nothing to license).
+pub fn deferral_cell_decisions(
+    model_name: &str,
+    metadata: Option<&ModelMetadata>,
+    interval_store: &IntervalStore,
+    landed_deltas: &LandedDeltaStore,
+) -> Vec<CellDeferralDecision> {
+    let Some(cells) = metadata.and_then(|m| m.contract.as_ref()).map(|c| &c.cells) else {
+        return Vec::new();
+    };
+    let maintained = interval_store.get(model_name);
+
+    cells
+        .iter()
+        .filter_map(|cell_cfg| {
+            let d_days = cell_cfg.deferral.as_ref()?.to_days() as i64;
+            let address = cell_address(&cell_cfg.columns, &cell_cfg.on);
+            let maintained_frontier = maintained
+                .and_then(|mi| mi.cell_frontier(&address))
+                .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+                .map(|d| d.num_days_from_ce() as i64);
+            let input_frontier = landed_deltas
+                .get(&cell_cfg.on)
+                .and_then(|landing| landing.covered_intervals.last())
+                .and_then(|iv| NaiveDate::parse_from_str(&iv.end, "%Y-%m-%d").ok())
+                .map(|d| d.num_days_from_ce() as i64);
+            Some(CellDeferralDecision {
+                address,
+                license: run_license(maintained_frontier, input_frontier, d_days),
+            })
+        })
+        .collect()
+}
+
 /// Closes `own_skip` (models `contract.deferral` itself licensed to skip)
 /// over `upstream_map` (every selected model's transitive upstream set) to
 /// the fixpoint: a dependent of a deferral-skipped model is skipped with
@@ -516,6 +576,28 @@ pub fn propagate_deferral_skip(
         }
     }
     skip
+}
+
+/// Advance every one of `addresses`' cell frontiers for `model_name` to
+/// `end`, and no sibling entry — the write-side counterpart of
+/// [`deferral_cell_decisions`]'s read, called once from the plain
+/// incremental fold's success path for each address
+/// `maintenance_driver::resolve_fold_deferral` resolved as covering the
+/// fold it just ran (`docs/outcomes/20260815-definition-delta-migrate/
+/// phases/14-plan.md`). `model_hash` mirrors `IntervalStore::get_or_create`'s
+/// own invalidation key — a definition change invalidates a model's cell
+/// frontiers exactly like it already invalidates `covered_intervals`.
+pub fn advance_cell_frontiers(
+    intervals: &mut IntervalStore,
+    model_name: &str,
+    model_hash: &str,
+    addresses: &[String],
+    end: &str,
+) {
+    let mi = intervals.get_or_create(model_name, model_hash);
+    for address in addresses {
+        mi.record_cell_frontier(address, end);
+    }
 }
 
 /// Whether `pending` (this model's `contract.deferral` pending window,

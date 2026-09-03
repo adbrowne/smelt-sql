@@ -6,6 +6,14 @@ timeseries:
   event_time_column: first_seen_date
   partition_column: first_seen_date
   granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.events:
+        # A late-arriving/redelivered event past this key's already-merged
+        # state has no statically derivable scan bound for its mutation
+        # cell — accepted here as a full-table op rather than bounded.
+        allow_full_scan: true
 ---
 -- Event-grain dedupe under the **composed shape** — key-addressed (one row
 -- per `event_id`) *and* time-partitioned (`first_seen_date`)

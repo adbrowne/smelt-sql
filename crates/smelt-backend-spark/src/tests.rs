@@ -123,10 +123,11 @@ fn sql_delete_partitions_range() {
         column: "dt".to_string(),
         start: "2024-01-01".to_string(),
         end: "2024-01-08".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     assert_eq!(
         sql::delete_partitions_range("cat.db.tbl", &partition),
-        "DELETE FROM cat.db.tbl WHERE dt >= '2024-01-01' AND dt < '2024-01-08'"
+        Ok("DELETE FROM cat.db.tbl WHERE dt >= '2024-01-01' AND dt < '2024-01-08'".to_string())
     );
 }
 
@@ -136,10 +137,11 @@ fn sql_delete_partitions_range_escapes_quotes() {
         column: "dt".to_string(),
         start: "it's".to_string(),
         end: "they're".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     assert_eq!(
         sql::delete_partitions_range("cat.db.tbl", &partition),
-        "DELETE FROM cat.db.tbl WHERE dt >= 'it''s' AND dt < 'they''re'"
+        Ok("DELETE FROM cat.db.tbl WHERE dt >= 'it''s' AND dt < 'they''re'".to_string())
     );
 }
 
@@ -163,6 +165,7 @@ fn sql_insert_overwrite() {
         column: "dt".to_string(),
         start: "2024-01-01".to_string(),
         end: "2024-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     assert_eq!(
         sql::insert_overwrite("cat.db.daily", "SELECT * FROM staging", &partition),
@@ -547,6 +550,7 @@ mod integration {
             column: "dt".to_string(),
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
+            axis: smelt_backend::PartitionAxis::Calendar,
         };
         let result = backend.delete_partitions(schema, name, &partition).await;
 

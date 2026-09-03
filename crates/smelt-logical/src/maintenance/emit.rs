@@ -24,6 +24,31 @@
 
 use super::diff_patch::DeleteLeg;
 use super::ScanClamp;
+use crate::PartitionAxis;
+
+/// Render a bare partition-column value as a SQL literal **in its axis's own
+/// domain** — the single owner of partition-literal quoting
+/// (`docs/specs/incremental_shapes.md` §"The partition grain" rule 8a): quoted
+/// and escaped (`'2026-01-01'`) on the calendar axis, bare (`7`) on the
+/// integer axis. `Err` when `value` doesn't parse as a bare integer on the
+/// integer axis — fail-closed rather than silently emitting a malformed
+/// literal.
+pub fn partition_literal(axis: PartitionAxis, value: &str) -> Result<String, String> {
+    match axis {
+        PartitionAxis::Calendar => Ok(format!("'{}'", value.replace('\'', "''"))),
+        PartitionAxis::Integer => {
+            value
+                .trim()
+                .parse::<i64>()
+                .map(|v| v.to_string())
+                .map_err(|_| {
+                    format!(
+                "expected a bare integer literal for an integer partition axis, got '{value}'"
+            )
+                })
+        }
+    }
+}
 
 /// One SQL statement a maintenance run executes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +113,17 @@ pub fn widened_scan_predicate(clamp: &ScanClamp, region: &Region) -> String {
 }
 
 impl Region {
+    /// Build a [`Region`] from bare (unquoted) partition-column values,
+    /// rendering each through [`partition_literal`] for `axis` — the single
+    /// owner of partition-literal quoting. `Err` propagates a malformed
+    /// integer-axis value.
+    pub fn for_axis(axis: PartitionAxis, start: &str, end: &str) -> Result<Region, String> {
+        Ok(Region {
+            start: partition_literal(axis, start)?,
+            end: partition_literal(axis, end)?,
+        })
+    }
+
     pub fn predicate(&self, qualifier: Option<&str>, column: &str) -> String {
         let col = match qualifier {
             Some(q) => format!("{q}.{column}"),
@@ -618,6 +654,57 @@ pub fn emit_keyed_fold_suppressed(
     }
 }
 
+/// Dialect-keyed null-safe equality spelling, following the printer's
+/// convention (`smelt-dialect/src/printer.rs`'s `null_safe_eq`, not reused
+/// directly since this emitter carries only a [`MaintenanceDialect`], not a
+/// `BackendCapabilities`): `IS NOT DISTINCT FROM` for DuckDB/BigQuery, `<=>`
+/// for Spark.
+fn null_safe_eq(lhs: &str, rhs: &str, dialect: MaintenanceDialect) -> String {
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery => {
+            format!("{lhs} IS NOT DISTINCT FROM {rhs}")
+        }
+        MaintenanceDialect::Spark => format!("{lhs} <=> {rhs}"),
+    }
+}
+
+/// The default `retain_departed` point's anti-join delete leg
+/// (`docs/specs/incremental_shapes.md` §"Departed keys and deletion"): a
+/// stored key absent from the incoming scan (`delta_select`, the whole-
+/// source snapshot-reconcile scan) is deleted. Null-safe key equality
+/// (`null_safe_eq`) so a NULL key component cannot silently exempt a row
+/// from deletion the way plain `=` would.
+///
+/// Caller composes this into the same transactional [`StatementGroup`] as
+/// the reconcile `MERGE` (`emit_keyed_fold`/`emit_keyed_fold_suppressed`) —
+/// this function returns the `DELETE` alone so the caller controls ordering
+/// and transactionality; suppressing this leg entirely (the `retain_
+/// departed` point) is the caller's decision
+/// (`smelt_logical::contract::retain_departed::reconcile_disposition`), not
+/// this emitter's.
+pub fn emit_departed_key_delete(
+    schema_table: &str,
+    key: &[String],
+    delta_select: &str,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    let join_predicate = key
+        .iter()
+        .map(|k| {
+            null_safe_eq(
+                &format!("{schema_table}.{k}"),
+                &format!("delta.{k}"),
+                dialect,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    MaintenanceStatement::new(format!(
+        "DELETE FROM {schema_table} WHERE NOT EXISTS (SELECT 1 FROM ({delta_select}) AS delta \
+         WHERE {join_predicate})"
+    ))
+}
+
 /// The staged-candidate conditional `DELETE`+`INSERT` (T2, `docs/specs/
 /// model_transforms.md` §"Change-suppressed MERGE and the staged-candidate
 /// conditional DELETE+INSERT"): the merge-less realisation of the same
@@ -854,6 +941,109 @@ pub fn emit_staged_candidate_conditional_recompute(
             MaintenanceStatement::new(delete_departed),
             MaintenanceStatement::new(insert),
             MaintenanceStatement::new(drop),
+        ],
+        transactional: true,
+    }
+}
+
+/// The staged-candidate conditional `DELETE`+`INSERT`, **keyless (whole-row)**
+/// variant (`docs/outcomes/20260815-definition-delta-migrate/phases/27c-plan.md`):
+/// the [`RowIdentity::WholeRow`] realisation [`emit_staged_candidate_conditional`]'s
+/// own doc comment names as unbuilt. Without a proven row identity there is no
+/// row address a multiset difference could delete with multiplicity in
+/// portable SQL, so suppression here is **region-grained, not row-grained**:
+/// a two-way `EXCEPT ALL` diff between stored state (optionally restricted by
+/// `region_predicate`) and the staged candidate is materialised once, before
+/// either write statement runs, into a 1-row-max sentinel relation; the
+/// region's own unconditional `DELETE`+`INSERT` is then guarded on that
+/// sentinel being non-empty. Diff empty ⇒ neither write statement touches a
+/// row; diff non-empty ⇒ byte-identical to the unconditional region rewrite
+/// (`docs/specs/model_transforms.md` §"Change-suppressed MERGE and the
+/// staged-candidate conditional DELETE+INSERT").
+///
+/// The sentinel is a `CREATE TEMP TABLE ... AS SELECT ...`, not an `EXISTS`
+/// re-evaluated after the `DELETE` — evaluating the diff after the target has
+/// already been mutated is order-dependent reasoning; a materialised sentinel
+/// computed up front is not.
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
+/// 2. `INSERT INTO <staged_relation> <candidate_select>`
+/// 3. `CREATE TEMP TABLE <sentinel_relation> AS SELECT 1 FROM ((stored EXCEPT
+///    ALL staged) UNION ALL (staged EXCEPT ALL stored)) LIMIT 1` — the stored
+///    side carries `region_predicate` when given, so the diff is scoped to
+///    exactly the same region the candidate covers.
+/// 4. `DELETE FROM <table> WHERE [<region_predicate> AND] EXISTS (SELECT 1
+///    FROM <sentinel_relation>)` — the whole region, guarded.
+/// 5. `INSERT INTO <table> SELECT * FROM <staged_relation> WHERE EXISTS
+///    (SELECT 1 FROM <sentinel_relation>)` — the whole staged candidate,
+///    guarded by the same sentinel.
+/// 6. `DROP TABLE <staged_relation>`
+/// 7. `DROP TABLE <sentinel_relation>`
+///
+/// One transaction, same contract as every other staged-candidate emitter in
+/// this module.
+///
+/// **No observed delta is recorded on this path.** The observed-delta table
+/// (T5) is keyed by the row identity's key columns; a keyless write has none
+/// to record — callers must not synthesize a fake key to force a recording.
+///
+/// # Panics
+/// Panics if `candidate_select` is empty — a vacuous candidate has no sound
+/// diff shape to emit.
+pub fn emit_staged_candidate_conditional_keyless(
+    table: &str,
+    staged_relation: &str,
+    sentinel_relation: &str,
+    region_predicate: Option<&str>,
+    candidate_select: &str,
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !candidate_select.trim().is_empty(),
+        "emit_staged_candidate_conditional_keyless requires a non-empty candidate select for \
+         {table}"
+    );
+
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+
+    let stored_side = match region_predicate {
+        Some(pred) => format!("SELECT * FROM {table} WHERE {pred}"),
+        None => format!("SELECT * FROM {table}"),
+    };
+    let sentinel = format!(
+        "CREATE TEMP TABLE {sentinel_relation} AS SELECT 1 AS __smelt_diff FROM (({stored_side} \
+         EXCEPT ALL SELECT * FROM {staged_relation}) UNION ALL (SELECT * FROM {staged_relation} \
+         EXCEPT ALL {stored_side})) AS __smelt_diff_rows LIMIT 1"
+    );
+
+    let delete = match region_predicate {
+        Some(pred) => format!(
+            "DELETE FROM {table} WHERE {pred} AND EXISTS (SELECT 1 FROM {sentinel_relation})"
+        ),
+        None => {
+            format!("DELETE FROM {table} WHERE EXISTS (SELECT 1 FROM {sentinel_relation})")
+        }
+    };
+    let insert = format!(
+        "INSERT INTO {table} SELECT * FROM {staged_relation} WHERE EXISTS (SELECT 1 FROM \
+         {sentinel_relation})"
+    );
+    let drop_staged = format!("DROP TABLE {staged_relation}");
+    let drop_sentinel = format!("DROP TABLE {sentinel_relation}");
+
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(sentinel),
+            MaintenanceStatement::new(delete),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop_staged),
+            MaintenanceStatement::new(drop_sentinel),
         ],
         transactional: true,
     }
@@ -1324,8 +1514,26 @@ fn select_with_enrichment_join(
     if sources.next().is_some() {
         return None;
     }
-    if only_source.alias().as_deref() != Some(smelt_dialect::TYPE_CAST_WRAP_ALIAS) {
-        // Not the cast-wrap shape — some other single-derived-table FROM
+    // The two single-source wrap shapes a compiled `body_sql` can arrive
+    // already carrying: the SQL compiler's own cast wrap
+    // (`smelt_dialect::TYPE_CAST_WRAP_ALIAS`, `_smelt_typed`) and
+    // `smelt-runtime`'s `inject_time_filter` output-clamp wrap
+    // (`_smelt_output_clamp` — `smelt-logical` cannot depend on
+    // `smelt-runtime` to import its constant, so the literal is named here;
+    // `docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`
+    // discovered the output-clamp shape reaching this function unhandled,
+    // silently disabling the declared-`referential_integrity` route's
+    // count-preservation probe — and therefore delta restriction — for
+    // every live, time-filtered call, both this phase's external-sidecar
+    // route and the model-edge route it generalizes). Neither name is
+    // load-bearing beyond "some known wrap, not a user's own subquery" —
+    // fail closed rather than guess for anything else.
+    const OUTPUT_CLAMP_WRAP_ALIAS: &str = "_smelt_output_clamp";
+    let alias = only_source.alias();
+    if alias.as_deref() != Some(smelt_dialect::TYPE_CAST_WRAP_ALIAS)
+        && alias.as_deref() != Some(OUTPUT_CLAMP_WRAP_ALIAS)
+    {
+        // Not a known wrap shape — some other single-derived-table FROM
         // (a user's own subquery, most commonly). Fail closed rather than
         // guess it's a wrap.
         return None;
@@ -1730,6 +1938,53 @@ pub fn emit_append_only_baseline_snapshot(
     MaintenanceStatement::new(sql)
 }
 
+/// The whole-source (unpartitioned) counterpart of
+/// [`emit_append_only_baseline_snapshot`]: a source's CURRENT row count and
+/// order-independent content fingerprint over `digest_columns`, with no
+/// `GROUP BY` and no partition column — the mutation-happened discrimination
+/// baseline an `UpstreamMutation` cell's dispatch decision compares against
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches").
+///
+/// The fingerprint construction is identical to
+/// [`emit_append_only_baseline_snapshot`]'s own (same per-row hash via
+/// [`row_fingerprint_expr`], same sorted-`STRING_AGG`-then-`sha256`
+/// aggregate, same per-dialect forms) — this emitter differs only in scope
+/// (the whole source, not one partition at a time).
+///
+/// `source_table` is already fully qualified (`schema.table`).
+///
+/// # Panics
+/// Panics if `digest_columns` is empty — nothing to fingerprint is not a
+/// degenerate probe.
+pub fn emit_source_mutation_fingerprint(
+    source_table: &str,
+    digest_columns: &[String],
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_source_mutation_fingerprint requires a non-empty digest column set for \
+         {source_table}"
+    );
+    let row_hash = row_fingerprint_expr(digest_columns, dialect);
+    let agg_fingerprint = match dialect {
+        MaintenanceDialect::DuckDb => {
+            format!("sha256(STRING_AGG({row_hash}, '' ORDER BY {row_hash}))")
+        }
+        MaintenanceDialect::Spark => {
+            format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
+        }
+        MaintenanceDialect::BigQuery => {
+            format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
+        }
+    };
+    let sql = format!(
+        "SELECT COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
+         FROM {source_table}"
+    );
+    MaintenanceStatement::new(sql)
+}
+
 /// First-run `CREATE TABLE … AS` for a windowed-keyed-maintenance cell
 /// (`maintenance_driver::run_windowed_keyed_maintenance`'s create arm): the
 /// target table does not exist yet, so the first step's delta becomes the
@@ -1949,6 +2204,68 @@ fn substitute_identifiers(text: &str, replacements: &[(String, String)]) -> Stri
         result.push(ch);
     }
     result
+}
+
+/// The post-fold candidate rows for a keyed fold (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27d-plan.md`): a keyed fold's
+/// staged candidate is `combiner(stored, delta)`, not the raw delta — the
+/// merge-less staged-candidate mechanism ([`emit_staged_candidate_conditional`])
+/// needs this select as its `candidate_select` to realise a `KeyedFold`
+/// cell, mirroring what [`emit_keyed_fold`]'s `MERGE … WHEN MATCHED THEN
+/// UPDATE SET` already computes for the `MERGE`-capable path.
+///
+/// `SELECT <key>, <folds> FROM (<delta_sql>) AS delta LEFT JOIN <table> AS
+/// target ON <key join>` — a `LEFT JOIN` of the delta to the target so every
+/// delta key is represented even when the target has no stored row for it
+/// yet. A matched key (the target row exists) resolves each fold column to
+/// `folds`'s own combine expression, exactly like `emit_keyed_fold`'s
+/// matched arm. A delta-only key (no stored row — `target`'s join columns
+/// are `NULL`) resolves each fold column to its own **raw delta value**
+/// instead: `folds`'s combine expressions are written in terms of
+/// `target.*`/`delta.*` assuming a matched row (e.g. `target.c + delta.c` for
+/// a `Sum` combiner), so applying them unmodified to an absent target would
+/// produce `NULL` rather than the delta's own value — the same "insert the
+/// delta row as-is" contract `emit_keyed_fold`'s `WHEN NOT MATCHED THEN
+/// INSERT` arm already has.
+///
+/// # Panics
+/// Panics if `key` is empty — an identity-free call has no join to build
+/// (mirrors [`emit_staged_candidate_conditional`]'s own empty-key panic).
+pub fn keyed_fold_candidate_select(
+    table: &str,
+    key: &[String],
+    folds: &[(String, String)],
+    delta_sql: &str,
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !key.is_empty(),
+        "keyed_fold_candidate_select requires a non-empty key for {table}"
+    );
+    let unmatched_guard = format!("target.{} IS NULL", key[0]);
+    let key_cols = key
+        .iter()
+        .map(|k| format!("COALESCE(delta.{k}, target.{k}) AS {k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fold_cols = folds
+        .iter()
+        .map(|(col, expr)| {
+            format!("CASE WHEN {unmatched_guard} THEN delta.{col} ELSE {expr} END AS {col}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let on = key
+        .iter()
+        .map(|k| format!("target.{k} = delta.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let select_list = if fold_cols.is_empty() {
+        key_cols
+    } else {
+        format!("{key_cols}, {fold_cols}")
+    };
+    format!("SELECT {select_list} FROM ({delta_sql}) AS delta LEFT JOIN {table} AS target ON {on}")
 }
 
 // ── Decomposed state (rung 2) select augmentation (`docs/specs/
@@ -3332,6 +3649,58 @@ mod column_scoped_merge_tests {
 }
 
 #[cfg(test)]
+mod departed_key_delete_tests {
+    use super::*;
+
+    /// The anti-join `DELETE` renders `NOT EXISTS` over the delta select
+    /// with null-safe key equality, per dialect, multi-column key included.
+    #[test]
+    fn emit_departed_key_delete_shape() {
+        let key = vec!["tenant_id".to_string(), "device_id".to_string()];
+        let stmt = emit_departed_key_delete(
+            "main.device_daily",
+            &key,
+            "SELECT * FROM raw.devices",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(
+            stmt.sql
+                .starts_with("DELETE FROM main.device_daily WHERE NOT EXISTS"),
+            "{}",
+            stmt.sql
+        );
+        assert!(
+            stmt.sql.contains(
+                "main.device_daily.tenant_id IS NOT DISTINCT FROM delta.tenant_id AND \
+                 main.device_daily.device_id IS NOT DISTINCT FROM delta.device_id"
+            ),
+            "{}",
+            stmt.sql
+        );
+        assert!(
+            stmt.sql
+                .contains("FROM (SELECT * FROM raw.devices) AS delta"),
+            "{}",
+            stmt.sql
+        );
+
+        let spark_stmt = emit_departed_key_delete(
+            "main.device_daily",
+            &["device_id".to_string()],
+            "SELECT * FROM raw.devices",
+            MaintenanceDialect::Spark,
+        );
+        assert!(
+            spark_stmt
+                .sql
+                .contains("main.device_daily.device_id <=> delta.device_id"),
+            "{}",
+            spark_stmt.sql
+        );
+    }
+}
+
+#[cfg(test)]
 mod keyed_fold_suppressed_tests {
     use super::*;
 
@@ -3587,6 +3956,198 @@ mod staged_candidate_conditional_tests {
             &["user_id".to_string()],
             "SELECT user_id, tier FROM source_delta",
             &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyed_fold_candidate_select_tests {
+    use super::*;
+
+    fn folds() -> Vec<(String, String)> {
+        vec![(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )]
+    }
+
+    #[test]
+    fn keyed_fold_candidate_select_folds_stored_state_against_the_delta() {
+        let sql = keyed_fold_candidate_select(
+            "main.user_stats",
+            &["user_id".to_string()],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
+        );
+
+        // A matched key's candidate row resolves to the fold's own combine
+        // expression, exactly as emit_keyed_fold's matched arm does.
+        assert!(
+            sql.contains("ELSE target.event_count + delta.event_count END AS event_count"),
+            "expected the fold's combine expression in the matched (ELSE) arm, got: {sql}"
+        );
+        assert!(
+            sql.contains("LEFT JOIN main.user_stats AS target ON target.user_id = delta.user_id"),
+            "expected a LEFT JOIN of the delta to the target on the key, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn keyed_fold_candidate_select_carries_keys_absent_from_the_target() {
+        let sql = keyed_fold_candidate_select(
+            "main.user_stats",
+            &["user_id".to_string()],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
+        );
+
+        // A delta-only key (no stored row) resolves to its own raw delta
+        // value, matching WHEN NOT MATCHED THEN INSERT's whole-row insert.
+        assert!(
+            sql.contains("CASE WHEN target.user_id IS NULL THEN delta.event_count ELSE"),
+            "expected the delta-only THEN arm to carry the raw delta value, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn keyed_fold_candidate_select_feeds_the_staged_emitter_unchanged() {
+        let candidate_select = keyed_fold_candidate_select(
+            "main.user_stats",
+            &["user_id".to_string()],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
+        );
+
+        let group = emit_staged_candidate_conditional(
+            "main.user_stats",
+            "__smelt_staged_user_stats",
+            &["user_id".to_string()],
+            &candidate_select,
+            &["event_count".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 5);
+        assert_eq!(
+            group.statements[2].sql,
+            format!(
+                "DELETE FROM main.user_stats USING __smelt_staged_user_stats WHERE \
+                 main.user_stats.user_id = __smelt_staged_user_stats.user_id AND \
+                 (main.user_stats.event_count IS DISTINCT FROM \
+                 __smelt_staged_user_stats.event_count)"
+            )
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty key")]
+    fn keyed_fold_candidate_select_panics_on_empty_key() {
+        keyed_fold_candidate_select(
+            "main.user_stats",
+            &[],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod staged_candidate_keyless_tests {
+    use super::*;
+
+    #[test]
+    fn keyless_group_stages_diffs_and_guards_both_write_legs() {
+        let group = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            None,
+            "SELECT event_id, event_date, payload FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 7);
+        assert_eq!(
+            group.statements[0].sql,
+            "CREATE TEMP TABLE __smelt_staged_events_region AS SELECT * FROM (SELECT event_id, \
+             event_date, payload FROM source_delta) AS __smelt_staged_shape LIMIT 0"
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            "INSERT INTO __smelt_staged_events_region SELECT event_id, event_date, payload FROM \
+             source_delta"
+        );
+        assert!(group.statements[2]
+            .sql
+            .starts_with("CREATE TEMP TABLE __smelt_sentinel_events_region AS"));
+        assert!(group.statements[2].sql.contains("EXCEPT ALL"));
+        // Both directions of the whole-row diff appear.
+        assert_eq!(group.statements[2].sql.matches("EXCEPT ALL").count(), 2);
+        assert_eq!(
+            group.statements[3].sql,
+            "DELETE FROM main.events_region WHERE EXISTS (SELECT 1 FROM \
+             __smelt_sentinel_events_region)"
+        );
+        assert_eq!(
+            group.statements[4].sql,
+            "INSERT INTO main.events_region SELECT * FROM __smelt_staged_events_region WHERE \
+             EXISTS (SELECT 1 FROM __smelt_sentinel_events_region)"
+        );
+        assert_eq!(
+            group.statements[5].sql,
+            "DROP TABLE __smelt_staged_events_region"
+        );
+        assert_eq!(
+            group.statements[6].sql,
+            "DROP TABLE __smelt_sentinel_events_region"
+        );
+    }
+
+    #[test]
+    fn keyless_region_predicate_bounds_both_the_diff_and_the_delete() {
+        let with_region = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            Some("main.events_region.event_date >= '2026-08-01'"),
+            "SELECT event_id, event_date FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(with_region.statements[2]
+            .sql
+            .contains("main.events_region.event_date >= '2026-08-01'"));
+        assert!(with_region.statements[3]
+            .sql
+            .contains("main.events_region.event_date >= '2026-08-01'"));
+
+        let without_region = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            None,
+            "SELECT event_id, event_date FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(!without_region.statements[2].sql.contains("event_date >= "));
+        assert!(!without_region.statements[3].sql.contains("event_date >= "));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty candidate select")]
+    fn keyless_emitter_needs_no_key_but_refuses_an_empty_candidate_select() {
+        emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            None,
+            "   ",
             MaintenanceDialect::DuckDb,
         );
     }

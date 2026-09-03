@@ -125,6 +125,9 @@ fn described_technique_matches_execution_partition_recompute() {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -199,6 +202,9 @@ fn described_technique_matches_execution_keyed_fold() {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -302,6 +308,9 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -608,15 +617,17 @@ const MATRIX: &[(&str, [Cell; 7])] = &[
             None,
         ],
     ),
-    // Not a row of the research catalogue's own matrix table — added by this
-    // phase (`incremental_models.md` §Known Divergences "INTERSECT/EXCEPT are
-    // unclassified set operations") to give the set-op classification gap a
-    // named cell rather than leaving it matrix-invisible. The collapse this
-    // pins is source-property-agnostic (grouping fails closed the same way
-    // regardless of which source is append-only/mutable/etc — see
-    // `coverage_matrix_gaps.rs::ex41_ex42_intersect_with_payload_column_collapses_whole_model`),
-    // so only the `append-only` column is marked inhabited: one cell is
-    // enough to name the gap without implying the other six columns carry
+    // Not a row of the research catalogue's own matrix table — added by an
+    // earlier phase to give the set-op classification gap a named cell
+    // rather than leaving it matrix-invisible. Phase 26b closed that gap
+    // (`model_properties.md` §"Per-column mutation-sensitivity / column
+    // provenance" "Across set-operation arms" — a real per-arm verdict, no
+    // longer a blanket collapse; see
+    // `coverage_matrix_gaps.rs::ex41_ex42_intersect_with_payload_column_derives_per_arm_provenance`);
+    // this cell stays claimed under the same catalogue id, now pinning the
+    // classification directly rather than its former collapse. Only the
+    // `append-only` column is marked inhabited: one cell is enough to name
+    // the construct without implying the other six columns carry
     // independently distinct verdicts.
     (
         "INTERSECT / EXCEPT (set operations)",
@@ -697,7 +708,7 @@ const CLAIMED: &[(&str, usize, &str)] = &[
     (
         "INTERSECT / EXCEPT (set operations)",
         0,
-        "coverage_matrix_gaps.rs::ex41_ex42_intersect_no_payload_column_still_delete_insert + ..._collapses_whole_model (pins the classification-collapse today)",
+        "coverage_matrix_gaps.rs::ex41_ex42_intersect_no_payload_column_still_delete_insert + ..._derives_per_arm_provenance (pins the real per-arm classification)",
     ),
 ];
 

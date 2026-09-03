@@ -14,6 +14,7 @@ use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{Corner, MutationProfile, SourceFacts, Technique, Trigger};
 use smelt_maintenance_testkit::feed::{self, FeedSourcePosture};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
+use smelt_maintenance_testkit::migrate_step::{run_migrate_step, MigrateStepOutcome};
 use smelt_maintenance_testkit::oracle::{
     except_all_row_count_via_backend, multiset_equal_via_backend,
 };
@@ -22,15 +23,16 @@ use smelt_maintenance_testkit::oracle_modes::{
 };
 use smelt_maintenance_testkit::recipe::{
     arb_composed_route, arb_composed_route3_schedule, arb_enrichment_edge_recipe,
-    arb_enrichment_edge_schedule, arb_keyed_combiner, arb_keyed_schedule, arb_recipe,
-    ComposedKeyedRecipe, ComposedRoute, ComposedRoute3Schedule, ConstructKind, EnrichmentJoinKind,
-    KeyShape, KeyedCombiner, KeyedRecipe, KeyedSchedule, ModelEdit, ModelRecipe,
-    MutableEnrichedRecipe, RecipePool, SourcePosture, SourceRecipe, ValueEnrichedRecipe,
+    arb_enrichment_edge_schedule, arb_keyed_combiner, arb_keyed_schedule,
+    arb_once_write_null_schedule, arb_recipe, ComposedKeyedRecipe, ComposedRoute,
+    ComposedRoute3Schedule, ConstructKind, EnrichmentJoinKind, KeyShape, KeyedCombiner,
+    KeyedRecipe, KeyedSchedule, ModelEdit, ModelRecipe, MutableEnrichedRecipe, RecipePool,
+    SourcePosture, SourceRecipe, ValueEnrichedRecipe,
 };
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
 use smelt_maintenance_testkit::schedule_gen::{
-    arb_mixed_schedule, arb_schedule_for, boundary_rows_for,
+    arb_mixed_schedule, arb_schedule_for, arb_schedule_with_definition_edit, boundary_rows_for,
     check_profile as check_mixed_schedule_profile, read_source_snapshot, scan_clamp_for,
     ConformanceSchedule, ConformanceStep, GenRow, MixedSchedule, MixedStep,
 };
@@ -41,6 +43,7 @@ use smelt_planner::{
 use smelt_runtime::check_runner::batches_to_rows;
 use smelt_runtime::maintenance_driver::{
     driving_steps, resolve_live_membership_recompute_cell, run_windowed_keyed_maintenance,
+    RestrictionDeltaSource,
 };
 
 /// A retry policy that never retries — this conformance gate drives a real
@@ -102,7 +105,7 @@ async fn insert_row(
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ))
         .await
         .map_err(|e| anyhow::anyhow!("insert row: {e}"))?;
@@ -119,6 +122,24 @@ pub async fn drive_and_assert(
     project: &LinkCProject,
     recipe: &ModelRecipe,
     schedule: &ConformanceSchedule,
+) -> anyhow::Result<(STracker, usize)> {
+    let mut migrate_outcomes = Vec::new();
+    drive_and_assert_collecting(project, recipe, schedule, &mut migrate_outcomes).await
+}
+
+/// [`drive_and_assert`], additionally recording every
+/// [`ConformanceStep::MigrateModel`] step's [`MigrateStepOutcome`] into
+/// `migrate_outcomes` — the generative gate
+/// (`definition_edit_pool_upholds_new_definition_equivalence`) needs to know
+/// whether at least one case in its deterministic sample actually took the
+/// `Applied` leg, mirroring `admission_rate_stays_above_floor`'s
+/// anti-vacuity discipline; `drive_and_assert` itself just discards the
+/// vec so its 9 existing call sites need no change.
+pub async fn drive_and_assert_collecting(
+    project: &LinkCProject,
+    recipe: &ModelRecipe,
+    schedule: &ConformanceSchedule,
+    migrate_outcomes: &mut Vec<MigrateStepOutcome>,
 ) -> anyhow::Result<(STracker, usize)> {
     let mut tracker = STracker::new(&recipe.source);
     let mut last_k: Option<usize> = None;
@@ -224,6 +245,63 @@ pub async fn drive_and_assert(
                     render::render_model_file_with_edit(recipe, *edit),
                 )?;
                 current_edit = Some(*edit);
+            }
+            ConformanceStep::MigrateModel { edit } => {
+                // Definition change routed through the shipped `smelt
+                // migrate` derive→apply path (task 3's shared helper): the
+                // new-definition oracle must hold IMMEDIATELY after this
+                // step, with no intervening catch-up run — unlike
+                // `RewriteModel`.
+                let backend = project.backend().await?;
+                let outcome = run_migrate_step(
+                    &project.project_dir,
+                    "dev",
+                    backend.as_ref(),
+                    recipe,
+                    *edit,
+                    || async {
+                        let mut request = base_request("dev");
+                        request.full_refresh = true;
+                        request.start = None;
+                        request.end = None;
+                        project
+                            .run_quiet(&format!("run-{i}-full-refresh"), request)
+                            .await?;
+                        Ok(())
+                    },
+                )
+                .await?;
+                migrate_outcomes.push(outcome);
+                current_edit = Some(*edit);
+
+                match outcome {
+                    MigrateStepOutcome::Applied => {
+                        // No new source data was read — the migration only
+                        // changed the definition, so the S-tracker's
+                        // existing last `k` (from the prior RunWindow) is
+                        // still the right point to assert against.
+                    }
+                    MigrateStepOutcome::FullRefreshed => {
+                        // The maintained table now reflects the full
+                        // current source contents under the migrated
+                        // definition — record a fresh full-refresh point,
+                        // mirroring the `FullRefreshRun` arm above.
+                        let snapshot = {
+                            let conn = project.connect()?;
+                            read_source_snapshot(&conn, &recipe.source)
+                        };
+                        let k = tracker.record_full_refresh(snapshot);
+                        last_k = Some(k);
+                    }
+                }
+
+                let k = last_k.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "MigrateModel step at index {i} had no prior RunWindow to assert \
+                         against: {schedule:?}"
+                    )
+                })?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
             }
         }
     }
@@ -557,7 +635,7 @@ pub fn insert_fact_row(
             recipe.fact.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -888,7 +966,7 @@ pub fn insert_row_keyed(
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -955,18 +1033,19 @@ fn delete_row_keyed_snapshot(
     Ok(())
 }
 
-/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): drive the ONE family
-/// the admission matrix actually admits under snapshot-reconcile
-/// (plain-overwrite, `ANY_VALUE`) end to end through the real
-/// `execute_project` pipeline and the now-built snapshot-reconcile
+/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`), delete leg extended
+/// phase 32b (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 32b-plan.md`): drive the ONE family the admission matrix actually admits
+/// under snapshot-reconcile (plain-overwrite, `ANY_VALUE`) end to end
+/// through the real `execute_project` pipeline and the snapshot-reconcile
 /// executor: seed rows, run (creation), mutate/delete/insert source rows,
 /// run again (reconcile), and assert the maintained table equals the
-/// current snapshot's own aggregation UNION the pre-mutation state of any
-/// key that departed the snapshot — the SAME retained-departed-keys
-/// carve-out `retained_departed_keys_adjusts_the_oracle` above pins as pure
-/// data, now exercised against a real backend.
+/// current snapshot's own aggregation exactly — the default `retain_
+/// departed` point deletes a key absent from the incoming scan
+/// (`incremental_shapes.md` §"Departed keys and deletion"), so no retained-
+/// departed-keys adjustment survives into the oracle comparison.
 #[tokio::test]
-async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys() {
+async fn snapshot_reconcile_plain_overwrite_settles_and_deletes_departed_keys() {
     let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project = stage_keyed_recipe(&recipe, &tmp).expect("stage snapshot-reconcile recipe");
@@ -999,67 +1078,48 @@ async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys(
         assert!(equal, "creation run must equal the full-scan oracle");
     }
 
-    // Snapshot the pre-mutation source state — the retained-departed-keys
-    // formula needs the departing key's value AS OF BEFORE it departed.
-    {
-        let conn = project.connect().expect("connect");
-        conn.execute_batch(&format!(
-            "CREATE TABLE main.pre_mutation_snapshot AS SELECT * FROM main.sources_{}",
-            recipe.source.name
-        ))
-        .expect("snapshot pre-mutation state");
-    }
-
     // Mutate: update id=1's value, delete id=2 (genuine departure), insert
     // a fresh id=4.
     update_row_keyed_snapshot(&project, &recipe, 1, 999).expect("update id=1");
     delete_row_keyed_snapshot(&project, &recipe, 2).expect("delete id=2");
     insert_row_keyed_snapshot(&project, &recipe, 4, 400).expect("insert id=4");
 
-    // Second run: still no window — reconciles via the whole-source MERGE.
+    // Second run: still no window — reconciles via the whole-source MERGE +
+    // the default point's anti-join delete leg.
     project
         .run_quiet("snapshot-reconcile-2", base_request("dev"))
         .await
         .expect("second (reconcile) run must succeed");
 
-    let adjusted_oracle_sql = format!(
-        "{full_scan_oracle_sql} \
-         UNION ALL \
-         SELECT {key}, {attr} AS current_val FROM main.pre_mutation_snapshot \
-         WHERE {key} NOT IN (SELECT {key} FROM main.sources_{name})",
-        key = recipe.source.key_column,
-        attr = recipe.source.payload_column,
-        name = recipe.source.name,
-    );
     {
         let backend = project.backend().await.expect("backend");
         let equal =
-            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &adjusted_oracle_sql)
+            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &full_scan_oracle_sql)
                 .await
                 .expect("comparison must run");
         assert!(
             equal,
-            "reconcile run must equal the oracle's current rows plus the retained departed key"
+            "reconcile run must equal the full-scan oracle exactly — the default point deletes \
+             departed keys"
         );
     }
 
     // Explicit assertion, not just the multiset comparison: the departed
-    // key (id=2) is present, unchanged from its PRE-mutation value (200) —
-    // not silently deleted.
+    // key (id=2) is gone.
     let conn = project.connect().expect("connect");
-    let departed_value: i64 = conn
+    let departed_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT current_val FROM main.{} WHERE id = 2",
+                "SELECT count(*) FROM main.{} WHERE id = 2",
                 recipe.model_name
             ),
             [],
             |row| row.get(0),
         )
-        .expect("departed key must still be present");
+        .expect("count query");
     assert_eq!(
-        departed_value, 200,
-        "the departed key must be RETAINED at its pre-departure value, never deleted"
+        departed_count, 0,
+        "the departed key must be DELETED under the default retain_departed point"
     );
 }
 
@@ -1581,7 +1641,16 @@ async fn order_monotone_redelivery_is_idempotent_no_ledger_refusal() {
     );
 
     let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
-    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 5 }).expect("insert row");
+    insert_row_keyed(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(5),
+        },
+    )
+    .expect("insert row");
 
     let mut request = base_request("dev");
     request.start = Some("2024-01-01".to_string());
@@ -1639,7 +1708,7 @@ fn once_write_constant_payload_schedule() -> KeyedSchedule {
             rows: vec![GenRow {
                 d: d1,
                 id: 1,
-                val: 7,
+                val: Some(7),
             }],
         },
         // The shared key `1` recurs with the SAME value — the once-write
@@ -1655,12 +1724,12 @@ fn once_write_constant_payload_schedule() -> KeyedSchedule {
                 GenRow {
                     d: d2,
                     id: 1,
-                    val: 7,
+                    val: Some(7),
                 },
                 GenRow {
                     d: d2,
                     id: 2,
-                    val: 42,
+                    val: Some(42),
                 },
             ],
         },
@@ -1677,7 +1746,7 @@ fn once_write_constant_payload_schedule() -> KeyedSchedule {
             rows: vec![GenRow {
                 d: d1,
                 id: 1,
-                val: 7,
+                val: Some(7),
             }],
         },
     ])
@@ -1713,6 +1782,63 @@ async fn once_write_pool_upholds_end_state_equivalence() {
     drive_keyed_and_assert(&project, &recipe, &schedule)
         .await
         .expect("once-write keyed schedule must uphold end-state equivalence");
+}
+
+/// `once_write_null_pool_upholds_end_state_equivalence`
+/// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md` test 4):
+/// a deterministic proptest sample over [`arb_once_write_null_schedule`]
+/// crossed with all three once-write spellings (`OnceWrite`,
+/// `OnceWriteFallback`, `OnceWriteMultiCandidate`), each staged and driven
+/// through the real `execute_project` pipeline by [`drive_keyed_and_assert`],
+/// asserting the `STracker` full-refresh oracle after every window. This is
+/// the test that replaces `once_write_null_payload_then_value_upholds_
+/// equivalence`'s hand-written case as the *proof* of the once-write
+/// family's NULL-preservation obligation.
+#[tokio::test]
+async fn once_write_null_pool_upholds_end_state_equivalence() {
+    let mut runner = TestRunner::deterministic();
+    let schedule_strat = arb_once_write_null_schedule();
+
+    let combiners = [
+        KeyedCombiner::OnceWrite,
+        KeyedCombiner::OnceWriteFallback,
+        KeyedCombiner::OnceWriteMultiCandidate,
+    ];
+
+    let mut cases = 0;
+    for i in 0..10 {
+        let schedule = schedule_strat.new_tree(&mut runner).unwrap().current();
+        for combiner in combiners {
+            let recipe = KeyedRecipe::new_window_forward_once_write_with(combiner);
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let project = stage_keyed_recipe(&recipe, &tmp).unwrap_or_else(|e| {
+                panic!("case {i} {combiner:?}: failed to stage once-write keyed recipe: {e}")
+            });
+
+            let plan = classify_keyed(&project, &recipe).unwrap_or_else(|e| {
+                panic!("case {i} {combiner:?}: classify once-write keyed recipe failed: {e}")
+            });
+            assert!(
+                !plan.cells.is_empty(),
+                "case {i} {combiner:?}: expected the once-write keyed recipe to admit at \
+                 least one cell: {plan:#?}"
+            );
+
+            drive_keyed_and_assert(&project, &recipe, &schedule)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i} {combiner:?}: once-write NULL schedule {schedule:?} \
+                         equivalence check failed: {e}"
+                    )
+                });
+            cases += 1;
+        }
+    }
+    assert!(
+        cases > 0,
+        "deterministic once-write NULL sample produced zero cases — generator regression"
+    );
 }
 
 /// Phase 8 task 4: the once-write family's fallback-bearing spelling
@@ -1954,15 +2080,18 @@ async fn downstream_select_star_consumer_sees_only_presented_columns() {
 /// the classifier's NULL-preservation obligation refuses
 /// (`incremental_shapes.md` §"The column-family catalogue").
 ///
-/// Written as a targeted (non-generative) case rather than widened into the
-/// generated pool: `GenRow::val` is a non-nullable `i64` threaded through
-/// the schedule generators, the `STracker` oracle materializer, the feed
-/// replay, and the Spark twin's Arrow readers — making it nullable is a
-/// generator-wide change out of proportion to the one column family that
-/// anticipates NULLs. The oracle here is the same full-refresh body every
-/// other keyed case asserts against, evaluated over the physical source
-/// table: the schedule is insert-only and every inserted row precedes the
-/// run that processes it, so `S` after each run IS the whole source table.
+/// Retained as a PINNED MINIMAL WITNESS, not the direction's proof: since
+/// `GenRow::val` became nullable
+/// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md`), the
+/// proof lives in the generated pool
+/// (`once_write_null_pool_upholds_end_state_equivalence`, below) via
+/// `arb_once_write_null_schedule`. This hand-written case stays as a small,
+/// readable, exact-shape fixture for the one scenario the generator's own
+/// doc comment names explicitly. The oracle here is the same full-refresh
+/// body every other keyed case asserts against, evaluated over the physical
+/// source table: the schedule is insert-only and every inserted row
+/// precedes the run that processes it, so `S` after each run IS the whole
+/// source table.
 #[tokio::test]
 async fn once_write_null_payload_then_value_upholds_equivalence() {
     let recipe = KeyedRecipe::new_window_forward_once_write();
@@ -1977,8 +2106,8 @@ async fn once_write_null_payload_then_value_upholds_equivalence() {
     let d2 = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date");
 
     /// One staged row of the NULL-bearing schedule: `(key, payload)`, where
-    /// `None` stages a NULL payload — the direction `GenRow`'s non-nullable
-    /// `val` cannot express.
+    /// `None` stages a NULL payload. Kept as a local tuple rather than
+    /// `GenRow` for this pinned fixture's own hand-rolled insert loop below.
     type NullableRow = (i64, Option<i64>);
 
     // Each entry is one run window: the day it covers and the rows staged
@@ -2052,7 +2181,16 @@ async fn once_write_merge_keeps_first_value_despite_later_differing_redelivery()
     );
 
     let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
-    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 7 }).expect("insert first row");
+    insert_row_keyed(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(7),
+        },
+    )
+    .expect("insert first row");
 
     let mut request = base_request("dev");
     request.start = Some("2024-01-01".to_string());
@@ -2072,8 +2210,16 @@ async fn once_write_merge_keeps_first_value_despite_later_differing_redelivery()
 
     // A late redelivery carrying a DIFFERENT (larger) value for the SAME
     // key, within the SAME already-folded window.
-    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 99 })
-        .expect("insert differing late row");
+    insert_row_keyed(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(99),
+        },
+    )
+    .expect("insert differing late row");
 
     // Once-write grades `Grade::Idempotent` (no reprocessing ledger) — the
     // redelivery must succeed, not refuse with `KeyedReprocessedWindow`.
@@ -2202,12 +2348,21 @@ impl KeyedEnrichedRecipe {
     /// mirroring `crates/smelt-runtime/tests/technique_lowering.rs`'s
     /// `keyed_column_scoped_merge_e2e::MODEL_FILE`.
     fn model_file(&self) -> String {
+        // `keyed_enrich_fact` is this model's own fold-driving source (a
+        // `COUNT` aggregate) — phase 19 (`docs/outcomes/
+        // 20260815-definition-delta-migrate`) now derives an
+        // `UpstreamMutation` cell for it too (an `AppendOnly` source named
+        // in a value-sensitive column group), with no statically derivable
+        // scan bound, so it needs the same `allow_full_scan` escape hatch
+        // the dimension already declares.
         format!(
             "---\nrefresh: incremental\ngrain: key\nunique_key: {id}\nmaintenance:\n  \
-             scan_bounds:\n    per_source:\n      {dim}:\n        allow_full_scan: true\n---\n\
+             scan_bounds:\n    per_source:\n      {dim}:\n        allow_full_scan: true\n      \
+             {fact}:\n        allow_full_scan: true\n---\n\
              {body}\n",
             id = self.fact.key_column,
             dim = self.dimension.name,
+            fact = self.fact.name,
             body = self.model_body(),
         )
     }
@@ -2308,7 +2463,7 @@ fn insert_fact_row_keyed_enriched(
             recipe.fact.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -2524,7 +2679,7 @@ fn keyed_enriched_recipe_admits_membership_recompute() {
     let mut explicitly_mutable = std::collections::HashSet::new();
     explicitly_mutable.insert(recipe.dimension.name.clone());
 
-    let (source, cell, suppression) = resolve_live_membership_recompute_cell(
+    let (source, cell, _group_columns, write) = resolve_live_membership_recompute_cell(
         sql_body,
         &recipe.model_name,
         &metadata,
@@ -2542,8 +2697,11 @@ fn keyed_enriched_recipe_admits_membership_recompute() {
     assert_eq!(source, recipe.dimension.name);
     assert_eq!(cell.technique, Technique::DeleteInsert);
     assert!(
-        matches!(suppression, WriteSuppression::Suppressed { .. }),
-        "expected the change-suppressed matched arm, got {suppression:?}"
+        matches!(
+            write,
+            smelt_runtime::maintenance_driver::MembershipRecomputeWrite::StagedRecompute { .. }
+        ),
+        "expected the change-suppressed matched arm, got {write:?}"
     );
 }
 
@@ -2627,11 +2785,11 @@ const DIM_MUTATION_TEST_ID: i64 = 9001;
 ///    stale — the row must now disappear from the maintained output.
 ///
 /// Finally, one hand-built zero-change window (no new fact rows, no
-/// dimension mutation) closes the change-suppressed
-/// `WriteSuppression::Suppressed` arm's no-op path — including proving the
-/// NEW departed-key `DELETE` predicate (window 4 above) is itself a no-op
-/// once nothing has departed since: the maintained table's full contents
-/// are asserted byte-identical before and after.
+/// dimension mutation) proves mutation-happened discrimination
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches")
+/// skips the cell entirely once the dimension's fingerprint is unchanged
+/// since the prior run's recorded baseline: the maintained table's full
+/// contents are asserted byte-identical before and after.
 #[test]
 fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
     let n = keyed_enriched_case_count();
@@ -2680,12 +2838,30 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
                         "case {i}: the creation run must not take the membership-recompute \
                          path — the target doesn't exist yet"
                     );
-                } else {
+                } else if w == 1 {
+                    // The first post-creation window has no recorded
+                    // mutation-fingerprint baseline yet for the dimension
+                    // (`docs/specs/incremental_models.md` §"When a mutation
+                    // cell dispatches"), so it always dispatches once —
+                    // regardless of whether the schedule's OWN fact-only
+                    // windows ever touch the dimension.
                     assert_eq!(
                         record.strategy, "delete_insert_suppressed",
                         "case {i}: window {w} must dispatch the keyed run loop through the \
                          staged-candidate membership-recompute technique once the target \
-                         exists"
+                         exists — no baseline is recorded yet"
+                    );
+                } else {
+                    // Every window in `schedule.0` only inserts fact rows —
+                    // it never mutates the dimension — so once a baseline
+                    // is recorded (window 1 above), mutation-happened
+                    // discrimination correctly finds nothing changed and
+                    // the cell is a no-op.
+                    assert_eq!(
+                        record.strategy, "cumulative_aggregate",
+                        "case {i}: window {w} must NOT dispatch the membership-recompute \
+                         technique — the dimension is unchanged since the last recorded \
+                         baseline"
                     );
                 }
 
@@ -2715,7 +2891,7 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
                 &GenRow {
                     d: start,
                     id: DIM_MUTATION_TEST_ID,
-                    val: 42,
+                    val: Some(42),
                 },
             )
             .unwrap_or_else(|e| panic!("case {i}: {label}: insert fact row failed: {e}"));
@@ -2868,14 +3044,15 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
             }
 
             // Zero-change redelivery: a fresh, never-processed window with
-            // no new fact rows and no dimension mutation. The live
-            // `UpstreamMutation` cell still dispatches (known divergence —
-            // unconditional per-run dispatch, `incremental_models.md`
-            // §Known Divergences), but nothing has changed since window 4,
-            // so this exercises the change-suppressed arm's genuine no-op
-            // path — INCLUDING the new departed-key DELETE predicate, which
-            // must itself be a no-op now that nothing has departed since
-            // the last run.
+            // no new fact rows and no dimension mutation. Mutation-happened
+            // discrimination (`docs/specs/incremental_models.md` §"When a
+            // mutation cell dispatches") now recognizes the dimension's
+            // fingerprint is unchanged since window 4's recorded baseline,
+            // so the `UpstreamMutation` cell is a no-op this run and the
+            // run falls back to the ordinary cumulative-fold label — no
+            // staged-candidate `DELETE`+`INSERT` executes at all, which is
+            // strictly stronger than the change-suppressed arm's own
+            // zero-affected-row no-op path this window used to exercise.
             let (label, redelivery_start, redelivery_end) = run_dim_mutation_window("redelivery");
 
             let maintained_before = {
@@ -2901,9 +3078,10 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
                 .get(&recipe.model_name)
                 .unwrap_or_else(|| panic!("case {i}: model did not run on redelivery"));
             assert_eq!(
-                record.strategy, "delete_insert_suppressed",
-                "case {i}: the zero-change redelivery window must still dispatch the \
-                 staged-candidate membership-recompute technique"
+                record.strategy, "cumulative_aggregate",
+                "case {i}: the zero-change redelivery window must NOT dispatch the \
+                 staged-candidate membership-recompute technique — the dimension is unchanged \
+                 since the last recorded baseline"
             );
 
             let k = tracker.record_run(redelivery_start, redelivery_end, snapshot);
@@ -3047,7 +3225,7 @@ fn insert_fact_row_value_enriched(
             recipe.fact.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -3264,7 +3442,7 @@ fn value_enriched_recipe_executes_column_scoped_merge() {
             &GenRow {
                 d: start,
                 id: VALUE_ENRICHED_TEST_ID,
-                val: 42,
+                val: Some(42),
             },
         )
         .expect("insert seed fact row");
@@ -3429,9 +3607,16 @@ fn value_enriched_recipe_executes_column_scoped_merge() {
             .models
             .get(&recipe.model_name)
             .unwrap_or_else(|| panic!("{label}: model did not run"));
+        // Mutation-happened discrimination (`docs/specs/incremental_models.md`
+        // §"When a mutation cell dispatches"): the dimension's fingerprint is
+        // unchanged since the prior run's recorded baseline, so the
+        // column-scoped MERGE cell is a no-op this run — the run correctly
+        // falls back to the ordinary DELETE+INSERT path instead of
+        // re-dispatching a MERGE with nothing to change.
         assert_eq!(
-            record.strategy, "column_scoped_merge",
-            "{label}: expected the live column-scoped MERGE to dispatch, got {:?}",
+            record.strategy, "deleteinsert",
+            "{label}: an unchanged dimension's UpstreamMutation cell must be a no-op, not \
+             re-dispatch the column-scoped MERGE, got {:?}",
             record.strategy
         );
         let k = tracker.record_run(redelivery_start, redelivery_end, snapshot);
@@ -3487,7 +3672,18 @@ fn redelivery_of_processed_window_is_idempotent() {
         ConformanceStep::RunWindow {
             start: d,
             end: window_end,
-            rows: vec![GenRow { d, id: 1, val: 10 }, GenRow { d, id: 2, val: 20 }],
+            rows: vec![
+                GenRow {
+                    d,
+                    id: 1,
+                    val: Some(10),
+                },
+                GenRow {
+                    d,
+                    id: 2,
+                    val: Some(20),
+                },
+            ],
         },
         ConformanceStep::RerunWindow {
             start: d,
@@ -3537,7 +3733,7 @@ fn full_refresh_interleave_resets_state_correctly() {
             rows: vec![GenRow {
                 d: d1,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         // A mid-schedule full-refresh interleave: drops + rebuilds from the
@@ -3550,7 +3746,7 @@ fn full_refresh_interleave_resets_state_correctly() {
             rows: vec![GenRow {
                 d: d2,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
         ConformanceStep::RunWindow {
@@ -3559,7 +3755,7 @@ fn full_refresh_interleave_resets_state_correctly() {
             rows: vec![GenRow {
                 d: d3,
                 id: 3,
-                val: 30,
+                val: Some(30),
             }],
         },
     ]);
@@ -3857,7 +4053,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 &GenRow {
                     d: day0,
                     id,
-                    val: id * 10,
+                    val: Some(id * 10),
                 },
             )
             .unwrap_or_else(|e| panic!("case {i}: failed to seed fact row {id}: {e}"));
@@ -3938,7 +4134,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                     &GenRow {
                         d: new_day,
                         id: dim_id,
-                        val: dim_id * 10 + step_i as i64,
+                        val: Some(dim_id * 10 + step_i as i64),
                     },
                 )
                 .unwrap_or_else(|e| {
@@ -4117,7 +4313,7 @@ fn column_add_between_runs_recovers_equivalence() {
             rows: vec![GenRow {
                 d: w1_start,
                 id: 1,
-                val: 10,
+                val: Some(10),
             }],
         },
         ConformanceStep::RunWindow {
@@ -4126,7 +4322,7 @@ fn column_add_between_runs_recovers_equivalence() {
             rows: vec![GenRow {
                 d: w2_start,
                 id: 2,
-                val: 20,
+                val: Some(20),
             }],
         },
         // Definition change: add a derived payload column, same skeleton.
@@ -4146,7 +4342,7 @@ fn column_add_between_runs_recovers_equivalence() {
             rows: vec![GenRow {
                 d: w3_start,
                 id: 3,
-                val: 30,
+                val: Some(30),
             }],
         },
     ]);
@@ -4218,6 +4414,8 @@ fn derive_plan_with_real_deployed_schema(
         &[],
         &deployed,
         &std::collections::BTreeMap::new(),
+        None,
+        None,
     )
     .ok_or_else(|| anyhow::anyhow!("model {:?} carries no maintenance plan", recipe.model_name))?;
     Ok(result.plan)
@@ -4274,7 +4472,7 @@ fn pure_backfill_column_add_executes_in_place_update() {
         // Creation run under the ORIGINAL body — establishes a deployed
         // schema baseline (no `val_doubled` yet) and a green equivalence
         // starting point.
-        rt_insert_and_run(&project, &recipe, w1_start, w1_end, &[GenRow { d: w1_start, id: 1, val: 10 }], &mut tracker)
+        rt_insert_and_run(&project, &recipe, w1_start, w1_end, &[GenRow { d: w1_start, id: 1, val: Some(10) }], &mut tracker)
             .await
             .expect("creation run");
 
@@ -4310,7 +4508,7 @@ fn pure_backfill_column_add_executes_in_place_update() {
         // (b) A plain windowed re-run (next window, new row) must dispatch
         // InPlaceUpdate — never a raw column-count crash, never a silent
         // recompute fallback.
-        insert_row(&project, &recipe, &GenRow { d: w2_start, id: 2, val: 20 })
+        insert_row(&project, &recipe, &GenRow { d: w2_start, id: 2, val: Some(20) })
             .await
             .expect("insert row 2");
         let snapshot = {
@@ -4377,7 +4575,7 @@ async fn rt_insert_and_run(
 /// (`docs/plans/20260809-sensitivity-precision.md` Phase 6): widening the
 /// `GROUP BY` (`ModelEdit::AddGroupingColumn`) is a grain change, never a
 /// column backfill (EX-39) — the plan derived with the REAL deployed-schema
-/// snapshot must carry `Refusal::SkeletonColumnAdded`, never a
+/// snapshot must carry `Refusal::SkeletonChanged`, never a
 /// `Trigger::ColumnAdded` cell.
 #[test]
 fn skeleton_position_add_derives_skeleton_column_added_refusal() {
@@ -4403,7 +4601,7 @@ fn skeleton_position_add_derives_skeleton_column_added_refusal() {
         &[GenRow {
             d: w1_start,
             id: 1,
-            val: 10,
+            val: Some(10),
         }],
         &mut tracker,
     ))
@@ -4422,10 +4620,10 @@ fn skeleton_position_add_derives_skeleton_column_added_refusal() {
     assert!(
         plan.refusals.iter().any(|r| matches!(
             r,
-            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { column }
+            smelt_logical::maintenance::Refusal::SkeletonChanged { column }
                 if column == &recipe.source.key_column
         )),
-        "a GROUP BY widening add must refuse SkeletonColumnAdded naming {:?}: {plan:#?}",
+        "a GROUP BY widening add must refuse SkeletonChanged naming {:?}: {plan:#?}",
         recipe.source.key_column
     );
     assert!(
@@ -4434,6 +4632,287 @@ fn skeleton_position_add_derives_skeleton_column_added_refusal() {
             .iter()
             .any(|c| matches!(&c.trigger, Trigger::ColumnAdded { .. })),
         "a skeleton-position add must admit no ColumnAdded cell at all: {plan:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `ConformanceStep::MigrateModel` — the shipped `smelt migrate`
+// derive→apply path, staged mid-schedule
+// (`docs/outcomes/20260815-definition-delta-migrate/phases/05-plan.md`).
+// Unlike `RewriteModel` above, the new-definition oracle must hold
+// IMMEDIATELY after the step, with no intervening catch-up run.
+// ---------------------------------------------------------------------
+
+/// `migrate_step_applies_plan_and_recovers_new_definition_equivalence`
+/// (plan test 2): a `PassThrough` recipe's `AddPayloadColumn` edit
+/// (`val * 2 AS val_doubled`, a pure function of the already-stored `val`
+/// column — the same shape `smelt-cli/tests/migrate_apply.rs`'s
+/// `MODEL_V2_SELF_DERIVED` fixture exercises) must admit an in-place
+/// `smelt_logical::backbuild` technique (`Technique::SelfDerivedColumnAdd`),
+/// so the `MigrateModel` step takes the `Applied` leg — executed via
+/// [`run_migrate_step`], never a full refresh. Two windows run under the
+/// original body first (establishing a deployed-schema baseline), then the
+/// migration, asserted equal to the rewritten body's own oracle with NO
+/// intervening run, then a further windowed run must keep it equal.
+#[test]
+fn migrate_step_applies_plan_and_recovers_new_definition_equivalence() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::PassThrough],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+    assert!(
+        recipe.evolution.contains(&ModelEdit::AddPayloadColumn),
+        "PassThrough recipes must carry the AddPayloadColumn evolution: {recipe:?}"
+    );
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected the PassThrough append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+    let w2_start = w1_end;
+    let w2_end = w2_start + chrono::Duration::days(1);
+    let w3_start = w2_end;
+    let w3_end = w3_start + chrono::Duration::days(1);
+
+    let schedule = ConformanceSchedule(vec![
+        // Two windows run under the ORIGINAL body — establishes a deployed
+        // schema baseline `derive_plan` diffs against.
+        ConformanceStep::RunWindow {
+            start: w1_start,
+            end: w1_end,
+            rows: vec![GenRow {
+                d: w1_start,
+                id: 1,
+                val: Some(10),
+            }],
+        },
+        ConformanceStep::RunWindow {
+            start: w2_start,
+            end: w2_end,
+            rows: vec![GenRow {
+                d: w2_start,
+                id: 2,
+                val: Some(20),
+            }],
+        },
+        // The migration: derive → apply in place → assert immediately.
+        ConformanceStep::MigrateModel {
+            edit: ModelEdit::AddPayloadColumn,
+        },
+        // A subsequent ordinary windowed run must keep working post-apply.
+        ConformanceStep::RunWindow {
+            start: w3_start,
+            end: w3_end,
+            rows: vec![GenRow {
+                d: w3_start,
+                id: 3,
+                val: Some(30),
+            }],
+        },
+    ]);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut outcomes = Vec::new();
+    rt.block_on(drive_and_assert_collecting(
+        &project,
+        &recipe,
+        &schedule,
+        &mut outcomes,
+    ))
+    .expect(
+        "a PassThrough AddPayloadColumn migration must apply in place and recover equivalence \
+         against the rewritten body's own oracle with no intervening run, and stay recovered \
+         through a subsequent windowed run",
+    );
+
+    assert_eq!(
+        outcomes,
+        vec![MigrateStepOutcome::Applied],
+        "PassThrough + AddPayloadColumn is a pure function of the already-stored `val` column \
+         and must admit an in-place backbuild technique (Technique::SelfDerivedColumnAdd), never \
+         fall back to a full refresh: {outcomes:?}"
+    );
+}
+
+/// `migrate_step_refuses_and_full_refreshes_when_no_technique_admits`
+/// (plan test 3): an `AdditiveAgg` recipe's `AddGroupingColumn` edit widens
+/// the `GROUP BY` — a skeleton/grain change
+/// (`skeleton_position_add_derives_skeleton_column_added_refusal` above
+/// proves the LIVE maintenance driver refuses this shape too), so the
+/// derived `smelt_logical::backbuild` plan admits no in-place technique
+/// (`plan.statements.is_empty()`, the same condition
+/// `commands::migrate::apply_plan` reports as
+/// `MigrateError::FullRefreshRequired`). The `MigrateModel` step must
+/// therefore take the `FullRefreshed` leg, and equivalence must still hold
+/// afterward.
+#[test]
+fn migrate_step_refuses_and_full_refreshes_when_no_technique_admits() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+    assert!(
+        recipe.evolution.contains(&ModelEdit::AddGroupingColumn),
+        "AdditiveAgg recipes must carry the AddGroupingColumn evolution: {recipe:?}"
+    );
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected the additive-agg append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+    let w2_start = w1_end;
+    let w2_end = w2_start + chrono::Duration::days(1);
+
+    let schedule = ConformanceSchedule(vec![
+        // Establishes a deployed schema baseline.
+        ConformanceStep::RunWindow {
+            start: w1_start,
+            end: w1_end,
+            rows: vec![GenRow {
+                d: w1_start,
+                id: 1,
+                val: Some(10),
+            }],
+        },
+        // A skeleton change: no in-place technique admits — the step must
+        // fall back to a full refresh.
+        ConformanceStep::MigrateModel {
+            edit: ModelEdit::AddGroupingColumn,
+        },
+        // A subsequent ordinary windowed run must keep working post-refresh.
+        ConformanceStep::RunWindow {
+            start: w2_start,
+            end: w2_end,
+            rows: vec![GenRow {
+                d: w2_start,
+                id: 2,
+                val: Some(20),
+            }],
+        },
+    ]);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut outcomes = Vec::new();
+    rt.block_on(drive_and_assert_collecting(
+        &project,
+        &recipe,
+        &schedule,
+        &mut outcomes,
+    ))
+    .expect(
+        "a skeleton-changing migration must fall back to a full refresh and still recover \
+         equivalence against the rewritten body's own oracle",
+    );
+
+    assert_eq!(
+        outcomes,
+        vec![MigrateStepOutcome::FullRefreshed],
+        "AdditiveAgg + AddGroupingColumn widens the GROUP BY — a skeleton change with no \
+         admissible in-place backbuild technique — and must take the FullRefreshed leg, never \
+         Applied: {outcomes:?}"
+    );
+}
+
+/// Default deterministic case count for
+/// `definition_edit_pool_upholds_new_definition_equivalence` — every recipe
+/// this test drives also stages a `MigrateModel` step and its own
+/// `derive_plan` call, so it stays at [`DEFAULT_CASES`]'s scale rather than
+/// `admission_rate_stays_above_floor`'s larger N=50 health check.
+const DEFINITION_EDIT_CASES: usize = 12;
+
+fn definition_edit_case_count() -> usize {
+    std::env::var("SMELT_CONFORMANCE_DEFINITION_EDIT_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFINITION_EDIT_CASES)
+}
+
+/// `definition_edit_pool_upholds_new_definition_equivalence` (plan test 4):
+/// deterministic-seeded sample over the append-only partition pool
+/// restricted to recipes with a non-empty `evolution` (today: every
+/// `RecipePool::partition_append_only()` construct), scheduled via
+/// [`arb_schedule_with_definition_edit`] and driven via
+/// [`drive_and_assert_collecting`] — equivalence is asserted after EVERY
+/// step (including immediately after the `MigrateModel` step, with no
+/// intervening run). Fails if zero admitted cases in the sample took the
+/// `Applied` leg — the anti-vacuity discipline
+/// `admission_rate_stays_above_floor` already established for admission
+/// itself, extended here to the migration leg: a sample that only ever
+/// full-refreshed would silently stop exercising the in-place `smelt
+/// migrate` apply path this whole phase exists to cover.
+#[test]
+fn definition_edit_pool_upholds_new_definition_equivalence() {
+    let n = definition_edit_case_count();
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut admitted_cases = 0;
+    let mut all_outcomes: Vec<MigrateStepOutcome> = Vec::new();
+
+    for i in 0..n {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+        if recipe.evolution.is_empty() {
+            continue;
+        }
+        let schedule = arb_schedule_with_definition_edit(&recipe)
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+        let verdict = classify(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+
+        match verdict {
+            Verdict::Refused(_) => continue,
+            Verdict::Admitted(_) => {
+                admitted_cases += 1;
+                let mut outcomes = Vec::new();
+                rt.block_on(drive_and_assert_collecting(
+                    &project,
+                    &recipe,
+                    &schedule,
+                    &mut outcomes,
+                ))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i}: recipe {recipe:?} schedule {schedule:?} equivalence check \
+                         failed: {e:?}"
+                    )
+                });
+                all_outcomes.extend(outcomes);
+            }
+        }
+    }
+
+    assert!(
+        admitted_cases > 0,
+        "N={n} deterministic sample admitted zero cases — generator/derivation regression"
+    );
+    assert!(
+        all_outcomes.contains(&MigrateStepOutcome::Applied),
+        "N={n} deterministic sample took the Applied leg zero times across {} MigrateModel \
+         step(s) — a vacuous pass that never exercises the in-place smelt-migrate apply path: \
+         {all_outcomes:?}",
+        all_outcomes.len()
     );
 }
 
@@ -4477,7 +4956,7 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
         &GenRow {
             d: w1_start,
             id: 1,
-            val: 10,
+            val: Some(10),
         },
     ))
     .expect("seed row");
@@ -4679,7 +5158,7 @@ fn insert_composed_row(
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -4824,7 +5303,14 @@ fn composed_route3_slice() -> LocalitySlice {
 fn composed_delta_values_sql(rows: &[GenRow]) -> String {
     let values: Vec<String> = rows
         .iter()
-        .map(|r| format!("({}, DATE '{}', {})", r.id, r.d.format("%Y-%m-%d"), r.val))
+        .map(|r| {
+            format!(
+                "({}, DATE '{}', {})",
+                r.id,
+                r.d.format("%Y-%m-%d"),
+                r.val_sql()
+            )
+        })
         .collect();
     format!("(VALUES {}) AS t(id, d, val)", values.join(", "))
 }
@@ -5019,7 +5505,7 @@ async fn insert_composed_rows_via_backend(
                 recipe.source.name,
                 row.d.format("%Y-%m-%d"),
                 row.id,
-                row.val,
+                row.val_sql(),
             ))
             .await?;
     }
@@ -5102,6 +5588,7 @@ async fn drive_composed_route2_and_assert(
             &classification,
             slice,
             &composed_route2_suppression(),
+            None,
             compile_step,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -5148,6 +5635,7 @@ async fn drive_composed_route3_and_assert(
             &classification,
             Some(&slice),
             &composed_route3_suppression(),
+            None,
             compile_step,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -5730,9 +6218,12 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             body,
             Some("event_id"),
             Some(&closed_verdict),
-            recipe.driving_source(),
-            "2026-07-01",
-            "2026-07-02",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: recipe.driving_source(),
+                window_start: "2026-07-01",
+                window_end: "2026-07-02",
+            },
+            None,
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -5753,9 +6244,12 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             body,
             Some("event_id"),
             Some(&open_verdict),
-            recipe.driving_source(),
-            "2026-07-01",
-            "2026-07-02",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: recipe.driving_source(),
+                window_start: "2026-07-01",
+                window_end: "2026-07-02",
+            },
+            None,
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
@@ -5910,6 +6404,7 @@ async fn empty_delta_cascade_is_a_no_op() {
         column: "spend_date".to_string(),
         start: "2026-07-01".to_string(),
         end: "2026-07-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
 
     // Leg (a): the write itself, executed for real — snapshot the target
@@ -5999,9 +6494,13 @@ async fn empty_delta_cascade_is_a_no_op() {
         "expected all three real fixture models to be discovered: {order:?}"
     );
 
-    let window_interval = smelt_logical::maintenance::propagate::DayInterval::new(
-        smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 1),
-        smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 2),
+    let window_interval = smelt_logical::maintenance::propagate::PartitionInterval::new(
+        smelt_logical::maintenance::propagate::day_start(
+            smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 1),
+        ),
+        smelt_logical::maintenance::propagate::day_start(
+            smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 2),
+        ),
     );
     let deltas = vec![smelt_runtime::propagation::SourceDelta {
         source: "user_daily_spend".to_string(),
@@ -6026,6 +6525,7 @@ async fn empty_delta_cascade_is_a_no_op() {
         &order,
         &deltas,
         &observed,
+        "2026-08-01",
     )
     .expect("a present-and-empty observed delta must not be a refusal");
 

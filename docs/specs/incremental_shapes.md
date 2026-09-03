@@ -1,7 +1,7 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-04
 owners: [andrew]
 ---
 
@@ -157,6 +157,11 @@ Rules:
   addressing lives — `incremental_models.md` §"Per-cell write addressing"), and
   `safety_overrides` then becomes a hard error. A model that wants only whole-partition
   rewrites declares no identity.
+- A generator-emitted partition-grain model (`meta_language.md` §"`ModelDef` meta record
+  type") may carry its own `timeseries` / `safety_overrides` fields on the `ModelDef` literal,
+  replacing the generator file's file-wide frontmatter blocks in full for that emission only —
+  so a single generator can emit multiple partition-grain models whose event-time columns
+  differ.
 
 The same declaration may live in `smelt.yml` instead; frontmatter wins over `smelt.yml` when
 both set the same field:
@@ -202,9 +207,10 @@ Rules:
 - One profile covers the running-aggregate, latest-value, and milestone patterns; what
   distinguishes them is the **column family** of each projection, derived from the SQL, never
   declared.
-- No shape-specific config block exists, and `safety_overrides` is a hard error once identity
-  makes the output key-addressed: every keyed rejection guards the equivalence invariant itself,
-  and there is nothing safe to waive (§"Key-grain design").
+- No shape-specific config block exists, and `safety_overrides` is a hard error
+  (`KeyedForbidsSafetyOverrides`) once identity makes the output key-addressed: every keyed
+  rejection guards the equivalence invariant itself, and there is nothing safe to waive
+  (§"Key-grain design").
 - By default the output carries no partition column and downstream consumers read it in full,
   like any lookup. A `timeseries:` block on the model is admitted **iff key temporal locality
   is established** (§"Key temporal locality (the time-partitioned output)"), refused otherwise
@@ -345,8 +351,9 @@ chooser").
 |---|---|
 | `TimeseriesRequiredForPartitionGrain` | `grain: partition` asserted with no `timeseries:` block (rule owned by `models.md` §"Constraint violations"). |
 | `PartitionGrainNotSafe` | The batch-safety classifier rejects the model's SQL (§"Safety checks (per-cell admission for recompute-a-region)"). |
-| `EventTimeColumnNotVisibleAtOuterSelect` | The outer output-clamp cannot bind: a set operation or subquery hides `event_time_column` at the outermost SELECT (§"Event-time outer-visibility"). |
+| `EventTimeColumnNotVisibleAtOuterSelect` | The outer output-clamp cannot bind: a set operation, subquery, or CTE hides `event_time_column` at the outermost SELECT (§"Event-time outer-visibility"). |
 | `PartitionGrainForbidsMetrics` | A partition-grain model's body consumes `smelt.metric()` — the composition of metric expansion with time-filter injection is deliberately unspecified, so the combination refuses ahead of execution rather than composing unpredictably (§"Functions inside partition-grain bodies"). |
+| `MaintenancePartitionColumnChanged` | A maintained model's declared `timeseries.partition_column` differs from the address recorded in the deployed-schema snapshot at last deploy; names both columns. No run flag bypasses it; remedy is deleting the model's recorded snapshot and re-running. |
 
 **Key-grain codes.**
 
@@ -354,6 +361,7 @@ chooser").
 |---|---|
 | `KeyedRequiresGroupBy` | The model SELECT has no `GROUP BY` — there is no unique key to derive. |
 | `KeyedForbidsTimeseries` | The model declares `timeseries:` but key temporal locality cannot be established — no route applies; names the three routes and the nearest missing fact (§"Key temporal locality (the time-partitioned output)"). |
+| `KeyedForbidsSafetyOverrides` | A key-addressed model (`grain: key`, declared or resolved) declares `safety_overrides:` — every keyed rejection guards the equivalence invariant, and there is nothing safe to waive; names the two escapes (remodel as partition-shaped, or `refresh: materialized_view`). |
 | `KeyedUnknownCombiner` | A non-key projection is not a direct call to a catalogued aggregator; names the offending expression. For a bare column or `ANY_VALUE` under window-forward, names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | The `GROUP BY` contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partition shape and the key-embedded time-partitioned shape; suggests both fixes: `grain: partition` + `timeseries:`, or declaring `timeseries:` on the model to stay `grain: key`. |
 | `KeyedForbidsWindowFunctions` | The outer SELECT uses `OVER (...)`. The keyed state *is* the window. |
@@ -525,29 +533,44 @@ wholesale (discouraged).
 #### Event-time outer-visibility
 
 The outer clamp needs `event_time_column` **accessible** at the outermost SELECT. A plain
-`UNION`/`INTERSECT`/`EXCEPT`, a `UNION ALL` with unprovable branches, or a subquery FROM not
-projecting it, is rejected (`EventTimeColumnNotVisibleAtOuterSelect`) before execution. A
-`UNION ALL` is **exempt** when every branch traces `Traceable` back to a real source's own
-partition column; a `StaticSeed` branch is named and rejected, a `NotTraceable` branch keeps
-the whole-model clamp.
+`UNION`/`INTERSECT`/`EXCEPT`, a `UNION ALL` with unprovable branches, a subquery FROM not
+projecting it, or a `FROM` naming a CTE whose body does not project it, is rejected
+(`EventTimeColumnNotVisibleAtOuterSelect`) before execution. A `UNION ALL` is **exempt** when
+every branch traces `Traceable` back to a real source's own partition column; a `StaticSeed`
+branch is named and rejected, a `NotTraceable` branch keeps the whole-model clamp. The CTE case
+is resolved through a chain of CTEs (a CTE's own single-table `FROM` naming another CTE), and
+left accepted (conservative, no diagnostic) when the referenced CTE's body projects a wildcard,
+the `WITH` is recursive, or the outer `FROM` has more than one table expression (a join) — the
+column may come from the other side.
 
 #### Observing the per-source clamp
 
 Because lookback is derived, not declared, the derived clamp is surfaced so authors can confirm
 the analyzer read their SQL as intended: `smelt explain --json`'s per-cell `source_bounds` map
-reports each source's `source_partition_col` and derived `(before, after)` offsets, resolving
-the scan window when a concrete run window is given; editor hover (LSP) on a `smelt.<path>`
-reference shows the same clamp alongside the schema/column readout. `Bounded(c, 0, 0)` reads
-partition-by-partition, no lookback/lookforward; `Bounded(c, before, after)` reads the window
-`c ∈ [run_start − before, run_end + after)`; `Unbounded` reads all history and forces
+reports each source's `source_partition_col` and derived `(before, after)` offsets. `Bounded(c,
+0, 0)` reads partition-by-partition, no lookback/lookforward; `Bounded(c, before, after)` reads
+the window `c ∈ [run_start − before, run_end + after)`; `Unbounded` reads all history and forces
 `PerPartitionOnly`; a lookup reads in full; a `NotDerivable` source surfaces the planning-time
 refusal instead of a window.
+
+When a concrete run window is supplied (`smelt explain --json --period <start>..<end>`, bounds
+read in the model's own axis domain), a `Bounded` entry additionally carries the resolved
+`scan_start`/`scan_end` pair `[run_start − before, run_end + after)`, rendered in that axis —
+the *same* derivation the run's pushdown filter uses, never a second arithmetic, so the window a
+report prints and the filter a run pushes down cannot drift. An offset with a non-uniform unit
+(month/year) resolves to no window; the entry instead carries `scan_unresolved` naming the unit
+rather than guessing a day count. Without `--period`, neither field is present. Editor hover on
+a `smelt.<path>` reference inside a partition-grain model renders the same per-source verdict
+(`Bounded`/`Unbounded`/`NotDerivable`) alongside the schema/column readout.
 
 #### Functions inside partition-grain bodies
 
 Function expansion (`expansion.md`) runs **before** every analysis stage here, so a `LAG()`
 inside a `smelt.define` body and one inlined at the call site are indistinguishable — the outer
-clamp and pushdown both operate on the expanded CST. **Opaque calls remain black boxes**: bound
+clamp and pushdown both operate on the expanded CST. Window/frame classification descends
+through every derived table and CTE body reachable from the expanded statement, so a frame a
+function-call expansion introduces as a FROM-clause derived table is seen exactly as one written
+inline at the outer level. **Opaque calls remain black boxes**: bound
 derivation cannot read through `smelt.extern`/built-ins, so time-dependence hidden behind one
 is `NotDerivable` and refused unless a bound is provable from the surrounding SQL.
 `smelt.metric()` calls are refused outright (`PartitionGrainForbidsMetrics`): how metric
@@ -566,7 +589,13 @@ via `smelt.<self>`) still executes as partition DELETE+INSERT — the same state
 spine separating the two grains: stateful-ordered in execution, yet keeping the partition-grain
 shape — but its windows build sequentially in strict temporal order, its backfill may not be
 parallelised or reordered, and an edge the planner cannot prove converges
-partition-by-partition is refused at planning time. A Form B skew anchored on a *non-self*
+partition-by-partition is refused at planning time. Proving convergence requires the
+self-reference to read no forward margin *and* a strictly positive backward reach over the
+declared partition axis: a self-read confined to the current partition (zero backward reach) is
+circular, not convergent — the partition's own output would have to exist before it is written
+— and is refused identically to a forward read, by the same derivation the propagation graph
+uses to admit a time-unrolled self-edge (`incremental_models.md` §"Time-unrolled self-edges"). A
+Form B skew anchored on a *non-self*
 source rebases an `Ordered` model's write window exactly as a window-independent model's; the
 self-edge itself is never a skew anchor — its own bounding relation is a distinct convergence
 mechanism, even sharing the `partition_column` name.
@@ -657,12 +686,15 @@ Three model-level properties fold from the column families, derived and surfaced
 over unchanged input? Holds iff every column is idempotent (no additive-fold column); an
 additive model double-counts and must be refused (§"The transactional frontier write (merge
 ledger)"). **Order-independence:** may windows apply out of order or in parallel? Holds iff
-every combiner is order-independent — extremal/lattice, decomposed-fold, and proven once-write
-qualify; order-monotone overwrite does not (only up to ordering-key ties, §"Ordering ties
-(order-monotone overwrite)"), forcing sequential execution. **Reprocessing refusal:** a window
-whose input changed since merging must not be re-merged for **any** family — an irreversible
-fold cannot un-see a removed contribution, an overwrite cannot retract a superseded-by-nothing
-value (§"Reprocessing").
+every combiner is order-independent — the formal rule, applied per family: extremal/lattice
+fold, additive fold, decomposed fold, and proven once-write all qualify (additive fold's `+`/
+`XOR` are commutative and associative; decomposed fold's own hidden state columns are
+themselves additive); order-monotone overwrite does not (only up to ordering-key ties, §"Ordering
+ties (order-monotone overwrite)") and plain overwrite does not (the delta always wins, so the
+last-applied window determines the stored value) — both force sequential execution.
+**Reprocessing refusal:** a window whose input changed since merging must not be re-merged for
+**any** family — an irreversible fold cannot un-see a removed contribution, an overwrite cannot
+retract a superseded-by-nothing value (§"Reprocessing").
 
 #### The transactional frontier write (merge ledger)
 
@@ -676,8 +708,11 @@ window may be re-merged (a no-op); the frontier serves reprocessing detection an
 bookkeeping, not refusal. The two grades differ in classification, not existence: for an
 additive-fold model the frontier is a correctness structure and always exists; for a
 re-run-tolerant model it is bookkeeping, written automatically whenever the project's state
-mode supports it (`state.md`), so `--auto` staleness always has a record to consult.
-Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
+mode supports it (`state.md`), so `--auto` staleness always has a record to consult. Where the
+backend offers no ledger substrate, the re-run-tolerant bookkeeping record is **not written**,
+and the omission is reported as a named fact on the run's reporter channel — never silently
+dropped; the additive grade has no such fallback and refuses the run outright there, since for
+it the frontier is a correctness structure. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
 describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
 state-structure inventory"), distinct from the opt-in run-state observability surface
 (`run_state.md`), and the model realisation of `state.md` §"The residency rule".
@@ -1061,10 +1096,28 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
    columns are not equivalent (§"Per-partition equivalence").
 7. **Idempotence under fixed input:** re-running the same run window on unchanged sources
    converges to the same output state.
-8. **Granularity is closed under partition arithmetic.** Run windows align to whole granularity
-   units; the declared granularity must be at least as coarse as the derived partition grid
-   (`g_run >= g_part`); violations reject, never silently widen (§"Run window vs partition
-   granularity").
+8. **Granularity is closed under partition arithmetic on the calendar axis.** Run windows align
+   to whole granularity units; the declared granularity must be at least as coarse as the
+   derived partition grid (`g_run >= g_part`); violations reject, never silently widen (§"Run
+   window vs partition granularity"). On an integer axis (rule 8a) neither check applies.
+8a. **The run window is supplied in the partition axis's own domain.** `partition_column`'s
+   resolved type (`timeseries.md` §"Validation rules" rule 9, "Partition axis domain") fixes
+   whether run-window bounds are calendar dates (`YYYY-MM-DD`) or bare integers on a unit-step
+   integer grid. A bound whose form contradicts the resolved type is a hard refusal, naming both
+   the offending bound and the resolved column type — never coerced between domains. On an
+   integer axis `--batch-size N` counts `N` partition units (not calendar days), and the only
+   run-window validity requirement is a positive span (`end > start`) — no granularity-boundary
+   alignment, matching rule 8's carve-out. Day-typed widening inputs — a per-column
+   `data_latency`, a seconds-domain SQL-inferred lookback/lookahead, or a derived
+   partition-column skew — have no conversion into an integer axis's units; if any of them would
+   be nonzero for an integer-axis model, that is a hard refusal (fail-closed), never silently
+   zeroed or coerced 1:1 into "N units". A partition literal is rendered **in the axis's own
+   domain** everywhere a run emits one — the output clamp, the per-source scan filter, and the
+   maintenance region's `DELETE` predicate — and everywhere `smelt explain` reports one: quoted
+   and escaped (`'2026-01-01'`) on the calendar axis, bare (`7`) on the integer axis. A
+   `contract.frozen_horizon` declared on an integer-axis model is also a hard refusal: its
+   horizon is a day count with no conversion into partition units, consistent with the day-typed
+   widening refusal above.
 9. **Safety-check overrides are explicit.** A `safety_overrides` entry names the specific check
    it bypasses; there is no global disable.
 10. **No silent downgrade to full refresh.** A rejected or `NotDerivable` model is refused at
@@ -1077,6 +1130,21 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
     promise); never in `event_time_column`, `partition_column`, a `unique_key` column, or any
     membership/grouping position. Declaring an excluded column `plausible` is a configuration
     error.
+13. **A `partition_column` rename against an already-deployed table is refused.** The declared
+    `timeseries.partition_column` is recorded in the deployed-schema snapshot at deploy time.
+    Changing it on a model whose table already exists is refused with
+    `MaintenancePartitionColumnChanged` (Error), naming both the recorded and the current
+    column — the address every partition-grain maintenance write targets is a world fact, not
+    re-derivable from a column diff alone (a rename that repoints the address at an
+    already-projected column changes no output column, so it is invisible to
+    `MaintenanceSkeletonChanged`). This is a pre-execution analyzer refusal
+    (`architecture.md` §"Diagnostic parity rule (analysis ↔ build)"): the blocking set is every
+    Error-severity diagnostic unconditionally, so no run flag (`--full-refresh`,
+    `--allow-full-refresh`) bypasses it. The remedy is to delete the model's recorded snapshot
+    (`.smelt/targets/<target>/schemas/<model>.json`) and re-run — a snapshot with no recorded
+    `partition_column` (deleted, or written before this field existed) derives no refusal
+    (fail-closed), so the re-run addresses the table under the new column and records a fresh
+    snapshot.
 
 ### Key-grain constraints
 
@@ -1133,44 +1201,23 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The partition grain
 
-- **One classification call site reads the outer SQL body**: the bound-`NotDerivable` refusal
-  gate classifies on the outer `model.sql`, so a lookback living only inside a function body
-  with no outer filter would diverge (no such case exists in the repo). Tracked:
-  `docs/plans/20260530-thread-fn-registry-classification.md`.
-- **The window-function batch-safety check runs on unexpanded outer SQL** — an `OVER` inside a
-  `smelt.define` body is invisible to it. Tracked:
-  `docs/plans/20260530-thread-fn-registry-classification.md`.
-- **Per-source clamp observability is partly emitted (Open Question)** — `smelt explain --json`
-  doesn't resolve the run-relative scan window when a run window is supplied; the editor-hover
-  readout is unimplemented; specified ahead of a tracking plan.
 - **Per-column `data_latency` is unimplemented**; the two interim mitigations
   (§"First-run and backfill") are the only options.
 - **Non-deterministic row-set-membership or grouping is out of scope** — always rejected;
   admitting it needs a frozen-per-window-membership design
   (`docs/research/20260703-model-updates.md` §9.1a).
-- **CTE-only `event_time_column` references are not yet detected**: a CTE alias that fails to
-  project it escapes the outer-visibility check and fails at execution. Tracked:
-  `docs/plans/20260616-smelt-feedback-fixes.md`.
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
-  Divergences); the residual open question here is a `partition_column` rename, a
-  skeleton-position change whose refusal path has no fixture or diagnostic surfaced ahead of a
-  run.
+  Divergences).
 - **The `PartitionGrainForbidsMetrics` refusal is unimplemented** — §"Functions inside
   partition-grain bodies" refuses `smelt.metric()` in a partition-grain body, but no
   classifier or diagnostic produces the code today, so the combination's behaviour is
   effectively undefined at runtime. Decision record:
   `docs/research/20260816-open-questions-triage.md`.
-- **Per-`ModelDef` overrides for generator-emitted models are not part of the closed field set
-  in v1.** Tracked: `docs/plans/20260509-meta-language-overall.md`.
 - **The sub-`g_part` rejection does not yet name the coarsened window** — §"Run window vs
   partition granularity" requires the refusal to spell out the run window that would be
   accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over
   auto-coarsening was decided 2026-08-16; `docs/research/20260816-open-questions-triage.md`.)
-- **Monotone-integer `partition_column` has no end-to-end run** — the trace and bound
-  derivation admit it, but run windows, backfill chunking, scan-filter injection, and the
-  explain clamp rendering are date-typed throughout. Tracked:
-  `docs/plans/20260704-model-updates-l4-batched.md`.
 - **`NOW()`/`CURRENT_*` are still compile-time-pinned** — §"Safety checks" admits them running
   as-is with no equivalence promise on the columns they feed; the implementation still freezes
   them to one per-run timestamp. Decision record:
@@ -1178,12 +1225,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The key grain
 
-- **A window-forward keyed run with no event-time window silently full-refreshes instead of
-  refusing** — the CLI surface (`incremental_models.md` §"CLI") requires both
-  `--event-time-start` and `--event-time-end`; the runtime's no-window arm instead drops and
-  recreates the target from the whole-source SELECT (including when only one flag is supplied).
-  The end state matches the full-refresh oracle, so nothing is silently wrong, but no test
-  asserts the refusal, and user docs describe the fallback rather than the required-flags rule.
 - **The once-write classifier has no nullability route around the fallback case** — the only
   route to decomposed `(value, written)` state is the FD-backed proof, since the NOT-NULL
   derivation proves not-null only for a partition/driving-clock-derived column; the key-derived
@@ -1193,19 +1234,15 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
-- **Re-run-tolerant keyed models do not yet write the frontier** — §"The transactional
-  frontier write (merge ledger)" has it written for every window-forward model whenever the
-  project's state mode supports it; the runtime only creates the ledger table for
-  additive-graded models, so a fully idempotent model has no merge record for `--auto` to
-  consult. Decision record: `docs/research/20260816-open-questions-triage.md`.
-- **`KeyedRetractableContribution` has no implementation (Open Question)** — the code is
-  specified but no classifier, diagnostic variant, or test produces it.
-- **`safety_overrides:` on a key-addressed model is not a hard error** — §"Key-grain
-  declaration (`grain: key`)" makes it one, but frontmatter validation only checks the
-  double-declaration case, so the block parses on a keyed model and is ignored.
-- **The reconciliation ledger's fold is transactional on DuckDB only (Open Question)** — the
-  default `Backend::fold_ledger_delta` is best-effort check-then-act across separate
-  statements; only the DuckDB backend overrides it with a real transaction.
+- **The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is
+  transactional, and the ledger table itself exists, on DuckDB only (Open Question)** — the
+  default `Backend::fold_ledger_delta` and `Backend::execute_write_with_bookkeeping` are
+  best-effort check-then-act across separate statements; only the DuckDB backend overrides
+  either with a real transaction, and every merge-ledger record (additive `INSERT` or
+  re-run-tolerant `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB
+  window-forward keyed model writes no frontier record at all today — the re-run-tolerant grade
+  reports the omission on the run's reporter channel rather than dropping it silently; the
+  additive grade instead refuses the run.
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.
@@ -1221,16 +1258,12 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   driving source's granularity; declared-vs-derived recurrence precedence and
   order-independent key-set comparison are implementation choices the spec text
   underdetermines. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **The derived execution postures are internal, and one of the three is not derived at all** —
-  order-independence is not derived as a named verdict anywhere: every window-forward run
-  applies its windows sequentially regardless of family, forgoing the parallel/out-of-order
-  application §"Derived execution postures" admits. Neither the derived run shape nor any
-  posture is printed by `smelt explain`, which names that as their surface.
-- **The generative conformance pool cannot stage NULL payloads (Open Question)** — the
-  generated row type's payload field (`GenRow::val`) is a non-nullable `i64`, so the once-write
-  family's NULL direction (a key whose first window carries only a NULL payload) is covered by
-  one targeted test case rather than by the generated pool that proves every other keyed
-  family.
+- **Order-independence is not yet acted on** — every window-forward run applies its windows
+  sequentially regardless of family, forgoing the parallel/out-of-order application
+  §"Derived execution postures" admits when order-independence holds. The verdict itself, and
+  the other two derived execution postures, are computed and printed by `smelt explain`
+  alongside the derived run shape; only the optimisation of actually reordering or
+  parallelising windows remains unbuilt.
 - **The pattern-function template file does not exist** — `smelt.latest`, `smelt.once`, and
   `smelt.current` are specified as a shipped `smelt.define` template file (§"The column-family
   catalogue"), but no such file ships; each family is reachable only through its hand-written
@@ -1240,13 +1273,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   fires for them today, where §Diagnostics admits them in payload positions running as-is
   with no equivalence promise. Decision record:
   `docs/research/20260816-open-questions-triage.md`.
-- **Departed keys are still retained under snapshot-reconcile** — §"Departed keys and
-  deletion" has the reconcile write deleting a key absent from the incoming scan; the
-  implementation retains it unchanged, forever. There are no production users, so the
-  behaviour change ships without a compatibility path. The opt-in retention relaxation (the
-  contract-lattice point for keeping departed keys as history) is likewise unbuilt. Decision
-  record: `docs/research/20260816-open-questions-triage.md`; earlier analysis:
-  `docs/research/20260705-keyed-collapse-application.md` §5.
 - **Ladder rungs 3–4 remain specified ahead of this profile's use of them** — group-rung
   retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the rung-2
   work above; rung 3 additionally depends on the change-feed consumption design. Deferred by
@@ -1303,15 +1329,24 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions`, `Backend::insert_into_from_query`, `Backend::delete_and_insert_transactional` (per-chunk transaction boundary)
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `DeleteInsert` impl
   - `crates/smelt-dialect/src/dialect.rs` — `BackendCapabilities::supports_merge`
+  - `crates/smelt-logical/src/analysis/temporal.rs` — `analyze_expr_temporal` subquery/CTE descent
+  - `crates/smelt-logical/src/analysis/partition_axis.rs` — `PartitionAxis`
+  - `crates/smelt-logical/src/analysis/source_bounds.rs` — `resolve_scan_window`
+  - `crates/smelt-runtime/src/windowing.rs` — `PartitionPoint`, `IncrementalBatch` axis dispatch (calendar / unit-step integer)
+  - `crates/smelt-logical/src/maintenance/derive.rs` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
+  - `crates/smelt-state/src/schema_tracking.rs` — `DeployedSchema::partition_column`
+  - `crates/smelt-db/src/lib.rs` — `model_source_clamps`
 - **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI
   integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition
-  full-refresh-equivalence harness
-- **User docs**: [`docs-site/docs/guide/incremental-models.md`](../../docs-site/docs/guide/incremental-models.md), [`docs-site/docs/guide/materializations.md`](../../docs-site/docs/guide/materializations.md)
+  full-refresh-equivalence harness; `crates/smelt-cli/tests/partition_residue_probes.rs`;
+  `crates/smelt-logical/tests/partition_residue_probes.rs`
+- **User docs**: [`docs-site/docs/guide/incremental-models.md`](../../docs-site/docs/guide/incremental-models.md), [`docs-site/docs/guide/materializations.md`](../../docs-site/docs/guide/materializations.md), [`docs-site/docs/reference/smelt-explain.md`](../../docs-site/docs/reference/smelt-explain.md), [`docs-site/docs/reference/timeseries.md`](../../docs-site/docs/reference/timeseries.md)
 - **Plans (history)**:
   - [`docs/plans/20260322-incremental-model-support.md`](../plans/20260322-incremental-model-support.md) — comprehensive plan; many phases still open
   - [`docs/plans/20260325-materialization-types.md`](../plans/20260325-materialization-types.md)
   - [`docs/plans/20260704-model-updates.md`](../plans/20260704-model-updates.md) — the mode-vertical master the spec family re-cuts as a composition
   - [`docs/plans/20260707-maintenance-plan-impl.md`](../plans/20260707-maintenance-plan-impl.md) — lands the target frontmatter surface and diagnostics
+  - [`docs/outcomes/20260815-partition-grain-residue/outcome.md`](../outcomes/20260815-partition-grain-residue/outcome.md) — closes the pre-`docs/outcomes/` partition-grain residues
 - **Research**:
   - [`docs/research/20260521-incremental-as-planner-rule.md`](../research/20260521-incremental-as-planner-rule.md) — design direction this spec absorbs
   - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — batched eligibility audit; §9.2 non-determinism derivation
@@ -1330,13 +1365,22 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
 
 - **Code**: `crates/smelt-core/src/config.rs` (`RefreshStrategy`);
   `crates/smelt-logical/src/rules/cumulative.rs` (the built classifier seed — combiner lookup,
-  GROUP-BY key derivation, driving-source resolution);
-  `crates/smelt-runtime/src/maintenance_driver.rs` (the windowed-keyed-maintenance driver,
+  GROUP-BY key derivation, driving-source resolution — and `execution_postures`, the derived
+  re-run-tolerance/order-independence/reprocessing-refusal verdicts);
+  `crates/smelt-logical/src/maintenance/derive.rs` (the `KeyedRetractableContribution` classifier
+  seam); `crates/smelt-runtime/src/maintenance_driver.rs` (the windowed-keyed-maintenance driver,
   `WindowedKeyedRule`); `crates/smelt-runtime/src/cumulative.rs` (per-window merge execution);
-  `crates/smelt-backend/src/lib.rs` (`merge_into`), impls in
-  `crates/smelt-backend-duckdb`/`-spark`.
+  `crates/smelt-backend/src/lib.rs` (`merge_into`, `Backend::execute_write_with_bookkeeping` —
+  the transactional-write seam), impls in `crates/smelt-backend-duckdb` (the transactional
+  override) `/-spark`; `crates/smelt-runtime/src/reporter.rs`
+  (`RunReporter::state_structure_unavailable` — the fail-loud report when a non-DuckDB backend
+  skips the idempotent-grade ledger record).
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`);
-  the keyed end-state-equivalence harness; `smelt-backend-duckdb` `merge_into` tests.
+  `crates/smelt-logical/tests/execution_postures.rs`; the keyed end-state-equivalence harness;
+  `crates/smelt-runtime/tests/keyed_frontier_bookkeeping.rs`; `smelt-backend-duckdb` `merge_into`
+  tests; `arb_once_write_null_schedule` (`crates/smelt-maintenance-testkit/src/recipe.rs`) —
+  the once-write NULL-payload generator consumed by `smelt-cli`'s
+  `maintenance_conformance` gate.
 - **User docs**: `docs-site/docs/reference/cumulative-aggregate.md` (the key-grain reference
   page — column families, the once-write proof, the two run shapes, the diagnostic codes);
   `docs-site/docs/guide/materializations.md` (author-facing walkthrough);

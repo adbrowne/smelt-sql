@@ -7,6 +7,11 @@ timeseries:
   event_time_column: first_seen_date
   partition_column: first_seen_date
   granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.events:
+        allow_full_scan: true
 ---
 -- The composed shape — key-addressed (one row per `event_id`, via
 -- `unique_key:`, which derives `grain: key`) *and* time-partitioned

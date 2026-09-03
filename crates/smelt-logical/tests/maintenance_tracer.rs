@@ -100,6 +100,9 @@ fn ex02_inputs() -> ModelInputs<'static> {
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -234,6 +237,9 @@ fn ex07_inputs(allow_full_scan: bool) -> ModelInputs<'static> {
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 
@@ -348,6 +354,9 @@ fn ex13_new_day_is_partition_local_recompute_region() {
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -390,6 +399,9 @@ fn ex24_inputs(
             add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -530,7 +542,7 @@ fn ex36_without_the_additive_only_proof_fails_closed() {
     assert!(plan.cells.is_empty());
     assert!(matches!(
         &plan.refusals[..],
-        [Refusal::NoAdmissibleTechnique { .. }]
+        [Refusal::DefinitionChangeNotBackfillable { .. }]
     ));
 }
 
@@ -566,7 +578,7 @@ fn ex39_skeleton_position_add_refuses_as_grain_change() {
     );
     assert!(plan.cells.is_empty());
     assert!(
-        matches!(&plan.refusals[..], [Refusal::SkeletonColumnAdded { column }] if column == "region")
+        matches!(&plan.refusals[..], [Refusal::SkeletonChanged { column }] if column == "region")
     );
 }
 
@@ -603,6 +615,9 @@ fn ex40_aggregate_field_add_is_column_merge_with_ledger_catch_up() {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -667,7 +682,7 @@ fn ex40_column_merge_sql_is_set_star_over_the_callers_full_row_projection() {
 
 /// A `GROUP BY` key absent from the declared `output.skeleton_columns` set,
 /// added in a group whose `mutation_sensitivity` is non-empty, must still
-/// refuse as `SkeletonColumnAdded` — a grain change, never a column
+/// refuse as `SkeletonChanged` — a grain change, never a column
 /// backfill (`model_properties.md` §"Definition-change column
 /// classification": "SkeletonAdd — refused, a grain change, never a column
 /// backfill"). Before this test's fix, `derive_column_added`'s only
@@ -716,6 +731,9 @@ fn ex39b_underived_skeleton_add_in_sensitive_group_still_refuses() {
             column_def("pay_date", "pay_date"),
             column_def("revenue", "SUM(amount)"),
         ],
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -724,7 +742,7 @@ fn ex39b_underived_skeleton_add_in_sensitive_group_still_refuses() {
         }],
     );
     assert!(
-        matches!(&plan.refusals[..], [Refusal::SkeletonColumnAdded { column }] if column == "region"),
+        matches!(&plan.refusals[..], [Refusal::SkeletonChanged { column }] if column == "region"),
         "refusals: {:?}",
         plan.refusals
     );
@@ -800,6 +818,9 @@ fn keyed_enriched_dim_mutation_is_membership_sensitive_recompute_never_column_me
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
 
     let plan = derive_maintenance_plan(
@@ -888,6 +909,9 @@ fn closed_outer_enrichment_join_upstream_mutation_derives_column_scoped_merge() 
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
 
     let plan = derive_maintenance_plan(

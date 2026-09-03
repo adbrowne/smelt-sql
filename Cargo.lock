@@ -4241,6 +4241,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
+ "chrono",
  "duckdb",
  "line-index",
  "marked-yaml",
@@ -4256,6 +4257,7 @@ dependencies = [
  "smelt-oracle-testkit",
  "smelt-parser",
  "smelt-runtime",
+ "smelt-state",
  "smelt-types",
  "tempfile",
  "tracing",
@@ -4290,10 +4292,12 @@ dependencies = [
 name = "smelt-logical"
 version = "0.3.2"
 dependencies = [
+ "chrono",
  "duckdb",
  "proptest",
  "serde",
  "serde_yaml",
+ "sha2 0.10.9",
  "smelt-core",
  "smelt-dialect",
  "smelt-parser",
@@ -4306,6 +4310,7 @@ name = "smelt-lsp"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "line-index",
  "lsp-types",
  "pyo3",
@@ -4316,6 +4321,7 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-parser",
+ "smelt-state",
  "smelt-types",
  "tempfile",
  "tokio",

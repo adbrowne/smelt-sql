@@ -101,6 +101,16 @@ pub struct SourceFacts {
     /// `change_feed`'s declared per-delta identity column(s)
     /// (`sources.md`'s `delta_identity`).
     pub delta_identity: Option<Vec<String>>,
+    /// The source's declared row identity (`sources.md`'s `unique_key:`) —
+    /// distinct from `delta_identity` (which names delta-record identity,
+    /// not row identity) and what `to_maintenance_source_facts` maps onto
+    /// `crate::maintenance::SourceFacts::unique_key`, the fact
+    /// `grouping::top_level_join_context` needs to prove a `JOIN ... ON`
+    /// equality conjunct is 1:1 (`crate::maintenance::grouping`'s own
+    /// closure-pruning doc comment). Mirrors `smelt-db`'s
+    /// `queries::maintenance::source_facts` reading the same
+    /// `SourceInfo::unique_key` for the plan-layer `SourceFacts`.
+    pub unique_key: Option<Vec<String>>,
 }
 
 impl SourceFacts {
@@ -125,6 +135,7 @@ impl SourceFacts {
                 .mutation_profile
                 .as_ref()
                 .and_then(|m| m.delta_identity.clone()),
+            unique_key: info.unique_key.clone(),
         }
     }
 }
@@ -666,7 +677,7 @@ fn to_maintenance_source_facts(sources: &[SourceFacts]) -> Vec<MaintenanceSource
                 _ => MaintenanceMutationProfile::MutableSnapshot,
             },
             partition_col: s.axis.clone(),
-            unique_key: s.delta_identity.clone().unwrap_or_default(),
+            unique_key: s.unique_key.clone().unwrap_or_default(),
             allow_full_scan: true,
         })
         .collect()
@@ -722,6 +733,25 @@ pub fn derive_consumer_column_groups(
         });
     }
     groups
+}
+
+/// The consumer's own raw [`crate::maintenance::grouping::GroupingResult`]
+/// — the same derivation [`derive_consumer_column_groups`] and
+/// [`derive_output_delta_with_model_verdicts`] both call, exposed whole
+/// (including [`crate::maintenance::grouping::GroupingResult::
+/// value_only_sources`], which [`derive_consumer_column_groups`]'s
+/// `Vec<ColumnGroup>`-only return type drops) so a caller can compute
+/// [`crate::maintenance::grouping::dirt_scope`] against this consumer's own
+/// groups. No synthetic skeleton group appended — this is the raw
+/// derivation, matching the group vocabulary `derive_output_delta_with_
+/// model_verdicts` uses for the SAME model when it is itself an upstream.
+pub fn derive_consumer_grouping_result(
+    sql: &str,
+    sources: &[SourceFacts],
+    skeleton_columns: &BTreeSet<String>,
+) -> crate::maintenance::grouping::GroupingResult {
+    let maintenance_sources = to_maintenance_source_facts(sources);
+    derive_column_groups(sql, &maintenance_sources, skeleton_columns)
 }
 
 /// Every bare column name referenced anywhere in `sql` — every scope's own
@@ -901,6 +931,7 @@ mod tests {
             mutation_profile: profile,
             delta_identity: delta_identity
                 .map(|ks| ks.into_iter().map(|k| k.to_string()).collect()),
+            unique_key: None,
         }
     }
 

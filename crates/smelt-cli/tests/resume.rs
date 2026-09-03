@@ -925,6 +925,7 @@ async fn resume_picks_up_completed_run_with_non_success_outcome() {
             retry_count: 0,
             probes: Vec::new(),
             subsumed: None,
+            deferred_cells: Vec::new(),
         },
     );
     let constructed = smelt_state::RunManifest {

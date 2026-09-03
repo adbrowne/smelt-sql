@@ -71,12 +71,19 @@
 //!   features): one `ConformanceBackend` trait, one `run_<family>` per
 //!   family, no per-backend re-derivation
 //!   (`docs/plans/20260817-bigquery-generative-conformance.md`).
+//! - [`migrate_step`] — the shared `ConformanceStep::MigrateModel` driver:
+//!   rewrite → derive (`smelt_runtime::definition_delta::derive_plan`) →
+//!   apply-or-full-refresh, routed through the *shipped* `smelt migrate`
+//!   backbuild path rather than the live maintenance driver's
+//!   `Trigger::ColumnAdded` dispatch
+//!   (`docs/outcomes/20260815-definition-delta-migrate/phases/05-plan.md`).
 
 pub mod bigquery_session;
 pub mod dag;
 pub mod families;
 pub mod feed;
 pub mod link_c_harness;
+pub mod migrate_step;
 pub mod oracle;
 pub mod oracle_modes;
 pub mod probes;

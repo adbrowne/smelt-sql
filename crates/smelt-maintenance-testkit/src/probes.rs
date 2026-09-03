@@ -231,7 +231,7 @@ async fn insert_row(project: &LinkCProject, source_name: &str, row: &GenRow) -> 
             "INSERT INTO main.sources_{source_name} VALUES (DATE '{}', {}, {})",
             row.d.format("%Y-%m-%d"),
             row.id,
-            row.val,
+            row.val_sql(),
         ),
         [],
     )?;
@@ -408,7 +408,7 @@ pub async fn rows_outside_write_window_are_byte_unchanged(ctx: &CaseContext) -> 
         &GenRow {
             d: window1.0,
             id: 1,
-            val: 11,
+            val: Some(11),
         },
     )
     .await
@@ -445,7 +445,7 @@ pub async fn rows_outside_write_window_are_byte_unchanged(ctx: &CaseContext) -> 
         &GenRow {
             d: window2.0,
             id: 2,
-            val: 22,
+            val: Some(22),
         },
     )
     .await
@@ -555,22 +555,22 @@ pub async fn technique_pins_agree_at_fixed_s(ctx: &CaseContext) -> ProbeOutcome 
         GenRow {
             d: d1,
             id: 1,
-            val: 10,
+            val: Some(10),
         },
         GenRow {
             d: d1,
             id: 2,
-            val: 20,
+            val: Some(20),
         },
         GenRow {
             d: d2,
             id: 1,
-            val: 5,
+            val: Some(5),
         },
         GenRow {
             d: d3,
             id: 3,
-            val: 30,
+            val: Some(30),
         },
     ];
 

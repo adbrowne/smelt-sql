@@ -63,6 +63,9 @@ fn inputs() -> ModelInputs<'static> {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     }
 }
 

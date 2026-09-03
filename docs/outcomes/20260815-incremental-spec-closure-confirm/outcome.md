@@ -1,7 +1,7 @@
 # Outcome: Confirm every closeable-without-design divergence is closed, and everything left is honestly flagged
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** done
 **Source:** `docs/outcomes/20260815-definition-delta-migrate` and the two outcomes it spawned
 (`keyed-grain-residue`, `partition-grain-residue`)
 **Spec anchors:** `docs/specs/definition_deltas.md`, `docs/specs/incremental_models.md`,
@@ -58,13 +58,137 @@ divergence entry removed).
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | pending |
-| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | pending |
-| 3 | Resolve any residual or drifted bullets: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
-| 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
-| 5 | Write `closure-report.md`; final standing-gate run | pending |
+| 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
+| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
+| 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | done |
+| 4 | Run all four `/smelt:validate` invocations; fix any drift | done |
+| 5 | Write `closure-report.md`; final standing-gate run | done |
 
 ## Decision log
+
+- 2026-09-04 — Phase 1 planned. Two facts fixed here. (a) The program baseline is commit
+  `03a431f3` (`outcome(20260815-definition-delta-migrate): scaffold`), the first commit of the
+  2026-08-15 program; every later spec edit is in scope for classification. (b) The precondition
+  in §"The outcome" — run only once all three owning outcomes are `done` — is **not** met:
+  `20260815-keyed-grain-residue` is `**Status:** blocked` (its phase 3, "Transactional ledger fold
+  on every shipped backend"; all its other rows are `done`). This does not block the audit — it is
+  precisely the case success criterion 6 exists for — so the audit proceeds and phase 3's row is
+  reworded to name that residue explicitly. No other reshape: rows 2-5 still map one-for-one onto
+  criteria 2-3, 4 and 1/5.
+- 2026-09-04 — Phase 1 done. 80 bullets extracted from the four anchor specs at commit
+  `03a431f3` (`definition_deltas` 7, `incremental_models` 25, `incremental_shapes` 32,
+  `model_properties` 16 — all match the plan's sample). The extractor's Open-Question count
+  disagrees with the plan's sample for two specs (`incremental_models` 7 not 6,
+  `incremental_shapes` 16 not 13): 5 bullets wrap `(Open`/`Question)` across a markdown line
+  break, which a naive single-line grep misses but the whitespace-collapsing extractor catches.
+  Per plan instruction, the extractor's count is authoritative; documented in
+  `baseline-inventory.md` §Extraction notes. `incremental_shapes` `IS-24` (the transactional-fold
+  bullet) is flagged for phase 2 as the `keyed-grain-residue` blocked-phase bullet — not to be
+  marked closed without independent repo-state verification.
+
+- 2026-09-04 — Phase 2 planned. No reshape: phase 1 surfaced no work needing a new row (its one
+  finding, the corrected Open-Question denominators, is already carried in `baseline-inventory.md`
+  and lands in the phase-5 report), and row 3 already names the `IS-24` / `keyed-grain-residue`
+  residue that phase 1 flagged. Fixed here: the four-value disposition vocabulary
+  (`closed <sha>` / `open` / `drifted` / `residue`) and the rule that a `closed` claim is verified
+  against the repo, never against the removing commit's message or an owning outcome's say-so.
+- 2026-09-04 — Phase 2 done. All 80 baseline bullets classified: 35 `closed`, 29 `open`, 16
+  `drifted`, **0 `residue`** — every owning-outcome closure claim independently confirmed against
+  code/tests/a landed decision record. Found and fixed a mislabeling carried from phase 1's
+  decision log: the transactional-merge-ledger bullet (the one `20260815-keyed-grain-residue`
+  phase 3 is blocked on) is `IS-18`, not `IS-24` as previously written here — `IS-24` is a
+  different bullet (recurrence-bound slice pruning / granularity relaxation / slice-scoped
+  deletion), now `drifted` (moved to §Future Extensions) for unrelated reasons. `IS-18` itself
+  classified `drifted` (bold lead-in reworded, same DuckDB-only gap), not `residue`: the blocked
+  outcome's decision log honestly states the criterion is "deliberately left unmet" and never
+  claims closure, so success criterion 6 doesn't fire — no owning-outcome reopen is needed. Full
+  detail in `phases/02-summary.md` and `baseline-inventory.md` §Classification summary. Row 3 is
+  lighter-scoped than anticipated (a wording spot-check on the 16 `drifted` rows, not a reopen).
+
+- 2026-09-04 — Phase 3 planned. Light reshape, no new rows. (a) Row 3's wording is updated: phase 2
+  found **zero `residue`** and confirmed the `keyed-grain-residue` blocked bullet (`IS-18`) never
+  claimed closure, so there is no owning-outcome reopen to do — the row's real content is the
+  `drifted` wording spot-check. (b) Row 3 now explicitly absorbs success criterion 3's
+  out-of-scope spot-check (every bullet `20260815-definition-delta-migrate` §"Out of scope" names:
+  still present, still `(Open Question)`-tagged where claimed, behaviour still missing), which was
+  previously implicit across rows 2-3 and which phase 2 did not cover — phase 2 classified the 80
+  *baseline* bullets, while the out-of-scope list also names §Future Extensions material that is
+  not a baseline Known-Divergence row. (c) Standing rule fixed for this phase: a stale bullet is
+  edited inline only when the fix is wording; a stale bullet needing implementation gets a new
+  phase row, and one needing a product decision gets a `## Blocked` entry — the audit never
+  invents a decision the program declined to make.
+
+- 2026-09-04 — Phase 3 done. All 16 `drifted` rows given a phase-3 Verdict: 11 `accurate`
+  (reworded but still describe a real, still-open gap), 5 `relocated` (moved to `§Future
+  Extensions`, still honestly framed as undecided-future). Zero `stale-fixed` — no spec text
+  needed editing, so this phase produced no spec diff. `check-classification.sh` extended to
+  enforce the Verdict column (confirmed red on all 16 rows before filling it in, green after).
+  The `20260815-definition-delta-migrate` §"Out of scope" sweep (success criterion 3) added a new
+  `baseline-inventory.md` §"Out-of-scope spot-check" table, one row per named item: every item's
+  spec/section still exists and is still honestly framed, with one exception that is **not** a
+  spec-text divergence — the out-of-scope prose's own claim that `docs/plans/20260704-model-
+  updates.md`'s D1–D3 fate is "unclear individually" is stale for the D3 leg
+  (`refresh: materialized_view` has since shipped as fully-specified surface,
+  `docs/specs/materialized_view.md`); D1/D2 (`latest_value`/`versioned`) remain genuinely absent
+  and unclear. No spec bullet claims D3 undecided, so nothing to fix under the spec-only-if-
+  trivial rule, and no product decision is needed (D3 is already decided and shipped) — recorded
+  as a closure-report footnote per the standing rule, not a new row or a `## Blocked` entry. The
+  `IS-24`/`IS-18` mislabel cross-check (task 7) came back clean in both owning outcomes' files.
+
+- 2026-09-04 — Phase 4 planned. No reshape: phase 3 produced no spec diff, added no row and no
+  `## Blocked` entry, so rows 4-5 stand as written (criterion 4, then criteria 1/5). Two things
+  fixed for this phase. (a) The drift-disposition rule is widened one level from phase 3's:
+  doc/wording drift is fixed inline, behaviour drift gets a new phase row, decision-needing drift
+  gets a `## Blocked` entry, and a bullet the spec *already* flags as open/relocated (per
+  `baseline-inventory.md`) is explicitly **not** drift — criterion 4's "no drift" means no
+  *unflagged* divergence, since the still-open bullets are this program's declared boundary.
+  (b) The four reports are written to `docs/validations/2026-09-04-<slug>-closure.md`, suffixed so
+  they do not clobber the earlier *scoped* `2026-09-04-incremental_shapes.md` (partition-grain
+  only, commit `7f4358cf`), and the automated-check leg is run once and cited by all four rather
+  than four full `cargo test` runs.
+
+- 2026-09-04 — Phase 4 done. Ran the automated-check leg once (`bash .claude/scripts/verify-phase.sh`,
+  all green) then four parallel full-spec `/smelt:validate` sweeps (steps 3-6), one per anchor spec,
+  each cross-checked against `baseline-inventory.md` so already-flagged-open bullets weren't
+  re-litigated as drift. Result: 0 drift in `definition_deltas` and `incremental_models`; 1 doc/wording
+  item each in `incremental_shapes` (a stale §References Code path — `windowing.rs` no longer holds
+  `PartitionAxis`/`resolve_scan_window`, moved to `analysis/partition_axis.rs` /
+  `analysis/source_bounds.rs`) and `model_properties` (Surface + §Semantics "Event-time monotonicity
+  trace" hadn't caught up to the shipped, tested `Offset::Integer` variant, commits
+  `98393e25`/`cc75fe58`). Both fixed inline this phase (spec text + `model_properties.md`
+  `last_reviewed` bump to 2026-09-04); neither needed a new phase row or a `## Blocked` entry — the
+  `model_properties` finding was initially mis-dispositioned by its validating sub-agent as behaviour
+  drift needing a phase row, corrected here since the code already implements and tests the gap, so
+  it's the spec lagging, not a functional hole. Four reports land at
+  `docs/validations/2026-09-04-<slug>-closure.md`; `check-validations.sh` (new gate for this phase)
+  went red-then-green. `check-inventory.sh`/`check-classification.sh` unchanged and still green.
+  Timeless-oracle sweep across all four specs: zero `Phase [A-Z0-9]+` hits. Row 5 stands as written —
+  criteria 1-3 were already satisfied by phases 1-3, criterion 4 is now fully satisfied.
+
+- 2026-09-04 — Phase 5 planned. No reshape: phase 4 fixed both of its findings inline, added no row
+  and no `## Blocked` entry, so row 5 is the last and stands as written. One gap fixed for this
+  phase: success criterion 1 demands each still-open bullet state *the reason it needs a product
+  decision this program didn't make*, and `baseline-inventory.md` records the `open` disposition
+  without that per-bullet reason — writing those 29 reasons is therefore phase-5 work, carried in
+  `closure-report.md` rather than back-filled into the inventory (phases 2/3 own the dispositions;
+  this phase does not re-derive them). A new gate, `check-closure-report.sh`, enforces the report's
+  completeness (all 80 IDs enumerated once, `closed` rows cite a sha, `open` rows carry a reason,
+  one section per criterion, all five criterion-5 gates named with a verdict). The criterion-5
+  gates are re-run in this phase rather than cited from phase 4, since criterion 5 asks for a
+  final green suite.
+
+- 2026-09-04 — Phase 5 done. `closure-report.md` written: all 80 baseline IDs enumerated with
+  disposition and, for all 29 `open` rows, the per-bullet reason criterion 1 demanded (product
+  decision this program declined vs. plain unscheduled backlog, distinguished per row). All five
+  criterion-5 gates re-run fresh in this phase, all PASS (`verify-phase.sh`;
+  `maintenance_conformance` 75/75; `statement_parity` 33/33; `walk_coverage` 4/4; `execute_parity`
+  4/4). New gate `check-closure-report.sh` went red (report missing, then an ID-padding bug: `seq
+  -w` doesn't zero-pad when the range max is single-digit, e.g. `DD-1..7` instead of `DD-01..07`)
+  then green after fixing the padding. `check-inventory.sh`/`check-classification.sh`/
+  `check-validations.sh` re-run, all still green. All six success criteria met (see report
+  §Summary) — criterion 6 confirmed zero false-closure residue, with `IS-18` (the
+  `keyed-grain-residue` blocked bullet) explicitly named as correctly not reopened. No spec or code
+  changes this phase (audit artifact only, as planned). Outcome status set to `done`.
 
 ## Blocked
 

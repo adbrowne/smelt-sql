@@ -101,6 +101,7 @@ async fn test_incremental_delete_and_insert() -> anyhow::Result<()> {
         column: "revenue_date".to_string(),
         start: "2024-12-25".to_string(),
         end: "2024-12-26".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
 
     backend
@@ -160,6 +161,7 @@ async fn test_inject_time_filter() -> anyhow::Result<()> {
     let range = TimeRange {
         start: "2024-12-25".into(),
         end: "2024-12-26".into(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     let result = inject_time_filter(sql, "transaction_timestamp", &range)?;
@@ -178,6 +180,7 @@ async fn test_inject_time_filter_with_existing_where() -> anyhow::Result<()> {
     let range = TimeRange {
         start: "2024-12-25".into(),
         end: "2024-12-26".into(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     let result = inject_time_filter(sql, "transaction_timestamp", &range)?;

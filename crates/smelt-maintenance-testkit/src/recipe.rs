@@ -1402,16 +1402,79 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
         let mut rows = vec![GenRow {
             d: start,
             id: KEYED_SHARED_KEY_ID,
-            val: 1 + i as i64,
+            val: Some(1 + i as i64),
         }];
         for val in vals {
             rows.push(GenRow {
                 d: start,
                 id: next_id,
-                val: *val,
+                val: Some(*val),
             });
             next_id += 1;
         }
+        windows.push(KeyedRunWindow { start, end, rows });
+    }
+    KeyedSchedule(windows)
+}
+
+/// The once-write family's NULL-preservation direction
+/// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md` task 6):
+/// 2-3 one-day windows over the shared re-touched key
+/// ([`KEYED_SHARED_KEY_ID`]) plus one fresh key per window. The shared key
+/// draws exactly ONE non-NULL value, landing in a randomly chosen window;
+/// every window strictly before that one delivers a NULL payload for the
+/// shared key instead — world-fact-preserving by construction
+/// (`incremental_shapes.md` §"The column-family catalogue": at most one
+/// distinct non-NULL value per key), and exactly the direction a total
+/// (fallback-carrying) projection would break (a NULL landing first must
+/// never be locked in). Fresh per-window keys each draw a single non-NULL
+/// value — variety, not exercising the NULL direction themselves.
+/// `arb_payload_value()` (the general append-only pool's own draw) stays
+/// non-NULL throughout, per this outcome's scoping decision — this is a
+/// dedicated generator for the once-write family alone, not a widening of
+/// every family's own pool.
+pub fn arb_once_write_null_schedule() -> impl Strategy<Value = KeyedSchedule> {
+    let base = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid base date");
+    (2_usize..=3).prop_flat_map(move |n_windows| {
+        (
+            0..n_windows,
+            arb_payload_value(),
+            proptest::collection::vec(arb_payload_value(), n_windows),
+        )
+            .prop_map(move |(real_value_window, shared_val, fresh_vals)| {
+                build_once_write_null_schedule(
+                    base,
+                    n_windows,
+                    real_value_window,
+                    shared_val,
+                    &fresh_vals,
+                )
+            })
+    })
+}
+
+fn build_once_write_null_schedule(
+    base: chrono::NaiveDate,
+    n_windows: usize,
+    real_value_window: usize,
+    shared_val: i64,
+    fresh_vals: &[i64],
+) -> KeyedSchedule {
+    use crate::schedule_gen::GenRow;
+
+    let mut windows = Vec::new();
+    for (i, &fresh_val) in fresh_vals.iter().enumerate().take(n_windows) {
+        let start = base + chrono::Duration::days(i as i64);
+        let end = start + chrono::Duration::days(1);
+        let mut rows = Vec::new();
+        match i.cmp(&real_value_window) {
+            std::cmp::Ordering::Less => rows.push(GenRow::null(start, KEYED_SHARED_KEY_ID)),
+            std::cmp::Ordering::Equal => {
+                rows.push(GenRow::new(start, KEYED_SHARED_KEY_ID, shared_val))
+            }
+            std::cmp::Ordering::Greater => {}
+        }
+        rows.push(GenRow::new(start, 100_i64 + i as i64, fresh_val));
         windows.push(KeyedRunWindow { start, end, rows });
     }
     KeyedSchedule(windows)
@@ -1644,12 +1707,12 @@ pub fn arb_composed_route3_schedule() -> impl Strategy<Value = ComposedRoute3Sch
                 crate::schedule_gen::GenRow {
                     d: base + chrono::Duration::days(*offset),
                     id: ROUTE3_STORM_KEY_ID,
-                    val: 10 + i as i64,
+                    val: Some(10 + i as i64),
                 },
                 crate::schedule_gen::GenRow {
                     d: run_date,
                     id: fresh_id,
-                    val: 1 + i as i64,
+                    val: Some(1 + i as i64),
                 },
             ];
             windows.push(ComposedRoute3Window { run_date, rows });
@@ -2126,5 +2189,65 @@ mod tests {
         let idempotent_body = render::render_keyed_model_body(&idempotent);
         assert!(additive_body.contains("SUM("));
         assert!(idempotent_body.contains("MAX("));
+    }
+
+    /// `arb_once_write_null_schedule_preserves_the_world_fact`
+    /// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md` test
+    /// 3): over a deterministic sample, every generated schedule carries at
+    /// most ONE distinct non-NULL value per key (the once-write provenance
+    /// proof's own precondition), and at least one sampled schedule delivers
+    /// a NULL for a key strictly before its real value.
+    #[test]
+    fn arb_once_write_null_schedule_preserves_the_world_fact() {
+        let mut runner = TestRunner::deterministic();
+        let strat = arb_once_write_null_schedule();
+        let mut saw_null_before_value = false;
+
+        for i in 0..100 {
+            let schedule = strat.new_tree(&mut runner).unwrap().current();
+
+            let mut non_null_values: std::collections::HashMap<
+                i64,
+                std::collections::HashSet<i64>,
+            > = std::collections::HashMap::new();
+            let mut saw_null: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            let mut saw_value_after_null: std::collections::HashSet<i64> =
+                std::collections::HashSet::new();
+
+            for window in &schedule.0 {
+                for row in &window.rows {
+                    match row.val {
+                        Some(v) => {
+                            non_null_values.entry(row.id).or_default().insert(v);
+                            if saw_null.contains(&row.id) {
+                                saw_value_after_null.insert(row.id);
+                            }
+                        }
+                        None => {
+                            saw_null.insert(row.id);
+                        }
+                    }
+                }
+            }
+
+            for (key, values) in &non_null_values {
+                assert!(
+                    values.len() <= 1,
+                    "case {i}: key {key} carries {} distinct non-NULL values {values:?} — \
+                     violates the once-write world-fact precondition: {schedule:?}",
+                    values.len()
+                );
+            }
+
+            if !saw_value_after_null.is_empty() {
+                saw_null_before_value = true;
+            }
+        }
+
+        assert!(
+            saw_null_before_value,
+            "no sampled schedule (of 100) ever delivered a NULL for a key strictly before \
+             its real value — generator regression"
+        );
     }
 }

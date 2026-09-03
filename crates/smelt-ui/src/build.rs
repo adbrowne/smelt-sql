@@ -98,6 +98,9 @@ pub fn build_model_details(
     let mut model_details: HashMap<String, ModelDetailResponse> = HashMap::new();
 
     let ws = smelt_db::Workspace::try_get(db);
+    let fn_bodies = ws
+        .map(|w| smelt_runtime::build_fn_body_map(db, w))
+        .unwrap_or_default();
 
     for (name, model) in graph.iter_models() {
         let metadata = model.metadata.as_deref();
@@ -173,7 +176,7 @@ pub fn build_model_details(
 
                 let model_info = ModelInfo {
                     name: name.to_string(),
-                    sql: model.content.clone(),
+                    sql: smelt_runtime::expand_function_calls(&model.content, &fn_bodies),
                     refs: model
                         .refs
                         .iter()
@@ -338,13 +341,15 @@ pub fn build_model_diagnostics_response(
     let bound_ctx = build_bound_context(name, graph, config);
 
     let ws = smelt_db::Workspace::try_get(db);
-    let plan_cells: Vec<smelt_logical::maintenance::PlanCell> =
-        match (ws, db.source_file(&model.path)) {
-            (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file)
-                .map(|result| result.plan.cells)
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
+    let (plan_cells, column_groups): (
+        Vec<smelt_logical::maintenance::PlanCell>,
+        Vec<smelt_logical::maintenance::ColumnGroup>,
+    ) = match (ws, db.source_file(&model.path)) {
+        (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file)
+            .map(|result| (result.plan.cells, result.column_groups))
+            .unwrap_or_default(),
+        _ => (Vec::new(), Vec::new()),
+    };
 
     let default_target = config.targets.keys().next().cloned().unwrap_or_default();
     let target = config.get_target(name, model.metadata.as_deref(), &default_target);
@@ -415,6 +420,7 @@ pub fn build_model_diagnostics_response(
         dialect,
         &source_timeseries,
         &unique_key,
+        &column_groups,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -474,9 +480,14 @@ pub fn resolve_selectors(
 pub fn build_run_plan(
     graph: &DependencyGraph,
     config: &Config,
+    db: &smelt_db::Database,
     request: &crate::types::RunPlanRequest,
 ) -> anyhow::Result<crate::types::RunPlanResponse> {
     use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+
+    let fn_bodies = smelt_db::Workspace::try_get(db)
+        .map(|w| smelt_runtime::build_fn_body_map(db, w))
+        .unwrap_or_default();
 
     let start = NaiveDate::parse_from_str(&request.start, "%Y-%m-%d")
         .map_err(|_| anyhow::anyhow!("Invalid start date: {}", request.start))?;
@@ -525,7 +536,7 @@ pub fn build_run_plan(
             (Some(inc), Some(ts)) => {
                 let model_info = ModelInfo {
                     name: model_name.clone(),
-                    sql: model.content.clone(),
+                    sql: smelt_runtime::expand_function_calls(&model.content, &fn_bodies),
                     refs: model
                         .refs
                         .iter()

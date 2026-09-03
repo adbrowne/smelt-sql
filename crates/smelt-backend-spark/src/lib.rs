@@ -459,8 +459,9 @@ impl Backend for SparkBackend {
         partition: &PartitionRange,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::delete_partitions_range(&table_name, partition))
-            .await
+        let delete_sql = sql::delete_partitions_range(&table_name, partition)
+            .map_err(|message| BackendError::ConfigurationError { message })?;
+        self.py_execute_no_result(&delete_sql).await
     }
 
     async fn insert_into_from_query(
@@ -492,10 +493,8 @@ impl Backend for SparkBackend {
         sql: &str,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        let region = Region {
-            start: format!("'{}'", partition.start.replace('\'', "''")),
-            end: format!("'{}'", partition.end.replace('\'', "''")),
-        };
+        let region = Region::for_axis(partition.axis, &partition.start, &partition.end)
+            .map_err(|message| BackendError::ConfigurationError { message })?;
         let group = emit_delete_insert(
             &table_name,
             &partition.column,

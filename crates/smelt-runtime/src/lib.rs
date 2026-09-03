@@ -22,6 +22,7 @@ pub mod combined_loop;
 pub mod compile;
 pub mod contract_probes;
 pub mod cumulative;
+pub mod definition_delta;
 pub mod diagnostics;
 pub mod dimension_horizon_merge;
 pub mod execute;
@@ -30,6 +31,7 @@ pub mod gate;
 pub mod maintenance_driver;
 pub mod meta_eval;
 pub mod model_probes;
+pub mod mutation_probe;
 pub mod probe_plan;
 pub mod probes;
 pub mod propagation;
@@ -84,6 +86,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(result.contains("WHERE status = 'active'"));
@@ -98,6 +101,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(
@@ -112,6 +116,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         let result = inject_time_filter(sql, "created_at", &range);
         assert!(matches!(result, Err(TransformError::NoFromClause)));

@@ -118,8 +118,26 @@ async fn dimension_mutation_recomputes_the_whole_touched_region() {
     );
 
     let d: NaiveDate = NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
-    insert_fact_row(&project, &recipe, &GenRow { d, id: 1, val: 11 }).expect("insert fact row 1");
-    insert_fact_row(&project, &recipe, &GenRow { d, id: 2, val: 22 }).expect("insert fact row 2");
+    insert_fact_row(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(11),
+        },
+    )
+    .expect("insert fact row 1");
+    insert_fact_row(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 2,
+            val: Some(22),
+        },
+    )
+    .expect("insert fact row 2");
 
     let mut request = base_request("dev");
     request.start = Some("2024-01-01".to_string());
@@ -145,7 +163,8 @@ async fn dimension_mutation_recomputes_the_whole_touched_region() {
     }
 
     // The catch-up run: same window, so the whole-region recompute resyncs
-    // it (no column-scoped dispatch exists for this shape anymore).
+    // it — never the column-scoped MERGE family, which this membership-
+    // sensitive shape can never admit.
     let outcome = project
         .run_quiet("probe-catchup", request)
         .await
@@ -156,8 +175,9 @@ async fn dimension_mutation_recomputes_the_whole_touched_region() {
         .expect("model ran on catch-up");
     assert_ne!(
         record.strategy, "column_scoped_merge",
-        "no live dispatch exists for this cell's technique — the catch-up run must fall \
-         through to the plain region-recompute batch loop"
+        "this cell's resolvable set never contains ColumnScopedMerge — the catch-up run must \
+         resolve through the region-recompute family (unconditional or the keyless \
+         staged-candidate conditional write), never column-scoped MERGE"
     );
 
     let after = read_maintained_rows(&project, &recipe);
@@ -208,7 +228,16 @@ async fn redelivered_window_refuses_for_additive_keyed() {
     );
 
     let d: NaiveDate = NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
-    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 5 }).expect("insert row");
+    insert_row_keyed(
+        &project,
+        &recipe,
+        &GenRow {
+            d,
+            id: 1,
+            val: Some(5),
+        },
+    )
+    .expect("insert row");
 
     let mut request = base_request("dev");
     request.start = Some("2024-01-01".to_string());

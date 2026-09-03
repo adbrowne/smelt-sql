@@ -26,11 +26,25 @@ Without `--json` or a `MODEL_NAME`, smelt prints a summary of the logical graph 
 
 `smelt explain <model>` prints that model's derived **maintenance plan** instead of the whole-project graph: every cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the derived per-source scan clamps, each source's partition-locality verdict, any admission refusals, and the model's inbound propagation edges. This only applies to `refresh: incremental` models with a `grain:` declared — other models print a one-line notice instead.
 
-Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell executes — the output of the same pure emitters a run executes. Each cell's SELECT body is compiled through the real discovered project's ephemeral resolver and upstream column types, the same way a run compiles it, so the printed SQL matches what a run would compile (referenced ephemeral models are CTE-inlined, and ref-column aggregates cast to their real type). A transactional group (e.g. a paired region `DELETE`+`INSERT`) is bracketed by `BEGIN`/`COMMIT` lines. `--show-sql` never connects to a backend. Combine with `--period <start>..<end>` for the real literal window bounds, or omit it to see the symbolic `{{window_start}}`/`{{window_end}}` placeholders instead. Combined with `--json`, the report is emitted as JSON with a `statements` array per cell.
+Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell executes — the output of the same pure emitters a run executes. Each cell's SELECT body is compiled through the real discovered project's ephemeral resolver and upstream column types, the same way a run compiles it, so the printed SQL matches what a run would compile (referenced ephemeral models are CTE-inlined, and ref-column aggregates cast to their real type). A suppressible cell's `ColumnScopedMerge`/`KeyedFold` matched arm prints in whichever variant that cell's own write-suppression resolution actually resolves — the change-suppressed `IS DISTINCT FROM`-guarded arm or the plain unconditional one, matching the report's own "write variant: …" line rather than always printing the unconditional shape. A `technique: suppress` pin whose proof refused prints no statements for that cell. A transactional group (e.g. a paired region `DELETE`+`INSERT`) is bracketed by `BEGIN`/`COMMIT` lines. `--show-sql` never connects to a backend. Combine with `--period <start>..<end>` for the real literal window bounds, or omit it to see the symbolic `{{window_start}}`/`{{window_end}}` placeholders instead. Combined with `--json`, the report is emitted as JSON with a `statements` array per cell.
 
 Add `--technique <name>` alongside `--show-sql` to preview a *different* technique than the one the plan admitted — every technique smelt has an emitter for, rendered against each cell's own contract/identity/column data and labelled with its admissibility: `Admitted` (the plan's own choice), `InterchangeableAlternative` (proven sound here, but not the one picked — region recompute always qualifies when it isn't itself admitted), or `NotApplicable` with a reason (the technique's preconditions aren't met for this cell — reported, never omitted). Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute` (`recompute` and `delete_insert` are the same technique). The preview always uses the symbolic `{{window_start}}`/`{{window_end}}` placeholders regardless of `--period` — it's a display-only illustration, not a windowed dry run. `--json` output always carries every technique's preview per cell (a `technique_previews` array) plus the model's full derived property set, whether or not `--technique` is given.
 
 One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the `BIGINT` default — a compile-order limitation shared identically by a real run, not an `explain`-specific divergence. See `docs/specs/cli.md` Known Divergences.
+
+## Execution postures
+
+For a `grain: key` model, `smelt explain <model>` derives and prints three model-level properties — never declared, folded from the model's column families: **re-run tolerance** (may a merged window be blindly re-merged over unchanged input?), **order-independence** (may windows apply out of order or in parallel?), and **reprocessing refusal** (a window whose input changed since merging must not be re-merged — unconditional across every family). Each verdict comes with a reason naming the deciding column, alongside the derived run shape (`window-forward` or `snapshot-reconcile`) the postures qualify:
+
+```
+Execution postures:
+  run shape: window-forward
+  re-run tolerance: no (column `total_amount` folds through an additive combiner (`Sum`) — a re-merged window double-counts or cancels)
+  order-independence: yes (every combiner is order-independent)
+  reprocessing: refused (a window whose input changed since merging must not be re-merged, for every family)
+```
+
+A model that never classifies as `grain: key` prints no execution-postures section. Order-independence is a derived verdict only — a windowed-keyed run still applies windows sequentially even where the verdict holds, forgoing the parallel/out-of-order application as an optimisation. With `--json`, the same information appears as a top-level `execution_postures` object: `{"run_shape": "window-forward", "rerun_tolerant": {"holds": false, "reason": "..."}, "order_independent": {"holds": true, "reason": "..."}, "reprocessing_refused": {"holds": true, "reason": "..."}}`.
 
 ## Internal state columns
 
@@ -137,6 +151,28 @@ Each entry is a tagged object with `"type"`:
 | `partition_col` | `string` | The source's declared `timeseries.partition_column`. |
 | `before` | `string` | ISO-8601 duration — how far before the run window to read the source. `"PT0S"` means partition-local (no extra lookback). |
 | `after` | `string` | ISO-8601 duration — how far after the run window to read the source. |
+| `scan_start` | `string` | Present only when `--period <start>..<end>` is supplied: the resolved run-relative scan window start, rendered in the model's own axis domain (`YYYY-MM-DD` on the calendar axis, a bare integer on the integer axis) — the same window the run's pushdown filter reads. |
+| `scan_end` | `string` | Present alongside `scan_start`: the resolved scan window end. |
+| `scan_unresolved` | `string` | Present instead of `scan_start`/`scan_end` when `--period` was supplied but the margin could not be resolved to a fixed value (e.g. a non-uniform month/year offset) — names the reason. |
+
+Without `--period`, `scan_start`/`scan_end`/`scan_unresolved` are all omitted:
+
+```bash
+smelt explain --json --period 2026-01-01..2026-01-08 | jq '.models.sessions.incremental.source_bounds'
+```
+
+```json
+{
+  "events_parsed": {
+    "type": "bounded",
+    "partition_col": "event_date",
+    "before": "PT30M",
+    "after": "PT0S",
+    "scan_start": "2026-01-01",
+    "scan_end": "2026-01-08"
+  }
+}
+```
 
 **`"unbounded"`** — the source requires reading unbounded history (cumulative aggregation, `UNBOUNDED PRECEDING`):
 

@@ -38,7 +38,7 @@ fn sessions_explain() -> smelt_cli::explain::ExplainOutput {
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+    build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None)
         .expect("build explain output")
 }
 
@@ -49,6 +49,7 @@ fn bound_json_to_source_bound(json: &SourceBoundJson) -> Option<SourceBound> {
             partition_col,
             before,
             after,
+            ..
         } => Some(SourceBound {
             partition_col: partition_col.clone(),
             before_secs: iso8601_duration_to_secs(before),
@@ -142,6 +143,7 @@ fn test_pushdown_reduces_scan() {
     let range = TimeRange {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     // If sessions has no bounded sources (e.g., bound derivation not wired for function bodies),
@@ -185,6 +187,7 @@ fn test_full_run_equivalent_with_pushdown() {
     let range = TimeRange {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     let result_with_pushdown = inject_source_filters(&sql, &bound_map, &range);

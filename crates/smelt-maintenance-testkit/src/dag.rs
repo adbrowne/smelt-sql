@@ -420,6 +420,24 @@ pub fn render_node_body(dag: &DagRecipe, idx: usize) -> String {
 pub fn render_node_file(dag: &DagRecipe, idx: usize) -> String {
     let node = &dag.nodes[idx];
     let body = render_node_body(dag, idx);
+    // A node reading the graph's own raw `events` source directly (rather
+    // than another node's already-maintained output) may aggregate over it
+    // (`DagBody::AdditiveAgg`/`KeyedAgg`/`KeyedFold`/`PartitionOverKeyedId`),
+    // which now derives an `UpstreamMutation` cell for the append-only
+    // source too (phase 19, `docs/outcomes/20260815-definition-delta-migrate`)
+    // — a cell with no statically derivable scan bound. Declared unused for
+    // a non-aggregating body (`PassThrough`/`ParityFilter`/`Union`/
+    // `GroupByPayload`'s upstream-side reads still resolve to another
+    // node), same as elsewhere in this crate.
+    let scan_bounds = if node.upstreams.contains(&Upstream::Source) {
+        format!(
+            "maintenance:\n  scan_bounds:\n    per_source:\n      {name}:\n        \
+             allow_full_scan: true\n",
+            name = dag.source.name,
+        )
+    } else {
+        String::new()
+    };
     match &node.grain {
         NodeGrain::Partition { unique_key: _ } => {
             // The retired `batched.unique_key` sub-block this used to carry
@@ -430,12 +448,12 @@ pub fn render_node_file(dag: &DagRecipe, idx: usize) -> String {
             // maintenance plan.
             let d = &dag.source.clock_column;
             format!(
-                "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\n---\n{body}\n"
+                "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\n{scan_bounds}---\n{body}\n"
             )
         }
         NodeGrain::Key { unique_key } => {
             let uk = render_unique_key_line(unique_key);
-            format!("---\nrefresh: incremental\ngrain: key\n{uk}---\n{body}\n")
+            format!("---\nrefresh: incremental\ngrain: key\n{uk}{scan_bounds}---\n{body}\n")
         }
     }
 }

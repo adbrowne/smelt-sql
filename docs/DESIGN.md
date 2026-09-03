@@ -294,7 +294,7 @@ Based on temporal dependencies, the optimizer classifies each incremental model'
 | `BoundedSafe(n)` | Bounded lookback/lookahead | Auto-sized chunks (3x context, clamped 7-90 days) |
 | `PerPartitionOnly` | Unbounded dependencies | Must process one partition at a time |
 
-This drives the `smelt backbuild` command's automatic range expansion and batching strategy.
+This drives the `smelt rebuild` command's automatic range expansion and batching strategy.
 
 ---
 

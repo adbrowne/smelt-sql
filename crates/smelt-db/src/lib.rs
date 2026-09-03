@@ -126,6 +126,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::PlausibleContractOnSkeletonColumn { .. } => None,
         MetadataError::KeyedForbidsTimeseries => None,
         MetadataError::PartitionGrainRequiresRefreshIncremental => None,
+        MetadataError::KeyedForbidsSafetyOverrides => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
         MetadataError::MaterializedViewForbidsPartitionGrain => None,
         MetadataError::MalformedFunctionalDependency { .. } => None,
@@ -169,6 +170,18 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
             message: err.to_string(),
             range: rowan::TextRange::empty(rowan::TextSize::from(0)),
             code: Some(DiagnosticCode::ContractDeferralInvalid),
+            data: None,
+        }),
+        // Raised by `extract_single_model`'s strict `contract:` pre-validation,
+        // the same site and pattern as `ContractFrozenHorizonInvalid`/
+        // `ContractDeferralInvalid` above — disambiguated by
+        // `smelt_core::metadata`'s own field-level check rather than by this
+        // mapper.
+        MetadataError::ContractRetainDepartedInvalid { .. } => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::ContractRetainDepartedInvalid),
             data: None,
         }),
     }
@@ -354,6 +367,10 @@ pub use queries::schema::{
 // Salsa inputs
 // ============================================================================
 
+/// Re-exported so `smelt-lsp`'s hover formatter can consume
+/// [`model_source_clamps`]'s return type without a new crate dependency.
+pub use smelt_logical::{BoundResult, Offset, Seconds};
+
 /// A source file tracked by Salsa. Holds the file's current text and the
 /// project root it belongs to. Looked up by path via the Database's
 /// internal registry (`Database::source_file`).
@@ -403,6 +420,47 @@ pub struct Workspace {
     /// the `--target` CLI flag (override). Both CLI and LSP read the same
     /// config-derived default to keep discovery symmetric.
     pub active_target: Option<Arc<str>>,
+    /// All registered deployed-schema snapshot inputs. Kept here so that
+    /// Salsa-tracked queries (which receive `&dyn salsa::Database`, not the
+    /// concrete `Database`) can enumerate registered snapshots without
+    /// downcasting — mirrors `loader_files` above.
+    #[returns(ref)]
+    pub deployed_schemas: Vec<DeployedSchemaInput>,
+}
+
+// ============================================================================
+// Deployed-schema snapshot inputs
+// ============================================================================
+
+/// A model's previously-deployed schema snapshot, registered as a Salsa
+/// world-fact input (`docs/specs/definition_deltas.md` §"Detection": "the
+/// deployed-schema snapshot is a world fact both the LSP and the CLI
+/// register at workspace load"). One input per `(project_root, model)` pair
+/// — project-scoped, per the project-isolation rule, since two projects in
+/// the same workspace folder may each maintain a model of the same name.
+#[salsa::input]
+pub struct DeployedSchemaInput {
+    #[returns(ref)]
+    pub model: Arc<str>,
+    #[returns(ref)]
+    pub project_root: PathBuf,
+    /// The snapshot's deployed output column names.
+    #[returns(ref)]
+    pub columns: Vec<Arc<str>>,
+    /// The model's source SQL text at the time this schema was deployed —
+    /// `None` for a snapshot written before `DeployedSchema::model_sql`
+    /// existed. Consulted only by the skeleton-clause-changed check
+    /// (`smelt_logical::maintenance::derive::skeleton_clause_changed`).
+    #[returns(ref)]
+    pub model_sql: Option<Arc<str>>,
+    /// The model's declared `timeseries.partition_column` at the time this
+    /// schema was deployed — `None` for a snapshot written before
+    /// `DeployedSchema::partition_column` existed, or for a model with no
+    /// partition grain. Consulted only by the partition-column-rename
+    /// refusal check
+    /// (`smelt_logical::maintenance::derive::partition_column_changed`).
+    #[returns(ref)]
+    pub partition_column: Option<Arc<str>>,
 }
 
 // ============================================================================
@@ -449,6 +507,8 @@ pub struct Database {
     projects: Arc<RwLock<HashMap<PathBuf, ProjectInput>>>,
     /// Per-loader-file inputs keyed by workspace-relative path.
     loader_files: Arc<RwLock<HashMap<String, LoaderFileInput>>>,
+    /// Per-deployed-schema inputs keyed by `(project_root, model)`.
+    deployed_schemas: Arc<RwLock<HashMap<(PathBuf, String), DeployedSchemaInput>>>,
 }
 
 #[salsa::db]
@@ -541,7 +601,7 @@ impl Database {
                 // set_loader_file and set_active_target respectively.
             }
             None => {
-                Workspace::new(self, files, projects, Vec::new(), None);
+                Workspace::new(self, files, projects, Vec::new(), None, Vec::new());
             }
         }
     }
@@ -550,7 +610,7 @@ impl Database {
     pub fn workspace(&mut self) -> Workspace {
         match Workspace::try_get(self) {
             Some(ws) => ws,
-            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), None),
+            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), None, Vec::new()),
         }
     }
 
@@ -564,7 +624,7 @@ impl Database {
         if let Some(ws) = Workspace::try_get(self) {
             ws.set_active_target(self).to(target);
         } else {
-            Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), target);
+            Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), target, Vec::new());
         }
     }
 
@@ -611,6 +671,64 @@ impl Database {
     pub fn loader_file(&self, path: &str) -> Option<LoaderFileInput> {
         // invariant: same RwLock poisoning rationale as set_source_file.
         self.loader_files.read().unwrap().get(path).copied()
+    }
+
+    /// Create or update the `DeployedSchemaInput` for `(project_root, model)`.
+    ///
+    /// Called by [`workspace_ingest::register_deployed_schemas_from_disk`]
+    /// (CLI `init_db` / LSP `initialize`, workspace-loading-parity rule)
+    /// whenever a `.smelt/targets/<target>/schemas/<model>.json` snapshot is
+    /// discovered on disk. Salsa propagates invalidations to `maintenance_plan`
+    /// / `check_file_diagnostics` automatically — re-setting an already-
+    /// registered input's fields (a re-run `register_deployed_schemas_from_disk`
+    /// after a fresh deploy) re-invalidates within the same `Database`.
+    pub fn set_deployed_schema(
+        &mut self,
+        model: Arc<str>,
+        project_root: PathBuf,
+        columns: Vec<Arc<str>>,
+        model_sql: Option<Arc<str>>,
+        partition_column: Option<Arc<str>>,
+    ) -> DeployedSchemaInput {
+        let key = (project_root.clone(), model.to_string());
+        // invariant: same RwLock poisoning rationale as set_source_file.
+        let existing = self.deployed_schemas.read().unwrap().get(&key).copied();
+        match existing {
+            Some(input) => {
+                input.set_columns(self).to(columns);
+                input.set_model_sql(self).to(model_sql);
+                input.set_partition_column(self).to(partition_column);
+                input
+            }
+            None => {
+                let input = DeployedSchemaInput::new(
+                    self,
+                    model,
+                    project_root,
+                    columns,
+                    model_sql,
+                    partition_column,
+                );
+                self.deployed_schemas.write().unwrap().insert(key, input);
+                if let Some(ws) = Workspace::try_get(self) {
+                    let mut current = ws.deployed_schemas(self).to_vec();
+                    current.push(input);
+                    ws.set_deployed_schemas(self).to(current);
+                }
+                input
+            }
+        }
+    }
+
+    /// Look up an already-registered `DeployedSchemaInput` by
+    /// `(project_root, model)`.
+    pub fn deployed_schema(&self, project_root: &Path, model: &str) -> Option<DeployedSchemaInput> {
+        // invariant: same RwLock poisoning rationale as set_source_file.
+        self.deployed_schemas
+            .read()
+            .unwrap()
+            .get(&(project_root.to_path_buf(), model.to_string()))
+            .copied()
     }
 }
 
@@ -1297,10 +1415,24 @@ fn ref_source_info(
 /// granularity-equality structural precondition (mirroring
 /// [`crate::queries::maintenance::single_clocked_source_granularity`]'s
 /// role for declared sources).
+/// `model_scan_bounds`/`project_scan_bounds` are the DOWNSTREAM (referencing)
+/// model's own `maintenance.scan_bounds` declarations — the same two configs
+/// [`crate::queries::maintenance::build_source_facts`] already threads for a
+/// declared `sources:` entry — consulted here so a model-edge candidate can
+/// be granted `allow_full_scan` too (keyed by its bare, `smelt.`-stripped
+/// name, exactly like a declared source's `per_source` key): before this,
+/// there was no way to declare the K8 escape hatch for an upstream
+/// maintained-model source at all, which phase 19
+/// (`docs/outcomes/20260815-definition-delta-migrate`) newly needs — an
+/// `UpstreamMutation` cell is now genuinely derivable for one of these
+/// candidates too (an `AppendOnly` composed source in a value-sensitive
+/// aggregate column group), not only for a declared `sources:` entry.
 fn ref_model_source_facts(
     db: &dyn salsa::Database,
     workspace: Workspace,
     ref_str: &str,
+    model_scan_bounds: Option<&smelt_core::config::ScanBoundsConfig>,
+    project_scan_bounds: Option<&smelt_core::config::ScanBoundsConfig>,
 ) -> Option<(
     smelt_logical::maintenance::SourceFacts,
     smelt_core::config::Granularity,
@@ -1321,6 +1453,12 @@ fn ref_model_source_facts(
         ref_str,
     )?
     .granularity;
+    let (allow_full_scan, _require, _on_violation) =
+        crate::queries::maintenance::effective_scan_bounds(
+            stripped,
+            model_scan_bounds,
+            project_scan_bounds,
+        );
     Some((
         smelt_logical::maintenance::SourceFacts {
             name: stripped.to_string(),
@@ -1333,7 +1471,7 @@ fn ref_model_source_facts(
             mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
             partition_col: Some(locality.slice.partition_column().to_string()),
             unique_key: Vec::new(),
-            allow_full_scan: false,
+            allow_full_scan,
         },
         granularity,
     ))
@@ -1588,6 +1726,75 @@ fn ref_model_edge(
     })
 }
 
+/// Per-source clamp observability (`docs/specs/incremental_shapes.md`
+/// §"Observing the per-source clamp"): `file`'s own [`BoundResult`] per
+/// `smelt.<path>` source it references, for editor hover. Thin Salsa
+/// wrapper (Salsa purity rule) over the pure
+/// `smelt_logical::analysis::source_bounds::derive_model_bounds`: resolves
+/// each of `file`'s own refs to the upstream's declared
+/// `timeseries.partition_column` (+ sibling spellings), mirroring
+/// [`ref_model_edge`]'s pattern, builds the `BoundContext`, and calls the
+/// pure derivation over `file`'s own SQL. Returns an empty map when `file`'s
+/// own model is not itself partition-grain (no `timeseries:` declared) or
+/// references no bounded sources — hover has nothing to show either way.
+pub fn model_source_clamps(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> std::collections::BTreeMap<String, smelt_logical::BoundResult> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single {
+        metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    else {
+        return Default::default();
+    };
+    if metadata.timeseries.is_none() {
+        return Default::default();
+    }
+    let sql = &text[sql_offset..];
+    let mut ctx = smelt_logical::BoundContext::new();
+    for r in smelt_logical::collect_path_refs(sql) {
+        let Some(stripped) = r.strip_prefix("smelt.") else {
+            continue;
+        };
+        let segments: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+        let Some(leaf) = segments.last().cloned() else {
+            continue;
+        };
+        let Some(resolved) = resolve_ref_path(db, workspace, segments.clone()) else {
+            continue;
+        };
+        if resolved.kind != RefKind::Model {
+            continue;
+        }
+        let Some(upstream_file) = resolved.source_file else {
+            continue;
+        };
+        let upstream_text = upstream_file.text(db);
+        let Some((upstream_sql, upstream_meta)) = resolved_model_sql_and_meta(upstream_text, &leaf)
+        else {
+            continue;
+        };
+        let Some(ts) = upstream_meta.timeseries.as_ref() else {
+            continue;
+        };
+        ctx.add_source(stripped, &ts.partition_column);
+        let aliases = smelt_logical::analysis::source_bounds::defining_expr_siblings(
+            &upstream_sql,
+            &ts.partition_column,
+        );
+        ctx.add_source_partition_col_aliases(stripped, aliases);
+    }
+    if ctx.source_partition_cols.is_empty() {
+        return Default::default();
+    }
+    smelt_logical::analysis::source_bounds::derive_model_bounds(sql, &ctx)
+        .into_iter()
+        .collect()
+}
+
 /// Thin Salsa wrapper around
 /// `smelt_logical::maintenance::derive::derive_maintenance_plan`
 /// (`incremental_models.md` §Surface "The plan (derived, reported)"): gathers
@@ -1657,12 +1864,24 @@ pub fn maintenance_plan(
     // wiring below: a `grain: key` model's driving source may be another
     // maintained model's locality-admitted composed output, not just a
     // declared `sources:` entry.
+    let model_scan_bounds = metadata
+        .maintenance
+        .as_ref()
+        .and_then(|m| m.scan_bounds.as_ref());
     let extra_model_sources: Vec<(
         smelt_logical::maintenance::SourceFacts,
         smelt_core::config::Granularity,
     )> = if resolved_grain == Some(smelt_core::config::Grain::Key) {
         refs.iter()
-            .filter_map(|r| ref_model_source_facts(db, workspace, r))
+            .filter_map(|r| {
+                ref_model_source_facts(
+                    db,
+                    workspace,
+                    r,
+                    model_scan_bounds,
+                    project_scan_bounds.as_ref(),
+                )
+            })
             .collect()
     } else {
         Vec::new()
@@ -1677,6 +1896,41 @@ pub fn maintenance_plan(
         .and_then(|p| project_active_backends(db, p))
         .unwrap_or_default();
 
+    // The deployed-schema snapshot (`docs/specs/definition_deltas.md`
+    // §"Detection"): a Salsa world-fact input the CLI and LSP both register
+    // at workspace load (`workspace_ingest::register_deployed_schemas_from_disk`).
+    // `deployed_column_names` now threads the snapshot's real column names —
+    // a non-skeleton `Trigger::ColumnAdded` cell that cannot be backfilled in
+    // place reports `MaintenanceColumnAddNotBackfillable` as a Warning rather
+    // than blocking the plan (`definition_deltas.md` §"Detection" posture
+    // rules 1-3), matching what `smelt-runtime`'s own run gate already
+    // admits. A model declaring `schema_evolution: strategy: full_refresh`
+    // derives no definition-change trigger at all (rule 3): the runtime
+    // rebuilds the whole table, so there is no in-place backfill obligation
+    // to report ahead of time — implemented here, at fact assembly, rather
+    // than as a new branch inside the pure derivation.
+    let deployed_schema = find_deployed_schema(db, workspace, &project_root, &table);
+    let deployed_model_sql: Option<String> = deployed_schema.and_then(|s| {
+        s.model_sql(db)
+            .as_ref()
+            .map(|sql: &Arc<str>| sql.to_string())
+    });
+    let deployed_partition_column: Option<String> = deployed_schema.and_then(|s| {
+        s.partition_column(db)
+            .as_ref()
+            .map(|col: &Arc<str>| col.to_string())
+    });
+    let full_refresh_schema_evolution = metadata.schema_evolution.as_ref().is_some_and(|se| {
+        se.strategy == smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh
+    });
+    let deployed_column_names: Vec<String> = if full_refresh_schema_evolution {
+        Vec::new()
+    } else {
+        deployed_schema
+            .map(|s| s.columns(db).iter().map(|c| c.to_string()).collect())
+            .unwrap_or_default()
+    };
+
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
         &table,
@@ -1685,6 +1939,9 @@ pub fn maintenance_plan(
         project_scan_bounds.as_ref(),
         &extra_model_sources,
         &active_backends,
+        &deployed_column_names,
+        deployed_model_sql.as_deref(),
+        deployed_partition_column.as_deref(),
     ))
 }
 
@@ -1760,7 +2017,7 @@ pub fn maintenance_plan_report(
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let mut sources = crate::queries::maintenance::build_source_facts(
+    let (mut sources, _scan_bounds_warnings) = crate::queries::maintenance::build_source_facts(
         &source_refs,
         model_scan_bounds,
         project_scan_bounds.as_ref(),
@@ -1779,7 +2036,13 @@ pub fn maintenance_plan_report(
     let mut model_source_granularities: Vec<smelt_core::config::Granularity> = Vec::new();
     if resolved_grain == Some(smelt_core::config::Grain::Key) {
         for r in &refs {
-            if let Some((facts, granularity)) = ref_model_source_facts(db, workspace, r) {
+            if let Some((facts, granularity)) = ref_model_source_facts(
+                db,
+                workspace,
+                r,
+                model_scan_bounds,
+                project_scan_bounds.as_ref(),
+            ) {
                 if !sources.iter().any(|s| s.name == facts.name) {
                     sources.push(facts);
                     model_source_granularities.push(granularity);
@@ -1818,6 +2081,33 @@ pub fn maintenance_plan_report(
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     let source_referential_integrity =
         crate::queries::maintenance::build_source_referential_integrity(&source_refs);
+    // The deployed-schema snapshot world-fact — see `maintenance_plan`'s own
+    // call site for the full rationale: `deployed_column_names` threads the
+    // snapshot's real column names (gated to empty under `schema_evolution:
+    // strategy: full_refresh`, rule 3), and `model_sql` feeds the
+    // skeleton-clause check; `smelt explain`'s report path reads the same
+    // registered Salsa input `maintenance_plan` does.
+    let deployed_schema = find_deployed_schema(db, workspace, &project_root, &table);
+    let deployed_model_sql: Option<String> = deployed_schema.and_then(|s| {
+        s.model_sql(db)
+            .as_ref()
+            .map(|sql: &Arc<str>| sql.to_string())
+    });
+    let deployed_partition_column: Option<String> = deployed_schema.and_then(|s| {
+        s.partition_column(db)
+            .as_ref()
+            .map(|col: &Arc<str>| col.to_string())
+    });
+    let full_refresh_schema_evolution = metadata.schema_evolution.as_ref().is_some_and(|se| {
+        se.strategy == smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh
+    });
+    let deployed_column_names: Vec<String> = if full_refresh_schema_evolution {
+        Vec::new()
+    } else {
+        deployed_schema
+            .map(|s| s.columns(db).iter().map(|c| c.to_string()).collect())
+            .unwrap_or_default()
+    };
     let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1827,11 +2117,10 @@ pub fn maintenance_plan_report(
         &model_edges,
         driving_source_granularity,
         &key_recurrences,
-        // `smelt explain`'s report path has no I/O access to the
-        // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
-        // own call site for the same rationale.
-        &[],
+        &deployed_column_names,
         &source_referential_integrity,
+        deployed_model_sql.as_deref(),
+        deployed_partition_column.as_deref(),
     )?;
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
@@ -1857,6 +2146,8 @@ pub fn maintenance_plan_report(
             &metadata.functional_dependencies,
         ) {
             result.state_columns = smelt_logical::state_column_summary(&classification);
+            result.execution_postures = Some(classification.execution_postures());
+            result.is_snapshot_reconcile = Some(classification.is_snapshot_reconcile());
         }
     }
 
@@ -2186,6 +2477,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::PartitionGrainRequiresRefreshIncremental => {
                     Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
                 }
+                smelt_core::metadata::MetadataError::KeyedForbidsSafetyOverrides => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::KeyedForbidsSafetyOverrides,
+                )),
                 smelt_core::metadata::MetadataError::MaterializedViewForbidsTimeseries => Some((
                     ts_err.to_string(),
                     DiagnosticCode::MaterializedViewForbidsTimeseries,
@@ -2335,6 +2630,59 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         })
                         .accumulate(db);
                     }
+                }
+            }
+        }
+
+        // Contract-lattice `retain_departed` posture-admissibility +
+        // tombstone-column check (`docs/specs/incremental_models.md`
+        // §"Contract relaxations (`contract:`)"). Format validity was
+        // already checked at frontmatter-parse time
+        // (`MetadataError::ContractRetainDepartedInvalid`, handled above);
+        // this pure `smelt-logical` validator checks that the declaration
+        // sits on a keyed shape consuming a mutable snapshot, and that a
+        // declared tombstone column exists in the model's inferred output —
+        // sharing the same diagnostic code (single-owner rule: the
+        // oracle/validator, not this Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if let Some(retain_departed) = &contract.retain_departed {
+                let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
+                let grain = metadata.grain.unwrap_or(smelt_core::config::Grain::Key);
+                let refs = smelt_logical::collect_path_refs(sql_body);
+                let consumes_mutable_snapshot = refs.iter().any(|r| {
+                    ref_source_info(db, workspace, project, r).is_some_and(|info| {
+                        info.mutation_profile.as_ref().is_some_and(|m| {
+                            m.kind == smelt_core::sources::MutationProfile::Mutable
+                        })
+                    })
+                });
+                let tombstone_column = match retain_departed {
+                    smelt_core::config::RetainDeparted::Bool(_) => None,
+                    smelt_core::config::RetainDeparted::Tombstone { tombstone } => {
+                        Some(tombstone.as_str())
+                    }
+                };
+                let typed_schema = typed_model_schema(db, workspace, file);
+                let output_columns: Vec<String> = typed_schema
+                    .columns
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect();
+                if let Err(why) = smelt_logical::validate_retain_departed(
+                    grain,
+                    consumes_mutable_snapshot,
+                    tombstone_column,
+                    &output_columns,
+                    model_name,
+                ) {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("ContractRetainDepartedInvalid: {why}"),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::ContractRetainDepartedInvalid),
+                        data: None,
+                    })
+                    .accumulate(db);
                 }
             }
         }
@@ -2508,8 +2856,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let plan_diags = maintenance_plan(db, workspace, file);
         let body_start = rowan::TextSize::from(sql_offset as u32);
         for refusal in &plan_diags.refusals {
-            let (code, message) = match refusal {
+            let (severity, code, message) = match refusal {
                 crate::queries::maintenance::MaintenanceRefusal::ScanUnbounded { source, why } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceScanUnbounded,
                     format!("maintenance scan over '{source}' cannot be partition-bounded: {why}"),
                 ),
@@ -2517,26 +2866,65 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     trigger,
                     why,
                 } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceNoAdmissibleTechnique,
                     format!("no maintenance technique admits trigger {trigger}: {why}"),
                 ),
                 crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
                     message,
-                } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
-                crate::queries::maintenance::MaintenanceRefusal::SkeletonColumnAdded { column } => {
-                    (
-                        DiagnosticCode::MaintenanceSkeletonColumnAdded,
-                        format!(
-                            "column '{column}' occupies a row-membership/identity (skeleton) \
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::KeyedForbidsTimeseries,
+                    message.clone(),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::IdentityNotDerivable {
+                    message,
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::GrainAssertionMismatch,
+                    message.clone(),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::SkeletonChanged { column } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::MaintenanceSkeletonChanged,
+                    format!(
+                        "column '{column}' occupies a row-membership/identity (skeleton) \
                          position — a grain change, never a column backfill (EX-39, \
                          docs/specs/incremental_models.md §\"The definition-change trigger\")",
-                        ),
-                    )
-                }
+                    ),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::SkeletonClauseChanged {
+                    reason,
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::MaintenanceSkeletonChanged,
+                    format!(
+                        "the model's skeleton clause changed against its deployed schema \
+                         snapshot: {reason} — a grain change, never a column backfill (EX-39, \
+                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
+                    ),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::PartitionColumnChanged {
+                    from,
+                    to,
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::MaintenancePartitionColumnChanged,
+                    format!(
+                        "declared timeseries.partition_column changed from '{from}' to '{to}' \
+                         since this model was last deployed — the recorded address every \
+                         partition-grain maintenance write targets no longer matches; this is a \
+                         pre-execution refusal that no run flag bypasses (the analyzer gate \
+                         blocks on any Error-severity diagnostic unconditionally), so delete the \
+                         model's recorded snapshot (.smelt/targets/<target>/schemas/<model>.json) \
+                         and re-run `smelt run` to re-address the table under the new column",
+                    ),
+                ),
                 crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
                     grain,
                     tracking_plan,
                 } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceUnsupportedGrain,
                     format!(
                         "grain: {grain} is not yet supported by maintenance-plan derivation \
@@ -2544,9 +2932,36 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                          (partition or key) or use refresh: full",
                     ),
                 ),
+                crate::queries::maintenance::MaintenanceRefusal::DefinitionChangeNotBackfillable {
+                    columns,
+                    why,
+                } => (
+                    DiagnosticSeverity::Warning,
+                    DiagnosticCode::MaintenanceColumnAddNotBackfillable,
+                    format!(
+                        "added column(s) {} cannot be backfilled in place: {why} — the run will \
+                         ALTER them in and leave historical rows NULL until `smelt migrate` \
+                         backfills them",
+                        columns.join(", "),
+                    ),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::KeyedRetractableContribution {
+                    source,
+                    columns,
+                    why,
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::KeyedRetractableContribution,
+                    format!(
+                        "enrichment join against '{source}' feeds a retractable contribution to \
+                         column(s) {}: {why} — use `refresh: materialized_view`, or compose the \
+                         enrichment as a separate model",
+                        columns.join(", "),
+                    ),
+                ),
             };
             DiagnosticAcc(Diagnostic {
-                severity: DiagnosticSeverity::Error,
+                severity,
                 message,
                 range: rowan::TextRange::empty(body_start),
                 code: Some(code),
@@ -2560,6 +2975,19 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message: violation.clone(),
                 range: rowan::TextRange::empty(body_start),
                 code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for source in &plan_diags.scan_bounds_warnings {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "maintenance scan over '{source}' cannot be partition-bounded — admitted \
+                     under scan_bounds.on_violation: warn"
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceScanUnbounded),
                 data: None,
             })
             .accumulate(db);
@@ -3681,6 +4109,24 @@ pub fn find_project(
         .iter()
         .copied()
         .find(|p| p.root(db) == root)
+}
+
+/// Look up the registered [`DeployedSchemaInput`] for `(project_root, table)`
+/// via the `Workspace` singleton's `deployed_schemas` list — the enumeration
+/// seam a Salsa-tracked query (`&dyn salsa::Database`, no downcast to the
+/// concrete `Database`) must use, mirroring `workspace.loader_files(db)`'s
+/// lookup pattern in `queries/loader.rs`/`queries/project.rs`.
+fn find_deployed_schema(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project_root: &Path,
+    table: &str,
+) -> Option<DeployedSchemaInput> {
+    workspace
+        .deployed_schemas(db)
+        .iter()
+        .copied()
+        .find(|s| s.project_root(db) == project_root && &**s.model(db) == table)
 }
 
 fn count_from_sources(select_stmt: &smelt_parser::ast::SelectStmt) -> usize {

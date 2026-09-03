@@ -126,6 +126,9 @@ fn reformatted_unrelated_column_does_not_block_a_real_column_add() {
         }],
         fold: None,
         old_columns: old,
+        old_sql: None,
+        keyed_time_axis: None,
+        old_partition_col: None,
     };
 
     let plan = derive_maintenance_plan(

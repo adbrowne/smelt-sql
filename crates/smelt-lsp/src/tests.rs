@@ -2413,6 +2413,42 @@ fn hover_on_generates_frontmatter_shows_body_type_and_emission_count() {
     );
 }
 
+/// `hover_text_for_source_clamp` renders a distinct one-line readout per
+/// `BoundResult` verdict, and `None` for a source with no verdict
+/// (`docs/outcomes/20260815-partition-grain-residue/phases/06-plan.md`).
+#[test]
+fn hover_text_for_source_clamp_renders_bounded_unbounded_not_derivable_and_none() {
+    use smelt_db::Seconds;
+
+    let bounded = smelt_db::BoundResult::Bounded {
+        source_partition_col: "event_date".to_string(),
+        before: Seconds::days(3),
+        after: Seconds::ZERO,
+    };
+    let bounded_text =
+        hover_text_for_source_clamp("silver.events", Some(&bounded)).expect("Bounded must render");
+    assert!(bounded_text.contains("silver.events"));
+    assert!(bounded_text.contains("event_date"));
+
+    let unbounded_text =
+        hover_text_for_source_clamp("silver.events", Some(&smelt_db::BoundResult::Unbounded))
+            .expect("Unbounded must render");
+    assert!(unbounded_text.contains("unbounded"));
+
+    let not_derivable_text =
+        hover_text_for_source_clamp("silver.events", Some(&smelt_db::BoundResult::NotDerivable))
+            .expect("NotDerivable must render");
+    assert!(not_derivable_text.contains("not derivable"));
+
+    // Distinct renderings.
+    assert_ne!(bounded_text, unbounded_text);
+    assert_ne!(bounded_text, not_derivable_text);
+    assert_ne!(unbounded_text, not_derivable_text);
+
+    // No verdict at all → None.
+    assert_eq!(hover_text_for_source_clamp("silver.events", None), None);
+}
+
 /// Hover on the opening `{` of a `ModelDef { … }` literal in a generator file
 /// shows the inferred smelt path when the `name` field is statically known, and
 /// falls back to just `"ModelDef"` when the name is not static.
@@ -2509,21 +2545,21 @@ fn completion_on_generates_offers_models_only() {
     );
 }
 
-/// Completion at `ModelDef {{ <cursor>` offers the closed five-field set, with
+/// Completion at `ModelDef {{ <cursor>` offers the closed seven-field set, with
 /// required fields (`name`, `body`) first, and excludes already-filled fields.
 ///
 /// `completion_for_model_def_field_key` must:
-/// - Return all five fields when `already_filled` is empty.
+/// - Return all seven fields when `already_filled` is empty.
 /// - Exclude already-filled fields.
 /// - Place `name` and `body` before optional fields.
 #[test]
-fn completion_on_model_def_field_key_offers_closed_five_field_set() {
-    // All five fields when nothing is filled.
+fn completion_on_model_def_field_key_offers_closed_seven_field_set() {
+    // All seven fields when nothing is filled.
     let items = completion_for_model_def_field_key(&[]);
     assert_eq!(
         items.len(),
-        5,
-        "must offer all five fields when nothing is filled; got: {items:?}"
+        7,
+        "must offer all seven fields when nothing is filled; got: {items:?}"
     );
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(
@@ -2546,6 +2582,14 @@ fn completion_on_model_def_field_key_offers_closed_five_field_set() {
         labels.contains(&"description"),
         "must offer 'description' field; got: {labels:?}"
     );
+    assert!(
+        labels.contains(&"timeseries"),
+        "must offer 'timeseries' field; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"safety_overrides"),
+        "must offer 'safety_overrides' field; got: {labels:?}"
+    );
     // Required fields (name, body) come first per the spec ordering rule.
     let name_pos = items.iter().position(|i| i.label == "name").unwrap();
     let body_pos = items.iter().position(|i| i.label == "body").unwrap();
@@ -2566,8 +2610,8 @@ fn completion_on_model_def_field_key_offers_closed_five_field_set() {
     let items_partial = completion_for_model_def_field_key(&["name".to_string()]);
     assert_eq!(
         items_partial.len(),
-        4,
-        "must offer 4 fields when 'name' is already filled; got: {items_partial:?}"
+        6,
+        "must offer 6 fields when 'name' is already filled; got: {items_partial:?}"
     );
     assert!(
         !items_partial.iter().any(|i| i.label == "name"),
@@ -2739,5 +2783,32 @@ fn completion_if_snippet_function_returns_correct_snippet() {
         item.insert_text_format,
         Some(InsertTextFormat::SNIPPET),
         "if completion must have SNIPPET insert text format"
+    );
+}
+
+/// `MaintenanceSkeletonChanged` renders as the wire-visible code string a
+/// CI/editor consumer matches on, post-rename
+/// (`docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7).
+#[test]
+fn skeleton_changed_maps_to_stable_code_string() {
+    assert_eq!(
+        crate::backend::diagnostic_code_str(smelt_db::DiagnosticCode::MaintenanceSkeletonChanged),
+        "maintenance-skeleton-changed"
+    );
+}
+
+/// A `grain: key` model with no derivable identity (no declared top-level
+/// `unique_key:`, no GROUP BY) surfaces `GrainAssertionMismatch` — the same
+/// code the plan-derivation seam now emits (`smelt-db`'s
+/// `maintenance.rs::MaintenanceRefusal::IdentityNotDerivable`,
+/// `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 17) —
+/// through the same wire-visible code string the LSP already renders for
+/// the other `grain:` assertion mismatch, so CLI and LSP consumers agree on
+/// the code string without a run.
+#[test]
+fn grain_assertion_mismatch_maps_to_stable_code_string() {
+    assert_eq!(
+        crate::backend::diagnostic_code_str(smelt_db::DiagnosticCode::GrainAssertionMismatch),
+        "grain-assertion-mismatch"
     );
 }

@@ -724,7 +724,7 @@ fn test_bronze_raw_events_view() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -914,7 +914,7 @@ fn test_end_to_end_smelt_build() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -1049,7 +1049,7 @@ fn test_sessions_model_materializes() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -1190,7 +1190,7 @@ fn test_device_user_edges_view() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -1385,7 +1385,7 @@ fn test_identity_forward_only_materializes() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -1513,7 +1513,7 @@ fn test_eventstream_with_identity_end_to_end() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -1761,7 +1761,7 @@ fn test_identity_backward_fill_materializes() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -1931,7 +1931,7 @@ fn test_eventstream_with_identity_includes_backward_fill() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -2090,7 +2090,7 @@ fn test_identity_connected_components_materializes() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -2329,7 +2329,7 @@ fn test_eventstream_with_identity_includes_connected_components() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -2598,7 +2598,7 @@ fn test_daily_active_users_by_method_monotonicity() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()
@@ -2739,7 +2739,7 @@ fn test_identity_method_comparison_materializes() {
     );
 
     let build_out = Command::new(&smelt)
-        .args(["build", "--target", "dev"])
+        .args(["build", "--target", "dev", "--full-refresh"])
         .current_dir(tmp_path)
         .env("RUST_LOG", "warn")
         .output()

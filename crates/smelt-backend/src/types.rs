@@ -79,11 +79,21 @@ pub struct PartitionRange {
     /// Column name used for partitioning (e.g., "event_date")
     pub column: String,
 
-    /// Inclusive start of the range (ISO-8601 date or timestamp string)
+    /// Inclusive start of the range — a bare (unquoted) value in the
+    /// partition column's own domain: `YYYY-MM-DD` on the calendar axis, a
+    /// decimal integer on the integer axis.
     pub start: String,
 
-    /// Exclusive end of the range (ISO-8601 date or timestamp string)
+    /// Exclusive end of the range, same domain as `start`.
     pub end: String,
+
+    /// The partition column's axis — governs how `start`/`end` are rendered
+    /// as SQL literals (quoted on the calendar axis, bare on the integer
+    /// axis; `docs/specs/incremental_shapes.md` §"The partition grain" rule
+    /// 8a). Single-owner rendering lives in
+    /// `smelt_logical::maintenance::emit::partition_literal`; backends never
+    /// decide quoting themselves.
+    pub axis: crate::PartitionAxis,
 }
 
 /// Materialization strategy for tables.

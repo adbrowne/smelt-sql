@@ -774,6 +774,15 @@ pub fn expand_function_calls(sql: &str, fn_bodies: &FnBodyMap) -> String {
     if fn_bodies.is_empty() {
         return sql.to_string();
     }
+    // Callers pass raw model content (frontmatter included) — a bare
+    // `---\n...\n---` block parses as a syntax error (`smelt_parser` has no
+    // frontmatter awareness of its own; that lives one layer up, same as
+    // `SqlCompiler`'s own `strip_frontmatter(&model.content)` calls), which
+    // left every `smelt.functions.*`/`smelt.fn.*` call site in the body
+    // unexpanded (the printer falls back to verbatim text on a parse this
+    // broken). Strip it first — whitespace-preserving, so byte offsets used
+    // by any downstream diagnostic stay stable.
+    let sql = &smelt_parser::strip_frontmatter(sql);
     let bodies = Arc::new(fn_bodies.clone());
     let fn_bodies_for_fn = Arc::clone(&bodies);
     let fn_expander: SmeltFnExpander<'static> = Box::new(

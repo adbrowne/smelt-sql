@@ -8,10 +8,13 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDate;
-use smelt_core::config::{ContractConfig, DataLatency};
+use smelt_core::config::{ContractCellConfig, ContractConfig, DataLatency};
 use smelt_core::metadata::ModelMetadata;
 use smelt_logical::contract::deferral::RunLicense;
-use smelt_runtime::contract_probes::{deferral_decision, propagate_deferral_skip, subsumed_window};
+use smelt_runtime::contract_probes::{
+    advance_cell_frontiers, deferral_cell_decisions, deferral_decision, propagate_deferral_skip,
+    subsumed_window,
+};
 use smelt_state::intervals::{Interval, IntervalStore, ModelIntervals};
 use smelt_state::landed_deltas::{LandedDeltaStore, SourceLanding};
 
@@ -184,4 +187,126 @@ fn covering_run_after_a_recorded_skip_reports_the_subsumed_window() {
     // pending window: no subsumption.
     let partial_end = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
     assert!(subsumed_window(decision.pending, true, start, partial_end).is_none());
+}
+
+fn cells_metadata(cells: Vec<ContractCellConfig>) -> ModelMetadata {
+    ModelMetadata {
+        contract: Some(ContractConfig {
+            cells,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn intervals_with_cell_frontier(model: &str, cell_address: &str, end: &str) -> IntervalStore {
+    let mut store = IntervalStore::default();
+    let mut mi = ModelIntervals::new("hash".to_string());
+    mi.record_cell_frontier(cell_address, end);
+    store.models.insert(model.to_string(), mi);
+    store
+}
+
+#[test]
+fn per_cell_decision_skips_one_cell_and_runs_its_sibling() {
+    use smelt_logical::contract::deferral::cell_address;
+
+    // Two cells, each addressing a different trigger, each with its own D:
+    // `on_a` is within its own D (3 <= 6 -> skip); `on_b` is beyond its own
+    // D (10 > 2 -> run), even though both cells share the same model.
+    let metadata = cells_metadata(vec![
+        ContractCellConfig {
+            columns: vec!["a".to_string()],
+            on: "raw.a".to_string(),
+            deferral: DataLatency::parse("6 days"),
+        },
+        ContractCellConfig {
+            columns: vec!["b".to_string()],
+            on: "raw.b".to_string(),
+            deferral: DataLatency::parse("2 days"),
+        },
+    ]);
+
+    let addr_a = cell_address(&["a".to_string()], "raw.a");
+    let addr_b = cell_address(&["b".to_string()], "raw.b");
+
+    let mut interval_store = intervals_with_cell_frontier("m", &addr_a, "2026-01-05");
+    interval_store
+        .models
+        .get_mut("m")
+        .unwrap()
+        .record_cell_frontier(&addr_b, "2026-01-01");
+
+    let mut landed_deltas = landed_deltas_ending("raw.a", "2026-01-08");
+    landed_deltas.sources.insert(
+        "raw.b".to_string(),
+        landed_deltas_ending("raw.b", "2026-01-11")
+            .sources
+            .remove("raw.b")
+            .unwrap(),
+    );
+
+    let decisions = deferral_cell_decisions("m", Some(&metadata), &interval_store, &landed_deltas);
+    assert_eq!(decisions.len(), 2);
+
+    let a = decisions.iter().find(|d| d.address == addr_a).unwrap();
+    assert_eq!(a.license, RunLicense::Skip { lag: 3, d: 6 });
+
+    let b = decisions.iter().find(|d| d.address == addr_b).unwrap();
+    assert_eq!(b.license, RunLicense::Run);
+}
+
+#[test]
+fn model_level_deferral_still_decides_when_no_cells_are_declared() {
+    // The existing model-level path (`deferral_decision`) is unaffected by
+    // `deferral_cell_decisions` — a model with no `contract.cells[]`
+    // declares no per-cell decisions at all.
+    let metadata = deferral_metadata(6);
+    let interval_store = intervals_ending("m", "2026-01-05");
+    let landed_deltas = landed_deltas_ending("raw.events", "2026-01-08");
+
+    let decisions = deferral_cell_decisions("m", Some(&metadata), &interval_store, &landed_deltas);
+    assert!(decisions.is_empty());
+
+    let decision = deferral_decision(
+        "m",
+        Some(&metadata),
+        &["raw.events".to_string()],
+        &interval_store,
+        &landed_deltas,
+    )
+    .expect("model declares contract.deferral");
+    assert_eq!(decision.license, RunLicense::Skip { lag: 3, d: 6 });
+}
+
+#[test]
+fn cell_frontier_advance_is_scoped_to_the_declaring_cells() {
+    use smelt_logical::contract::deferral::cell_address;
+
+    let addr_a = cell_address(&["a".to_string()], "raw.a");
+    let addr_b = cell_address(&["b".to_string()], "raw.b");
+    let addr_c = cell_address(&["c".to_string()], "raw.c");
+
+    let mut interval_store = IntervalStore::default();
+    // A sibling cell frontier that must survive untouched.
+    interval_store
+        .get_or_create("m", "hash")
+        .record_cell_frontier(&addr_c, "2026-01-01");
+
+    advance_cell_frontiers(
+        &mut interval_store,
+        "m",
+        "hash",
+        &[addr_a.clone(), addr_b.clone()],
+        "2026-01-10",
+    );
+
+    let mi = interval_store.get("m").expect("model intervals created");
+    assert_eq!(mi.cell_frontier(&addr_a), Some("2026-01-10"));
+    assert_eq!(mi.cell_frontier(&addr_b), Some("2026-01-10"));
+    assert_eq!(
+        mi.cell_frontier(&addr_c),
+        Some("2026-01-01"),
+        "a sibling cell frontier not named in `addresses` must be untouched"
+    );
 }

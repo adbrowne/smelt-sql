@@ -2,20 +2,26 @@
 //! into targeted migration scripts instead of a full rebuild.
 //!
 //! See `docs/research/20260802-backbuild-synthesis.md` for the correctness
-//! oracle this module implements against. This is the diff-foundation phase
-//! (research §6 `diff.rs`): purely syntactic CST-level factoring of two
-//! definitions into a [`DefinitionDiff`]. No admission judgements and no
-//! classification happen here — that is later phases' `classify.rs`. This
-//! module is deliberately unwired: nothing outside `smelt-logical` calls it
-//! yet.
+//! oracle this module implements against. `diff.rs` is purely syntactic
+//! CST-level factoring of two definitions into a [`DefinitionDiff`];
+//! `classify.rs` derives admission judgements and technique options from
+//! that diff; `plan.rs` folds those options into a per-column-group
+//! migration plan. `smelt-cli`'s `migrate` command (`smelt migrate <model>`)
+//! is the one consumer outside this crate today — it derives and prints a
+//! plan but does not yet execute it (`docs/specs/definition_deltas.md`
+//! §"`smelt migrate`").
 
 pub mod classify;
 pub mod diff;
 pub mod emit;
+pub mod plan;
 pub mod requalify;
 
 pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
+pub use plan::{
+    derive_migration_plan, plan_hash, ColumnGroupPlan, MigrationPlan, MigrationVerdict,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -52,6 +58,31 @@ impl DefinitionDiff {
     pub fn is_noop(&self) -> bool {
         match self {
             DefinitionDiff::Comparable(c) => c.is_noop(),
+            DefinitionDiff::Opaque { .. } => false,
+        }
+    }
+
+    /// Whether this diff adds one or more SELECT-list columns and changes
+    /// nothing else — no dropped or changed columns, no `WHERE`/skeleton/
+    /// set-op change. This is exactly the shape the maintenance driver's
+    /// own live `Trigger::ColumnAdded` → `Technique::InPlaceUpdate`
+    /// dispatch already handles safely and atomically as part of an
+    /// ordinary run (`docs/specs/definition_deltas.md` §"Detection" —
+    /// pure column addition is exempt from the run gate for exactly this
+    /// reason). `false` for `Opaque` — an unfactored diff is never assumed
+    /// to be a pure addition.
+    pub fn is_pure_column_addition(&self) -> bool {
+        match self {
+            DefinitionDiff::Comparable(c) => {
+                c.where_clause.is_noop()
+                    && c.skeleton.is_noop()
+                    && c.set_ops.is_noop()
+                    && matches!(
+                        &c.select_list,
+                        SelectListDiff::Diffed { added, dropped, changed, .. }
+                            if !added.is_empty() && dropped.is_empty() && changed.is_empty()
+                    )
+            }
             DefinitionDiff::Opaque { .. } => false,
         }
     }

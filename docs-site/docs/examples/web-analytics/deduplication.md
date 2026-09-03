@@ -110,6 +110,11 @@ timeseries:
   event_time_column: first_seen_date
   partition_column: first_seen_date
   granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.events:
+        allow_full_scan: true
 ---
 SELECT
     event_id,
@@ -148,7 +153,7 @@ smelt explain silver.events_deduped
 ```text
 Maintenance plan: silver.events_deduped
 
-Cells (2):
+Cells (3):
   - group {device_id, user_id, amplitude_id, event_ts, first_seen_date, utm_campaign, event_name, platform, url} on trigger NewData { source: "raw.events" }
       corner:    FoldDelta
       technique: KeyedFold
@@ -159,6 +164,19 @@ Cells (2):
       scan clamps: (none)
       admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
+      write variant: unconditional (not admitted — the cell's column group is empty — there is nothing to compare)
+  - group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign} on trigger UpstreamMutation { source: "raw.events" }
+      corner:    ColumnMerge
+      technique: ColumnScopedMerge
+      ledger_catch_up: false
+      contract:  default
+      region key: Key(["event_id"])
+      locality:  partition_local
+      scan clamps:
+        - source=raw.events column=event_date before=Seconds(0) after=Seconds(0)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+      write pin: (none)
+      observed-delta recording: yes (change-suppressed column-scoped MERGE)
       write variant: suppressed (preference — steady-state trigger over prior state)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
@@ -170,6 +188,12 @@ Cells (2):
       scan clamps: (none)
       admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
+
+Execution postures:
+  run shape: window-forward
+  re-run tolerance: yes (no column folds through an additive combiner)
+  order-independence: yes (every combiner is order-independent)
+  reprocessing: refused (a window whose input changed since merging must not be re-merged, for every family)
 
 Key temporal locality:
   route: route 3 (recurrence-bounded, declared key_recurrence)
@@ -225,6 +249,11 @@ this model's runs clean:
 -- Would run: silver.events_deduped (materialization shown below)
 SELECT CAST(event_id AS BIGINT) AS event_id, CAST(device_id AS INTEGER) AS device_id, CAST(user_id AS INTEGER) AS user_id, CAST(amplitude_id AS VARCHAR) AS amplitude_id, CAST(event_ts AS TIMESTAMP) AS event_ts, CAST(first_seen_date AS DATE) AS first_seen_date, CAST(utm_campaign AS VARCHAR) AS utm_campaign, CAST(event_name AS VARCHAR) AS event_name, CAST(platform AS VARCHAR) AS platform, CAST(url AS VARCHAR) AS url FROM (
   --
+--
+--
+--
+--
+--
 --
 --
 --
@@ -294,7 +323,10 @@ SELECT
 FROM (SELECT * FROM raw.events WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11')
 GROUP BY event_id
 
-) _smelt_typed) AS delta ON target.event_id = delta.event_id WHEN MATCHED THEN UPDATE SET device_id = LEAST(target.device_id, delta.device_id), user_id = LEAST(target.user_id, delta.user_id), amplitude_id = LEAST(target.amplitude_id, delta.amplitude_id), event_ts = LEAST(target.event_ts, delta.event_ts), first_seen_date = LEAST(target.first_seen_date, delta.first_seen_date), utm_campaign = LEAST(target.utm_campaign, delta.utm_campaign), event_name = LEAST(target.event_name, delta.event_name), platform = LEAST(target.platform, delta.platform), url = LEAST(target.url, delta.url) WHEN NOT MATCHED THEN INSERT *
+) _smelt_typed) AS delta ON target.event_id = delta.event_id WHEN MATCHED AND (target.device_id IS DISTINCT FROM (LEAST(target.device_id, delta.device_id)) OR target.user_id IS DISTINCT FROM (LEAST(target.user_id, delta.user_id)) OR target.amplitude_id IS DISTINCT FROM (LEAST(target.amplitude_id, delta.amplitude_id)) OR target.event_ts IS DISTINCT FROM (LEAST(target.event_ts, delta.event_ts)) OR target.first_seen_date IS DISTINCT FROM (LEAST(target.first_seen_date, delta.first_seen_date)) OR target.utm_campaign IS DISTINCT FROM (LEAST(target.utm_campaign, delta.utm_campaign)) OR target.event_name IS DISTINCT FROM (LEAST(target.event_name, delta.event_name)) OR target.platform IS DISTINCT FROM (LEAST(target.platform, delta.platform)) OR target.url IS DISTINCT FROM (LEAST(target.url, delta.url))) THEN UPDATE SET device_id = LEAST(target.device_id, delta.device_id), user_id = LEAST(target.user_id, delta.user_id), amplitude_id = LEAST(target.amplitude_id, delta.amplitude_id), event_ts = LEAST(target.event_ts, delta.event_ts), first_seen_date = LEAST(target.first_seen_date, delta.first_seen_date), utm_campaign = LEAST(target.utm_campaign, delta.utm_campaign), event_name = LEAST(target.event_name, delta.event_name), platform = LEAST(target.platform, delta.platform), url = LEAST(target.url, delta.url) WHEN NOT MATCHED THEN INSERT *
+
+-- trigger: UpstreamMutation { source: "raw.events" }
+-- (no statements: the admitted technique preview has no statements)
 
 -- trigger: Backfill
 BEGIN

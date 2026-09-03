@@ -63,3 +63,14 @@ fn declared_unique_key_naming_a_foreign_column_errors() {
     assert_eq!(err.0, declared);
     assert_eq!(err.1, vec!["device_id".to_string(), "user_id".to_string()]);
 }
+
+/// A GROUP BY column named `order_id` must not collide with the `ORDER`
+/// end-keyword scan (word-boundary fix, `find_keyword_not_in_parens`) — the
+/// derived key must be `[order_id]`, not empty.
+#[test]
+fn group_by_unique_key_derives_order_id() {
+    let sql = "SELECT order_id, COUNT(*) AS n FROM smelt.orders GROUP BY order_id";
+    assert_eq!(group_by_unique_key(sql), vec!["order_id".to_string()]);
+    declared_unique_key_matches(&["order_id".to_string()], sql)
+        .expect("declared unique_key matching the GROUP BY-derived order_id must agree");
+}

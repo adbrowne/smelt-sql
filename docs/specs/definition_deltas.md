@@ -1,7 +1,7 @@
 ---
 feature: definition_deltas
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-03
 owners: [andrew]
 ---
 
@@ -81,11 +81,58 @@ reformatted the SQL, the plan would be empty ("eclipsed — nothing to do") and 
 smelt records, per model, the definition it last maintained the stored table under. A mismatch
 between that recorded definition and the model's current SQL is a **definition delta**. Detection
 is passive — editing a model never triggers work by itself; the delta is reported the next time
-the model is planned, explained, or run. Between detection and approval, `smelt run` on a model
-with a pending non-eclipsed definition delta **refuses to fold data deltas** rather than
-silently maintaining a table whose definition no longer matches its contents; once a migration
-plan is approved and applying, data deltas fold under the rules of §"Mid-migration data
-folds".
+the model is planned, explained, or run.
+
+The deployed-schema snapshot backing this detection is a **world fact**: both the LSP and the
+CLI register it as a Salsa input at workspace load (`architecture.md` §"Workspace loading
+parity rule (CLI ↔ LSP)"), reading every `.smelt/targets/<target>/schemas/<model>.json` snapshot
+on disk. This is what lets a skeleton-positioned definition change (a redefined `GROUP BY`, a
+changed `FROM` target) surface as `MaintenanceSkeletonChanged` in the editor and in
+`smelt explain <model>` ahead of any run — not only when a run's maintenance driver derives the
+trigger with its own direct I/O access to the snapshot. A model with no registered snapshot on
+record derives no definition-change trigger at all (fail-closed, unchanged from before this
+input existed).
+
+The refusal rule: a **maintained (incremental) model whose stored table already exists and
+carries a recorded `model_sql`**, run without `--full-refresh`, refuses to fold a data delta over
+a pending non-eclipsed definition delta rather than silently maintaining a table whose definition
+no longer matches its contents. "Pending" means no approval is on record whose `plan_hash` equals
+the freshly re-derived plan hash (§"`smelt migrate`"); an approval marked `in_progress` folds
+under §"Mid-migration data folds" instead of refusing. The refusal fires `DefinitionDeltaPending`
+(§Diagnostics) and exits `3` (`cli.md` §"Exit codes"). A `--full-refresh` run is not a fold — it
+proceeds under the new definition regardless of any pending delta.
+
+**Pure column addition is exempt.** A definition delta that only adds one or more SELECT-list
+columns — no dropped or changed column, no `WHERE`/skeleton/set-op change — never refuses, even
+though `smelt migrate`/`smelt explain` still report it as a pending, reviewable delta. This shape
+has its own live, narrower mechanism (the maintenance driver's `Trigger::ColumnAdded` →
+`Technique::InPlaceUpdate` dispatch, §"The verdict per column group") that already backfills it
+safely and atomically as part of an ordinary run, predating and coexisting with `smelt migrate`
+(§Known Divergences). `smelt explain <model>` reports
+a pending definition delta and its whole-plan verdict ahead of a run, without deriving or executing
+anything beyond the plan derivation itself.
+
+**The pre-execution gate's posture matches what a run actually refuses.** The maintenance-plan
+gate that backs `smelt explain` and editor diagnostics derives the same `Trigger::ColumnAdded`
+cell a run's maintenance driver would, and reports its refusals at the severity the runtime
+actually implies rather than defaulting every refusal to `Error`:
+
+1. A column addition that **cannot be backfilled in place** — an unbounded scan for the
+   column-scoped merge, no admissible technique, an unresolvable expression, or added columns in
+   one group disagreeing on their definition-change classification — does not refuse the model's
+   ongoing maintenance plan. The run proceeds: the column is ALTERed in and its historical rows
+   stay `NULL` until a `smelt migrate` backfill closes the gap. Reported as a **Warning**
+   (`MaintenanceColumnAddNotBackfillable`, §Diagnostics) naming the affected columns and pointing
+   at `smelt migrate`.
+2. A **skeleton-position** add keeps the existing `MaintenanceSkeletonChanged` **Error** — it is a
+   grain change, not a backfillable column add (§"Skeleton changes are a new relation").
+3. A model declaring `schema_evolution: strategy: full_refresh` derives no definition-change
+   trigger in the gate at all: the runtime rebuilds the whole table on its next run, so there is
+   no in-place backfill obligation to report ahead of time.
+
+This posture mirrors `smelt-runtime`'s own run gate, which already exempts a pure column addition
+from the definition-delta refusal outright (`incremental_models.md` §"Delta signatures") — the
+pre-execution gate never reports as an error what a run does not itself refuse.
 
 ### `smelt migrate`
 
@@ -97,19 +144,24 @@ smelt migrate <model> --json     # machine-readable plan + exit-code contract (C
 
 - **Plan.** `smelt migrate <model>` derives the migration plan (§"The migration plan") and prints
   it: per column group, the verdict, the chosen technique, the regions touched, and a cost class
-  — or "eclipsed: nothing to do". The plan carries a **plan hash** over its content.
+  — or "eclipsed: nothing to do". The plan carries a **plan hash** over its content, which the
+  plan step records to a per-target approval store (one entry per model) — this is what "seeing
+  the plan printed" means for approval purposes.
 - **Approve and apply.** `--apply` executes the plan whose hash was recorded by the most recent
   plan step. If the model's SQL, its inputs' declared facts, or anything else that feeds the plan
   has changed since — so the freshly derived plan's hash no longer matches the recorded one —
   `--apply` refuses and prints the new plan instead. Approval is therefore always approval of the
   exact statements that will run, never of a stale description.
-- **Resume.** An interrupted `--apply` resumes on re-invocation: the frontier records which
-  regions each affected column group has caught up (§"Frontier semantics"), and re-applying the
-  same approved plan continues from there.
+- **Resume.** Resume is by re-invocation of the same approved plan: identical hash implies
+  identical script, so re-running `--apply` against an unchanged, still-approved plan re-executes
+  it. §"Frontier semantics" describes the region-scoped resume this mechanism is defined against;
+  today's resume is coarser than that (§Known Divergences).
 - **CI mode.** `--json` plus the exit-code contract makes the pending-migration state visible to
-  CI: exit 0 when there is no definition delta or the delta is eclipsed-only; a distinct non-zero
-  exit when a non-trivial migration is derived but unapproved. "The deploy changes what this
-  table means" becomes a checkable pipeline state; formatting-only changes pass silently.
+  CI: exit `0` when there is no definition delta, the delta is eclipsed-only, or the derived plan
+  already matches a previously-approved one; exit `3` when a non-trivial migration is derived but
+  not yet approved, or when `--apply` refuses on a stale or absent approval (`cli.md` §"Exit
+  codes"). "The deploy changes what this table means" becomes a checkable pipeline state;
+  formatting-only changes pass silently.
 
 ### `smelt rebuild`
 
@@ -126,6 +178,7 @@ Catalogued in `diagnostics.md`; semantics owned here.
 | Code | Fires when |
 |---|---|
 | `MaintenanceSkeletonChanged` | A definition delta adds or changes a field in a skeleton position — identity, grouping, dedup, or ordering — so the change alters which rows exist or the model's grain. Refused as an in-place migration; the honest plan is a rebuild (§"Skeleton changes are a new relation"). |
+| `DefinitionDeltaPending` | `smelt run` (without `--full-refresh`) would fold a data delta over a pending, non-eclipsed, unapproved definition delta (§"Detection"). Fix: `smelt migrate <model>` to review, then `--apply`; or run with `--full-refresh`. |
 
 ## Semantics
 
@@ -312,10 +365,18 @@ never to revisit. The plan-and-approve gate is where that conflict is resolved, 
 
 A backfill-in-place group's physical column and its backfilled values are created by the **same
 statement group** as the schema migration adding the column — never a separately-dispatched
-write that could observe the column added but not yet backfilled. On a backend with
-transactional DDL, a group failure leaves neither the column nor the values, and the next apply
-retries the whole group. There is no window in which the deployed schema outruns the column's
-real values.
+write that could observe the column added but not yet backfilled. This holds unconditionally: a
+model that opts out of `ALTER`-based evolution (`schema_evolution: strategy: full_refresh`)
+rebuilds the table under its new definition instead of taking a two-step ADD-then-UPDATE, so
+there is no code path left that dispatches a backfill-in-place `UPDATE` outside a migration's own
+statement group. On a backend with transactional DDL, a group failure leaves neither the column
+nor the values, and the next apply retries the whole group. On a backend without transactional
+DDL, a migration group is made rerun-safe by reconciling its `ADD COLUMN` statements against the
+target's physical columns before executing: a column already physically present (from a prior
+partial application) has its `ADD COLUMN` dropped and its backfill `UPDATE` kept, so a group that
+applied its DDL but failed before backfilling completes on the next apply instead of refusing
+with "column already exists". There is no window in which the deployed schema outruns the
+column's real values.
 
 ### Downstream of a migration
 
@@ -335,8 +396,9 @@ strategy, and the stored-schema format for *declared-schema* changes. This spec 
 migration of a **maintained model's stored data** across a change in its defining SQL. Where
 both apply — an added column on an incremental model is both a schema change and a definition
 delta — the definition-delta path governs, because only it carries the frontier bookkeeping and
-the plan-and-approve gate. (`schema_evolution.md`'s `strategy: full_refresh` escape currently
-bypasses that gate — a recorded divergence, §Known Divergences.)
+the plan-and-approve gate. `schema_evolution.md`'s `strategy: full_refresh` escape does not
+bypass that gate: a definition change against a `full_refresh`-strategy model routes to a
+rebuild under the definition-delta path's own admission, rather than a separate DDL step.
 
 ### What stays data-side
 
@@ -384,8 +446,8 @@ refines the plan-hash decision above rather than introducing a second one.
 (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §7.)
 
 **The skeleton-change diagnostic is one code, not a split add/changed pair.**
-`MaintenanceSkeletonColumnAdded` is renamed to `MaintenanceSkeletonChanged`, covering a
-skeleton-position field that is added or changed alike. Both trigger the identical refusal and
+`MaintenanceSkeletonChanged` covers a skeleton-position field that is added or changed alike,
+rather than carrying separate add and changed codes. Both trigger the identical refusal and
 the identical remediation (a rebuild is the only honest plan — §"Skeleton changes are a new
 relation"), so a split pair would carry two codes for one decision path. This matches how every
 other `Maintenance*` code names the refused condition rather than the trigger that produced it
@@ -404,6 +466,15 @@ verb was rejected: the two operations differ in destructiveness, approval postur
 change was rejected: no per-column technique can make stored rows correspond to a definition
 that changes which rows exist. Refusing with the rebuild named keeps the fail-loud discipline
 (`incremental_models.md` §"Validator, not chooser").
+
+**No `on_column_add` policy knob.** A per-model frontmatter setting choosing what happens when a
+column is added (`backfill` / `leave_null` / `recompute`) was considered and dropped. `smelt
+migrate`'s per-column-group verdict (§"The verdict per column group" — eclipsed, backfill in
+place, re-derive, or skeleton change) already answers "what happens when this column is added"
+case-by-case, derived from the column's own computability rather than declared. A standalone
+knob would be a second, independently-driftable answer to the same question — exactly the
+namespace/identity anti-pattern this spec avoids elsewhere by deriving structure instead of
+declaring it. The question does not reopen: the verdict is the answer.
 
 ## Constraints & Invariants
 
@@ -427,38 +498,14 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **The definition-delta synthesis layer is unwired.** The classification and emission machinery
-  (`crates/smelt-logical/src/backbuild/` — diff factoring, per-group verdicts, the technique
-  catalogue, script assembly) exists and is fully tested, but nothing outside its own crate
-  calls it: no CLI verb reaches it, no plan derivation consumes it. Tracked:
-  `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 2 (no
-  implementation plan yet).
-- **`smelt migrate` does not exist**, and the ranged-rebuild verb ships under the name
-  `smelt backbuild` rather than `smelt rebuild`. The live handling of definition changes is a
-  narrower third mechanism covering **column additions only** (the definition-change trigger in
-  the maintenance driver); a changed column's redefinition falls to a full recompute. Same
-  tracking as above.
-- **The atomicity rule is conditional in practice.** A model whose
-  `schema_evolution: strategy: full_refresh` frontmatter skips the migration gate falls back to
-  a standalone `UPDATE` for backfill-in-place fields — the non-atomic two-step §"The atomicity
-  rule" forbids — and that path is also the only one exercised on a backend without
-  transactional DDL. Neither case has a repair path today. Tracked:
-  `docs/plans/20260809-sensitivity-precision.md`. The
-  `schema_evolution.md` full-refresh escape bypassing the gate is the divergence §"Boundary with
-  `schema_evolution.md`" names; the unification should subsume it, not inherit it.
-- **The conformance harness has no definition-edit step kind yet** — the oracle extension in
-  §"The oracle" is specified ahead of the harness work.
-- **No approval store exists.** The plan-hash persistence §Surface requires, hashing the plan
-  data structure per §Design "The plan hash covers the plan data structure, not only rendered
-  SQL", is unbuilt. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3.
-- **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
-  `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
-  the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's
-  add-only derivation. The rename is a diagnostic-API change and needs its own sweep across
-  sibling specs (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
-  `schema_evolution.md`, `diagnostics.md`) and code. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7.
+- **Resume is approval-marker-based, not frontier-region-scoped**, despite §"Frontier semantics"
+  describing a per-region resume: `--apply` records only whether an execution is in progress for
+  the approved plan as a whole, not which regions each column group has caught up. A partially
+  applied script whose chosen technique is not rerun-safe (the `BackbuildOption::rerun_safe` flag
+  `crates/smelt-logical/src/backbuild/` classifiers already carry) therefore refuses on the next
+  `--apply` rather than resuming — the honest route is a full refresh. Tracked:
+  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 12 ("Per-cell frontier
+  addressing").
 
 ## Future Extensions
 
@@ -484,7 +531,8 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   `crates/smelt-logical/tests/maintenance_tracer_evolution.rs`;
   `crates/smelt-runtime/tests/tracer_evolution.rs`;
   `crates/smelt-cli/tests/targeted_column_backfill.rs`.
-- **User docs**: none yet — the docs-site page for migration lands with the wiring plan.
+- **User docs**: `docs-site/docs/guide/backbuild-synthesis.md` (the migration guide);
+  `docs-site/docs/reference/cli.md` §"smelt migrate".
 - **Plans (history)**: `docs/plans/20260809-sensitivity-precision.md` (atomicity-gap tracking).
 - **Research**: `docs/research/20260802-backbuild-synthesis.md` (the technique catalogue and its
   correctness oracle); `docs/research/20260811-delta-signatures-and-definition-deltas.md` (the

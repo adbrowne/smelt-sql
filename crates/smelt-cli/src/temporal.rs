@@ -8,4 +8,5 @@
 pub use smelt_runtime::windowing::{
     compute_incremental_windows, validate_run_window_against_partition_grid,
     validate_run_window_alignment, EffectiveWindow, IncrementalBatch, IncrementalWindows,
+    PartitionAxis, PartitionPoint,
 };

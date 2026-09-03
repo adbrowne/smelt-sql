@@ -129,11 +129,13 @@ pub async fn dispatch_declared_model_probes(
                 fact: probe.ctx.fact.clone(),
                 probe: probe.ctx.probe_code.clone(),
                 outcome: ProbeRecordOutcome::Skipped,
+                observed: None,
             }),
             ProbeVerdict::Held => records.push(ProbeRecord {
                 fact: probe.ctx.fact.clone(),
                 probe: probe.ctx.probe_code.clone(),
                 outcome: ProbeRecordOutcome::Dispatched,
+                observed: None,
             }),
             ProbeVerdict::Violated { count, sample_keys } => {
                 return Err(BackendError::ExecutionFailed {

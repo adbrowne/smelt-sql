@@ -169,7 +169,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         end: end_val,
         batch_size_days: None,
         per_partition: false,
-        full_refresh: false,
+        full_refresh: args.full_refresh,
         dry_run: false,
         enforce_safety: !args.allow_downgrade,
         allow_column_removal: false,

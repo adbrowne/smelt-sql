@@ -177,6 +177,15 @@ pub struct BackendCapabilities {
     /// synthesised join spelling for a statement-level restructure
     /// (`docs/specs/multi_backend.md` §"Statement-level lowering").
     pub null_safe_equality: NullSafeEqualitySpelling,
+
+    /// Supports the fingerprint sidecar (`_smelt_fingerprint_sidecar`) that
+    /// synthesizes an exact changed-key delta for a `mutable_snapshot`
+    /// external source with no native change feed
+    /// (`docs/specs/sources.md` §"The fingerprint sidecar"). A backend
+    /// without it keeps the widened-scan recompute for a mutable external
+    /// dimension — the gap is declared, never a silent narrowing.
+    /// `true` for DuckDB alone today.
+    pub supports_fingerprint_sidecar: bool,
 }
 
 impl BackendCapabilities {
@@ -210,6 +219,7 @@ impl BackendCapabilities {
             // The only backend accepting `* REPLACE` / `* EXCLUDE` / `* RENAME`.
             supports_pipe_set_drop_rename: true,
             null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
+            supports_fingerprint_sidecar: true,
         }
     }
 
@@ -251,6 +261,7 @@ impl BackendCapabilities {
             dialect: SqlDialect::SparkSQL,
             supports_pipe_set_drop_rename: false,
             null_safe_equality: NullSafeEqualitySpelling::Spaceship,
+            supports_fingerprint_sidecar: false,
         }
     }
 
@@ -285,6 +296,7 @@ impl BackendCapabilities {
             dialect: SqlDialect::SparkSQL,
             supports_pipe_set_drop_rename: false,
             null_safe_equality: NullSafeEqualitySpelling::Spaceship,
+            supports_fingerprint_sidecar: false,
         }
     }
 
@@ -343,6 +355,7 @@ impl BackendCapabilities {
             dialect: SqlDialect::BigQuery,
             supports_pipe_set_drop_rename: false,
             null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
+            supports_fingerprint_sidecar: false,
         }
     }
 
@@ -376,6 +389,7 @@ impl BackendCapabilities {
             dialect: SqlDialect::PostgreSQL,
             supports_pipe_set_drop_rename: false,
             null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
+            supports_fingerprint_sidecar: false,
         }
     }
 }

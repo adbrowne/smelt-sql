@@ -64,6 +64,9 @@ pub fn ingest_loaded_workspace(db: &mut Database, loaded: &LoadedWorkspace) -> I
 
     register_loader_files_from_disk(db, &loaded.project_root);
 
+    let effective_target = loaded.config.target.as_deref().unwrap_or("dev");
+    register_deployed_schemas_from_disk(db, &loaded.project_root, effective_target);
+
     IngestedProject {
         project,
         source_files,
@@ -118,6 +121,52 @@ pub fn register_loader_files_from_disk(db: &mut Database, project_root: &Path) {
             Err(_) => continue,
         };
         db.set_loader_file(Arc::from(rel.as_str()), Arc::from(text.as_str()), true);
+    }
+}
+
+/// Register every model's deployed-schema snapshot found in
+/// `.smelt/targets/<target>/schemas/*.json` as a `DeployedSchemaInput`
+/// (`docs/specs/definition_deltas.md` §"Detection" — the deployed-schema
+/// snapshot is a world fact both the LSP and the CLI register at workspace
+/// load).
+///
+/// Reads via `smelt_state::FileStore::{list_deployed_model_names,
+/// load_schema}` rather than walking `.smelt/` directly, so this stays in
+/// lockstep with any future change to the on-disk layout. Mirrors the
+/// loader-file precedent above: an unreadable/unparseable snapshot is
+/// skipped with a `tracing::warn!` rather than failing workspace load — a
+/// stale or corrupt `.smelt/` snapshot must never take down the LSP or the
+/// CLI's diagnostic path. A project with no `.smelt/` directory at all (the
+/// common case — nothing has been deployed yet) is a silent no-op:
+/// `list_deployed_model_names` already returns empty rather than erroring.
+pub fn register_deployed_schemas_from_disk(db: &mut Database, project_root: &Path, target: &str) {
+    let store = smelt_state::file_store::FileStore::new(project_root, target);
+    for model_name in store.list_deployed_model_names() {
+        let schema = match store.load_schema(&model_name) {
+            Ok(Some(schema)) => schema,
+            Ok(None) => continue,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to read deployed schema for '{model_name}' in {}: {err}",
+                    project_root.display()
+                );
+                continue;
+            }
+        };
+        let columns: Vec<Arc<str>> = schema
+            .columns
+            .iter()
+            .map(|c| Arc::from(c.name.as_str()))
+            .collect();
+        let model_sql: Option<Arc<str>> = schema.model_sql.as_deref().map(Arc::from);
+        let partition_column: Option<Arc<str>> = schema.partition_column.as_deref().map(Arc::from);
+        db.set_deployed_schema(
+            Arc::from(model_name.as_str()),
+            project_root.to_path_buf(),
+            columns,
+            model_sql,
+            partition_column,
+        );
     }
 }
 

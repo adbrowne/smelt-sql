@@ -16,11 +16,11 @@ use smelt_logical::maintenance::emit::StatementGroup;
 
 /// Which chunk of a chunked range a [`StatementGroup`] belongs to, when the
 /// batch-safety classification (or an explicit `--batch-size`/`--per-partition`)
-/// splits a run/backbuild range into more than one window. `index` is 0-based;
+/// splits a run/rebuild range into more than one window. `index` is 0-based;
 /// `total` is the count of chunks for this model; `start`/`end` are the
 /// `[start, end)` window this chunk covers, formatted as `YYYY-MM-DD`. A
 /// single-chunk range still carries a `ChunkInfo` with `total == 1` — consumers
-/// decide whether to render a boundary line (`smelt backbuild --dry-run` prints
+/// decide whether to render a boundary line (`smelt rebuild --dry-run` prints
 /// one only when `total > 1`, `docs/specs/cli.md` §"`--dry-run` prints the
 /// maintenance statements").
 #[derive(Debug, Clone)]
@@ -81,7 +81,7 @@ pub trait RunReporter: Send + Sync {
     /// dry-run), for every maintained (non-`full`) technique this runtime lowers
     /// to a `StatementGroup`. `chunk` names which window of a chunked range this
     /// group covers (`None` when the technique is not region-chunked, e.g. a
-    /// keyed fold). Default: no-op; `smelt run`/`smelt backbuild --dry-run` and
+    /// keyed fold). Default: no-op; `smelt run`/`smelt rebuild --dry-run` and
     /// statement-parity tests are the consumers.
     fn maintenance_statements(
         &self,
@@ -141,6 +141,25 @@ pub trait RunReporter: Send + Sync {
         _attempt: u32,
         _retry_max: u32,
         _error: &str,
+    ) {
+    }
+
+    /// A state structure a maintained model's run would normally write was
+    /// skipped because the backend offers no substrate for it — never a
+    /// silent omission (`docs/specs/incremental_shapes.md` §"The
+    /// transactional frontier write (merge ledger)": "the omission is
+    /// reported as a named fact on the run's reporter channel"). `structure`
+    /// names the skipped structure (e.g. `"merge ledger"`); `dialect` is the
+    /// backend dialect that lacks it; `consequence` is a short human-readable
+    /// description of what the skip means for this run. Default: no-op;
+    /// `smelt run` verbose output and reporter tests are the consumers.
+    fn state_structure_unavailable(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        _structure: &str,
+        _dialect: &str,
+        _consequence: &str,
     ) {
     }
 }

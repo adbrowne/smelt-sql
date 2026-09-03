@@ -89,7 +89,7 @@ impl RunReporter for CliReporter {
         // `--dry-run` prints the maintenance statements this invocation would
         // execute (`docs/specs/cli.md` §"`--dry-run` prints the maintenance
         // statements"). A real run does not re-print them — its progress is the
-        // `batch_completed`/`model_completed` summary. A backbuild whose range
+        // `batch_completed`/`model_completed` summary. A rebuild whose range
         // was split into chunks introduces each chunk's block with a boundary
         // line naming its `[start, end)` window and position.
         if !self.dry_run {
@@ -132,6 +132,26 @@ impl RunReporter for CliReporter {
 
     fn run_cancelled(&self, _run_id: &str) {
         eprintln!("smelt: run cancelled");
+    }
+
+    fn state_structure_unavailable(
+        &self,
+        _run_id: &str,
+        model: &str,
+        structure: &str,
+        dialect: &str,
+        consequence: &str,
+    ) {
+        tracing::warn!(
+            model,
+            structure,
+            dialect,
+            "{} skipped for model '{}' on {} — {}",
+            structure,
+            model,
+            dialect,
+            consequence
+        );
     }
 }
 

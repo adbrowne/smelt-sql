@@ -16,6 +16,7 @@
 
 #![allow(dead_code)]
 
+use arrow::array::Array;
 use chrono::NaiveDate;
 use duckdb::Connection;
 use proptest::prelude::*;
@@ -24,19 +25,48 @@ use crate::recipe::{arb_payload_value, ModelEdit, ModelRecipe, SourceRecipe};
 
 /// One row of the `events`-shaped source every Phase 1/2 recipe stages —
 /// integer-valued `val` (design §5's numeric-payload discipline), unlike
-/// `run_schedule::EventRow`'s legacy `f64`.
+/// `run_schedule::EventRow`'s legacy `f64`. `val` is nullable
+/// (`Option<i64>`) so the once-write family's NULL-preservation obligation
+/// (`incremental_shapes.md` §"The column-family catalogue") can be staged
+/// through the pool; every other combiner family's own generator keeps
+/// drawing `Some(..)` (`arb_payload_value`, unchanged).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenRow {
     pub d: NaiveDate,
     pub id: i64,
-    pub val: i64,
+    pub val: Option<i64>,
 }
 
 impl GenRow {
+    /// Construct a row with a non-NULL payload — the common case every
+    /// existing call site used before `val` became nullable.
+    pub fn new(d: NaiveDate, id: i64, val: i64) -> Self {
+        GenRow {
+            d,
+            id,
+            val: Some(val),
+        }
+    }
+
+    /// Construct a row with a NULL payload.
+    pub fn null(d: NaiveDate, id: i64) -> Self {
+        GenRow { d, id, val: None }
+    }
+
     /// The row's event-time value — the field [`crate::s_tracker::STracker`]'s
     /// window filter reads.
     pub fn event_time(&self) -> NaiveDate {
         self.d
+    }
+
+    /// Render `val` for SQL: `NULL` for `None`, the bare integer literal
+    /// otherwise — the single seam every insert/oracle site funnels through
+    /// so a NULL payload is never silently coerced to a sentinel value.
+    pub fn val_sql(&self) -> String {
+        match self.val {
+            Some(v) => v.to_string(),
+            None => "NULL".to_string(),
+        }
     }
 }
 
@@ -100,13 +130,29 @@ pub enum ConformanceStep {
     /// invalidates the interval store's coverage bookkeeping for this
     /// model — the run pipeline itself always uses the CURRENT on-disk SQL
     /// regardless, so a full DELETE+INSERT recompute of whichever window a
-    /// later step names always reflects the rewritten body. This is
-    /// deliberately NOT the spec's `SkeletonAdd`/`PureBackfill`/
-    /// `UpstreamRederive` definition-change classification
-    /// (`definition_deltas.md` §"The verdict per column group") — that
-    /// classification is unbuilt (no `derive_model_maintenance_plan` caller
-    /// reads a prior definition to classify an added column against it).
+    /// later step names always reflects the rewritten body. `RewriteModel`
+    /// asserts this pre-migrate contract only ("whatever's on disk compiles
+    /// and runs on the next ordinary run step") — it never routes through
+    /// `smelt migrate`'s own derive→classify→apply-or-refuse machinery.
+    /// [`ConformanceStep::MigrateModel`] is its migrated counterpart: the
+    /// same rewrite, but staged through the shipped backbuild classification
+    /// (`docs/specs/definition_deltas.md` §"The verdict per column group").
     RewriteModel { edit: ModelEdit },
+    /// A definition-change step routed through the *shipped* `smelt
+    /// migrate` derive→apply path (`smelt_logical::backbuild`, consumed via
+    /// `smelt_runtime::definition_delta::derive_plan` +
+    /// [`crate::migrate_step::run_migrate_step`]) — the migrated counterpart
+    /// of [`ConformanceStep::RewriteModel`]
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/05-plan.md`):
+    /// rewrite `models/<name>.sql` on disk with `edit` applied, derive the
+    /// migration plan against the model's last-deployed definition, and
+    /// either execute the derived in-place statements (when the plan admits
+    /// one) or fall back to an ordinary full-refresh run (when it does
+    /// not) — never re-deriving admission, only executing what the shared
+    /// backbuild derivation already classified. Unlike `RewriteModel`, the
+    /// new-definition oracle must hold IMMEDIATELY after this step, with no
+    /// intervening catch-up run.
+    MigrateModel { edit: ModelEdit },
 }
 
 /// Whether every window in `schedule` is mutually independent under
@@ -208,7 +254,7 @@ fn build_schedule(
                 let row = GenRow {
                     d: start,
                     id: next_id,
-                    val: *val,
+                    val: Some(*val),
                 };
                 next_id += 1;
                 row
@@ -222,7 +268,111 @@ fn build_schedule(
             let late_row = GenRow {
                 d: start,
                 id: next_id,
-                val: 7,
+                val: Some(7),
+            };
+            next_id += 1;
+            steps.push(ConformanceStep::AppendLateRow(late_row));
+            late_windows.push(windows[i]);
+        }
+    }
+
+    // Catch-up: re-run every window that received a late row, so a settled
+    // point always exists (design §5).
+    for (start, end) in late_windows {
+        steps.push(ConformanceStep::RunWindow {
+            start,
+            end,
+            rows: Vec::new(),
+        });
+    }
+
+    ConformanceSchedule(steps)
+}
+
+/// [`arb_schedule_for`] with a [`ConformanceStep::MigrateModel`] step
+/// inserted after the FIRST window's `RunWindow` step
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/05-plan.md`
+/// task 4): the migration edit is drawn from `recipe.evolution`, which
+/// callers must have already restricted to non-empty (e.g. filtering
+/// `RecipePool::partition_append_only()` recipes on
+/// `!recipe.evolution.is_empty()`) — panics loudly on an empty `evolution`
+/// rather than silently generating a schedule with no migration step.
+/// Deliberately independent of [`arb_schedule_for`]/`build_schedule` (never
+/// touched by this function) so every existing pool consuming
+/// `arb_schedule_for`, including the Spark/BigQuery twins, keeps generating
+/// byte-identical schedules.
+pub fn arb_schedule_with_definition_edit(
+    recipe: &ModelRecipe,
+) -> impl Strategy<Value = ConformanceSchedule> {
+    assert!(
+        !recipe.evolution.is_empty(),
+        "arb_schedule_with_definition_edit requires a recipe with a non-empty evolution: \
+         {recipe:?}"
+    );
+    let base = base_date();
+    let evolution = recipe.evolution.clone();
+    (2_usize..=3).prop_flat_map(move |n_windows| {
+        let evolution = evolution.clone();
+        (
+            proptest::collection::vec(
+                proptest::collection::vec(arb_payload_value(), 1..=2),
+                n_windows,
+            ),
+            proptest::collection::vec(any::<bool>(), n_windows),
+            proptest::sample::select(evolution),
+        )
+            .prop_map(move |(window_vals, gets_late, edit)| {
+                build_schedule_with_definition_edit(base, &window_vals, &gets_late, edit)
+            })
+    })
+}
+
+/// [`build_schedule`], with a [`ConformanceStep::MigrateModel { edit }`]
+/// step inserted immediately after the FIRST window's `RunWindow` step — the
+/// remaining windows (2nd, optionally 3rd) run as ordinary `RunWindow` steps
+/// under the migrated definition, so equivalence is checked both
+/// immediately after the migration and after subsequent windowed runs.
+fn build_schedule_with_definition_edit(
+    base: NaiveDate,
+    window_vals: &[Vec<i64>],
+    gets_late: &[bool],
+    edit: ModelEdit,
+) -> ConformanceSchedule {
+    let mut steps = Vec::new();
+    let mut next_id = 1_i64;
+    let mut late_windows: Vec<(NaiveDate, NaiveDate)> = Vec::new();
+    let mut windows = Vec::new();
+
+    for (i, vals) in window_vals.iter().enumerate() {
+        let start = base + chrono::Duration::days(i as i64);
+        let end = start + chrono::Duration::days(1);
+        windows.push((start, end));
+
+        let rows = vals
+            .iter()
+            .map(|val| {
+                let row = GenRow {
+                    d: start,
+                    id: next_id,
+                    val: Some(*val),
+                };
+                next_id += 1;
+                row
+            })
+            .collect();
+        steps.push(ConformanceStep::RunWindow { start, end, rows });
+
+        if i == 0 {
+            steps.push(ConformanceStep::MigrateModel { edit });
+        }
+    }
+
+    for (i, &(start, _end)) in windows.iter().enumerate() {
+        if gets_late.get(i).copied().unwrap_or(false) {
+            let late_row = GenRow {
+                d: start,
+                id: next_id,
+                val: Some(7),
             };
             next_id += 1;
             steps.push(ConformanceStep::AppendLateRow(late_row));
@@ -314,7 +464,7 @@ fn build_mixed_schedule(
                 let row = GenRow {
                     d: start,
                     id: next_id,
-                    val: *val,
+                    val: Some(*val),
                 };
                 first_id.get_or_insert(next_id);
                 next_id += 1;
@@ -419,7 +569,7 @@ pub fn read_source_snapshot(conn: &Connection, source: &SourceRecipe) -> Vec<Gen
         .expect("prepare source snapshot query");
     stmt.query_map([], |row| {
         let d_text: String = row.get(0)?;
-        Ok((d_text, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        Ok((d_text, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?))
     })
     .expect("query source snapshot")
     .collect::<Result<Vec<_>, _>>()
@@ -484,7 +634,11 @@ pub async fn read_source_snapshot_via_backend(
                     anyhow::anyhow!("parse snapshot date {:?}: {e}", d_col.value(i))
                 })?,
                 id: id_col.value(i),
-                val: val_col.value(i),
+                val: if val_col.is_null(i) {
+                    None
+                } else {
+                    Some(val_col.value(i))
+                },
             });
         }
     }
@@ -537,7 +691,7 @@ pub fn boundary_rows_for(
         let row = GenRow {
             d,
             id: *next_id,
-            val,
+            val: Some(val),
         };
         *next_id += 1;
         row
@@ -584,6 +738,19 @@ mod tests {
     use proptest::strategy::{Strategy, ValueTree};
     use proptest::test_runner::TestRunner;
 
+    /// `gen_row_null_payload_renders_sql_null`
+    /// (`docs/outcomes/20260815-keyed-grain-residue/phases/05-plan.md` test
+    /// 1): [`GenRow::val_sql`] yields `NULL` for `None` and the bare integer
+    /// literal otherwise — the one rendering seam every insert/oracle site
+    /// funnels through.
+    #[test]
+    fn gen_row_null_payload_renders_sql_null() {
+        let d = base_date();
+        assert_eq!(GenRow::null(d, 1).val_sql(), "NULL");
+        assert_eq!(GenRow::new(d, 1, 42).val_sql(), "42");
+        assert_eq!(GenRow::new(d, 1, -7).val_sql(), "-7");
+    }
+
     /// Every generated schedule contains at least one `RunWindow` step, and
     /// every `AppendLateRow`'s window is re-run afterward (a self-check on
     /// the generator itself — the gate's driver relies on this invariant).
@@ -610,11 +777,13 @@ mod tests {
                     // Phase 6/9 hazard steps never appear in `arb_schedule_for`'s
                     // own generated output (see that fn's doc comment) — this
                     // self-check is scoped to the generator, not hand-written
-                    // schedules.
+                    // schedules. `MigrateModel` is `arb_schedule_with_definition_edit`'s
+                    // own step kind, not `arb_schedule_for`'s.
                     ConformanceStep::RerunWindow { .. }
                     | ConformanceStep::FullRefreshRun
                     | ConformanceStep::BackfillRegion { .. }
-                    | ConformanceStep::RewriteModel { .. } => {}
+                    | ConformanceStep::RewriteModel { .. }
+                    | ConformanceStep::MigrateModel { .. } => {}
                 }
             }
             assert!(
@@ -735,6 +904,7 @@ mod tests {
             column: "d".to_string(),
             before: smelt_logical::analysis::source_bounds::Seconds(2 * 86_400),
             after: smelt_logical::analysis::source_bounds::Seconds(86_400),
+            write_footprint: None,
         };
         let window = (
             NaiveDate::from_ymd_opt(2024, 1, 5).expect("valid date"),

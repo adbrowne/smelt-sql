@@ -110,7 +110,12 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
     // Function bodies so batch-safety classification sees lookback declared
     // inside `smelt.define` bodies (parity with the execution path).
     let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
-    let mut output = build_explain_output(&graph, &config, &fn_bodies, &origins)?;
+    // `--period`, when supplied, resolves each incremental model's per-source
+    // `scan_start`/`scan_end` in `--json` output (`docs/specs/
+    // incremental_shapes.md` §"Observing the per-source clamp") — the same
+    // parse `--show-sql`'s literal rendering uses.
+    let period = args.period.as_deref().map(parse_period).transpose()?;
+    let mut output = build_explain_output(&graph, &config, &fn_bodies, &origins, period.as_ref())?;
     // Narrow the output's execution_order to the filtered set so the
     // human-readable and JSON output reflects --select.
     output.execution_order = execution_order.clone();
@@ -145,7 +150,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
             .unwrap_or_default();
         opt_graph.add_model(ModelInfo {
             name: model.name.clone(),
-            sql: model.content.clone(),
+            sql: smelt_runtime::expand_function_calls(&model.content, &fn_bodies),
             refs: model
                 .refs
                 .iter()
@@ -508,6 +513,33 @@ async fn explain_maintenance_plan(
         .map(backend_type_to_maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
 
+    // Definition-delta status (`docs/specs/definition_deltas.md`
+    // §"Detection"): read from the same single-owner derivation the run
+    // gate and `smelt migrate` use, via `FileStore`'s local target state —
+    // never a live backend connection, matching this command's offline
+    // posture. Only a `Pending` verdict is reported; every other status is
+    // unremarkable.
+    let definition_delta_file_store =
+        smelt_state::file_store::FileStore::new(&project_dir, &target);
+    let pending_definition_delta = match smelt_runtime::definition_delta::detect_definition_delta(
+        &definition_delta_file_store,
+        model,
+        &models,
+        sources.as_ref(),
+        &db,
+    ) {
+        Ok(smelt_runtime::definition_delta::DefinitionDeltaStatus::Pending {
+            verdict,
+            plan_hash,
+            ..
+        }) => Some((verdict, plan_hash)),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!("Definition-delta detection failed for '{canonical}': {e}. Omitting.");
+            None
+        }
+    };
+
     // The declared-fact probe plan (`docs/specs/model_properties.md`
     // §"Probe obligation"): built pure/offline by the shared
     // `smelt_runtime::probe_plan` owner, never re-derived here
@@ -539,6 +571,7 @@ async fn explain_maintenance_plan(
         &probe_entries,
         config.probes.cadence,
         &edge_delta_types,
+        pending_definition_delta.as_ref(),
     )
     .with_context(|| {
         format!(
@@ -692,6 +725,7 @@ async fn explain_maintenance_plan(
             dialect,
             &source_timeseries,
             &unique_key,
+            &result.column_groups,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("Failed to build model diagnostics for `{}`", canonical))?
@@ -727,10 +761,13 @@ async fn explain_maintenance_plan(
             &diagnostics.cells,
             diagnostics.properties.clone(),
             result.state_columns.clone(),
+            result.execution_postures.clone(),
+            result.is_snapshot_reconcile,
             probe_entries.clone(),
             config.probes.cadence,
             &result.column_groups,
             contract_cfg,
+            pending_definition_delta.as_ref(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
@@ -840,9 +877,17 @@ fn build_derived_window(
     // `build_explain_output`/`build_model_plans` already do.
     let expanded_sql = smelt_runtime::expand_function_calls(&model.content, fn_bodies);
 
+    // `smelt explain` has no Salsa handle to resolve the model's schema, so
+    // it can't read `partition_column`'s type the way a live run does
+    // (`execute.rs::resolve_partition_axes`) — it infers the axis from the
+    // `--period` literal's own form instead, the same fail-open posture
+    // `build_model_plans` already uses when a schema read is unavailable
+    // (`smelt_runtime::windowing::axis_implied_by_literal_form`).
+    let axis = smelt_runtime::windowing::axis_implied_by_literal_form(Some(start));
     let full_range = smelt_runtime::TimeRange {
         start: start.clone(),
         end: end.clone(),
+        axis,
     };
 
     let windows = smelt_runtime::windowing::compute_incremental_windows(
@@ -852,6 +897,7 @@ fn build_derived_window(
         &dep_ts,
         data_latency_days,
         &full_range,
+        axis,
         None,
         false,
     )
@@ -869,22 +915,34 @@ fn build_derived_window(
     let scan_bounds = smelt_runtime::build_model_source_bounds(model, source_timeseries, canonical);
 
     Ok(Some(smelt_cli::explain::DerivedWindow {
-        output_start: output_start.format("%Y-%m-%d").to_string(),
-        output_end: output_end.format("%Y-%m-%d").to_string(),
+        output_start: output_start.to_string(),
+        output_end: output_end.to_string(),
         scan_bounds,
         skew: windows.skew,
         run_start: chrono::Utc::now(),
+        axis,
     }))
 }
 
-/// Parse `--period <start>..<end>` (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive)
-/// into raw literal date strings. A named CLI error (never a panic) on a
-/// malformed range — mirrors `smelt_runtime::propagation::parse_landed_range`'s
-/// grammar and error shape for the sibling `--landed` flag.
+/// Parse `--period <start>..<end>` — either `YYYY-MM-DD..YYYY-MM-DD` (a
+/// calendar-axis model) or `<int>..<int>` (an integer-axis model,
+/// `docs/specs/incremental_shapes.md` §"The partition grain" rule 8a —
+/// "`--period` bounds are read in the same domain"), end exclusive. A named
+/// CLI error (never a panic) on a malformed range — mirrors
+/// `smelt_runtime::propagation::parse_landed_range`'s grammar and error
+/// shape for the sibling `--landed` flag.
 fn parse_period(value: &str) -> Result<(String, String)> {
     let (start, end) = value
         .split_once("..")
         .with_context(|| format!("malformed --period range '{value}': expected <start>..<end>"))?;
+
+    if let (Ok(start_i), Ok(end_i)) = (start.parse::<i64>(), end.parse::<i64>()) {
+        if end_i < start_i {
+            anyhow::bail!("malformed --period range '{value}': end is before start");
+        }
+        return Ok((start_i.to_string(), end_i.to_string()));
+    }
+
     let start_date = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .with_context(|| format!("malformed --period range '{value}': invalid start date"))?;
     let end_date = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")

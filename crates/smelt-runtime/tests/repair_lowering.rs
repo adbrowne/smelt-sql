@@ -413,6 +413,7 @@ fn resolve_live_per_group_recompute_cell_fails_loud_on_whole_row_identity() {
             column: "order_date".to_string(),
             before: Seconds::days(1),
             after: Seconds::ZERO,
+            write_footprint: None,
         }],
         ledger_catch_up: false,
         row_identity: RowIdentityVerdict {
@@ -446,6 +447,7 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
         column: "order_date".to_string(),
         before: Seconds::days(1),
         after: Seconds::ZERO,
+        write_footprint: None,
     };
 
     // The affected-key relation is a single canonical `delta_key` column
@@ -1380,4 +1382,115 @@ async fn except_all_count(
         .downcast_ref::<Int64Array>()
         .expect("count column");
     col.value(0)
+}
+
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "keyless-recompute-test",
+        model_name: "events_region",
+        reporter: &smelt_runtime::NoOpReporter,
+    }
+}
+
+/// Phase 27c (`docs/outcomes/20260815-definition-delta-migrate/
+/// phases/27c-plan.md`): the keyless (whole-row) staged-candidate
+/// conditional write against a real DuckDB backend — an unchanged candidate
+/// must leave the target's stored rows untouched (zero deleted/inserted),
+/// asserted via a frozen BEFORE snapshot rather than a rowid/`ctid`-style
+/// observable DuckDB does not expose.
+#[tokio::test]
+async fn keyless_recompute_skips_the_write_when_the_candidate_matches_stored_state() {
+    use smelt_backend::Backend;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.events_region (event_id INTEGER, tag VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.events_region VALUES (1, 'a'), (2, 'b')")
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql("CREATE TABLE main.events_region_before AS SELECT * FROM main.events_region")
+        .await
+        .expect("snapshot before");
+
+    // Byte-identical to what is already stored — the diff sentinel must be
+    // empty, so neither the DELETE nor the INSERT touches a row.
+    let candidate_select = "SELECT event_id, tag FROM main.events_region";
+    let result = smelt_runtime::maintenance_driver::execute_staged_keyless_recompute(
+        &backend,
+        "main",
+        "events_region",
+        candidate_select,
+        &no_retry_policy(),
+    )
+    .await
+    .expect("keyless recompute must succeed");
+    assert_eq!(
+        result.row_count, 2,
+        "the unchanged region's stored row count is unaffected"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT * FROM main.events_region",
+            "SELECT * FROM main.events_region_before"
+        )
+        .await,
+        "an unchanged candidate must leave the stored state exactly as the BEFORE snapshot \
+         recorded it"
+    );
+}
+
+/// The equivalence leg: a genuinely changed candidate must rewrite the
+/// region so stored state equals the candidate afterwards.
+#[tokio::test]
+async fn keyless_recompute_rewrites_the_region_when_the_candidate_differs() {
+    use smelt_backend::Backend;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.events_region (event_id INTEGER, tag VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.events_region VALUES (1, 'a'), (2, 'b')")
+        .await
+        .expect("seed target table");
+
+    // The candidate drops event 2 and changes event 1's tag — a genuinely
+    // different whole-row multiset.
+    let candidate_select = "SELECT * FROM (VALUES (1, 'z')) AS t(event_id, tag)";
+    smelt_runtime::maintenance_driver::execute_staged_keyless_recompute(
+        &backend,
+        "main",
+        "events_region",
+        candidate_select,
+        &no_retry_policy(),
+    )
+    .await
+    .expect("keyless recompute must succeed");
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT * FROM main.events_region",
+            candidate_select
+        )
+        .await,
+        "a changed candidate must leave stored state equal to the candidate"
+    );
 }

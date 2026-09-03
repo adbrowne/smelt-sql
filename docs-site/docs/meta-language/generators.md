@@ -22,7 +22,7 @@ smelt.config.load_yaml('cohorts.yaml', List<{ name: Text, region: Text, min_reve
 
 The file body is a meta-language expression of type `List<ModelDef>`. Each `ModelDef` value in the list becomes a model in the workspace.
 
-## ModelDef — the closed five-field record
+## ModelDef — the closed seven-field record
 
 `ModelDef` is a built-in closed record type. It is user-constructible only inside a generator file body.
 
@@ -33,8 +33,10 @@ The file body is a meta-language expression of type `List<ModelDef>`. Each `Mode
 | `materialization` | `Text` | No | `"view"` |
 | `tags` | `List<Text>` | No | `[]` |
 | `description` | `Text` | No | `""` |
+| `timeseries` | `Record{event_time_column: Text, partition_column: Text, granularity: Text, week_start: Text?, assert_monotonic: Bool?}` | No | inherits the frontmatter `timeseries:` block |
+| `safety_overrides` | `Record{allow_window_functions: Bool?, allow_having: Bool?, allow_limit: Bool?, allow_subqueries: Bool?, allow_nondeterministic: Bool?, allow_distinct: Bool?}` | No | inherits the frontmatter `safety_overrides:` block |
 
-The `name` field must be a path-safe identifier (ASCII letters, digits, underscores only; must not start with a digit).
+The `name` field must be a path-safe identifier (ASCII letters, digits, underscores only; must not start with a digit). `timeseries` and `safety_overrides` are honoured only when `materialization` is `'incremental'`; present on any other materialization, they emit `ModelDefOverrideRequiresIncremental`.
 
 ## Emitted model paths
 
@@ -70,7 +72,7 @@ A generator file's frontmatter is inherited by all emitted models:
 
 - `tags`: frontmatter tags are merged with per-`ModelDef` tags.
 - `materialization`: the frontmatter value is the default; each `ModelDef` may override it via the `materialization` field.
-- `incremental:` block: shared by all incremental emissions from the same generator. Per-`ModelDef` overrides are not supported in v1.
+- `timeseries:` / `safety_overrides:` blocks: inherited by every incremental emission from the same generator by default. A `ModelDef` may replace either block in full for its own emission via the `timeseries` / `safety_overrides` fields (whole-block replacement, not a key-level merge) — see [Per-cohort overrides](#per-cohort-overrides-distinct-event-time-columns) below.
 
 ## Name uniqueness and collision rules
 
@@ -149,6 +151,41 @@ SELECT * FROM smelt.cohorts.eu
 
 The full working example is in `examples/per_cohort_union/`.
 
+## Per-cohort overrides: distinct event-time columns
+
+A generator's frontmatter `timeseries:` block applies file-wide, but a source-per-cohort setup
+sometimes needs a different event-time column per emission. Each `ModelDef` can replace the
+block for its own emission via the `timeseries` field:
+
+```sql
+---
+generates: models
+refresh: incremental
+grain: partition
+---
+[
+  ModelDef {
+    name: 'us_west',
+    body: SELECT * FROM smelt.sources.raw.orders_us,
+    materialization: 'incremental',
+    timeseries: { event_time_column: 'order_ts', partition_column: 'order_ts', granularity: 'day' }
+  },
+  ModelDef {
+    name: 'eu',
+    body: SELECT * FROM smelt.sources.raw.orders_eu,
+    materialization: 'incremental',
+    timeseries: { event_time_column: 'created_at', partition_column: 'created_at', granularity: 'day' }
+  }
+]
+```
+
+`smelt.cohorts.us_west` and `smelt.cohorts.eu` are each partition-grain models with their own
+`event_time_column` — the override replaces the frontmatter's `timeseries:` block in full for
+that emission, so there is no risk of a stale sub-field carrying over. `safety_overrides`
+follows the same whole-block-replacement rule. Both fields require `materialization:
+'incremental'` on the same literal; omitting it (or setting `'view'`/`'table'`) emits
+`ModelDefOverrideRequiresIncremental`.
+
 ## Diagnostic codes
 
 | Code | Trigger |
@@ -163,6 +200,7 @@ The full working example is in `examples/per_cohort_union/`.
 | `ModelDefDuplicateName` | Two `ModelDef`s in the same file share the same `name` |
 | `ModelDefHandAuthoredCollision` | Generator-emitted path collides with a hand-authored model or another generator's emission |
 | `GeneratorBodyForbidsModelReflection` | Generator body calls `smelt.models.with_tag` or `smelt.models.all` |
+| `ModelDefOverrideRequiresIncremental` | `timeseries` or `safety_overrides` field present but `materialization` is not `'incremental'` |
 
 ## See also
 

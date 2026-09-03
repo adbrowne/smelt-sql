@@ -212,3 +212,53 @@ async fn absent_contract_leaves_the_range_untouched() {
         "absent contract must leave the requested start untouched"
     );
 }
+
+const INTEGER_AXIS_PARTITION_MODEL: &str = "---\n\
+     materialization: table\n\
+     refresh: incremental\n\
+     grain: partition\n\
+     timeseries:\n\
+     \x20\x20partition_column: batch_id\n\
+     \x20\x20event_time_column: event_ts\n\
+     \x20\x20granularity: day\n\
+     contract:\n  frozen_horizon: '30 days'\n\
+     ---\n\
+     SELECT CAST(batch_id AS INTEGER) AS batch_id, event_ts, amount FROM (VALUES \
+     (1, TIMESTAMP '2024-01-01 00:00:00', 10), (2, TIMESTAMP '2024-01-02 00:00:00', 20)) \
+     AS t(batch_id, event_ts, amount)";
+
+/// `docs/outcomes/20260815-partition-grain-residue/phases/05b-plan.md` —
+/// `contract.frozen_horizon` has no conversion into partition units on an
+/// integer axis (it is a day count); declaring it on an integer-axis model
+/// is a hard refusal naming the model and the field, not a silent unclamped
+/// pass-through.
+#[tokio::test]
+async fn integer_axis_frozen_horizon_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    let db_path = project_dir.join("run.duckdb");
+    let config = write_project(project_dir, &db_path, INTEGER_AXIS_PARTITION_MODEL);
+
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let reporter = RecordingReporter::default();
+
+    let err = execute_project(
+        "frozen-horizon-integer-axis".to_string(),
+        dry_run_request("1", "3"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &PanicBackendFactory,
+        &reporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("frozen_horizon on an integer partition axis must be refused");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("daily_events") && message.contains("frozen_horizon"),
+        "error must name the model and the field, got: {message}"
+    );
+}

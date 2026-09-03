@@ -132,7 +132,7 @@ def run_smelt(
     cwd_rel: str,
     expect_exit: int,
     fixture_schemas: bool,
-    is_backbuild: bool,
+    is_rebuild: bool,
     workspaces: WorkspaceCache,
 ) -> str:
     """Run the smelt CLI (via `cargo run`, so it always matches the current
@@ -141,7 +141,7 @@ def run_smelt(
     workspace = workspaces.get(cwd_rel, fixture_schemas)
 
     args = list(argv)
-    if is_backbuild:
+    if is_rebuild:
         target_dir = workspace / "target"
         target_dir.mkdir(parents=True, exist_ok=True)
         args = [*args, "--database", str(target_dir / "db.duckdb")]
@@ -365,7 +365,7 @@ def render_include(path_rel: str) -> str:
 
 _DEFAULT_RENDER_BY_SUBCOMMAND = {
     "explain": "cells",
-    "backbuild": "sql",
+    "rebuild": "sql",
     "run": "text",
     "diff": "text",
 }
@@ -398,7 +398,7 @@ def render_generate(rest: str, workspaces: WorkspaceCache) -> tuple[str, str]:
     expect_exit = int(opts.get("expect-exit", 0))
     fixture_schemas = bool(opts.get("fixture-schemas", False))
     subcommand = argv[0]
-    is_backbuild = subcommand == "backbuild"
+    is_rebuild = subcommand == "rebuild"
 
     default_render = _DEFAULT_RENDER_BY_SUBCOMMAND.get(subcommand)
     mode = str(opts.get("render", default_render or ""))
@@ -413,7 +413,7 @@ def render_generate(rest: str, workspaces: WorkspaceCache) -> tuple[str, str]:
         cwd_rel=cwd_rel,
         expect_exit=expect_exit,
         fixture_schemas=fixture_schemas,
-        is_backbuild=is_backbuild,
+        is_rebuild=is_rebuild,
         workspaces=workspaces,
     )
 
@@ -422,7 +422,7 @@ def render_generate(rest: str, workspaces: WorkspaceCache) -> tuple[str, str]:
     if mode == "sql":
         return render_sql(raw), "sql"
     if mode == "skeleton":
-        if is_backbuild:
+        if is_rebuild:
             base = render_sql(raw)
         else:
             base = render_cells(raw, argv, marker)

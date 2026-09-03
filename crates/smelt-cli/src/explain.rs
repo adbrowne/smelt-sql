@@ -5,6 +5,7 @@ use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::sources::SourceInfo;
 use smelt_core::{Granularity, Materialization, ModelOriginKind, PartitionGrainConfig};
+use smelt_logical::backbuild::MigrationVerdict;
 use smelt_logical::maintenance::choice::{resolve_cell_choice, ChosenTechnique};
 use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
@@ -73,6 +74,20 @@ pub enum SourceBoundJson {
         before: String,
         /// ISO-8601 duration.
         after: String,
+        /// The run-relative scan window `[run_start − before, run_end +
+        /// after)`, rendered in the model's own axis domain — resolved via
+        /// the same `smelt_logical::resolve_scan_window` a run's pushdown
+        /// filter uses. `None` when no `--period` was supplied.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scan_start: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scan_end: Option<String>,
+        /// Set instead of `scan_start`/`scan_end` when a concrete `--period`
+        /// was supplied but the margin could not be resolved to a fixed
+        /// value (e.g. a non-uniform month/year offset) — names the reason
+        /// rather than guessing a day count.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scan_unresolved: Option<String>,
     },
     Unbounded,
     NotDerivable,
@@ -271,6 +286,7 @@ pub fn build_maintenance_plan_report(
     probes: &[smelt_runtime::probe_plan::ProbePlanEntry],
     cadence: smelt_core::config::ProbeCadence,
     edge_delta_types: &[(String, smelt_logical::analysis::output_delta::OutputDelta)],
+    pending_definition_delta: Option<&(MigrationVerdict, String)>,
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -278,6 +294,19 @@ pub fn build_maintenance_plan_report(
     let mut out = String::new();
     let _ = writeln!(out, "Maintenance plan: {}", model_name);
     let _ = writeln!(out);
+
+    // Pending definition delta (`docs/specs/definition_deltas.md`
+    // §"Detection"): reported ahead of a run, without deriving or executing
+    // anything beyond the plan derivation itself.
+    if let Some((verdict, plan_hash)) = pending_definition_delta {
+        let _ = writeln!(
+            out,
+            "Definition delta: PENDING (verdict: {:?}, plan hash {}) — review with `smelt \
+             migrate {}`, then `--apply`, or run with `--full-refresh`.",
+            verdict, plan_hash, model_name
+        );
+        let _ = writeln!(out);
+    }
 
     // Whole-model collapse: a column's provenance couldn't be resolved and
     // the derivation fell back to the whole-model group. `degenerate` is the
@@ -454,33 +483,21 @@ pub fn build_maintenance_plan_report(
                      falls back to unconditional rewrite, nothing to record)"
                 );
             }
-            // Write variant (`docs/plans/20260715-composed-axes-conditional-
-            // maintenance.md` Phase G1; `incremental_models.md` §"Windowed
-            // maintenance and the horizon" category 2, §"Interchangeability
-            // and choice"): which matched-arm shape the override ladder's
+            // Write variant (`incremental_models.md` §"Windowed maintenance
+            // and the horizon" category 2, §"Interchangeability and
+            // choice"): which matched-arm shape the override ladder's
             // conditional-variant dimension resolves for a suppressible
             // cell (`Technique::ColumnScopedMerge` or `Technique::KeyedFold`),
             // and why — pin / preference / default / first-build, mirroring
-            // `choice::VariantReason`. Like the observed-delta recording
-            // line above, this reporting path has no `sql`/`JoinContext`
-            // threaded to redo the P3 comparability walk, so `facts.
-            // has_identity` (the P2 half only) is the best-effort proxy for
-            // "the conditional variant is admitted" in the branches below
-            // that print a preference/pin/default line — the authoritative
-            // check at runtime is `choice::resolve_write_suppression` folded
-            // through `choice::resolve_write_variant`.
-            //
-            // The one case that IS fully decidable without a P3 walk is
-            // `!facts.has_identity` (`RowIdentity::WholeRow`):
-            // `resolve_write_suppression` checks row identity first and
-            // short-circuits to `Unconditional` before ever consulting
-            // comparability or the column group, so a `technique: suppress`
-            // pin over a `WholeRow` cell is genuinely, always inadmissible —
-            // this block calls the real resolvers for that decidable case
-            // and propagates the resulting `ChoiceRefusal` as an actual
-            // `explain` error, rather than the silently-wrong success line a
-            // pre-this-fix version printed unconditionally here regardless
-            // of any pin.
+            // `choice::VariantReason`. `result.comparability` (the same
+            // derivation `MaintenancePlanResult::comparability`'s own doc
+            // comment names) is threaded straight into the real
+            // `choice::resolve_write_suppression`/`choice::
+            // resolve_write_variant` calls below — the authoritative P2/P3
+            // proof, not a `facts.has_identity`-only proxy — so a
+            // `technique: suppress` pin over an incomparable compared
+            // column refuses here exactly as it does at runtime, not only
+            // the decidable `WholeRow` (P2) case.
             if matches!(
                 cell.technique,
                 Technique::ColumnScopedMerge | Technique::KeyedFold
@@ -521,32 +538,35 @@ pub fn build_maintenance_plan_report(
 
                 use smelt_core::config::{CellTechnique, TechniquePreference};
 
-                if !facts.has_identity {
-                    // Real (not proxy): a `WholeRow` cell always resolves
-                    // `WriteSuppression::Unconditional` regardless of the
-                    // column group or comparability
-                    // (`resolve_write_suppression`'s own fail-closed first
-                    // check), so calling the real resolvers here with an
-                    // empty compared-column set is exact, not an
-                    // approximation. A hard `technique: suppress` pin over
-                    // this is a genuine `ChoiceRefusal`.
-                    let raw_suppression =
-                        smelt_logical::maintenance::choice::resolve_write_suppression(
-                            &[],
-                            &[],
-                            &cell.row_identity,
-                        );
-                    smelt_logical::maintenance::choice::resolve_write_variant(
-                        &raw_suppression,
-                        &cell.trigger,
-                        cell.ledger_catch_up,
-                        &overrides,
-                    )
-                    .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+                // The real P2/P3 proof (`choice::resolve_write_suppression`)
+                // over this cell's own group columns and the plan's derived
+                // comparability — `WholeRow` cells short-circuit to
+                // `Unconditional` inside this same call (no special-casing
+                // needed here), and an incomparable compared column over a
+                // proven key does too. `resolve_write_variant` folds in the
+                // override ladder and is the single point a hard
+                // `technique: suppress` pin over either failure propagates
+                // as a real `explain` error, never a silently-wrong success
+                // line.
+                let raw_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+                    &group_columns,
+                    &result.comparability,
+                    &cell.row_identity,
+                );
+                smelt_logical::maintenance::choice::resolve_write_variant(
+                    &raw_suppression,
+                    &cell.trigger,
+                    cell.ledger_catch_up,
+                    &overrides,
+                )
+                .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+
+                if let smelt_logical::maintenance::choice::WriteSuppression::Unconditional { why } =
+                    &raw_suppression
+                {
                     let _ = writeln!(
                         out,
-                        "      write variant: unconditional (default — no proven row identity, \
-                         the conditional variant is never admitted for this cell)"
+                        "      write variant: unconditional (not admitted — {why})"
                     );
                 } else if let Some(CellTechnique::Suppress) = overrides.technique {
                     let _ = writeln!(
@@ -641,11 +661,20 @@ pub fn build_maintenance_plan_report(
                 // source's mutation profile, so `find_source_info` (which
                 // only resolves a declared `sources.*` name) is never
                 // consulted for this branch.
-                if cell.key_scope.is_some() {
+                if let Some(scope) = &cell.key_scope {
+                    let route = match scope.discovery {
+                        smelt_logical::maintenance::KeyDiscovery::UpstreamKeyed => {
+                            "keyed at the upstream's own KeyedUpsert key columns"
+                        }
+                        smelt_logical::maintenance::KeyDiscovery::DownstreamGrainOverUpstream => {
+                            "keyed at the downstream's own grain, projected over the upstream \
+                             relation"
+                        }
+                    };
                     let _ = writeln!(
                         out,
                         "      affected-key discovery: group-grain fingerprint-sidecar diff \
-                         over the upstream's own output table"
+                         over the upstream's own output table ({route})"
                     );
                 } else {
                     match trigger_source
@@ -659,13 +688,19 @@ pub fn build_maintenance_plan_report(
                                 false,
                             );
                             let mechanism = match discovery_posture(src_facts.mutation) {
-                                RepairDiscoveryPosture::ClampedScan => {
+                                Some(RepairDiscoveryPosture::ClampedScan) => {
                                     "clamped current-source scan"
                                 }
-                                RepairDiscoveryPosture::SidecarDiff => {
+                                Some(RepairDiscoveryPosture::SidecarDiff) => {
                                     "group-grain fingerprint-sidecar diff (mutable_snapshot, \
                                      obligation 7)"
                                 }
+                                // A repair cell is never admitted over a
+                                // change_feed source (`derive::
+                                // derive_new_data` refuses it upstream), so
+                                // this arm should be unreachable for any
+                                // cell `smelt explain` actually renders.
+                                None => "(no discovery posture — unexpected change_feed source)",
                             };
                             let _ = writeln!(out, "      affected-key discovery: {mechanism}");
                         }
@@ -731,6 +766,49 @@ pub fn build_maintenance_plan_report(
         }
     }
     let _ = writeln!(out);
+
+    // Derived execution postures (`incremental_shapes.md` §"Derived
+    // execution postures", `docs/outcomes/20260815-keyed-grain-residue`
+    // phase 4): read straight off `result.execution_postures` — this
+    // function derives nothing, `smelt_logical::execution_postures` is the
+    // single owner. `None` for a model that never classified as `grain:
+    // key` (nothing to derive postures over); omitted entirely rather than
+    // printed as a false negative.
+    if let Some(postures) = &result.execution_postures {
+        let run_shape = match result.is_snapshot_reconcile {
+            Some(true) => "snapshot-reconcile",
+            Some(false) => "window-forward",
+            None => "n/a",
+        };
+        let _ = writeln!(out, "Execution postures:");
+        let _ = writeln!(out, "  run shape: {run_shape}");
+        let _ = writeln!(
+            out,
+            "  re-run tolerance: {} ({})",
+            if postures.rerun_tolerant.holds {
+                "yes"
+            } else {
+                "no"
+            },
+            postures.rerun_tolerant.reason
+        );
+        let _ = writeln!(
+            out,
+            "  order-independence: {} ({})",
+            if postures.order_independent.holds {
+                "yes"
+            } else {
+                "no"
+            },
+            postures.order_independent.reason
+        );
+        let _ = writeln!(
+            out,
+            "  reprocessing: refused ({})",
+            postures.reprocessing_refused.reason
+        );
+        let _ = writeln!(out);
+    }
 
     // Internal state columns (`incremental_shapes.md` §"Decomposed state
     // (rung 2) in keyed models", `docs/outcomes/20260809-rung2-state-shapes`
@@ -923,6 +1001,10 @@ pub struct DerivedWindow {
     /// run-deterministic calls (`NOW()`, …) to. `--show-sql` has no real run
     /// clock, so this is simply the report's own build time.
     pub run_start: chrono::DateTime<chrono::Utc>,
+    /// The axis `output_start`/`output_end` are rendered in — inferred by
+    /// `commands/explain.rs::build_derived_window` from the `--period`
+    /// literal's own form (no schema handle to resolve it from directly).
+    pub axis: smelt_logical::PartitionAxis,
 }
 
 /// One cell's `--show-sql` statement report: the cell it belongs to
@@ -1065,6 +1147,7 @@ fn build_delete_insert_period_statement_group(
     let run_range = TimeRange {
         start: dw.output_start.clone(),
         end: dw.output_end.clone(),
+        axis: dw.axis,
     };
     let filtered_sql = smelt_runtime::derive_batch_filtered_sql(
         &stripped_sql,
@@ -1081,10 +1164,12 @@ fn build_delete_insert_period_statement_group(
         .compile_with_sql_and_ephemerals(model, schema, &filtered_sql, resolver)
         .map_err(|e| format!("failed to compile model body: {e}"))?;
 
-    let region_used = smelt_logical::maintenance::emit::Region {
-        start: format!("'{}'", dw.output_start.replace('\'', "''")),
-        end: format!("'{}'", dw.output_end.replace('\'', "''")),
-    };
+    let region_used = smelt_logical::maintenance::emit::Region::for_axis(
+        dw.axis,
+        &dw.output_start,
+        &dw.output_end,
+    )
+    .map_err(|e| format!("failed to render the DELETE/INSERT region literal: {e}"))?;
 
     Ok(smelt_logical::maintenance::emit::emit_delete_insert(
         &table_name,
@@ -1157,7 +1242,7 @@ pub fn render_cell_statements_text(statements: &[CellStatements]) -> String {
 }
 
 /// Render one emitted [`StatementGroup`] as the plain-text block both
-/// `smelt explain <model> --show-sql` and `smelt run`/`smelt backbuild
+/// `smelt explain <model> --show-sql` and `smelt run`/`smelt rebuild
 /// --dry-run` print for a maintenance statement: a transactional group is
 /// bracketed by `BEGIN`/`COMMIT` lines to show its atomicity (the backend
 /// supplies the real transaction mechanics at run time), a single-statement
@@ -1367,11 +1452,53 @@ pub struct ExplainMaintenanceJson {
     /// this JSON shape (`docs/specs/cli.md` §Constraints item 5).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub state_columns: Vec<smelt_logical::StateColumnSummary>,
+    /// The model's three derived execution postures
+    /// (`incremental_shapes.md` §"Derived execution postures"), absent for
+    /// a model that never classified as `grain: key` — an append-stable
+    /// addition to this JSON shape (`docs/specs/cli.md` §Constraints item
+    /// 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_postures: Option<ExplainExecutionPosturesJson>,
     /// The model's declared-fact probe set (`docs/specs/model_properties.md`
     /// §"Probe obligation"), empty for a model declaring none — an
     /// append-stable addition to this JSON shape (`docs/specs/cli.md`
     /// §Constraints item 5).
     pub probes: Vec<ExplainProbeJson>,
+    /// A pending, non-eclipsed, unapproved definition delta
+    /// (`docs/specs/definition_deltas.md` §"Detection"), absent when there
+    /// is none — an append-stable addition to this JSON shape
+    /// (`docs/specs/cli.md` §Constraints item 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition_delta: Option<ExplainDefinitionDeltaJson>,
+}
+
+/// A pending definition delta, as reported by `smelt explain --json`
+/// (`docs/specs/definition_deltas.md` §"Detection").
+#[derive(Debug, Serialize)]
+pub struct ExplainDefinitionDeltaJson {
+    pub status: String,
+    pub verdict: String,
+    pub plan_hash: String,
+}
+
+/// One derived execution posture's verdict, as reported by `smelt explain
+/// --json` — mirrors `smelt_logical::PostureVerdict`.
+#[derive(Debug, Serialize)]
+pub struct ExplainPostureVerdictJson {
+    pub holds: bool,
+    pub reason: String,
+}
+
+/// The `execution_postures` object of `smelt explain --json`'s output
+/// (`docs/specs/incremental_shapes.md` §"Derived execution postures"): the
+/// derived run shape plus the three posture verdicts, read verbatim from
+/// `smelt_logical::execution_postures` — never re-derived here.
+#[derive(Debug, Serialize)]
+pub struct ExplainExecutionPosturesJson {
+    pub run_shape: String,
+    pub rerun_tolerant: ExplainPostureVerdictJson,
+    pub order_independent: ExplainPostureVerdictJson,
+    pub reprocessing_refused: ExplainPostureVerdictJson,
 }
 
 /// One entry of a model's declared-fact probe set
@@ -1406,10 +1533,13 @@ pub fn build_maintenance_plan_json(
     diagnostics_cells: &[PlanCellDiagnostics],
     properties: PropertySet,
     state_columns: Vec<smelt_logical::StateColumnSummary>,
+    execution_postures: Option<smelt_logical::ExecutionPostures>,
+    is_snapshot_reconcile: Option<bool>,
     probe_entries: Vec<smelt_runtime::probe_plan::ProbePlanEntry>,
     cadence: smelt_core::config::ProbeCadence,
     column_groups: &[smelt_logical::maintenance::ColumnGroup],
     contract_cfg: Option<&smelt_core::config::ContractConfig>,
+    pending_definition_delta: Option<&(MigrationVerdict, String)>,
 ) -> ExplainMaintenanceJson {
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
@@ -1470,25 +1600,60 @@ pub fn build_maintenance_plan_json(
             }
         })
         .collect();
+    let definition_delta =
+        pending_definition_delta.map(|(verdict, plan_hash)| ExplainDefinitionDeltaJson {
+            status: "pending".to_string(),
+            verdict: format!("{:?}", verdict),
+            plan_hash: plan_hash.clone(),
+        });
+    let execution_postures = execution_postures.map(|postures| {
+        let run_shape = match is_snapshot_reconcile {
+            Some(true) => "snapshot-reconcile",
+            Some(false) => "window-forward",
+            None => "n/a",
+        };
+        ExplainExecutionPosturesJson {
+            run_shape: run_shape.to_string(),
+            rerun_tolerant: ExplainPostureVerdictJson {
+                holds: postures.rerun_tolerant.holds,
+                reason: postures.rerun_tolerant.reason,
+            },
+            order_independent: ExplainPostureVerdictJson {
+                holds: postures.order_independent.holds,
+                reason: postures.order_independent.reason,
+            },
+            reprocessing_refused: ExplainPostureVerdictJson {
+                holds: postures.reprocessing_refused.holds,
+                reason: postures.reprocessing_refused.reason,
+            },
+        }
+    });
     ExplainMaintenanceJson {
         model: model_name.to_string(),
         contract: own_contract,
         inbound_edges,
         cells,
+        execution_postures,
         properties,
         state_columns,
         probes,
+        definition_delta,
     }
 }
 
 /// Build the explain output from the dependency graph and config.
 ///
 /// `origins` maps emitted model names to `(generator_file, generator_def_name)`.
+/// `period` is the parsed `--period <start>..<end>` run window (bounds in
+/// the model's own axis domain), when one was supplied — threaded into each
+/// incremental model's `source_bounds` to resolve `scan_start`/`scan_end`
+/// (`docs/specs/incremental_shapes.md` §"Observing the per-source clamp").
 pub fn build_explain_output(
     graph: &DependencyGraph,
     config: &Config,
     fn_bodies: &smelt_runtime::FnBodyMap,
     origins: &std::collections::HashMap<String, (String, String)>,
+    period: Option<&(String, String)>,
 ) -> Result<ExplainOutput> {
     let execution_order = graph.execution_order()?;
 
@@ -1516,7 +1681,8 @@ pub fn build_explain_output(
                     smelt_runtime::expand_function_calls(&model_file.content, fn_bodies);
                 let batch_safety =
                     compute_batch_safety_label(model_name, &expanded_sql, model_file, &inc, &ts);
-                let source_bounds = compute_source_bounds(model_name, &expanded_sql, graph, config);
+                let source_bounds =
+                    compute_source_bounds(model_name, &expanded_sql, graph, config, period);
                 Some(ExplainIncremental {
                     granularity: ts.granularity,
                     partition_column: ts.partition_column.clone(),
@@ -1651,12 +1817,16 @@ pub fn build_physical_explain(
     }
 }
 
-/// Derive per-source bounds for a model.
+/// Derive per-source bounds for a model, resolving each `Bounded` source's
+/// run-relative scan window against `period` when one is supplied — via the
+/// same `smelt_logical::resolve_scan_window` a run's pushdown filter uses
+/// (`docs/specs/incremental_shapes.md` §"Observing the per-source clamp").
 fn compute_source_bounds(
     model_name: &str,
     sql: &str,
     graph: &DependencyGraph,
     config: &Config,
+    period: Option<&(String, String)>,
 ) -> BTreeMap<String, SourceBoundJson> {
     use smelt_planner::analysis::source_bounds::derive_model_bounds;
     use smelt_planner::Frontmatter;
@@ -1673,11 +1843,37 @@ fn compute_source_bounds(
                 source_partition_col,
                 before,
                 after,
-            } => SourceBoundJson::Bounded {
-                partition_col: source_partition_col,
-                before: before.to_iso8601(),
-                after: after.to_iso8601(),
-            },
+            } => {
+                let (scan_start, scan_end, scan_unresolved) = match period {
+                    Some((run_start, run_end)) => {
+                        let axis =
+                            smelt_runtime::windowing::axis_implied_by_literal_form(Some(run_start));
+                        match smelt_logical::resolve_scan_window(
+                            axis,
+                            run_start,
+                            run_end,
+                            &smelt_logical::Offset::Seconds(before),
+                            &smelt_logical::Offset::Seconds(after),
+                        ) {
+                            smelt_logical::ScanWindowVerdict::Resolved { start, end } => {
+                                (Some(start), Some(end), None)
+                            }
+                            smelt_logical::ScanWindowVerdict::Unresolved { reason } => {
+                                (None, None, Some(reason))
+                            }
+                        }
+                    }
+                    None => (None, None, None),
+                };
+                SourceBoundJson::Bounded {
+                    partition_col: source_partition_col,
+                    before: before.to_iso8601(),
+                    after: after.to_iso8601(),
+                    scan_start,
+                    scan_end,
+                    scan_unresolved,
+                }
+            }
             BoundResult::Unbounded => SourceBoundJson::Unbounded,
             BoundResult::NotDerivable => SourceBoundJson::NotDerivable,
         };
@@ -1839,7 +2035,7 @@ mod tests {
         );
 
         let bs = |fns: &smelt_runtime::FnBodyMap| {
-            build_explain_output(&graph, &config, fns, &HashMap::new())
+            build_explain_output(&graph, &config, fns, &HashMap::new(), None)
                 .unwrap()
                 .models["sessions"]
                 .incremental
@@ -1876,7 +2072,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         assert_eq!(output.execution_order.len(), 2);
         assert_eq!(output.execution_order[0], "orders");
@@ -1930,7 +2126,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         let daily = &output.models["daily_revenue"];
         assert_eq!(daily.materialization, Materialization::Table);
@@ -1949,7 +2145,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
 
         assert!(json.contains("\"models\""));
@@ -1972,7 +2168,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")
@@ -2007,7 +2203,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         let model_entry = &output.models["device_stats"];
 
@@ -2059,7 +2255,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         let model_entry = &output.models["orders"];
         assert_eq!(

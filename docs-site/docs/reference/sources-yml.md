@@ -90,6 +90,8 @@ mutation_profile:
 | `retractions`, `ordered`, `delta_identity` | `change_feed` | Feed-shape facts describing how the change feed itself is structured. |
 | `key_recurrence.key` / `key_recurrence.window` | any | The declared **recurrence bound**: every pair of rows sharing the named key(s) lies within `window` of each other on the event-time axis. This is route 3 (recurrence-bounded) of a downstream `grain: key` model's [key temporal locality](timeseries.md#interaction-with-grain-key) — a checked declaration, not a proof: violations fail the consuming run transactionally (`KeyedRecurrenceBoundViolated`) rather than silently producing a wrong answer. See the [deduplication tutorial](../examples/web-analytics/deduplication.md) for a worked example. |
 
+Declaring `mutation_profile: mutable_snapshot` derives a mutation-maintenance cell for a model that reads this source whether or not the source is also clocked (`timeseries:` declared) — a late correction to an already-processed row is maintained either way, not only for an unclocked lookup. An `append_only` source read by an aggregate gets one too: a late-arriving append into an already-written region still changes the stored aggregate, so that region is maintained rather than left stale. Either case may have no statically derivable scan bound, refusing loudly (`MaintenanceScanUnbounded`) until `maintenance.scan_bounds.per_source.<name>.allow_full_scan` accepts the full-table cost.
+
 ## Supported types
 
 | Type | Description |

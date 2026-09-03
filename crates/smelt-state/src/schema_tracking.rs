@@ -118,6 +118,17 @@ pub struct DeployedSchema {
     pub version: u32,
     pub deployed_at: DateTime<Utc>,
     pub model_hash: String,
+    /// The model's source SQL text at the time this schema was deployed — the
+    /// "before" side of a definition delta. `None` for snapshots written before
+    /// this field existed (`#[serde(default)]` back-compat).
+    #[serde(default)]
+    pub model_sql: Option<String>,
+    /// The model's declared `timeseries.partition_column` at the time this schema
+    /// was deployed — the address every partition-grain maintenance write targets.
+    /// `None` for snapshots written before this field existed
+    /// (`#[serde(default)]` back-compat), or for a model with no partition grain.
+    #[serde(default)]
+    pub partition_column: Option<String>,
     pub columns: Vec<DeployedColumn>,
 }
 
@@ -1460,42 +1471,39 @@ pub fn plan_migration_for_backend(
                 data_type,
                 nullable,
             } => {
-                if *nullable {
-                    statements.push(format!(
-                        "ALTER TABLE {} ADD COLUMN {} {}",
-                        qualified_table, name, data_type
-                    ));
-                } else if let Some(default_val) = column_defaults.get(name.as_str()) {
-                    // NOT NULL with default: use DEFAULT clause
-                    statements.push(format!(
-                        "ALTER TABLE {} ADD COLUMN {} {} NOT NULL DEFAULT {}",
-                        qualified_table, name, data_type, default_val
-                    ));
+                let default_val = if *nullable {
+                    None
                 } else {
-                    // NOT NULL with backfill only: no DEFAULT clause; backfill UPDATE follows
-                    statements.push(format!(
-                        "ALTER TABLE {} ADD COLUMN {} {} NOT NULL",
-                        qualified_table, name, data_type
-                    ));
-                }
+                    column_defaults.get(name.as_str()).map(String::as_str)
+                };
+                statements.push(crate::ddl_duckdb::render_add_column(
+                    &qualified_table,
+                    name,
+                    data_type,
+                    *nullable,
+                    default_val,
+                ));
                 // Backfill expression for the newly added column (no WHERE — new column, all rows need fill)
                 if let Some(backfill) = backfill_exprs.get(name.as_str()) {
-                    statements.push(format!(
-                        "UPDATE {} SET {} = {}",
-                        qualified_table, name, backfill
+                    statements.push(crate::ddl_duckdb::render_backfill_update(
+                        &qualified_table,
+                        name,
+                        backfill,
+                        false,
                     ));
                 }
             }
             SchemaChange::RemoveColumn { name } => {
-                statements.push(format!(
-                    "ALTER TABLE {} DROP COLUMN {}",
-                    qualified_table, name
+                statements.push(crate::ddl_duckdb::render_drop_column(
+                    &qualified_table,
+                    name,
                 ));
             }
             SchemaChange::ChangeType { name, to, .. } => {
-                statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                    qualified_table, name, to
+                statements.push(crate::ddl_duckdb::render_alter_column_type(
+                    &qualified_table,
+                    name,
+                    to,
                 ));
             }
             SchemaChange::ChangeNullability {
@@ -1503,9 +1511,9 @@ pub fn plan_migration_for_backend(
                 to_nullable: true,
                 ..
             } => {
-                statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                    qualified_table, name
+                statements.push(crate::ddl_duckdb::render_drop_not_null(
+                    &qualified_table,
+                    name,
                 ));
             }
             SchemaChange::ChangeNullability {
@@ -1520,15 +1528,17 @@ pub fn plan_migration_for_backend(
                     .get(name.as_str())
                     .or_else(|| column_defaults.get(name.as_str()));
                 if let Some(fill_val) = fill_expr {
-                    statements.push(format!(
-                        "UPDATE {} SET {} = {} WHERE {} IS NULL",
-                        qualified_table, name, fill_val, name
+                    statements.push(crate::ddl_duckdb::render_backfill_update(
+                        &qualified_table,
+                        name,
+                        fill_val,
+                        true,
                     ));
                 }
                 // Always emit SET NOT NULL on the safe path (never a silent no-op).
-                statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                    qualified_table, name
+                statements.push(crate::ddl_duckdb::render_set_not_null(
+                    &qualified_table,
+                    name,
                 ));
             }
             // Complex type changes — delegate to backend-specific DDL module.
@@ -1584,12 +1594,10 @@ pub fn plan_migration_for_backend(
                             if let Ok(new_dt) = parse_type(new_str) {
                                 // Deduplicate: if we already emitted ALTER COLUMN TYPE for this
                                 // column, skip (multiple changes on same column → single ALTER).
-                                let alter_stmt = format!(
-                                    "ALTER TABLE {}.{} ALTER COLUMN {} TYPE {}",
-                                    schema,
-                                    table,
+                                let alter_stmt = crate::ddl_duckdb::render_alter_column_type(
+                                    &qualified_table,
                                     col_name,
-                                    new_dt.to_sql()
+                                    &new_dt.to_sql(),
                                 );
                                 if !statements.contains(&alter_stmt) {
                                     statements.push(alter_stmt);
@@ -1841,6 +1849,126 @@ mod tests {
         }
     }
 
+    /// `plan_migration`'s DuckDB safe path must not author `ALTER TABLE`/
+    /// `UPDATE` text itself — every statement it produces must be
+    /// byte-identical to a direct call into `ddl_duckdb`'s single-owner
+    /// renderers over the same inputs, in order
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
+    /// owner)").
+    #[test]
+    fn safe_path_migration_sql_comes_from_ddl_duckdb_renderers() {
+        use crate::ddl_duckdb::{
+            render_add_column, render_alter_column_type, render_backfill_update,
+            render_drop_column, render_drop_not_null, render_set_not_null,
+        };
+
+        let mut defaults = HashMap::new();
+        defaults.insert("with_default".to_string(), "0".to_string());
+        let mut backfills = HashMap::new();
+        backfills.insert("with_backfill".to_string(), "42".to_string());
+        backfills.insert("gap_fill".to_string(), "'x'".to_string());
+
+        let diff = SchemaDiff {
+            changes: vec![
+                SchemaChange::AddColumn {
+                    name: "nullable_col".to_string(),
+                    data_type: "VARCHAR".to_string(),
+                    nullable: true,
+                },
+                SchemaChange::AddColumn {
+                    name: "with_default".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                },
+                SchemaChange::AddColumn {
+                    name: "with_backfill".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                },
+                SchemaChange::RemoveColumn {
+                    name: "old_col".to_string(),
+                },
+                SchemaChange::ChangeType {
+                    name: "amount".to_string(),
+                    from: "INTEGER".to_string(),
+                    to: "BIGINT".to_string(),
+                },
+                SchemaChange::ChangeNullability {
+                    name: "gap_fill".to_string(),
+                    from_nullable: true,
+                    to_nullable: false,
+                },
+                SchemaChange::ChangeNullability {
+                    name: "was_required".to_string(),
+                    from_nullable: false,
+                    to_nullable: true,
+                },
+            ],
+            warnings: vec![],
+        };
+
+        let action = plan_migration_for_backend(
+            "main",
+            "my_table",
+            &diff,
+            true,
+            &defaults,
+            &backfills,
+            &DdlBackend::DuckDb,
+            &[],
+            &[],
+        );
+        let statements = match action {
+            MigrationAction::AlterTable { statements } => statements,
+            other => panic!("Expected AlterTable, got {:?}", other),
+        };
+
+        let qualified = "main.my_table";
+        let expected = vec![
+            render_add_column(qualified, "nullable_col", "VARCHAR", true, None),
+            render_add_column(qualified, "with_default", "INTEGER", false, Some("0")),
+            render_add_column(qualified, "with_backfill", "INTEGER", false, None),
+            render_backfill_update(qualified, "with_backfill", "42", false),
+            render_drop_column(qualified, "old_col"),
+            render_alter_column_type(qualified, "amount", "BIGINT"),
+            render_backfill_update(qualified, "gap_fill", "'x'", true),
+            render_set_not_null(qualified, "gap_fill"),
+            render_drop_not_null(qualified, "was_required"),
+        ];
+        assert_eq!(statements, expected);
+    }
+
+    /// A keyword-named column reaching the DuckDB safe path renders quoted
+    /// — proof the safe path delegates to the quoting renderer rather than
+    /// interpolating the raw name, matching `ddl_duckdb`'s own
+    /// `test_remove_column_with_keyword_name`.
+    #[test]
+    fn safe_path_quotes_a_keyword_column_name() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::RemoveColumn {
+                name: "order".to_string(),
+            }],
+            warnings: vec![],
+        };
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            true,
+            &no_defaults(),
+            &no_defaults(),
+        );
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(
+                    statements,
+                    vec!["ALTER TABLE main.my_table DROP COLUMN \"order\""]
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_plan_migration_remove_column_without_flag() {
         let diff = SchemaDiff {
@@ -1952,6 +2080,8 @@ mod tests {
             version: 1,
             deployed_at: Utc::now(),
             model_hash: "sha256:abc123".to_string(),
+            model_sql: None,
+            partition_column: None,
             columns: vec![
                 col("order_date", "DATE", false),
                 col("total", "DECIMAL(10,2)", true),
@@ -1963,6 +2093,76 @@ mod tests {
         assert_eq!(deserialized.model, "daily_revenue");
         assert_eq!(deserialized.columns.len(), 2);
         assert_eq!(deserialized.columns[0].name, "order_date");
+    }
+
+    #[test]
+    fn deployed_schema_roundtrips_model_sql() {
+        let schema = DeployedSchema {
+            model: "daily_revenue".to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "sha256:abc123".to_string(),
+            model_sql: Some("SELECT 1".to_string()),
+            partition_column: None,
+            columns: vec![col("order_date", "DATE", false)],
+        };
+
+        let json = serde_json::to_string(&schema).unwrap();
+        let deserialized: DeployedSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.model_sql, Some("SELECT 1".to_string()));
+    }
+
+    #[test]
+    fn deployed_schema_without_model_sql_still_loads() {
+        let json = r#"{
+            "model": "daily_revenue",
+            "version": 1,
+            "deployed_at": "2026-01-01T00:00:00Z",
+            "model_hash": "sha256:abc123",
+            "columns": [
+                {"name": "order_date", "type": "DATE", "nullable": false}
+            ]
+        }"#;
+
+        let deserialized: DeployedSchema = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.model_sql, None);
+        assert_eq!(deserialized.columns.len(), 1);
+    }
+
+    #[test]
+    fn deployed_schema_json_without_partition_column_deserializes() {
+        let json = r#"{
+            "model": "daily_revenue",
+            "version": 1,
+            "deployed_at": "2026-01-01T00:00:00Z",
+            "model_hash": "sha256:abc123",
+            "columns": [
+                {"name": "order_date", "type": "DATE", "nullable": false}
+            ]
+        }"#;
+
+        let deserialized: DeployedSchema = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.partition_column, None);
+    }
+
+    #[test]
+    fn deployed_schema_roundtrips_partition_column() {
+        let schema = DeployedSchema {
+            model: "daily_revenue".to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "sha256:abc123".to_string(),
+            model_sql: None,
+            partition_column: Some("event_date".to_string()),
+            columns: vec![col("order_date", "DATE", false)],
+        };
+
+        let json = serde_json::to_string(&schema).unwrap();
+        let deserialized: DeployedSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.partition_column,
+            Some("event_date".to_string())
+        );
     }
 
     #[test]

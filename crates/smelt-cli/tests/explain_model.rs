@@ -125,6 +125,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &[],
             smelt_core::config::ProbeCadence::PerRun,
             &edge_delta_types,
+            None,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -953,6 +954,9 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         }],
         degenerate: vec![],
         state_columns: vec![],
+        execution_postures: None,
+        is_snapshot_reconcile: None,
+        comparability: vec![],
     };
     let report = build_maintenance_plan_report(
         "daily_events_enriched",
@@ -966,6 +970,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
     )
     .expect("build_maintenance_plan_report");
 
@@ -1076,6 +1081,9 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         ],
         degenerate: vec![],
         state_columns: vec![],
+        execution_postures: None,
+        is_snapshot_reconcile: None,
+        comparability: vec![],
     };
     let report = build_maintenance_plan_report(
         "events_enriched",
@@ -1089,6 +1097,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
     )
     .expect("build_maintenance_plan_report");
 
@@ -1209,10 +1218,26 @@ mod write_variant_explain_surface {
     use smelt_cli::build_maintenance_plan_report;
     use smelt_cli::explain::RelationContractView;
     use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::analysis::walk::{ColumnComparability, Comparability};
     use smelt_logical::maintenance::{
         Corner, MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict,
         Technique, Trigger,
     };
+
+    /// `{tier}`, proven `Comparable` — the P3 half of the write-suppression
+    /// proof, threaded here so `report_for`'s cells (all `Key`-identity,
+    /// `ColumnScopedMerge`) reach the SAME "admitted, preference/pin
+    /// decides" branches these tests exercised before `smelt explain`
+    /// consulted real comparability instead of a `facts.has_identity`-only
+    /// proxy. `technique_suppress_pin_on_an_incomparable_column_is_a_hard_
+    /// refusal` below is the one test in this module that deliberately
+    /// supplies a DIFFERENT (`Incomparable`) vector instead.
+    fn comparable_tier() -> Vec<ColumnComparability> {
+        vec![ColumnComparability {
+            output: "tier".to_string(),
+            comparability: Comparability::Comparable,
+        }]
+    }
 
     fn key_identity() -> RowIdentityVerdict {
         RowIdentityVerdict {
@@ -1238,13 +1263,15 @@ mod write_variant_explain_surface {
     }
 
     fn report_for(cell: PlanCell) -> String {
-        report_for_with_overrides(cell, &[], None).expect("build_maintenance_plan_report")
+        report_for_with_overrides(cell, &[], None, comparable_tier())
+            .expect("build_maintenance_plan_report")
     }
 
     fn report_for_with_overrides(
         cell: PlanCell,
         cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
         defaults_cfg: Option<&smelt_core::config::MaintenanceDefaults>,
+        comparability: Vec<ColumnComparability>,
     ) -> anyhow::Result<String> {
         use smelt_logical::maintenance::ColumnGroup;
 
@@ -1264,6 +1291,9 @@ mod write_variant_explain_surface {
             }],
             degenerate: vec![],
             state_columns: vec![],
+            execution_postures: None,
+            is_snapshot_reconcile: None,
+            comparability,
         };
         build_maintenance_plan_report(
             "write_variant_fixture",
@@ -1277,6 +1307,7 @@ mod write_variant_explain_surface {
             &[],
             smelt_core::config::ProbeCadence::PerRun,
             &[],
+            None,
         )
     }
 
@@ -1335,7 +1366,7 @@ mod write_variant_explain_surface {
         };
         let report = report_for(cell);
         assert!(
-            report.contains("write variant: unconditional (default"),
+            report.contains("write variant: unconditional (not admitted"),
             "expected the no-proven-identity default line, never a preference/first-build \
              claim: {report}"
         );
@@ -1371,7 +1402,7 @@ mod write_variant_explain_surface {
             "sources.users",
             smelt_core::config::CellTechnique::Suppress,
         )];
-        let report = report_for_with_overrides(cell, &cells_cfg, None)
+        let report = report_for_with_overrides(cell, &cells_cfg, None, comparable_tier())
             .expect("build_maintenance_plan_report");
         assert!(
             report.contains("write variant: suppressed (pinned via `technique: suppress`"),
@@ -1394,7 +1425,7 @@ mod write_variant_explain_surface {
             "sources.users",
             smelt_core::config::CellTechnique::Unconditional,
         )];
-        let report = report_for_with_overrides(cell, &cells_cfg, None)
+        let report = report_for_with_overrides(cell, &cells_cfg, None, comparable_tier())
             .expect("build_maintenance_plan_report");
         assert!(
             report.contains("write variant: unconditional (pinned via `technique: unconditional`"),
@@ -1433,7 +1464,7 @@ mod write_variant_explain_surface {
             "sources.users",
             smelt_core::config::CellTechnique::Suppress,
         )];
-        let err = report_for_with_overrides(cell, &cells_cfg, None).expect_err(
+        let err = report_for_with_overrides(cell, &cells_cfg, None, comparable_tier()).expect_err(
             "an inadmissible `technique: suppress` pin must refuse, never print a \
              success/fallback line",
         );
@@ -1441,6 +1472,44 @@ mod write_variant_explain_surface {
         assert!(
             message.contains("technique: suppress"),
             "expected the refusal to name the pin that could not be honoured: {message}"
+        );
+    }
+
+    /// A `technique: suppress` pin over a cell that DOES carry a proven
+    /// `Key` row identity (P2 holds) but whose compared column is not
+    /// proven comparable across runs (P3 fails) is the same hard
+    /// `ChoiceRefusal` as the `WholeRow` case above — `smelt explain` must
+    /// propagate it too, not only the P2-decidable case
+    /// (`incremental_models.md` §"Per-cell write addressing" → "User
+    /// pins").
+    #[test]
+    fn technique_suppress_pin_on_an_incomparable_column_is_a_hard_refusal() {
+        let cell = base_cell(
+            Trigger::UpstreamMutation {
+                source: "sources.users".to_string(),
+            },
+            false,
+        );
+        let cells_cfg = vec![cell_cfg_with_technique(
+            "sources.users",
+            smelt_core::config::CellTechnique::Suppress,
+        )];
+        let incomparable_tier = vec![ColumnComparability {
+            output: "tier".to_string(),
+            comparability: Comparability::Incomparable,
+        }];
+        let err = report_for_with_overrides(cell, &cells_cfg, None, incomparable_tier).expect_err(
+            "a `technique: suppress` pin over an incomparable compared column must refuse, \
+             never print a success/fallback line",
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("technique: suppress"),
+            "expected the refusal to name the pin that could not be honoured: {message}"
+        );
+        assert!(
+            message.contains("tier"),
+            "expected the refusal to trace back to the incomparable column: {message}"
         );
     }
 }

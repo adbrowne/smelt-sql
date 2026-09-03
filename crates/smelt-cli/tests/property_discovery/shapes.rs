@@ -251,6 +251,11 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
+maintenance:
+  scan_bounds:
+    per_source:
+      transactions:
+        allow_full_scan: true
 ---
 SELECT d, balance FROM (
   SELECT
@@ -291,6 +296,11 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
+maintenance:
+  scan_bounds:
+    per_source:
+      transactions:
+        allow_full_scan: true
 ---
 SELECT
   t.d AS d,

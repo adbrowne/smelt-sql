@@ -22,6 +22,10 @@ smelt-types = { path = "../smelt-types" }
 # pin validation (`queries/maintenance.rs::backend_write_capabilities_for`) —
 # a real (non-dev) dependency now, not just for test fixtures.
 smelt-dialect = { path = "../smelt-dialect" }
+# Deployed-schema snapshot reads for the world-fact input
+# (`workspace_ingest::register_deployed_schemas_from_disk`) — acyclic:
+# smelt-state depends only on smelt-types/smelt-dialect.
+smelt-state = { path = "../smelt-state" }
 walkdir = "2"
 line-index.workspace = true
 tracing.workspace = true
@@ -33,6 +37,7 @@ proptest = { workspace = true }
 smelt-runtime = { path = "../smelt-runtime" }
 smelt-oracle-testkit = { path = "../smelt-oracle-testkit" }
 tempfile = "3"
+chrono = { workspace = true }
 
 [features]
 default = []

@@ -340,7 +340,7 @@ fn web_analytics_keyed_model_shows_merge() {
 /// outermost projection is a bare `*` by the time `apply_type_casts` runs.
 /// This is a pre-existing characteristic of the live run's own clamped
 /// statement (unrelated to and unchanged by this fix — confirmed via
-/// `smelt backbuild --dry-run` against `examples/web_analytics`, whose real
+/// `smelt rebuild --dry-run` against `examples/web_analytics`, whose real
 /// executed `INSERT` bodies carry no `CAST` either), not a new
 /// explain-vs-run divergence; tracked as a `smelt-runtime` finding
 /// (`apply_type_casts`/`compile.rs`) outside this fix's scope.
@@ -622,4 +622,156 @@ fn json_show_sql_reports_source_derived_columns_for_a_bigquery_median_model() {
         found_insert,
         "expected at least one INSERT statement in the JSON output: {json_stdout}"
     );
+}
+
+/// `docs/outcomes/20260815-partition-grain-residue/phases/05b-plan.md` —
+/// a bare-integer `--period` (`1..4`) selects the integer partition axis,
+/// so the derived window and the DELETE/INSERT region literals it feeds
+/// print as bare integers, not quoted dates.
+#[test]
+fn explain_period_implies_integer_axis() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path().join("int_axis_explain");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::write(
+        root.join("smelt.yml"),
+        "name: int_axis_explain\n\
+         version: 1\n\
+         paths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: table\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("models/int_partition_mart.sql"),
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20 partition_column: batch_id\n  event_time_column: event_ts\n  granularity: day\n\
+         ---\n\
+         SELECT CAST(batch_id AS INTEGER) AS batch_id, event_ts, id FROM (VALUES \
+         (1, TIMESTAMP '2026-01-01 00:00:00', 1)) AS t(batch_id, event_ts, id)\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("int_partition_mart")
+        .arg("--show-sql")
+        .arg("--period")
+        .arg("1..4")
+        .arg("--project-dir")
+        .arg(&root)
+        .output()
+        .expect("spawn smelt explain --show-sql --period 1..4");
+
+    assert!(
+        output.status.success(),
+        "smelt explain --show-sql --period 1..4 failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("batch_id >= 1") && stdout.contains("batch_id < 4"),
+        "expected bare-integer clamp bounds in the show-sql output: {stdout}"
+    );
+    assert!(
+        !stdout.contains("'1'") && !stdout.contains("'4'"),
+        "integer-axis bounds must not be quoted: {stdout}"
+    );
+}
+
+/// `docs/outcomes/20260815-partition-grain-residue/phases/06-plan.md` —
+/// on the whole-project `explain --json` path (no positional model name),
+/// `--period 2026-01-01..2026-01-08` on a model with a 3-day lookback
+/// resolves `scan_start`/`scan_end` in `source_bounds`; without `--period`
+/// neither field is present and `before`/`after` stay ISO-8601 durations.
+#[test]
+fn explain_json_period_resolves_scan_window() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path().join("scan_window_explain");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::write(
+        root.join("smelt.yml"),
+        "name: scan_window_explain\n\
+         version: 1\n\
+         paths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: table\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("models/raw_orders.sql"),
+        "---\n\
+         materialization: table\n\
+         timeseries:\n\
+         \x20 event_time_column: order_ts\n  partition_column: order_ts\n  granularity: day\n\
+         ---\n\
+         SELECT CAST(order_ts AS TIMESTAMP) AS order_ts, amount \
+         FROM (VALUES (TIMESTAMP '2026-01-01 00:00:00', 1.0)) AS t(order_ts, amount)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("models/recent_orders.sql"),
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20 event_time_column: order_date\n  partition_column: order_date\n  granularity: day\n\
+         ---\n\
+         SELECT CAST(order_ts AS DATE) AS order_date, amount \
+         FROM smelt.raw_orders \
+         WHERE order_ts >= CURRENT_DATE - INTERVAL '3 day'\n",
+    )
+    .unwrap();
+
+    let with_period = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .args(["explain", "--json"])
+        .args(["--period", "2026-01-01..2026-01-08"])
+        .args(["--project-dir", root.to_str().unwrap()])
+        .output()
+        .expect("spawn smelt explain --json --period");
+    assert!(
+        with_period.status.success(),
+        "smelt explain --json --period failed: stderr={}",
+        String::from_utf8_lossy(&with_period.stderr)
+    );
+    let with_period_json: serde_json::Value =
+        serde_json::from_slice(&with_period.stdout).expect("valid JSON");
+    let bound = with_period_json["models"]["recent_orders"]["incremental"]["source_bounds"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no source_bounds in {with_period_json}"))
+        .values()
+        .next()
+        .unwrap_or_else(|| panic!("no source bound entries"));
+    assert_eq!(
+        bound.get("scan_start").and_then(|v| v.as_str()),
+        Some("2025-12-29")
+    );
+    assert_eq!(
+        bound.get("scan_end").and_then(|v| v.as_str()),
+        Some("2026-01-08")
+    );
+    assert_eq!(bound.get("before").and_then(|v| v.as_str()), Some("P3D"));
+
+    let without_period = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .args(["explain", "--json"])
+        .args(["--project-dir", root.to_str().unwrap()])
+        .output()
+        .expect("spawn smelt explain --json");
+    assert!(without_period.status.success());
+    let without_period_json: serde_json::Value =
+        serde_json::from_slice(&without_period.stdout).expect("valid JSON");
+    let bound = without_period_json["models"]["recent_orders"]["incremental"]["source_bounds"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no source_bounds in {without_period_json}"))
+        .values()
+        .next()
+        .unwrap_or_else(|| panic!("no source bound entries"));
+    assert!(bound.get("scan_start").is_none());
+    assert!(bound.get("scan_end").is_none());
+    assert_eq!(bound.get("before").and_then(|v| v.as_str()), Some("P3D"));
 }

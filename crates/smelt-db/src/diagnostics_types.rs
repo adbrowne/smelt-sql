@@ -626,6 +626,11 @@ pub enum DiagnosticCode {
     /// Anchored at the `smelt.models.*` call site.
     /// Message: "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references"
     GeneratorBodyForbidsModelReflection,
+    /// `ModelDef.timeseries` or `ModelDef.safety_overrides` is present on a
+    /// `ModelDef` literal whose `materialization` is not `'incremental'`.
+    /// Anchored at the offending field's name token.
+    /// Message: "ModelDef.{field} is only valid when materialization is 'incremental'"
+    ModelDefOverrideRequiresIncremental,
 
     // ── Multi-model section structure diagnostic codes ───────────────────────
     /// SQL content (non-comment, non-empty) appears before the first
@@ -760,6 +765,11 @@ pub enum DiagnosticCode {
     /// partition column by default; the rule reads it from the driving
     /// source. Anchored at offset 0. Error severity.
     KeyedForbidsTimeseries,
+    /// A key-addressed model (`grain: key`, resolved) declares
+    /// `safety_overrides:` (top-level or the folded `batched.safety_overrides`
+    /// sub-block). A keyed model has no partition-shaped output for a safety
+    /// override to apply to. Anchored at offset 0. Error severity.
+    KeyedForbidsSafetyOverrides,
     /// A `refresh: materialized_view` model incorrectly declares a
     /// `timeseries:` block. Like `keyed`, the engine-maintained output
     /// has no partition column. Anchored at offset 0. Error severity.
@@ -884,7 +894,24 @@ pub enum DiagnosticCode {
     /// (skeleton) position — a grain change, never a column backfill
     /// (EX-39, `definition_deltas.md` §"The verdict per column group").
     /// Anchored at the model SQL body start.
-    MaintenanceSkeletonColumnAdded,
+    MaintenanceSkeletonChanged,
+    /// Emitted (Error) when a maintained model's declared
+    /// `timeseries.partition_column` differs from the address recorded in
+    /// the deployed-schema snapshot at last deploy — the address every
+    /// partition-grain maintenance write targets
+    /// (`docs/specs/incremental_shapes.md` §"The partition grain"). Names
+    /// both the recorded and current column; the remedy is
+    /// `--full-refresh` or `smelt migrate`. Anchored at the model SQL body
+    /// start.
+    MaintenancePartitionColumnChanged,
+    /// Emitted (Warning) when a model's definition-change `Trigger::
+    /// ColumnAdded` names a non-skeleton column that cannot be backfilled in
+    /// place (unbounded scan, no admissible technique, unresolvable
+    /// expression, or group disagreement) — the run still proceeds, ALTERing
+    /// the column in and leaving historical rows `NULL` until `smelt
+    /// migrate` backfills them (`definition_deltas.md` §"Detection").
+    /// Anchored at the model SQL body start.
+    MaintenanceColumnAddNotBackfillable,
     /// Emitted (Error) when a model's declared `timeseries.granularity`
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`
@@ -919,6 +946,14 @@ pub enum DiagnosticCode {
     /// pattern; the pin never silently resolves to a substituted
     /// technique. Anchored at the model SQL body start.
     MaintenanceWriteAddressingRefused,
+    /// Emitted (Error) when `smelt run` would fold a data delta over an
+    /// unapproved, non-eclipsed definition delta — the recorded and current
+    /// definitions diverge and no matching plan-hash approval is on record
+    /// (`definition_deltas.md` §Detection). The fix is `smelt migrate
+    /// <model>` (review) then `--apply`, or `--full-refresh`. Never fires
+    /// for a `--full-refresh` run, which is not a fold. Anchored at the
+    /// model SQL body start.
+    DefinitionDeltaPending,
 
     // ── Contract lattice diagnostic codes ────────────────────────────────────
     /// A `contract.frozen_horizon` is unparseable or declared on a
@@ -938,6 +973,17 @@ pub enum DiagnosticCode {
     /// `smelt_logical::contract::deferral::validate_deferral`. Anchored at
     /// the top of the file (line 0, column 0).
     ContractDeferralInvalid,
+    /// A `contract.retain_departed` is neither a bare bool nor
+    /// `{tombstone: <col>}`, is declared on anything other than a keyed
+    /// shape consuming a mutable snapshot, or names a tombstone column
+    /// absent from the model's output (`incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Covers both the frontmatter-parse-time
+    /// format failure (`smelt_core::metadata::MetadataError::
+    /// ContractRetainDepartedInvalid`) and the posture/tombstone-column
+    /// check made by
+    /// `smelt_logical::contract::retain_departed::validate`. Anchored at the
+    /// top of the file (line 0, column 0).
+    ContractRetainDepartedInvalid,
 
     /// A user-written top-level SELECT-item alias begins with the reserved
     /// `_smelt_` prefix (`multi_backend.md` §"Output-schema type
@@ -956,6 +1002,18 @@ pub enum DiagnosticCode {
     /// text, which names the construct and suggests the portable spelling.
     /// Anchored at the offending expression. Error severity.
     UnsupportedOnBackend,
+
+    /// Emitted (Error) when a `grain: key` model folds a retractable
+    /// enrichment-join contribution — a join whose per-key contribution
+    /// feeds a decrementing aggregate or a value that must be un-seen — and
+    /// the repair family cannot admit a per-group recompute for the
+    /// retraction (`incremental_shapes.md` §"Enrichment joins",
+    /// `incremental_models.md` §"The repair family"). Names the failing
+    /// repair obligation. Never fires on join spelling alone — only a
+    /// genuinely retractable contribution is refused; steers to
+    /// `refresh: materialized_view` or DAG composition. Anchored at the
+    /// model SQL body start.
+    KeyedRetractableContribution,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -1603,6 +1661,10 @@ pub fn meta_multi_model_diagnostic_message(
         }
         DiagnosticCode::GeneratorBodyForbidsModelReflection => {
             "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references".to_string()
+        }
+        DiagnosticCode::ModelDefOverrideRequiresIncremental => {
+            let n = name.unwrap_or("?");
+            format!("ModelDef.{n} is only valid when materialization is 'incremental'")
         }
         // invariant: unreachable from user input — caller is dispatched only for meta-multi_model diagnostic codes
         _ => panic!(
