@@ -495,6 +495,7 @@ Owned by `docs/specs/meta_language.md` (multi-model production section).
 | `ModelDefDuplicateName` | Error | Two `ModelDef`s in the same generator emit with the same `name`. |
 | `ModelDefHandAuthoredCollision` | Error | A generator-emitted path collides with a hand-authored model or another generator's emission. |
 | `GeneratorBodyForbidsModelReflection` | Error | A generator body invokes `smelt.models.with_tag` or `smelt.models.all`. |
+| `ModelDefOverrideRequiresIncremental` | Error | `ModelDef.timeseries` or `ModelDef.safety_overrides` is present on a literal whose `materialization` is not `'incremental'`. |
 
 ---
 

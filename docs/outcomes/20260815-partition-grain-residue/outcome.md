@@ -70,7 +70,7 @@ fixture.
 | 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | done |
 | 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | done |
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | done |
-| 4 | Per-`ModelDef` overrides for generator-emitted models | planned |
+| 4 | Per-`ModelDef` overrides for generator-emitted models | done |
 | 5 | Monotone-integer `partition_column` end-to-end (backfill chunking, scan-filter injection, explain clamp) | pending |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
@@ -154,6 +154,14 @@ fixture.
   applicability enforced by a new fail-loud diagnostic. Other frontmatter keys
   (`owner:`, `backend_hints:`, `target:`) stay closed — no residue bullet
   demands them.
+
+- 2026-09-04 — Phase 4 implemented (`phases/04-summary.md`). Landed `timeseries` /
+  `safety_overrides` as `MODEL_DEF_FIELDS` fields 6–7 (Record-typed, bespoke
+  required/optional sub-field validation, whole-block replacement, incremental-only via
+  the new `ModelDefOverrideRequiresIncremental` diagnostic). Both emission paths
+  (array-literal and loader-driven lambda) extract and apply the override;
+  `discovery::model_file_from_emitted_def` needed no changes since it already clones
+  `EmittedModelDef`'s config fields verbatim. No phase reshape.
 
 ## Blocked
 

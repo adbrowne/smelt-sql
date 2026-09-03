@@ -335,6 +335,7 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::ModelDefDuplicateName => "model-def-duplicate-name",
         DbCode::ModelDefHandAuthoredCollision => "model-def-hand-authored-collision",
         DbCode::GeneratorBodyForbidsModelReflection => "generator-body-forbids-model-reflection",
+        DbCode::ModelDefOverrideRequiresIncremental => "model-def-override-requires-incremental",
         // Timeseries frontmatter validation diagnostic codes.
         DbCode::TimeseriesRequiredForPartitionGrain => "timeseries-required-for-batched",
         DbCode::MalformedTimeseries => "malformed-timeseries",

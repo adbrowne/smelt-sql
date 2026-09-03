@@ -157,6 +157,11 @@ Rules:
   addressing lives — `incremental_models.md` §"Per-cell write addressing"), and
   `safety_overrides` then becomes a hard error. A model that wants only whole-partition
   rewrites declares no identity.
+- A generator-emitted partition-grain model (`meta_language.md` §"`ModelDef` meta record
+  type") may carry its own `timeseries` / `safety_overrides` fields on the `ModelDef` literal,
+  replacing the generator file's file-wide frontmatter blocks in full for that emission only —
+  so a single generator can emit multiple partition-grain models whose event-time columns
+  differ.
 
 The same declaration may live in `smelt.yml` instead; frontmatter wins over `smelt.yml` when
 both set the same field:
@@ -1172,8 +1177,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   classifier or diagnostic produces the code today, so the combination's behaviour is
   effectively undefined at runtime. Decision record:
   `docs/research/20260816-open-questions-triage.md`.
-- **Per-`ModelDef` overrides for generator-emitted models are not part of the closed field set
-  in v1.** Tracked: `docs/plans/20260509-meta-language-overall.md`.
 - **The sub-`g_part` rejection does not yet name the coarsened window** — §"Run window vs
   partition granularity" requires the refusal to spell out the run window that would be
   accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over

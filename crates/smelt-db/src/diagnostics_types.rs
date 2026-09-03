@@ -626,6 +626,11 @@ pub enum DiagnosticCode {
     /// Anchored at the `smelt.models.*` call site.
     /// Message: "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references"
     GeneratorBodyForbidsModelReflection,
+    /// `ModelDef.timeseries` or `ModelDef.safety_overrides` is present on a
+    /// `ModelDef` literal whose `materialization` is not `'incremental'`.
+    /// Anchored at the offending field's name token.
+    /// Message: "ModelDef.{field} is only valid when materialization is 'incremental'"
+    ModelDefOverrideRequiresIncremental,
 
     // ── Multi-model section structure diagnostic codes ───────────────────────
     /// SQL content (non-comment, non-empty) appears before the first
@@ -1647,6 +1652,10 @@ pub fn meta_multi_model_diagnostic_message(
         }
         DiagnosticCode::GeneratorBodyForbidsModelReflection => {
             "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references".to_string()
+        }
+        DiagnosticCode::ModelDefOverrideRequiresIncremental => {
+            let n = name.unwrap_or("?");
+            format!("ModelDef.{n} is only valid when materialization is 'incremental'")
         }
         // invariant: unreachable from user input — caller is dispatched only for meta-multi_model diagnostic codes
         _ => panic!(

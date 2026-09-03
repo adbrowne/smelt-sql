@@ -78,19 +78,29 @@ fn probe_cte_only_event_time_column() {
 /// §"The partition grain" Known Divergences. Tracked:
 /// `docs/plans/20260509-meta-language-overall.md` (folded into Phase E2,
 /// which explicitly deferred "Per-`ModelDef` frontmatter beyond the closed
-/// five-field set" as out of scope). Inverts in phase 4.
+/// five-field set" as out of scope). LANDED in phase 4
+/// (`docs/outcomes/20260815-partition-grain-residue/phases/04-plan.md`):
+/// `MODEL_DEF_FIELDS` grew `timeseries` and `safety_overrides`, both
+/// Record-typed, incremental-only, whole-block-replacement overrides of the
+/// generator file's file-wide frontmatter blocks.
 #[test]
 fn probe_modeldef_per_model_override() {
     let fields = &*smelt_types::signatures::MODEL_DEF_FIELDS;
     let names: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
 
-    // The closed five-field set per Phase E2: name, body, materialization,
-    // tags, description. No override/config-carrying field exists.
+    // The closed seven-field set per phase 4: name, body, materialization,
+    // tags, description, timeseries, safety_overrides.
     assert_eq!(
         names,
-        vec!["name", "body", "materialization", "tags", "description"],
-        "MODEL_DEF_FIELDS grew a field beyond the closed five-field set — if this \
-         is a per-model override field, this residue is LANDED; invert this probe \
-         and update docs/specs/incremental_shapes.md's Known Divergences entry"
+        vec![
+            "name",
+            "body",
+            "materialization",
+            "tags",
+            "description",
+            "timeseries",
+            "safety_overrides",
+        ],
+        "MODEL_DEF_FIELDS must be the closed seven-field set landed in phase 4"
     );
 }

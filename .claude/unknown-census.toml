@@ -506,27 +506,27 @@ discriminant = "dynamic"
 
 # ── smelt-types / signatures ──────────────────────────────────────────────────
 
-["crates/smelt-types/src/signatures.rs:2457"]
+["crates/smelt-types/src/signatures.rs:2462"]
 classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3414"]
+["crates/smelt-types/src/signatures.rs:3419"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3416"]
+["crates/smelt-types/src/signatures.rs:3421"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:4354"]
+["crates/smelt-types/src/signatures.rs:4385"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:5475"]
+["crates/smelt-types/src/signatures.rs:5506"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"

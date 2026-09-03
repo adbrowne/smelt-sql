@@ -2328,23 +2328,32 @@ pub fn hover_text_for_model_def_body_field_value(columns: Option<&[String]>) -> 
 }
 
 /// Render hover text for the value token of an optional field (`materialization`,
-/// `tags`, or `description`) in a `ModelDef` literal — shows the field's
-/// declared type from `MODEL_DEF_FIELDS`.
+/// `tags`, `description`, `timeseries`, or `safety_overrides`) in a `ModelDef`
+/// literal — shows the field's declared type from `MODEL_DEF_FIELDS`.
 ///
-/// Returns `Some(text)` for the three optional fields (`materialization`,
-/// `tags`, `description`) and `None` for any other field name.
+/// Returns `Some(text)` for the five optional fields (`materialization`,
+/// `tags`, `description`, `timeseries`, `safety_overrides`) and `None` for
+/// any other field name.
 ///
 /// Pure — no Salsa dependency.
 pub fn hover_text_for_model_def_optional_field_value(field_name: &str) -> Option<String> {
     use smelt_types::signatures::model_def_field;
     let field_ty = model_def_field(field_name)?;
-    // Only serve the three optional fields here; `name` and `body` have their
+    // Only serve the five optional fields here; `name` and `body` have their
     // own dedicated renderers.
     match field_name {
         "materialization" | "tags" | "description" => {
             let ty_str = smelt_types::format_smelt_type_hover(field_ty);
             Some(format!("`{field_name}: {ty_str}` (ModelDef field)"))
         }
+        "timeseries" => Some(
+            "`timeseries: Record{event_time_column: Text, partition_column: Text, granularity: Text, week_start: Text?, assert_monotonic: Bool?}` (ModelDef field, incremental-only, replaces the generator's frontmatter `timeseries:` block in full)"
+                .to_string(),
+        ),
+        "safety_overrides" => Some(
+            "`safety_overrides: Record{allow_window_functions: Bool?, allow_having: Bool?, allow_limit: Bool?, allow_subqueries: Bool?, allow_nondeterministic: Bool?, allow_distinct: Bool?}` (ModelDef field, incremental-only, replaces the generator's frontmatter `safety_overrides:` block in full)"
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -2722,7 +2731,8 @@ pub fn completion_for_model_def_field_key(already_filled: &[String]) -> Vec<Comp
     use smelt_types::signatures::MODEL_DEF_FIELDS;
 
     // Required fields appear first (name, body), then optional fields.
-    // MODEL_DEF_FIELDS is already in spec order: [name, body, materialization, tags, description].
+    // MODEL_DEF_FIELDS is already in spec order: [name, body, materialization,
+    // tags, description, timeseries, safety_overrides].
     MODEL_DEF_FIELDS
         .iter()
         .filter(|(name, _)| !already_filled.iter().any(|f| f == *name))

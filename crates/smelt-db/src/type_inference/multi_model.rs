@@ -73,6 +73,150 @@ pub fn validate_model_def_name(value: &str, span: TextRange) -> Option<MultiMode
     }
 }
 
+/// Sub-field schema for `ModelDef.timeseries` — mirrors `TimeseriesConfig`.
+/// `(name, required)`.
+const MODELDEF_TIMESERIES_OVERRIDE_FIELDS: &[(&str, bool)] = &[
+    ("event_time_column", true),
+    ("partition_column", true),
+    ("granularity", true),
+    ("week_start", false),
+    ("assert_monotonic", false),
+];
+
+/// Sub-field schema for `ModelDef.safety_overrides` — mirrors
+/// `PartitionGrainSafetyOverrides`; every field is optional. `(name, required)`.
+const MODELDEF_SAFETY_OVERRIDES_OVERRIDE_FIELDS: &[(&str, bool)] = &[
+    ("allow_window_functions", false),
+    ("allow_having", false),
+    ("allow_limit", false),
+    ("allow_subqueries", false),
+    ("allow_nondeterministic", false),
+    ("allow_distinct", false),
+];
+
+/// Cast an `Expr` to a `RecordLiteral`, unwrapping an `EXPRESSION` wrapper if
+/// present. Mirrors `Expr::as_array_literal`'s pattern.
+fn as_record_literal(expr: &smelt_parser::ast::Expr) -> Option<RecordLiteral> {
+    RecordLiteral::cast(expr.syntax().clone())
+        .or_else(|| expr.syntax().children().find_map(RecordLiteral::cast))
+}
+
+/// Validate a `ModelDef.timeseries` / `ModelDef.safety_overrides` nested
+/// record literal against its bespoke required/optional sub-field schema.
+///
+/// Unlike `check_record_literal` (which treats every declared field of a
+/// target `Record` type as required), these two `ModelDef` override fields
+/// have optional sub-fields, so this walks the literal directly rather than
+/// going through the generic record-literal checker.
+///
+/// Emits `RecordFieldUnknown` for a sub-field outside `field_specs`,
+/// `RecordFieldDuplicate` for a repeated sub-field, and `RecordFieldMissing`
+/// (anchored at the inner closing brace) for a required sub-field that never
+/// appears.
+///
+/// Pure — no Salsa dependency.
+fn validate_modeldef_override_literal(
+    parent_field_name: &str,
+    lit: &RecordLiteral,
+    field_specs: &[(&'static str, bool)],
+) -> Vec<MultiModelSentinel> {
+    let mut sentinels = Vec::new();
+    let type_display = format!("ModelDef.{parent_field_name}");
+    let declared_names: Vec<&str> = field_specs.iter().map(|(n, _)| *n).collect();
+    let declared_str = declared_names.join(", ");
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for field in lit.fields() {
+        let Some(field_name) = field.name() else {
+            continue;
+        };
+        let name_span = field
+            .syntax()
+            .children_with_tokens()
+            .find_map(|e| {
+                let tok = e.into_token()?;
+                if tok.kind() == SyntaxKind::IDENT {
+                    Some(tok.text_range())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(field.syntax().text_range());
+
+        if seen.contains(&field_name) {
+            sentinels.push(MultiModelSentinel {
+                code: crate::DiagnosticCode::RecordFieldDuplicate,
+                span: name_span,
+                message: crate::meta_record_diagnostic_message(
+                    crate::DiagnosticCode::RecordFieldDuplicate,
+                    None,
+                    Some(&field_name),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            });
+            continue;
+        }
+
+        if !declared_names.contains(&field_name.as_str()) {
+            sentinels.push(MultiModelSentinel {
+                code: crate::DiagnosticCode::RecordFieldUnknown,
+                span: name_span,
+                message: crate::meta_record_diagnostic_message(
+                    crate::DiagnosticCode::RecordFieldUnknown,
+                    Some(&type_display),
+                    Some(&field_name),
+                    None,
+                    None,
+                    None,
+                    Some(&declared_str),
+                ),
+            });
+            seen.insert(field_name);
+            continue;
+        }
+
+        seen.insert(field_name);
+    }
+
+    let close_brace_range = lit
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| {
+            let tok = e.into_token()?;
+            if tok.kind() == SyntaxKind::RBRACE {
+                Some(tok.text_range())
+            } else {
+                None
+            }
+        })
+        .last()
+        .unwrap_or(lit.syntax().text_range());
+
+    for (name, required) in field_specs {
+        if *required && !seen.contains(*name) {
+            sentinels.push(MultiModelSentinel {
+                code: crate::DiagnosticCode::RecordFieldMissing,
+                span: close_brace_range,
+                message: crate::meta_record_diagnostic_message(
+                    crate::DiagnosticCode::RecordFieldMissing,
+                    Some(&type_display),
+                    Some(name),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            });
+        }
+    }
+
+    sentinels
+}
+
 /// Validate that `value` is one of the closed materialization set
 /// `{'view', 'table', 'incremental'}`.
 ///
@@ -168,6 +312,8 @@ pub fn infer_model_def_literal(
 
     let mut seen: std::collections::HashMap<String, ()> = std::collections::HashMap::new();
     let mut provided: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut materialization_value: Option<String> = None;
+    let mut override_field_spans: Vec<(String, TextRange)> = Vec::new();
 
     for field in literal.fields() {
         let Some(field_name) = field.name() else {
@@ -253,10 +399,49 @@ pub fn infer_model_def_literal(
                     seen.insert(field_name.clone(), ());
                     continue;
                 }
+                materialization_value = Some(unquoted);
+            }
+
+            if field_name == "timeseries" || field_name == "safety_overrides" {
+                let field_specs = if field_name == "timeseries" {
+                    MODELDEF_TIMESERIES_OVERRIDE_FIELDS
+                } else {
+                    MODELDEF_SAFETY_OVERRIDES_OVERRIDE_FIELDS
+                };
+                if let Some(nested_lit) = as_record_literal(&value_expr) {
+                    sentinels.extend(validate_modeldef_override_literal(
+                        &field_name,
+                        &nested_lit,
+                        field_specs,
+                    ));
+                }
+                override_field_spans.push((field_name.clone(), name_span));
             }
         }
 
         provided.insert(field_name.clone());
+    }
+
+    // Incremental-only check: `timeseries` / `safety_overrides` are only
+    // meaningful when the emission materializes incrementally. Deferred until
+    // after the full field scan since `materialization` may appear after the
+    // override fields in source order.
+    let effective_materialization = materialization_value.as_deref().unwrap_or("view");
+    if effective_materialization != "incremental" {
+        for (field_name, span) in &override_field_spans {
+            sentinels.push(MultiModelSentinel {
+                code: crate::DiagnosticCode::ModelDefOverrideRequiresIncremental,
+                span: *span,
+                message: crate::meta_multi_model_diagnostic_message(
+                    crate::DiagnosticCode::ModelDefOverrideRequiresIncremental,
+                    None,
+                    None,
+                    Some(field_name),
+                    None,
+                    None,
+                ),
+            });
+        }
     }
 
     // Missing required fields: `name` and `body` are required.
@@ -781,6 +966,82 @@ mod tests {
                 .iter()
                 .any(|s| s.code == crate::DiagnosticCode::ModelDefOutsideGeneratorFile),
             "ModelDef outside generator must emit ModelDefOutsideGeneratorFile, got: {:?}",
+            result.sentinels
+        );
+    }
+
+    // ─── Test: ModelDef.timeseries override happy path ────────────────────────
+
+    #[test]
+    fn model_def_timeseries_override_typechecks() {
+        let src = "SELECT smelt.foo(ModelDef { name: 'us_west', body: SELECT 1, materialization: 'incremental', timeseries: { event_time_column: 'ts', partition_column: 'dt', granularity: 'day' } }) FROM t";
+        let lit = parse_model_def_literal(src);
+        let ctx = generator_ctx();
+        let result = infer_model_def_literal(&lit, &ctx);
+        assert!(
+            result.sentinels.is_empty(),
+            "expected no sentinels for valid timeseries override, got: {:?}",
+            result.sentinels
+        );
+        assert_eq!(result.inferred, SmeltType::ModelDef);
+    }
+
+    // ─── Test: ModelDef.timeseries unknown sub-field ───────────────────────────
+
+    #[test]
+    fn model_def_timeseries_unknown_subfield_rejected() {
+        let src = "SELECT smelt.foo(ModelDef { name: 'us_west', body: SELECT 1, materialization: 'incremental', timeseries: { event_time_column: 'ts', partition_column: 'dt', granularity: 'day', bogus: 'x' } }) FROM t";
+        let lit = parse_model_def_literal(src);
+        let ctx = generator_ctx();
+        let result = infer_model_def_literal(&lit, &ctx);
+        let found = result
+            .sentinels
+            .iter()
+            .find(|s| s.code == crate::DiagnosticCode::RecordFieldUnknown);
+        assert!(
+            found.is_some(),
+            "unknown sub-field `bogus` must emit RecordFieldUnknown, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            found.unwrap().message.contains("ModelDef.timeseries"),
+            "message must name ModelDef.timeseries, got: {}",
+            found.unwrap().message
+        );
+    }
+
+    // ─── Test: ModelDef.timeseries missing required sub-field ─────────────────
+
+    #[test]
+    fn model_def_timeseries_missing_required_subfield_rejected() {
+        let src = "SELECT smelt.foo(ModelDef { name: 'us_west', body: SELECT 1, materialization: 'incremental', timeseries: { event_time_column: 'ts', granularity: 'day' } }) FROM t";
+        let lit = parse_model_def_literal(src);
+        let ctx = generator_ctx();
+        let result = infer_model_def_literal(&lit, &ctx);
+        assert!(
+            result
+                .sentinels
+                .iter()
+                .any(|s| s.code == crate::DiagnosticCode::RecordFieldMissing),
+            "omitted partition_column must emit RecordFieldMissing, got: {:?}",
+            result.sentinels
+        );
+    }
+
+    // ─── Test: ModelDef override requires incremental materialization ─────────
+
+    #[test]
+    fn model_def_override_on_non_incremental_emission_rejected() {
+        let src = "SELECT smelt.foo(ModelDef { name: 'us_west', body: SELECT 1, materialization: 'view', timeseries: { event_time_column: 'ts', partition_column: 'dt', granularity: 'day' } }) FROM t";
+        let lit = parse_model_def_literal(src);
+        let ctx = generator_ctx();
+        let result = infer_model_def_literal(&lit, &ctx);
+        assert!(
+            result
+                .sentinels
+                .iter()
+                .any(|s| s.code == crate::DiagnosticCode::ModelDefOverrideRequiresIncremental),
+            "timeseries override on view materialization must emit ModelDefOverrideRequiresIncremental, got: {:?}",
             result.sentinels
         );
     }

@@ -30,6 +30,7 @@ mod meta_config_e2e;
 mod meta_hofs_e2e;
 mod meta_lists_e2e;
 mod meta_workspace_e2e;
+mod modeldef_per_emission_override_e2e;
 mod path_prefix_build;
 mod per_partition_equivalence;
 mod rebuild_cumulative_e2e;

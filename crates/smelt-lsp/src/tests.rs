@@ -2509,21 +2509,21 @@ fn completion_on_generates_offers_models_only() {
     );
 }
 
-/// Completion at `ModelDef {{ <cursor>` offers the closed five-field set, with
+/// Completion at `ModelDef {{ <cursor>` offers the closed seven-field set, with
 /// required fields (`name`, `body`) first, and excludes already-filled fields.
 ///
 /// `completion_for_model_def_field_key` must:
-/// - Return all five fields when `already_filled` is empty.
+/// - Return all seven fields when `already_filled` is empty.
 /// - Exclude already-filled fields.
 /// - Place `name` and `body` before optional fields.
 #[test]
-fn completion_on_model_def_field_key_offers_closed_five_field_set() {
-    // All five fields when nothing is filled.
+fn completion_on_model_def_field_key_offers_closed_seven_field_set() {
+    // All seven fields when nothing is filled.
     let items = completion_for_model_def_field_key(&[]);
     assert_eq!(
         items.len(),
-        5,
-        "must offer all five fields when nothing is filled; got: {items:?}"
+        7,
+        "must offer all seven fields when nothing is filled; got: {items:?}"
     );
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(
@@ -2546,6 +2546,14 @@ fn completion_on_model_def_field_key_offers_closed_five_field_set() {
         labels.contains(&"description"),
         "must offer 'description' field; got: {labels:?}"
     );
+    assert!(
+        labels.contains(&"timeseries"),
+        "must offer 'timeseries' field; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"safety_overrides"),
+        "must offer 'safety_overrides' field; got: {labels:?}"
+    );
     // Required fields (name, body) come first per the spec ordering rule.
     let name_pos = items.iter().position(|i| i.label == "name").unwrap();
     let body_pos = items.iter().position(|i| i.label == "body").unwrap();
@@ -2566,8 +2574,8 @@ fn completion_on_model_def_field_key_offers_closed_five_field_set() {
     let items_partial = completion_for_model_def_field_key(&["name".to_string()]);
     assert_eq!(
         items_partial.len(),
-        4,
-        "must offer 4 fields when 'name' is already filled; got: {items_partial:?}"
+        6,
+        "must offer 6 fields when 'name' is already filled; got: {items_partial:?}"
     );
     assert!(
         !items_partial.iter().any(|i| i.label == "name"),

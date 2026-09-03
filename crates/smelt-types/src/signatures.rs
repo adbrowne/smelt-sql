@@ -415,18 +415,23 @@ pub enum SmeltType {
     /// reflection), `ModelDef` values are constructed via record literals inside
     /// a `generates: models` generator file body.
     ///
-    /// The type has exactly five fields (see [`MODEL_DEF_FIELDS`]):
+    /// The type has exactly seven fields (see [`MODEL_DEF_FIELDS`]):
     ///   - `name: Text` — model identifier (`[A-Za-z0-9_]+`, non-empty)
     ///   - `body: TableExpr` — the model's SQL body (the single carve-out
     ///     admitting `TableExpr` in a record-like field position)
     ///   - `materialization: Text` — one of `view`, `table`, `incremental`
     ///   - `tags: List<Text>` — tag set (merges with workspace-level overlays)
     ///   - `description: Text` — human-readable description
+    ///   - `timeseries: Record{…}` — optional per-emission override of the
+    ///     generator's file-wide `timeseries:` block; incremental-only
+    ///   - `safety_overrides: Record{…}` — optional per-emission override of the
+    ///     generator's file-wide `safety_overrides:` block; incremental-only
     ///
     /// **Meta-only**: values never reach the database engine.
     ///
-    /// **Closed**: the v1 field set is exactly `{name, body, materialization, tags, description}`.
-    /// Adding a field requires a spec edit and a compiler change.
+    /// **Closed**: the v1 field set is exactly `{name, body, materialization, tags,
+    /// description, timeseries, safety_overrides}`. Adding a field requires a
+    /// spec edit and a compiler change.
     ///
     /// **Not assignable to `Record`**: `ModelDef` is the only user-constructible
     /// closed meta record type. It is structurally distinguishable from any
@@ -3771,17 +3776,29 @@ pub fn source_ref_field(name: &str) -> Option<&'static SmeltType> {
 
 /// The closed field set of [`SmeltType::ModelDef`].
 ///
-/// Invariant: exactly five entries — `name`, `body`, `materialization`, `tags`,
-/// `description` — in this canonical order. This is the single source of truth
-/// for the v1 field set. Any future addition requires a spec edit AND a change
-/// to this constant.
+/// Invariant: exactly seven entries — `name`, `body`, `materialization`, `tags`,
+/// `description`, `timeseries`, `safety_overrides` — in this canonical order.
+/// This is the single source of truth for the v1 field set. Any future
+/// addition requires a spec edit AND a change to this constant.
 ///
 /// Field types:
-/// - `name`            → `Expr<Text>`       — model identifier (`[A-Za-z0-9_]+`, non-empty)
-/// - `body`            → `TableExpr`        — the only carve-out admitting `TableExpr` in a record field
-/// - `materialization` → `Expr<Text>`       — one of `view`, `table`, `incremental`
-/// - `tags`            → `List<Expr<Text>>` — merged tag set
-/// - `description`     → `Expr<Text>`       — human-readable description
+/// - `name`             → `Expr<Text>`       — model identifier (`[A-Za-z0-9_]+`, non-empty)
+/// - `body`             → `TableExpr`        — the only carve-out admitting `TableExpr` in a record field
+/// - `materialization`  → `Expr<Text>`       — one of `view`, `table`, `incremental`
+/// - `tags`              → `List<Expr<Text>>` — merged tag set
+/// - `description`       → `Expr<Text>`       — human-readable description
+/// - `timeseries`        → `Record{…}`        — per-emission override of the generator's
+///   file-wide `timeseries:` frontmatter block; mirrors `TimeseriesConfig`. Whole-block
+///   replacement, honoured only when `materialization == 'incremental'`.
+/// - `safety_overrides`  → `Record{…}`        — per-emission override of the generator's
+///   file-wide `safety_overrides:` block; mirrors `PartitionGrainSafetyOverrides`. Whole-block
+///   replacement, honoured only when `materialization == 'incremental'`.
+///
+/// `timeseries` and `safety_overrides` are validated with bespoke required/optional
+/// sub-field rules in `smelt-db`'s `type_inference::multi_model` (not through the
+/// generic `check_record_literal` path, which treats every declared field as
+/// required) — see `MODELDEF_TIMESERIES_OVERRIDE_FIELDS` /
+/// `MODELDEF_SAFETY_OVERRIDES_OVERRIDE_FIELDS` there.
 ///
 /// Uses `LazyLock` because `SmeltType::List` and `SmeltType::TableExpr` contain
 /// heap-allocated inner types that cannot be constructed in `const` context.
@@ -3808,6 +3825,20 @@ pub static MODEL_DEF_FIELDS: LazyLock<Vec<(&'static str, SmeltType)>> = LazyLock
         (
             "description",
             SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "timeseries",
+            SmeltType::Record {
+                fields: BTreeMap::new(),
+                name: Some("ModelDef.timeseries".to_string()),
+            },
+        ),
+        (
+            "safety_overrides",
+            SmeltType::Record {
+                fields: BTreeMap::new(),
+                name: Some("ModelDef.safety_overrides".to_string()),
+            },
         ),
     ]
 });
@@ -8009,17 +8040,30 @@ mod tests {
 
     // ── ModelDef type system tests ────────────────────────────────────────────
 
-    /// `MODEL_DEF_FIELDS` exposes exactly five names and each entry's type
-    /// matches the spec table.
+    /// `MODEL_DEF_FIELDS` exposes exactly seven names, in canonical order, and
+    /// each entry's type matches the spec table.
     #[test]
     fn model_def_fields_registry_is_closed_and_exact() {
-        // Exact five names in the spec-defined set.
-        let spec_names = ["name", "body", "materialization", "tags", "description"];
+        // Exact seven names in the spec-defined set, canonical order.
+        let spec_names = [
+            "name",
+            "body",
+            "materialization",
+            "tags",
+            "description",
+            "timeseries",
+            "safety_overrides",
+        ];
         assert_eq!(
             MODEL_DEF_FIELDS.len(),
-            5,
-            "MODEL_DEF_FIELDS must have exactly 5 entries; got {}",
+            7,
+            "MODEL_DEF_FIELDS must have exactly 7 entries; got {}",
             MODEL_DEF_FIELDS.len()
+        );
+        let actual_names: Vec<&str> = MODEL_DEF_FIELDS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            actual_names, spec_names,
+            "MODEL_DEF_FIELDS must be in canonical order"
         );
         for name in &spec_names {
             assert!(
@@ -8027,6 +8071,20 @@ mod tests {
                 "MODEL_DEF_FIELDS must contain field '{name}'"
             );
         }
+        assert!(
+            matches!(
+                model_def_field("timeseries"),
+                Some(SmeltType::Record { .. })
+            ),
+            "timeseries field must be Record-typed"
+        );
+        assert!(
+            matches!(
+                model_def_field("safety_overrides"),
+                Some(SmeltType::Record { .. })
+            ),
+            "safety_overrides field must be Record-typed"
+        );
         // Unknown identifiers return None (closed-field invariant).
         assert!(
             model_def_field("incremental").is_none(),
