@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788435920097,
+  "lastUpdate": 1788435924448,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -587,6 +587,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 32.54566859924453,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "39228307bd7960d6e5319c1b06150a5be9ec3d53",
+          "message": "CI: restore rustfmt/clippy component install in Lint job\n\nRemoved this in the mise migration on the mistaken assumption mise's\nrust backend includes them by default (confirmed locally, but that\nmachine already had rustfmt/clippy from a prior non-mise rustup\ninstall — a fresh CI runner doesn't have them). CI failed with\n\"'cargo-fmt' is not installed for the toolchain '1.95.0-...'\".\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T21:42:07+10:00",
+          "tree_id": "e3f4391fcacc37d66cc207e31cb67a7d566baf8b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/39228307bd7960d6e5319c1b06150a5be9ec3d53"
+        },
+        "date": 1788435923186,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.972171928295936,
             "unit": "MB/s"
           }
         ]
