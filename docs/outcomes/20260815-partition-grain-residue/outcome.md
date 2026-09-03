@@ -63,7 +63,7 @@ fixture.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | done |
-| 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | pending |
+| 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | planned |
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | pending |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | pending |
 | 5 | Monotone-integer `partition_column` end-to-end (backfill chunking, scan-filter injection, explain clamp) | pending |
@@ -93,6 +93,14 @@ fixture.
   `docs/plans/20260704-model-updates-l4-batched.md` Phase BL8 (`pending`) —
   phase 8's close-out should fix this stale claim alongside the divergence
   removal.
+
+- 2026-09-04 — Phase 2 planned. No phase row added, split, or reordered: the
+  residual gap the phase-1 summary flagged (`analyze_one_select` never descends
+  into subqueries, so even fully-expanded SQL hides an `OVER`/`LAG` inside the
+  derived table that expansion produces) is absorbed *into* phase 2 rather than
+  deferred — without it, expansion alone would leave a define-body `LAG`
+  classified `FullyBatchSafe`, i.e. success criterion 2 unmet and the verdict
+  unsafe rather than merely conservative.
 
 ## Blocked
 
