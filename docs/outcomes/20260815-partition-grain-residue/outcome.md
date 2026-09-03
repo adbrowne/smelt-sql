@@ -74,7 +74,7 @@ fixture.
 | 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | done |
 | 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | done |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | done |
-| 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
+| 7 | `partition_column` rename: refusal diagnostic + fixture | planned |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
@@ -267,6 +267,21 @@ fixture.
   LSP hover formatter for the editor-hover half. Spec updated; stale Known
   Divergences bullet removed; `probe_explain_json_run_relative_source_bounds`
   inverted. No phase reshape.
+
+- 2026-09-04 — Phase 7 planned. No phase row added, split, or reordered: the phase-6
+  summary reported no new residue, and its two forward items (phase 7, phase 8) are
+  already rows. Two design calls the outcome text leaves open, made in the plan rather
+  than escalated: (i) *how a rename is even detectable* — the deployed-schema snapshot
+  records the compiled SQL and output column names only, never the declared write
+  address, so a rename that repoints `partition_column` at an already-projected column
+  produces no diff at all today; the snapshot therefore gains a `partition_column`
+  field (`#[serde(default)]`, same back-compat posture as `model_sql`) threaded to the
+  pure derivation as a world fact, per maintenance-plan purity. (ii) *a new code rather
+  than reusing `MaintenanceSkeletonChanged`* — the incidental column-diff path names the
+  new output column with no mention of the address change, and the no-diff rename is
+  invisible to it, so `MaintenancePartitionColumnChanged` is its own catalogue row owned
+  by `incremental_shapes.md` §"The partition grain". Scoped to `partition_column` only;
+  an `event_time_column`-only rename matches no residue bullet and is not folded in.
 
 ## Blocked
 
