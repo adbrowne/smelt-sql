@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788432740197,
+  "lastUpdate": 1788432743179,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.123520123464008,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "223d4aafbc346af84af46e3a73aaee24e7382571",
+          "message": "Add mise for tool versions, DuckDB lib setup, and dev tasks\n\nPins Rust/Node via mise.toml, sets DUCKDB_LIB_DIR/LD_LIBRARY_PATH\ndynamically, and wraps verify-phase.sh/clippy-gate.sh as mise tasks so\na fresh checkout no longer needs the manual export block in CLAUDE.md.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T20:50:15+10:00",
+          "tree_id": "014d71c2b080ca2cbefbe2d941171aba7e1d090a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/223d4aafbc346af84af46e3a73aaee24e7382571"
+        },
+        "date": 1788432742341,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.79225327085001,
             "unit": "MB/s"
           }
         ]
