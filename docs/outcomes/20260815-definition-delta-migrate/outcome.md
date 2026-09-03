@@ -349,7 +349,7 @@ open — not that the excluded bullets themselves are gone.
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | done |
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
-| 32 | Posture-derived key departure (`retain_departed`): declaration parsing, oracle transform, probe emitter, and a `ContractRetainDepartedInvalid`-shaped diagnostic for the already-decided default-point behaviour (decision record `docs/research/20260816-open-questions-triage.md`); found orphaned by phase 31's audit (maps to no live outcome, out-of-scope entry, or Future Extensions item) | planned |
+| 32 | Posture-derived key departure (`retain_departed`): declaration parsing, oracle transform, probe emitter, and a `ContractRetainDepartedInvalid`-shaped diagnostic for the already-decided default-point behaviour (decision record `docs/research/20260816-open-questions-triage.md`); found orphaned by phase 31's audit (maps to no live outcome, out-of-scope entry, or Future Extensions item) | blocked |
 | 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | planned |
 
 ## Decision log
@@ -1305,3 +1305,16 @@ row rather than being fixed inside the audit.
 ## Blocked
 
 <!-- Dated entries: phase, reason, candidate options. -->
+
+**2026-09-03 — Phase 32 (`retain_departed` key departure).** The phase-31 close-out commit
+(`eb0894d0`) queued this row directly as `planned` when it discovered the orphaned finding,
+without a PLAN step ever writing `phases/32-plan.md`. The IMPLEMENT contract (`docs/outcome_loop.md`)
+is to execute an existing phase plan, not author one from scratch — `phases/<NN>-plan.md` is
+supposed to exist by the time a row reaches `planned`. No plan file exists for phase 32 (or 33,
+same defect). Flipping back to `blocked` rather than improvising a plan inline.
+Candidate options: (a) the loop's next PLAN-step iteration should treat a `blocked` row whose
+blocker is "missing plan file" as workable — write `phases/32-plan.md` per the referenced decision
+record `docs/research/20260816-open-questions-triage.md`, then flip to `planned`; (b) fold phase 32
+into whichever future phase would naturally cover contract-lattice point additions, if one exists
+by then. No design ambiguity in the underlying work itself — just a process gap in how phase 31's
+audit queued follow-ups.
