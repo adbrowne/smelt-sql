@@ -1,7 +1,7 @@
 # Outcome: Close the partition grain's stale-plan-tracked implementation residues
 
 **Created:** 2026-08-15
-**Status:** active
+**Status:** done
 **Source:** `docs/specs/incremental_shapes.md` §"The partition grain" §Known Divergences;
 `docs/plans/20260530-thread-fn-registry-classification.md`,
 `docs/plans/20260616-smelt-feedback-fixes.md`, `docs/plans/20260509-meta-language-overall.md`,
@@ -75,7 +75,7 @@ fixture.
 | 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | done |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | done |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | done |
-| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | planned |
+| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | done |
 
 ## Decision log
 
@@ -304,6 +304,16 @@ fixture.
   scheduling a no-op edit. The phase-7 summary's other forward note (a smoother remedy than
   deleting the snapshot file for `MaintenancePartitionColumnChanged`) is new scope beyond every
   success criterion and is not folded in; phase 8's summary records it as a finding.
+
+- 2026-09-04 — Phase 8 implemented (`phases/08-summary.md`). Scoped
+  `/smelt:validate incremental_shapes` to the partition grain (key grain owned by a separate
+  blocked outcome). Two drift items found and fixed: §References → "The partition grain" was
+  stale (missing every code/test/doc path phases 2–7 landed); `MaintenancePartitionColumnChanged`
+  was missing from the spec's own partition-grain diagnostics table despite `diagnostics.md`
+  naming this spec as owner. Also documented the phase-6 editor-hover clamp readout, previously
+  shipped but undocumented. Landed the ratchet test
+  `partition_grain_residues_stay_closed` pinning the six live (unowned) Known Divergences
+  bullets. All success criteria met; outcome closed.
 
 ## Blocked
 

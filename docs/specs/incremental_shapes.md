@@ -353,6 +353,7 @@ chooser").
 | `PartitionGrainNotSafe` | The batch-safety classifier rejects the model's SQL (§"Safety checks (per-cell admission for recompute-a-region)"). |
 | `EventTimeColumnNotVisibleAtOuterSelect` | The outer output-clamp cannot bind: a set operation, subquery, or CTE hides `event_time_column` at the outermost SELECT (§"Event-time outer-visibility"). |
 | `PartitionGrainForbidsMetrics` | A partition-grain model's body consumes `smelt.metric()` — the composition of metric expansion with time-filter injection is deliberately unspecified, so the combination refuses ahead of execution rather than composing unpredictably (§"Functions inside partition-grain bodies"). |
+| `MaintenancePartitionColumnChanged` | A maintained model's declared `timeseries.partition_column` differs from the address recorded in the deployed-schema snapshot at last deploy; names both columns. No run flag bypasses it; remedy is deleting the model's recorded snapshot and re-running. |
 
 **Key-grain codes.**
 
@@ -1328,15 +1329,23 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions`, `Backend::insert_into_from_query`, `Backend::delete_and_insert_transactional` (per-chunk transaction boundary)
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `DeleteInsert` impl
   - `crates/smelt-dialect/src/dialect.rs` — `BackendCapabilities::supports_merge`
+  - `crates/smelt-logical/src/analysis/temporal.rs` — `analyze_expr_temporal` subquery/CTE descent
+  - `crates/smelt-logical/src/windowing.rs` — `PartitionAxis`, `PartitionPoint`, `resolve_scan_window`
+  - `crates/smelt-runtime/src/windowing.rs` — `IncrementalBatch` axis dispatch (calendar / unit-step integer)
+  - `crates/smelt-logical/src/maintenance/derive.rs` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
+  - `crates/smelt-state/src/schema_tracking.rs` — `DeployedSchema::partition_column`
+  - `crates/smelt-db/src/lib.rs` — `model_source_clamps`
 - **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI
   integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition
-  full-refresh-equivalence harness
-- **User docs**: [`docs-site/docs/guide/incremental-models.md`](../../docs-site/docs/guide/incremental-models.md), [`docs-site/docs/guide/materializations.md`](../../docs-site/docs/guide/materializations.md)
+  full-refresh-equivalence harness; `crates/smelt-cli/tests/partition_residue_probes.rs`;
+  `crates/smelt-logical/tests/partition_residue_probes.rs`
+- **User docs**: [`docs-site/docs/guide/incremental-models.md`](../../docs-site/docs/guide/incremental-models.md), [`docs-site/docs/guide/materializations.md`](../../docs-site/docs/guide/materializations.md), [`docs-site/docs/reference/smelt-explain.md`](../../docs-site/docs/reference/smelt-explain.md), [`docs-site/docs/reference/timeseries.md`](../../docs-site/docs/reference/timeseries.md)
 - **Plans (history)**:
   - [`docs/plans/20260322-incremental-model-support.md`](../plans/20260322-incremental-model-support.md) — comprehensive plan; many phases still open
   - [`docs/plans/20260325-materialization-types.md`](../plans/20260325-materialization-types.md)
   - [`docs/plans/20260704-model-updates.md`](../plans/20260704-model-updates.md) — the mode-vertical master the spec family re-cuts as a composition
   - [`docs/plans/20260707-maintenance-plan-impl.md`](../plans/20260707-maintenance-plan-impl.md) — lands the target frontmatter surface and diagnostics
+  - [`docs/outcomes/20260815-partition-grain-residue/outcome.md`](../outcomes/20260815-partition-grain-residue/outcome.md) — closes the pre-`docs/outcomes/` partition-grain residues
 - **Research**:
   - [`docs/research/20260521-incremental-as-planner-rule.md`](../research/20260521-incremental-as-planner-rule.md) — design direction this spec absorbs
   - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — batched eligibility audit; §9.2 non-determinism derivation

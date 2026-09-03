@@ -416,3 +416,62 @@ fn probe_partition_column_rename_refusal() {
         String::from_utf8_lossy(&fourth.stderr)
     );
 }
+
+/// Ratchet: `docs/outcomes/20260815-partition-grain-residue` closed seven pre-`docs/outcomes/`
+/// partition-grain Known Divergences bullets (phases 2-7; two folded into phase 2). This test
+/// pins the bullet set the spec's §"The partition grain" Known Divergences is allowed to carry
+/// going forward, so a future edit cannot quietly reintroduce a closed residue without the
+/// change being visible here. Green on arrival; red if the bullet set drifts from the six this
+/// outcome does not own.
+#[test]
+fn partition_grain_residues_stay_closed() {
+    let spec_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/incremental_shapes.md");
+    let spec = std::fs::read_to_string(&spec_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", spec_path.display()));
+
+    let section_start = spec
+        .find("### The partition grain\n")
+        .expect("spec must have a \"### The partition grain\" Known Divergences section");
+    let after_heading = &spec[section_start..];
+    let section_end = after_heading[1..]
+        .find("\n### ")
+        .map(|i| i + 1)
+        .unwrap_or(after_heading.len());
+    let section = &after_heading[..section_end];
+
+    let bullets: Vec<&str> = section
+        .lines()
+        .filter(|l| l.trim_start().starts_with("- **"))
+        .collect();
+
+    let expected_leads = [
+        "Per-column `data_latency` is unimplemented",
+        "Non-deterministic row-set-membership or grouping is out of scope",
+        "Schema evolution on the partition grain is largely a definition delta now",
+        "The `PartitionGrainForbidsMetrics` refusal is unimplemented",
+        "The sub-`g_part` rejection does not yet name the coarsened window",
+        "`NOW()`/`CURRENT_*` are still compile-time-pinned",
+    ];
+
+    assert_eq!(
+        bullets.len(),
+        expected_leads.len(),
+        "expected exactly {} partition-grain Known Divergences bullets (the six this outcome \
+         does not own), found {}:\n{}",
+        expected_leads.len(),
+        bullets.len(),
+        bullets.join("\n")
+    );
+
+    for (bullet, expected_lead) in bullets.iter().zip(expected_leads.iter()) {
+        assert!(
+            bullet.contains(expected_lead),
+            "unexpected or reordered partition-grain Known Divergences bullet.\n\
+             expected a bullet containing: {expected_lead:?}\n\
+             found: {bullet:?}\n\
+             (this fires either because a closed residue's bullet reappeared, or because the \
+             bullet order changed — update `expected_leads` only if the reorder is intentional)"
+        );
+    }
+}

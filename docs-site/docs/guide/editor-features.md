@@ -52,6 +52,11 @@ Column types include nullability: a non-nullable column shows as `T NOT NULL` (f
 
 This is particularly useful when writing joins or aggregations: you can quickly check what columns are available without switching files.
 
+Hovering over a `smelt.<path>` reference into a partition-grain incremental model also appends a
+one-line scan-window clamp readout below the schema table when the source carries a resolvable
+`before`/`after` bound — the same run-relative window `smelt explain --json`'s `source_bounds`
+reports.
+
 ![Model schema on hover](../assets/editor-features/01-model-schema-on-hover-editor.png)
 
 ![Upstream schema lineage](../assets/editor-features/02-upstream-schema-lineage.png)
