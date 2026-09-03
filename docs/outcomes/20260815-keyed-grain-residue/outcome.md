@@ -71,7 +71,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
 | 3 | Transactional ledger fold on every shipped backend | blocked |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
-| 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | pending |
+| 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | planned |
 | 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
@@ -143,6 +143,18 @@ six success criteria — criterion 1 is already met end-to-end without it.
   an `Execution postures:` block (text and `--json`). The tutorial doc-sync gate required one
   regeneration (`deduplication.md` picked up the new block) — expected, not a regression. No new
   limitations discovered.
+
+- 2026-09-04 — Phase 5 planned. No reshape: phase 4's summary explicitly reports no new
+  limitations and states rows 5-6 are unaffected; rows 5 and 6 still map onto criteria 5 and 6.
+  Two scoping decisions fixed here. (a) The nullable payload lands as a TYPE change on `GenRow`
+  (`val: Option<i64>`) threaded through every testkit and gate site, but `arb_payload_value()` —
+  the general append-only pool's draw — keeps producing non-NULL values: criterion 5 names the
+  once-write NULL direction, and drawing NULLs across every combiner family would change what the
+  additive/idempotent/decomposed families are asserting, which is hardening beyond this outcome
+  rather than work its criteria require. (b) The proof moves into a dedicated world-fact-preserving
+  generator (`arb_once_write_null_schedule`) driven through the existing `STracker` oracle, and the
+  hand-written case is retained as a pinned minimal witness with its now-false "GenRow::val is
+  non-nullable" rationale rewritten.
 
 ## Blocked
 
