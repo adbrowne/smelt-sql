@@ -351,10 +351,18 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
 | 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | done |
 | 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | done |
-| 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | planned |
+| 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | done |
 | 34 | Persist the `retain_departed` probe outcome on the run manifest: thread the snapshot-reconcile path's pre-write probe through `smelt-runtime`'s `ProbeRecord`/`ModelRunRecord.probes` ledger the `frozen_horizon`/`deferral` probes already use, so the declared lattice point is explain/run-report visible rather than only fail-loud inline (phase 32b summary follow-up) | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 33 implement — wired.** The override ladder's write-suppression
+  dimension now reaches the keyed-fold consumer: `resolve_cumulative_write_suppression` folds
+  `resolve_write_variant` over `Trigger::NewData{..}`/`ledger_catch_up: false` (a derivation
+  from the route's structure — both live call sites only resolve suppression once the target
+  table exists), and the `smelt explain --show-sql` keyed-fold preview folds the same ladder in
+  for preview/live parity. Spec's Known Divergences bullet deleted; the cost-model residual
+  moved to §Future Extensions. See `phases/33-summary.md`.
 
 - **2026-09-03, phase 33 plan — reshape.** Two edits. (a) Row 33 is planned, not deferred:
   investigation for `phases/33-plan.md` found the keyed-fold consumer silently ignores a

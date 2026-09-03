@@ -27,7 +27,9 @@ use smelt_core::ModelFile;
 use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::contract::retain_departed::{reconcile_disposition, DepartedKeyDisposition};
-use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
+use smelt_logical::maintenance::choice::{
+    resolve_write_suppression, resolve_write_variant, EffectiveOverride, WriteSuppression,
+};
 use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
     emit_departed_key_delete, emit_keyed_fold, emit_keyed_fold_suppressed,
@@ -37,6 +39,7 @@ use smelt_logical::maintenance::emit::{
 use smelt_logical::maintenance::locality::{
     establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
 };
+use smelt_logical::maintenance::Trigger;
 use smelt_planner::{
     classify_cumulative, combiner_for, CrossPartitionCombiner, CumulativeClassification,
     KeyedDiagnostic, SourceTimeseriesMap,
@@ -505,7 +508,21 @@ pub async fn execute_cumulative_aggregate(
     // model's own P2 row identity and P3 change-comparability over the
     // fold's own output columns (`docs/plans/20260715-composed-axes-
     // conditional-maintenance.md` Phase C6) — never re-derived per step.
-    let suppression = resolve_cumulative_write_suppression(&classification, &clean_sql);
+    // Folds the override ladder's write-suppression dimension in
+    // (`docs/outcomes/20260815-definition-delta-migrate/phases/33-plan.md`).
+    let write_suppression_overrides = model
+        .metadata
+        .as_deref()
+        .map(|m| {
+            smelt_db::queries::maintenance::keyed_fold_effective_override(m, &driving_source_name)
+        })
+        .unwrap_or_default();
+    let suppression = resolve_cumulative_write_suppression(
+        &classification,
+        &clean_sql,
+        &write_suppression_overrides,
+    )
+    .map_err(|refusal| anyhow::anyhow!("{}", refusal))?;
 
     // The hidden decomposed-state columns every state-bearing aggregator
     // column carries (`docs/specs/incremental_shapes.md` §"Decomposed state
@@ -660,7 +677,22 @@ pub async fn execute_snapshot_reconcile(
             .await
             .with_context(|| format!("Failed to create keyed model {}", model_name))?;
     } else {
-        let suppression = resolve_cumulative_write_suppression(classification, &clean_sql);
+        let write_suppression_overrides = model
+            .metadata
+            .as_deref()
+            .map(|m| {
+                smelt_db::queries::maintenance::keyed_fold_effective_override(
+                    m,
+                    &classification.driving_source.name,
+                )
+            })
+            .unwrap_or_default();
+        let suppression = resolve_cumulative_write_suppression(
+            classification,
+            &clean_sql,
+            &write_suppression_overrides,
+        )
+        .map_err(|refusal| anyhow::anyhow!("{}", refusal))?;
         let dialect = smelt_backend::maintenance_dialect(backend.dialect());
         let merge_sql = build_cumulative_merge_sql(
             schema,
@@ -853,10 +885,27 @@ pub fn build_cumulative_merge_sql(
 /// (`model_property_vector`) over the model's own SQL. `compared_columns`
 /// is exactly the fold's own output columns — there is nothing else a
 /// keyed-fold cell's matched arm could write.
+///
+/// Folds the override ladder's write-suppression dimension in via
+/// [`resolve_write_variant`] (`docs/outcomes/20260815-definition-delta-
+/// migrate/phases/33-plan.md`) — `maintenance.cells[].technique: suppress|
+/// unconditional`/`prefer:` addressing this keyed fold's driving source was
+/// previously silently ignored on this route. Both keyed call sites reach a
+/// merge only once the target table already exists (`run_windowed_keyed_
+/// maintenance` emits `emit_create_table_as` for a non-existent table; the
+/// snapshot-reconcile executor resolves suppression inside its `else` arm
+/// of `!table_exists`), so `Trigger::Backfill`/`ledger_catch_up` can never
+/// be observed here — `keyed`'s classifier runs outside the
+/// `MaintenancePlan` machinery and carries no `PlanCell`. Passing
+/// `Trigger::NewData` with `ledger_catch_up: false` is therefore a
+/// derivation from the route's own structure, not an assumption: every
+/// reachable call is, by construction, a steady-state write over an
+/// already-populated table.
 fn resolve_cumulative_write_suppression(
     classification: &CumulativeClassification,
     sql: &str,
-) -> WriteSuppression {
+    overrides: &EffectiveOverride,
+) -> Result<WriteSuppression, smelt_logical::maintenance::choice::ChoiceRefusal> {
     let group_columns: Vec<String> = classification
         .aggregator_columns
         .iter()
@@ -866,7 +915,11 @@ fn resolve_cumulative_write_suppression(
     let comparability = model_property_vector(sql, &JoinContext::new())
         .map(|v| v.comparability)
         .unwrap_or_default();
-    resolve_write_suppression(&group_columns, &comparability, &identity)
+    let suppression = resolve_write_suppression(&group_columns, &comparability, &identity);
+    let trigger = Trigger::NewData {
+        source: classification.driving_source.name.clone(),
+    };
+    resolve_write_variant(&suppression, &trigger, false, overrides).map(|(variant, _)| variant)
 }
 
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
@@ -1371,7 +1424,12 @@ mod tests {
         let sql = "SELECT event_id, MIN(device_id) AS device_id, \
                     MIN(CAST(event_date AS DATE)) AS first_seen_date \
                     FROM smelt.sources.raw.events GROUP BY event_id";
-        let suppression = resolve_cumulative_write_suppression(&classification, sql);
+        let suppression = resolve_cumulative_write_suppression(
+            &classification,
+            sql,
+            &EffectiveOverride::default(),
+        )
+        .expect("no override pinned — resolve_write_variant never refuses here");
         assert_eq!(
             suppression,
             WriteSuppression::Suppressed {
@@ -1379,6 +1437,181 @@ mod tests {
             },
             "a MIN-folded group over a proven key must admit suppression, not refuse: \
              {suppression:?}"
+        );
+    }
+
+    /// `docs/outcomes/20260815-definition-delta-migrate/phases/33-plan.md`:
+    /// a hard `technique: unconditional` pin addressing the keyed fold's
+    /// driving source must reach the resolver — the write must fall back to
+    /// the plain unconditional matched arm even though P2/P3 both admit
+    /// suppression. Before this phase `resolve_cumulative_write_suppression`
+    /// never consulted the override ladder at all, so this pin was silently
+    /// ignored.
+    #[test]
+    fn keyed_fold_unconditional_pin_reaches_the_emitted_merge() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["event_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT event_id, MIN(device_id) AS device_id FROM smelt.sources.raw.events \
+                    GROUP BY event_id";
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(smelt_core::config::CellTechnique::Unconditional),
+        };
+        let suppression = resolve_cumulative_write_suppression(&classification, sql, &overrides)
+            .expect("technique: unconditional never refuses");
+        assert!(
+            matches!(suppression, WriteSuppression::Unconditional { .. }),
+            "pinned technique: unconditional must resolve the unconditional variant even \
+             though P2/P3 admit suppression: {suppression:?}"
+        );
+
+        let delta_sql = "SELECT event_id, MIN(device_id) AS device_id FROM events GROUP BY \
+                          event_id";
+        let merge_sql = build_cumulative_merge_sql(
+            "main",
+            "events_deduped",
+            delta_sql,
+            &classification,
+            None,
+            &suppression,
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(
+            !merge_sql.contains("IS DISTINCT FROM"),
+            "the pinned unconditional arm must not emit the change-suppressed guard: \
+             {merge_sql}"
+        );
+    }
+
+    /// `technique: suppress` over a proof that refused (P2 `WholeRow`
+    /// identity here) must propagate the resolver's `ChoiceRefusal`, never
+    /// silently fall back to the unconditional arm.
+    #[test]
+    fn keyed_fold_suppress_pin_over_refused_proof_refuses() {
+        let classification = CumulativeClassification {
+            unique_key: vec![],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT MIN(device_id) AS device_id FROM smelt.sources.raw.events";
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(smelt_core::config::CellTechnique::Suppress),
+        };
+        let result = resolve_cumulative_write_suppression(&classification, sql, &overrides);
+        assert!(
+            result.is_err(),
+            "technique: suppress over a WholeRow (no proven key) row identity must refuse, \
+             not silently emit the unconditional arm: {result:?}"
+        );
+    }
+
+    /// The soft `prefer: unconditional` bias flips the structural default
+    /// (suppressed, since P2/P3 both admit it here) without ever refusing.
+    #[test]
+    fn keyed_fold_prefer_unconditional_soft_biases_without_refusing() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["event_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT event_id, MIN(device_id) AS device_id FROM smelt.sources.raw.events \
+                    GROUP BY event_id";
+
+        let unconditional_bias = EffectiveOverride {
+            prefer: Some(smelt_core::config::TechniquePreference::Unconditional),
+            technique: None,
+        };
+        let suppression =
+            resolve_cumulative_write_suppression(&classification, sql, &unconditional_bias)
+                .expect("a soft prefer never refuses");
+        assert!(matches!(
+            suppression,
+            WriteSuppression::Unconditional { .. }
+        ));
+
+        // A `prefer: suppress` bias over a WholeRow proof refusal falls
+        // back silently — never a hard refusal like the pin above.
+        let whole_row_classification = CumulativeClassification {
+            unique_key: vec![],
+            ..classification
+        };
+        let suppress_bias = EffectiveOverride {
+            prefer: Some(smelt_core::config::TechniquePreference::Suppress),
+            technique: None,
+        };
+        let fallback_suppression = resolve_cumulative_write_suppression(
+            &whole_row_classification,
+            "SELECT MIN(device_id) AS device_id FROM smelt.sources.raw.events",
+            &suppress_bias,
+        )
+        .expect("a soft prefer never refuses even over a WholeRow proof failure");
+        assert!(matches!(
+            fallback_suppression,
+            WriteSuppression::Unconditional { .. }
+        ));
+    }
+
+    /// Regression: with no `maintenance:` overrides at all
+    /// (`EffectiveOverride::default()`), the emitted merge SQL is
+    /// byte-identical to what it was before this phase folded the ladder
+    /// in — the trigger derivation (`Trigger::NewData`, `ledger_catch_up:
+    /// false`) must not perturb the unpinned default.
+    #[test]
+    fn keyed_fold_unpinned_write_is_byte_identical() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["event_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "device_id".to_string(),
+                per_partition_agg: "MIN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Min,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let sql = "SELECT event_id, MIN(device_id) AS device_id FROM smelt.sources.raw.events \
+                    GROUP BY event_id";
+        let suppression = resolve_cumulative_write_suppression(
+            &classification,
+            sql,
+            &EffectiveOverride::default(),
+        )
+        .expect("no override pinned — never refuses");
+        assert_eq!(
+            suppression,
+            WriteSuppression::Suppressed {
+                compared_columns: vec!["device_id".to_string()]
+            }
         );
     }
 

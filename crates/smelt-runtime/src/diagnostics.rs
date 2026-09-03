@@ -647,17 +647,15 @@ fn build_technique_statements(
                 .collect();
 
             // Mirrors `crate::cumulative::resolve_cumulative_write_suppression`
-            // exactly (raw P2/P3 proof, group columns = the classification's
+            // exactly: raw P2/P3 proof (group columns = the classification's
             // own aggregator output names, row identity re-derived from the
             // classification's proven unique key over the pre-augmentation
-            // SQL) rather than [`resolve_preview_write_suppression`]'s
-            // override-ladder-folding counterpart: the live `refresh: keyed`
-            // maintenance loop does not fold `resolve_write_variant`/
-            // `effective_override` into its own keyed-fold write-suppression
-            // resolution today (unlike `ColumnScopedMerge`'s live path in
-            // `maintenance_driver.rs`) — folding them in here would render a
-            // matched-arm shape a live KeyedFold run would not actually
-            // execute, the exact drift this phase's own goal refuses.
+            // SQL), then the override ladder's write-suppression dimension
+            // folded in via `resolve_write_variant` over `Trigger::NewData`/
+            // `ledger_catch_up: false` — the live keyed-fold write path folds
+            // the SAME ladder in now (`docs/outcomes/
+            // 20260815-definition-delta-migrate/phases/33-plan.md`), so this
+            // preview and the live run agree.
             let fold_group_columns: Vec<String> = classification
                 .aggregator_columns
                 .iter()
@@ -672,6 +670,26 @@ fn build_technique_statements(
                 &fold_comparability,
                 &fold_identity,
             );
+            let fold_overrides = model
+                .metadata
+                .as_deref()
+                .map(|m| {
+                    smelt_db::queries::maintenance::keyed_fold_effective_override(
+                        m,
+                        &classification.driving_source.name,
+                    )
+                })
+                .unwrap_or_default();
+            let fold_trigger = Trigger::NewData {
+                source: classification.driving_source.name.clone(),
+            };
+            let (fold_suppression, _) = smelt_logical::maintenance::choice::resolve_write_variant(
+                &fold_suppression,
+                &fold_trigger,
+                false,
+                &fold_overrides,
+            )
+            .map_err(|refusal| format!("{WRITE_SUPPRESSION_REFUSAL_MARKER}{refusal}"))?;
             match fold_suppression {
                 WriteSuppression::Suppressed { compared_columns } => {
                     Ok(emit_keyed_fold_suppressed(

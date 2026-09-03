@@ -1057,6 +1057,36 @@ pub fn keyed_fold_write_pin(metadata: &ModelMetadata, driving_source: &str) -> O
     write_pin_matching(driving_source, "{*}", &[], cells_cfg)
 }
 
+/// The `maintenance.defaults`/`maintenance.cells[].prefer`/`cells[].technique`
+/// override ladder's effective value for a `refresh: keyed` model's
+/// whole-row keyed-fold write-suppression dimension (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/33-plan.md`). Mirrors
+/// [`keyed_fold_write_pin`]'s own reasoning: there is no derived `PlanCell`
+/// to consult here, and the keyed fold's cell is always whole-row
+/// (`group: "{*}"`), so a `cells[]` entry matches by its `on:` address
+/// alone — the same address-only rule [`write_pin_matching`]'s `group ==
+/// "{*}"` arm already applies, not [`smelt_logical::maintenance::choice::
+/// effective_override`]'s per-column-group `matching_cell`, which would
+/// never match a whole-row cell's (typically empty) `columns`.
+/// Never re-derives admission — a read-only lookup the runtime write path
+/// folds into [`smelt_logical::maintenance::choice::resolve_write_variant`].
+pub fn keyed_fold_effective_override(
+    metadata: &ModelMetadata,
+    driving_source: &str,
+) -> smelt_logical::maintenance::choice::EffectiveOverride {
+    let maintenance = metadata.maintenance.as_ref();
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
+        maintenance.map(|m| m.cells.as_slice()).unwrap_or(&[]);
+    let broad_prefer = maintenance
+        .and_then(|m| m.defaults.as_ref())
+        .and_then(|d| d.prefer);
+    let narrow = cells_cfg.iter().find(|c| c.on == driving_source);
+    smelt_logical::maintenance::choice::EffectiveOverride {
+        prefer: narrow.and_then(|c| c.prefer).or(broad_prefer),
+        technique: narrow.and_then(|c| c.technique),
+    }
+}
+
 /// Validate every `maintenance.cells[].write` pin against the open
 /// write-pattern registry (`incremental_models.md` §"Per-cell write
 /// addressing" → "User pins"): an unrecognised name, or one the target
@@ -1492,6 +1522,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(keyed_fold_write_pin(&metadata, "sources.events"), None);
+    }
+
+    #[test]
+    fn keyed_fold_effective_override_matches_by_on_address() {
+        let metadata = ModelMetadata {
+            maintenance: Some(MaintenanceConfig {
+                defaults: None,
+                cells: vec![MaintenanceCellConfig {
+                    columns: vec![],
+                    on: "sources.events".to_string(),
+                    prefer: None,
+                    technique: Some(smelt_core::config::CellTechnique::Unconditional),
+                    write: None,
+                }],
+                scan_bounds: None,
+            }),
+            ..Default::default()
+        };
+        let effective = keyed_fold_effective_override(&metadata, "sources.events");
+        assert_eq!(
+            effective.technique,
+            Some(smelt_core::config::CellTechnique::Unconditional)
+        );
+
+        let non_matching = keyed_fold_effective_override(&metadata, "sources.other");
+        assert_eq!(non_matching.technique, None);
+        assert_eq!(non_matching.prefer, None);
     }
 
     #[test]

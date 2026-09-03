@@ -333,7 +333,10 @@ maintenance:
   admission"). The ladder is consulted uniformly by every dispatch route, including the
   ordinary windowed/partition-grain region path (§Design "Absent a cost model: the fixed
   preference order"); no cost model exists yet to rank between two admissible techniques
-  (§Future Extensions).
+  (§Future Extensions). The ladder's write-suppression dimension (`suppress`/`unconditional`)
+  is consulted by every write consumer that can suppress, the keyed-fold write included; on
+  the keyed-fold route the structural first-build default never applies, because a first build
+  there is a `CREATE TABLE … AS`, never a suppressible merge.
 - `<source-address>` names the changed input the cell handles, as the model's SQL refers to
   it — a source (`sources.customers`) or an upstream model (`order_facts`). A worked pin from
   the running example — steer `order_facts`'s tier-correction cell to an unconditional write:
@@ -2097,12 +2100,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §8).
 - **The derived model-wide horizon is under construction**, as is the data-quality check for
   the model-author lateness-flag pattern. Tracked: `docs/plans/20260704-model-updates.md`.
-- **Override-ladder reach (Open Question)**: the keyed-fold suppression consumer honours
-  `Suppressed` unconditionally — the first-build-vs-steady-state rule doesn't reach it; no
-  real fixture derives a column-scoped/keyed-fold cell under a first-build/backfill trigger,
-  so that branch is proven only at resolver level; `smelt bakeoff` measures technique-family
-  cost only, not the write-suppression dimension; whether a future cost model needs
-  region-level change-ratio statistics from prior observed deltas is open.
 - **A `change_feed` source's mutation cell always re-derives from the full input** — a
   `change_feed`-declared source gets an `UpstreamMutation` cell (§"Which changed inputs get a
   mutation cell"), but the cell never reads the feed's own delta rows; live fold machinery over
@@ -2124,6 +2121,10 @@ none of it may be relied on or implemented against until it graduates into
   `prefer` names this as the eventual decision-maker, but nothing ranks admissible
   alternatives today — the fixed preference order (§Design "Absent a cost model: the fixed
   preference order") stands in until a real cost model exists.
+- **Cost-model input for the write-suppression dimension.** Ranking a suppressed write against
+  an unconditional one needs region-level change-ratio statistics from prior observed deltas
+  that nothing collects today; `smelt bakeoff` measures technique-family cost only, not the
+  write-suppression dimension. Undecided.
 - **Further contract-lattice points.** Candidates, in the priority order the delta framing
   suggests (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §5):
   - **Reconciliation points** — equivalence promised at declared moments (say, end of day)

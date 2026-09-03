@@ -1284,3 +1284,128 @@ fn keyed_fold_preview_renders_the_suppressed_matched_arm() {
         "expected the change-suppressed matched-arm guard over `total_amount`: {sql}"
     );
 }
+
+/// `docs/outcomes/20260815-definition-delta-migrate/phases/33-plan.md`:
+/// `smelt explain --show-sql`'s keyed-fold preview must honour a
+/// `maintenance.cells[].technique: unconditional` pin addressing the
+/// keyed fold's driving source — preview/live parity, since the live
+/// windowed-keyed-maintenance path now folds the same override ladder in
+/// (`crate::cumulative::resolve_cumulative_write_suppression`). Otherwise
+/// identical to `keyed_fold_preview_renders_the_suppressed_matched_arm`
+/// above, whose model/plan this pin is layered onto — without the pin the
+/// preview would render the change-suppressed guard.
+#[test]
+fn explain_show_sql_keyed_fold_honours_the_pin() {
+    let content =
+        "SELECT device_id, SUM(amount) AS total_amount FROM smelt.events GROUP BY device_id";
+    let path: PathBuf = "device_total.sql".into();
+    let model = ModelFile {
+        name: "device_total".to_string(),
+        model_id: smelt_core::ModelId::from_path(path.clone()),
+        path,
+        content: content.to_string(),
+        refs: vec![RefInfo {
+            has_named_params: false,
+            range: Default::default(),
+            smelt_ref: SmeltRef::Path(vec!["events".to_string()]),
+        }],
+        parse_errors: Vec::new(),
+        metadata: Some(Box::new(ModelMetadata {
+            materialization: Some(Materialization::Table),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Key),
+            maintenance: Some(smelt_core::config::MaintenanceConfig {
+                defaults: None,
+                cells: vec![smelt_core::config::MaintenanceCellConfig {
+                    columns: vec![],
+                    on: "smelt.events".to_string(),
+                    prefer: None,
+                    technique: Some(smelt_core::config::CellTechnique::Unconditional),
+                    write: None,
+                }],
+                scan_bounds: None,
+            }),
+            ..Default::default()
+        })),
+        kind: smelt_core::ModelKind::Sql,
+        address_segments: vec!["device_total".to_string()],
+    };
+    let metadata = model.metadata.as_deref().unwrap();
+    let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+
+    let sources = vec![smelt_logical::maintenance::SourceFacts {
+        name: "events".to_string(),
+        mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
+        partition_col: Some("event_date".to_string()),
+        unique_key: vec![],
+        allow_full_scan: true,
+    }];
+    let plan_result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        &stripped_sql,
+        "device_total",
+        metadata,
+        &sources,
+        &std::collections::HashSet::new(),
+        None,
+        &[],
+        &[],
+        &std::collections::BTreeMap::new(),
+        None,
+    )
+    .expect("device_total must derive a maintenance plan");
+    let cell = plan_result
+        .plan
+        .cells
+        .iter()
+        .find(|c| c.technique == Technique::KeyedFold)
+        .expect("device_total must admit a KeyedFold cell");
+
+    let mut source_timeseries = smelt_planner::SourceTimeseriesMap::new();
+    source_timeseries.insert(
+        "smelt.events".to_string(),
+        TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        },
+    );
+
+    let config = load_fixture().2;
+    let registry = CompilerRegistry::new(&config, &config.targets);
+    let resolver = registry
+        .get("dev")
+        .build_ephemeral_resolver(&[], "main")
+        .expect("no ephemerals");
+
+    let diagnostics = build_plan_cell_diagnostics(
+        cell,
+        &model,
+        "main",
+        "dev",
+        &registry,
+        &resolver,
+        MaintenanceDialect::DuckDb,
+        &[],
+        &source_timeseries,
+        &plan_result.column_groups,
+    );
+
+    let preview = diagnostics
+        .technique_previews
+        .iter()
+        .find(|p| p.technique == Technique::KeyedFold)
+        .expect("KeyedFold must have a preview entry");
+    assert_eq!(preview.admissibility, Admissibility::Admitted);
+    let sql = preview
+        .statements
+        .first()
+        .expect("the Admitted KeyedFold preview must render a statement")
+        .sql
+        .clone();
+    assert!(
+        !sql.contains("IS DISTINCT FROM"),
+        "the pinned technique: unconditional must suppress the change-suppressed guard: {sql}"
+    );
+}
