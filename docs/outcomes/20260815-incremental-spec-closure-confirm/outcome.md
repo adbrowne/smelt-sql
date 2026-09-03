@@ -58,7 +58,7 @@ divergence entry removed).
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | planned |
+| 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | pending |
 | 3 | Resolve any residual or drifted bullets, including the `keyed-grain-residue` blocked-phase residue: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
@@ -75,6 +75,16 @@ divergence entry removed).
   precisely the case success criterion 6 exists for — so the audit proceeds and phase 3's row is
   reworded to name that residue explicitly. No other reshape: rows 2-5 still map one-for-one onto
   criteria 2-3, 4 and 1/5.
+- 2026-09-04 — Phase 1 done. 80 bullets extracted from the four anchor specs at commit
+  `03a431f3` (`definition_deltas` 7, `incremental_models` 25, `incremental_shapes` 32,
+  `model_properties` 16 — all match the plan's sample). The extractor's Open-Question count
+  disagrees with the plan's sample for two specs (`incremental_models` 7 not 6,
+  `incremental_shapes` 16 not 13): 5 bullets wrap `(Open`/`Question)` across a markdown line
+  break, which a naive single-line grep misses but the whitespace-collapsing extractor catches.
+  Per plan instruction, the extractor's count is authoritative; documented in
+  `baseline-inventory.md` §Extraction notes. `incremental_shapes` `IS-24` (the transactional-fold
+  bullet) is flagged for phase 2 as the `keyed-grain-residue` blocked-phase bullet — not to be
+  marked closed without independent repo-state verification.
 
 ## Blocked
 
