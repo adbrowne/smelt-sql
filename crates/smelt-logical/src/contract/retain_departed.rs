@@ -3,23 +3,53 @@
 //! tombstoned) at reconcile instead of deleted
 //! (`docs/specs/incremental_models.md` §"Contract relaxations
 //! (`contract:`)", §"Retention (`retain_departed`)"). This module
-//! single-owns the complete declaration half of the triple: the
-//! posture-admissibility + tombstone-column validator, the pure
-//! departed-key quotient oracle, and the reconcile-anti-join probe emitter
-//! that would recover the retained-departed (and, where declared,
-//! unmarked-tombstone) key count at runtime. The runtime half — dispatching
-//! this probe and suppressing the default point's anti-join delete leg on a
-//! declared point — has not landed (`docs/outcomes/
-//! 20260815-definition-delta-migrate/phases/32-plan.md`).
+//! single-owns the complete triple: the posture-admissibility +
+//! tombstone-column validator, the pure departed-key quotient oracle, the
+//! reconcile-anti-join probe emitter, and — via [`reconcile_disposition`] —
+//! the write-path seam that resolves a declaration to what the reconcile
+//! write must do: run the default point's anti-join delete
+//! (`crate::maintenance::emit::emit_departed_key_delete`), or suppress it and
+//! dispatch the probe instead (`docs/outcomes/
+//! 20260815-definition-delta-migrate/phases/32b-plan.md`).
 //!
 //! Unlike `frozen_horizon`/`deferral`, this point has no write-eligibility
 //! clamp and no scheduling license of its own — declaring it changes what
 //! the default reconcile write is required to prove, not when a cell runs
 //! (`incremental_models.md` §"The equivalence invariant", key departure).
 
-use smelt_core::config::Grain;
+use smelt_core::config::{Grain, RetainDeparted};
 
 use crate::maintenance::emit::MaintenanceStatement;
+
+/// The runtime write-path disposition a reconcile write must apply for
+/// departed keys — the seam `execute_snapshot_reconcile` consults instead of
+/// inspecting `RetainDeparted` itself, so this module stays the single owner
+/// of what a declaration *means* at write time
+/// (`incremental_models.md` §"Contract-lattice point single ownership").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DepartedKeyDisposition {
+    /// The default point: run `emit_departed_key_delete` as part of the
+    /// same transactional write as the reconcile merge.
+    Delete,
+    /// The declared `retain_departed` point: suppress the delete leg
+    /// entirely. `tombstone` names the column the probe should read to spot
+    /// an unmarked departure, when one was declared.
+    Retain { tombstone: Option<String> },
+}
+
+/// Resolve a model's declared `contract.retain_departed` (or its absence)
+/// to the write-path disposition. Pure: no default point exists that is not
+/// exactly "absent declaration".
+pub fn reconcile_disposition(declared: Option<&RetainDeparted>) -> DepartedKeyDisposition {
+    match declared {
+        None => DepartedKeyDisposition::Delete,
+        Some(RetainDeparted::Bool(true)) => DepartedKeyDisposition::Retain { tombstone: None },
+        Some(RetainDeparted::Bool(false)) => DepartedKeyDisposition::Delete,
+        Some(RetainDeparted::Tombstone { tombstone }) => DepartedKeyDisposition::Retain {
+            tombstone: Some(tombstone.clone()),
+        },
+    }
+}
 
 /// Validates that `contract.retain_departed` is declared only on a keyed
 /// shape consuming a mutable snapshot — the one posture where key departure
@@ -173,6 +203,27 @@ mod tests {
         assert_eq!(
             classify_key(false, true, false),
             KeyVerdict::UnmarkedDeparture
+        );
+    }
+
+    #[test]
+    fn reconcile_disposition_ladder() {
+        assert_eq!(reconcile_disposition(None), DepartedKeyDisposition::Delete);
+        assert_eq!(
+            reconcile_disposition(Some(&RetainDeparted::Bool(true))),
+            DepartedKeyDisposition::Retain { tombstone: None }
+        );
+        assert_eq!(
+            reconcile_disposition(Some(&RetainDeparted::Bool(false))),
+            DepartedKeyDisposition::Delete
+        );
+        assert_eq!(
+            reconcile_disposition(Some(&RetainDeparted::Tombstone {
+                tombstone: "is_departed".to_string()
+            })),
+            DepartedKeyDisposition::Retain {
+                tombstone: Some("is_departed".to_string())
+            }
         );
     }
 

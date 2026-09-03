@@ -350,10 +350,22 @@ open — not that the excluded bullets themselves are gone.
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
 | 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | done |
-| 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | planned |
+| 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | done |
 | 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 32b implement — the delete leg lands; the declared point's probe
+  dispatch is self-contained, not yet on the persisted probe ledger.** `execute_snapshot_
+  reconcile` now assembles the merge and (undeclared) delete as one transactional
+  `StatementGroup`; the default point is the actual default. The declared point's probe runs
+  pre-write and fails the run loud on an unmarked-tombstone violation, but is implemented
+  inline (an `anyhow::ensure!`) rather than through `smelt-runtime`'s `ProbeRecord`/
+  `ModelRunRecord.probes` ledger — that ledger is populated by the batched window-forward
+  per-cell loop in `execute.rs` (~line 3579), a different branch than the windowless
+  snapshot-reconcile dispatch (~line 2407) this phase touches; wiring it in is a separable
+  follow-up, not required by the spec deltas this phase closes (recorded in the phase
+  summary's "For the next planner").
 
 - **2026-09-03, phase 32b plan — no reshape; the delete leg is one phase, and the tombstone
   *marking* write stays out of it.** Phase 32's summary surfaced nothing needing a new row.

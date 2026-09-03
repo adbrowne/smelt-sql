@@ -1239,13 +1239,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   fires for them today, where §Diagnostics admits them in payload positions running as-is
   with no equivalence promise. Decision record:
   `docs/research/20260816-open-questions-triage.md`.
-- **Departed keys are still retained under snapshot-reconcile** — §"Departed keys and
-  deletion" has the reconcile write deleting a key absent from the incoming scan; the
-  implementation retains it unchanged, forever. There are no production users, so the
-  behaviour change ships without a compatibility path. The opt-in retention relaxation (the
-  contract-lattice point for keeping departed keys as history) is likewise unbuilt. Decision
-  record: `docs/research/20260816-open-questions-triage.md`; earlier analysis:
-  `docs/research/20260705-keyed-collapse-application.md` §5.
 - **Ladder rungs 3–4 remain specified ahead of this profile's use of them** — group-rung
   retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the rung-2
   work above; rung 3 additionally depends on the change-feed consumption design. Deferred by

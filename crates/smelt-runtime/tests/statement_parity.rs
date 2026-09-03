@@ -58,9 +58,10 @@ use smelt_logical::backbuild::emit::{
 use smelt_logical::backbuild::{MigrationPlan, MigrationVerdict, Technique};
 use smelt_logical::maintenance::emit::{
     emit_append_only_posture_probe, emit_column_scoped_merge, emit_create_table_as,
-    emit_delete_insert, emit_diff_patch, emit_keyed_fold, emit_keyed_fold_suppressed,
-    emit_per_group_recompute, emit_recurrence_bound_probe, emit_source_mutation_fingerprint,
-    emit_staged_candidate_conditional_recompute, MaintenanceDialect, Region, TargetSlicePredicate,
+    emit_delete_insert, emit_departed_key_delete, emit_diff_patch, emit_keyed_fold,
+    emit_keyed_fold_suppressed, emit_per_group_recompute, emit_recurrence_bound_probe,
+    emit_source_mutation_fingerprint, emit_staged_candidate_conditional_recompute,
+    MaintenanceDialect, Region, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
@@ -5017,6 +5018,199 @@ JOIN smelt.customers AS customers ON o.customer_id = customers.customer_id\n";
         )
         .await,
         "the backfill statements must reproduce a full refresh of the after-definition"
+    );
+}
+
+/// The default `retain_departed` point's runtime half (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/32b-plan.md`): a snapshot-
+/// reconcile keyed run's executed statements are exactly `emit_keyed_fold`
+/// + `emit_departed_key_delete`, sent as one `transactional: true`
+/// `StatementGroup` — and the post-run table is multiset-equal to a full
+/// refresh of the new source (the departed key is gone from both).
+#[tokio::test]
+async fn snapshot_reconcile_delete_leg_parity() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    std::fs::write(
+        project_dir.join("models/sources/devices.yml"),
+        "description: Raw per-device rows, no clock.\n\
+         columns:\n\
+         \x20\x20- name: device_id\n\
+         \x20\x20\x20\x20type: INTEGER\n\
+         \x20\x20- name: amount\n\
+         \x20\x20\x20\x20type: DOUBLE\n\
+         mutation_profile:\n\
+         \x20\x20kind: mutable_snapshot\n",
+    )
+    .unwrap();
+
+    write_model(
+        project_dir,
+        "device_snapshot",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         maintenance:\n\
+         \x20\x20scan_bounds:\n\
+         \x20\x20\x20\x20per_source:\n\
+         \x20\x20\x20\x20\x20\x20devices:\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+         ---\n\
+         SELECT device_id, ANY_VALUE(amount) AS amount FROM smelt.sources.devices GROUP BY 1",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: statement_parity_departed_key_test\nversion: 1\npaths:\n  - models\ntargets:\n  \
+         dev:\n    type: duckdb\n    database: {db}\n    schema: main\n\
+         default_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    let mut request = make_request("dev", "2024-01-01", "2024-01-01");
+    request.start = None;
+    request.end = None;
+
+    // Run 1: table does not exist — the create path, no delete leg to prove.
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS main; \
+             CREATE OR REPLACE TABLE main.sources_devices AS \
+             SELECT * FROM (VALUES (1, 10.0), (2, 5.0)) AS t(device_id, amount);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let backend_slot = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        execute_project(
+            "snapshot-reconcile-parity-run-1".to_string(),
+            request.clone(),
+            Arc::clone(&config),
+            Arc::clone(&graph),
+            Arc::clone(&db),
+            project_dir,
+            &factory,
+            &NO_OP_REPORTER,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first run creates the table");
+    }
+
+    // Device 2 departs the source.
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE OR REPLACE TABLE main.sources_devices AS \
+             SELECT * FROM (VALUES (1, 10.0)) AS t(device_id, amount);",
+        )
+        .unwrap();
+    }
+
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    execute_project(
+        "snapshot-reconcile-parity-run-2".to_string(),
+        request,
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        project_dir,
+        &factory,
+        &NO_OP_REPORTER,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("reconcile run deletes the departed key");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let reconcile_group = groups
+        .iter()
+        .find(|g| g.statements.iter().any(|s| s.sql.starts_with("MERGE INTO")))
+        .expect("reconcile run must execute via execute_statement_group");
+
+    assert!(
+        reconcile_group.transactional,
+        "the merge + departed-key delete must execute as one transactional group"
+    );
+
+    // Recover the compiler's own delta SELECT (type-cast-wrapped, with its
+    // header comment) from the executed merge text — the same "read the
+    // embedded relation back" approach `extract_affected_keys_select` above
+    // uses for the repair family, since the compiled SQL a real run embeds
+    // is not byte-reconstructable from the model's source text alone.
+    let merge_sql = &reconcile_group.statements[0].sql;
+    let using_marker = "USING (";
+    let delta_start = merge_sql.find(using_marker).expect("USING clause") + using_marker.len();
+    let delta_end_marker = ") AS delta ON";
+    let delta_end = merge_sql.rfind(delta_end_marker).expect("delta alias");
+    let delta_select = &merge_sql[delta_start..delta_end];
+    let expected_merge = emit_keyed_fold_suppressed(
+        "main.device_snapshot",
+        &["device_id".to_string()],
+        &[("amount".to_string(), "delta.amount".to_string())],
+        delta_select,
+        None,
+        &["amount".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    let expected_delete = smelt_logical::contract::retain_departed::reconcile_disposition(None);
+    assert_eq!(
+        expected_delete,
+        smelt_logical::contract::retain_departed::DepartedKeyDisposition::Delete,
+        "sanity: undeclared retain_departed resolves to the default delete point"
+    );
+    let expected_delete_stmt = emit_departed_key_delete(
+        "main.device_snapshot",
+        &["device_id".to_string()],
+        delta_select,
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(
+        reconcile_group.statements.len(),
+        2,
+        "expected exactly the merge and the delete, got: {:#?}",
+        reconcile_group.statements
+    );
+    assert_eq!(
+        reconcile_group.statements[0], expected_merge.statements[0],
+        "executed merge must be byte-identical to a direct emit_keyed_fold call"
+    );
+    assert_eq!(
+        reconcile_group.statements[1], expected_delete_stmt,
+        "executed delete must be byte-identical to a direct emit_departed_key_delete call"
+    );
+
+    assert!(
+        multiset_equal(
+            &*backend,
+            "SELECT device_id, amount FROM main.device_snapshot",
+            delta_select,
+        )
+        .await,
+        "the post-run table must be multiset-equal to a full refresh of the new source"
     );
 }
 

@@ -618,6 +618,57 @@ pub fn emit_keyed_fold_suppressed(
     }
 }
 
+/// Dialect-keyed null-safe equality spelling, following the printer's
+/// convention (`smelt-dialect/src/printer.rs`'s `null_safe_eq`, not reused
+/// directly since this emitter carries only a [`MaintenanceDialect`], not a
+/// `BackendCapabilities`): `IS NOT DISTINCT FROM` for DuckDB/BigQuery, `<=>`
+/// for Spark.
+fn null_safe_eq(lhs: &str, rhs: &str, dialect: MaintenanceDialect) -> String {
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery => {
+            format!("{lhs} IS NOT DISTINCT FROM {rhs}")
+        }
+        MaintenanceDialect::Spark => format!("{lhs} <=> {rhs}"),
+    }
+}
+
+/// The default `retain_departed` point's anti-join delete leg
+/// (`docs/specs/incremental_shapes.md` §"Departed keys and deletion"): a
+/// stored key absent from the incoming scan (`delta_select`, the whole-
+/// source snapshot-reconcile scan) is deleted. Null-safe key equality
+/// (`null_safe_eq`) so a NULL key component cannot silently exempt a row
+/// from deletion the way plain `=` would.
+///
+/// Caller composes this into the same transactional [`StatementGroup`] as
+/// the reconcile `MERGE` (`emit_keyed_fold`/`emit_keyed_fold_suppressed`) —
+/// this function returns the `DELETE` alone so the caller controls ordering
+/// and transactionality; suppressing this leg entirely (the `retain_
+/// departed` point) is the caller's decision
+/// (`smelt_logical::contract::retain_departed::reconcile_disposition`), not
+/// this emitter's.
+pub fn emit_departed_key_delete(
+    schema_table: &str,
+    key: &[String],
+    delta_select: &str,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    let join_predicate = key
+        .iter()
+        .map(|k| {
+            null_safe_eq(
+                &format!("{schema_table}.{k}"),
+                &format!("delta.{k}"),
+                dialect,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    MaintenanceStatement::new(format!(
+        "DELETE FROM {schema_table} WHERE NOT EXISTS (SELECT 1 FROM ({delta_select}) AS delta \
+         WHERE {join_predicate})"
+    ))
+}
+
 /// The staged-candidate conditional `DELETE`+`INSERT` (T2, `docs/specs/
 /// model_transforms.md` §"Change-suppressed MERGE and the staged-candidate
 /// conditional DELETE+INSERT"): the merge-less realisation of the same
@@ -3557,6 +3608,58 @@ mod column_scoped_merge_tests {
             &[],
             &[],
             MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod departed_key_delete_tests {
+    use super::*;
+
+    /// The anti-join `DELETE` renders `NOT EXISTS` over the delta select
+    /// with null-safe key equality, per dialect, multi-column key included.
+    #[test]
+    fn emit_departed_key_delete_shape() {
+        let key = vec!["tenant_id".to_string(), "device_id".to_string()];
+        let stmt = emit_departed_key_delete(
+            "main.device_daily",
+            &key,
+            "SELECT * FROM raw.devices",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(
+            stmt.sql
+                .starts_with("DELETE FROM main.device_daily WHERE NOT EXISTS"),
+            "{}",
+            stmt.sql
+        );
+        assert!(
+            stmt.sql.contains(
+                "main.device_daily.tenant_id IS NOT DISTINCT FROM delta.tenant_id AND \
+                 main.device_daily.device_id IS NOT DISTINCT FROM delta.device_id"
+            ),
+            "{}",
+            stmt.sql
+        );
+        assert!(
+            stmt.sql
+                .contains("FROM (SELECT * FROM raw.devices) AS delta"),
+            "{}",
+            stmt.sql
+        );
+
+        let spark_stmt = emit_departed_key_delete(
+            "main.device_daily",
+            &["device_id".to_string()],
+            "SELECT * FROM raw.devices",
+            MaintenanceDialect::Spark,
+        );
+        assert!(
+            spark_stmt
+                .sql
+                .contains("main.device_daily.device_id <=> delta.device_id"),
+            "{}",
+            spark_stmt.sql
         );
     }
 }

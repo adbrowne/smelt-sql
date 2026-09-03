@@ -26,10 +26,12 @@ use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
 use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::contract::retain_departed::{reconcile_disposition, DepartedKeyDisposition};
 use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
 use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
-    emit_keyed_fold, emit_keyed_fold_suppressed, emit_recurrence_bound_probe, MaintenanceDialect,
+    emit_departed_key_delete, emit_keyed_fold, emit_keyed_fold_suppressed,
+    emit_recurrence_bound_probe, MaintenanceDialect, MaintenanceStatement, StatementGroup,
     TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::{
@@ -595,11 +597,14 @@ pub async fn execute_cumulative_aggregate(
 /// `[run_start, run_end)` window — the whole source is re-scanned every
 /// run. First run (target does not yet exist) creates the table from the
 /// compiled SELECT directly; every subsequent run `MERGE`s the whole-source
-/// scan into the existing target via [`build_cumulative_merge_sql`]
-/// (`emit_keyed_fold`'s shape carries no `DELETE`, so a key present in the
-/// target but absent from the incoming scan is retained unchanged — the
-/// documented carve-out, `incremental_shapes.md` §"End-state equivalence").
-/// No reconciliation ledger: `classification`'s plain-overwrite columns are
+/// scan into the existing target via [`build_cumulative_merge_sql`], then —
+/// unless `contract.retain_departed` is declared
+/// (`smelt_logical::contract::retain_departed::reconcile_disposition`) —
+/// deletes any key present in the target but absent from the incoming scan
+/// ([`emit_departed_key_delete`]), the merge and delete running as one
+/// transactional [`StatementGroup`] (`incremental_shapes.md` §"Departed
+/// keys and deletion"). No reconciliation ledger: `classification`'s
+/// plain-overwrite columns are
 /// idempotent by construction (re-running an unchanged snapshot converges),
 /// so `Grade::Idempotent` semantics apply without any ledger bookkeeping —
 /// this executor never touches one.
@@ -656,6 +661,7 @@ pub async fn execute_snapshot_reconcile(
             .with_context(|| format!("Failed to create keyed model {}", model_name))?;
     } else {
         let suppression = resolve_cumulative_write_suppression(classification, &clean_sql);
+        let dialect = smelt_backend::maintenance_dialect(backend.dialect());
         let merge_sql = build_cumulative_merge_sql(
             schema,
             db_table_name,
@@ -663,10 +669,86 @@ pub async fn execute_snapshot_reconcile(
             classification,
             None,
             &suppression,
-            smelt_backend::maintenance_dialect(backend.dialect()),
+            dialect,
         );
+        let schema_table = format!("{schema}.{db_table_name}");
+        let mut statements = vec![MaintenanceStatement { sql: merge_sql }];
+        let declared_retain_departed = model
+            .metadata
+            .as_deref()
+            .and_then(|m| m.contract.as_ref())
+            .and_then(|c| c.retain_departed.as_ref());
+        let transactional = match reconcile_disposition(declared_retain_departed) {
+            DepartedKeyDisposition::Delete => {
+                statements.push(emit_departed_key_delete(
+                    &schema_table,
+                    &classification.unique_key,
+                    &compiled.sql,
+                    dialect,
+                ));
+                true
+            }
+            DepartedKeyDisposition::Retain { tombstone } => {
+                // The declared point's probe: the reconcile scan's own
+                // anti-join, dispatched at the pre-write site instead of
+                // running the default point's delete
+                // (`smelt_logical::contract::retain_departed::
+                // emit_departed_key_probe`). `current_table` is a
+                // parenthesised subquery over this run's compiled scan — the
+                // probe emitter appends its own `c` alias.
+                let key_refs: Vec<&str> = classification
+                    .unique_key
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                let probe = smelt_logical::contract::retain_departed::emit_departed_key_probe(
+                    &schema_table,
+                    &format!("({})", compiled.sql),
+                    &key_refs,
+                    tombstone.as_deref(),
+                );
+                let batches = backend.execute_sql(&probe.sql).await.with_context(|| {
+                    format!(
+                        "Failed to run the retain_departed probe for keyed model {}",
+                        model_name
+                    )
+                })?;
+                let rows = crate::check_runner::batches_to_rows(&batches);
+                let retained: u64 = rows
+                    .first()
+                    .and_then(|r| r.get("retained_departed_count"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                tracing::info!(
+                    model = %model_name,
+                    retained_departed_count = retained,
+                    "contract.retain_departed: reconcile anti-join probe"
+                );
+                if tombstone.is_some() {
+                    let unmarked: u64 = rows
+                        .first()
+                        .and_then(|r| r.get("unmarked_departed_count"))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    anyhow::ensure!(
+                        unmarked == 0,
+                        "Model '{}' declares contract.retain_departed with a tombstone column, \
+                         but {unmarked} departed key(s) are not marked departed — every row a \
+                         reconcile no longer scans from the source must have its tombstone set \
+                         before it is exempted from comparison \
+                         (`docs/specs/incremental_models.md` §\"Retention (retain_departed)\")",
+                        model_name
+                    );
+                }
+                false
+            }
+        };
+        let group = StatementGroup {
+            statements,
+            transactional,
+        };
         backend
-            .execute_sql(&merge_sql)
+            .execute_statement_group(&group)
             .await
             .with_context(|| format!("Failed to reconcile keyed model {}", model_name))?;
     }

@@ -2029,18 +2029,6 @@ and §References → Plans. Shape-profile gaps are `incremental_shapes.md` §Kno
 definition-delta gaps (including the unwired synthesis layer and the verb renames) are
 `definition_deltas.md` §Known Divergences.
 
-- **Posture-derived key departure's runtime half is unimplemented; the runtime retains
-  departed keys unconditionally.** The `retain_departed` lattice point's declaration
-  half — parsing both forms, the posture/tombstone-column admissibility validator, the
-  departed-key quotient oracle, the reconcile-anti-join probe emitter, and the
-  `ContractRetainDepartedInvalid` diagnostic — has landed
-  (`crates/smelt-logical/src/contract/retain_departed.rs`), matching this section's
-  declaration. What remains is the runtime consequence: a snapshot-reconcile run still does
-  not delete keys absent from the incoming scan (no anti-join delete leg exists in the write
-  path), so every keyed model behaves as if `retain_departed` were silently declared
-  regardless of whether it actually is, and the probe emitter is never dispatched by a live
-  run (decision record: `docs/research/20260816-open-questions-triage.md`; tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 32b).
 - **The determinism scope is unimplemented.** The runtime still compile-time-pins
   `NOW()`/`CURRENT_*` in partition-grain models and rejects them in keyed models, instead of
   running them as-is; the conformance oracle's comparison and the recompute-equality

@@ -23,14 +23,14 @@
 //!   `deferral::subsumption` single-own the licensing decisions;
 //!   `smelt-runtime`'s scheduler is a thin builder over them
 //!   (`docs/outcomes/20260809-contract-lattice-v1/outcome.md` phase 5).
-//! - `retain_departed`: the declaration half of the triple has landed —
-//!   posture/tombstone-column validation, the departed-key quotient oracle,
-//!   and the reconcile-anti-join probe emitter all live in the
-//!   `retain_departed` module. The runtime half — the default point's
-//!   anti-join delete leg actually running, and this point's probe actually
-//!   being dispatched by a live run — has not landed yet
-//!   (`docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase
-//!   32b).
+//! - `retain_departed`: the complete triple has landed — posture/
+//!   tombstone-column validation, the departed-key quotient oracle, and the
+//!   reconcile-anti-join probe emitter live in the `retain_departed`
+//!   module; the runtime write-path seam (`retain_departed::
+//!   reconcile_disposition`) resolves a declaration to the default point's
+//!   anti-join delete leg (`smelt-logical`'s `emit_departed_key_delete`) or
+//!   this point's probe dispatch, both driven from `smelt-runtime`'s
+//!   `execute_snapshot_reconcile`.
 
 pub mod deferral;
 pub mod frozen_horizon;

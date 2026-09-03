@@ -1032,18 +1032,19 @@ fn delete_row_keyed_snapshot(
     Ok(())
 }
 
-/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): drive the ONE family
-/// the admission matrix actually admits under snapshot-reconcile
-/// (plain-overwrite, `ANY_VALUE`) end to end through the real
-/// `execute_project` pipeline and the now-built snapshot-reconcile
+/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`), delete leg extended
+/// phase 32b (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 32b-plan.md`): drive the ONE family the admission matrix actually admits
+/// under snapshot-reconcile (plain-overwrite, `ANY_VALUE`) end to end
+/// through the real `execute_project` pipeline and the snapshot-reconcile
 /// executor: seed rows, run (creation), mutate/delete/insert source rows,
 /// run again (reconcile), and assert the maintained table equals the
-/// current snapshot's own aggregation UNION the pre-mutation state of any
-/// key that departed the snapshot — the SAME retained-departed-keys
-/// carve-out `retained_departed_keys_adjusts_the_oracle` above pins as pure
-/// data, now exercised against a real backend.
+/// current snapshot's own aggregation exactly — the default `retain_
+/// departed` point deletes a key absent from the incoming scan
+/// (`incremental_shapes.md` §"Departed keys and deletion"), so no retained-
+/// departed-keys adjustment survives into the oracle comparison.
 #[tokio::test]
-async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys() {
+async fn snapshot_reconcile_plain_overwrite_settles_and_deletes_departed_keys() {
     let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project = stage_keyed_recipe(&recipe, &tmp).expect("stage snapshot-reconcile recipe");
@@ -1076,67 +1077,48 @@ async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys(
         assert!(equal, "creation run must equal the full-scan oracle");
     }
 
-    // Snapshot the pre-mutation source state — the retained-departed-keys
-    // formula needs the departing key's value AS OF BEFORE it departed.
-    {
-        let conn = project.connect().expect("connect");
-        conn.execute_batch(&format!(
-            "CREATE TABLE main.pre_mutation_snapshot AS SELECT * FROM main.sources_{}",
-            recipe.source.name
-        ))
-        .expect("snapshot pre-mutation state");
-    }
-
     // Mutate: update id=1's value, delete id=2 (genuine departure), insert
     // a fresh id=4.
     update_row_keyed_snapshot(&project, &recipe, 1, 999).expect("update id=1");
     delete_row_keyed_snapshot(&project, &recipe, 2).expect("delete id=2");
     insert_row_keyed_snapshot(&project, &recipe, 4, 400).expect("insert id=4");
 
-    // Second run: still no window — reconciles via the whole-source MERGE.
+    // Second run: still no window — reconciles via the whole-source MERGE +
+    // the default point's anti-join delete leg.
     project
         .run_quiet("snapshot-reconcile-2", base_request("dev"))
         .await
         .expect("second (reconcile) run must succeed");
 
-    let adjusted_oracle_sql = format!(
-        "{full_scan_oracle_sql} \
-         UNION ALL \
-         SELECT {key}, {attr} AS current_val FROM main.pre_mutation_snapshot \
-         WHERE {key} NOT IN (SELECT {key} FROM main.sources_{name})",
-        key = recipe.source.key_column,
-        attr = recipe.source.payload_column,
-        name = recipe.source.name,
-    );
     {
         let backend = project.backend().await.expect("backend");
         let equal =
-            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &adjusted_oracle_sql)
+            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &full_scan_oracle_sql)
                 .await
                 .expect("comparison must run");
         assert!(
             equal,
-            "reconcile run must equal the oracle's current rows plus the retained departed key"
+            "reconcile run must equal the full-scan oracle exactly — the default point deletes \
+             departed keys"
         );
     }
 
     // Explicit assertion, not just the multiset comparison: the departed
-    // key (id=2) is present, unchanged from its PRE-mutation value (200) —
-    // not silently deleted.
+    // key (id=2) is gone.
     let conn = project.connect().expect("connect");
-    let departed_value: i64 = conn
+    let departed_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT current_val FROM main.{} WHERE id = 2",
+                "SELECT count(*) FROM main.{} WHERE id = 2",
                 recipe.model_name
             ),
             [],
             |row| row.get(0),
         )
-        .expect("departed key must still be present");
+        .expect("count query");
     assert_eq!(
-        departed_value, 200,
-        "the departed key must be RETAINED at its pre-departure value, never deleted"
+        departed_count, 0,
+        "the departed key must be DELETED under the default retain_departed point"
     );
 }
 
