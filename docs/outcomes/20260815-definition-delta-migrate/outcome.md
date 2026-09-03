@@ -352,9 +352,19 @@ open — not that the excluded bullets themselves are gone.
 | 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | done |
 | 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | done |
 | 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | done |
-| 34 | Persist the `retain_departed` probe outcome on the run manifest: thread the snapshot-reconcile path's pre-write probe through `smelt-runtime`'s `ProbeRecord`/`ModelRunRecord.probes` ledger the `frozen_horizon`/`deferral` probes already use, so the declared lattice point is explain/run-report visible rather than only fail-loud inline (phase 32b summary follow-up) | pending |
+| 34 | Persist the `retain_departed` probe outcome on the run manifest: thread the snapshot-reconcile path's pre-write probe through `smelt-runtime`'s `ProbeRecord`/`ModelRunRecord.probes` ledger the `frozen_horizon`/`deferral` probes already use, so the declared lattice point is explain/run-report visible rather than only fail-loud inline (phase 32b summary follow-up) | planned |
 
 ## Decision log
+
+- **2026-09-03, phase 34 plan — probe measurements become manifest data.** Recording the
+  `retain_departed` anti-join's retained-departed count requires a place to put it:
+  `ProbeRecord` gains an optional `observed: u64` (serde-defaulted, omitted when absent) rather
+  than the count living only in a `tracing::info!`. The probe is dispatched independent of the
+  project `probes:` cadence — unlike its `frozen_horizon`/`deferral` siblings it stands in for
+  the delete the default point would have run, so a cadence skip would suppress the delete
+  while verifying nothing. The unmarked-tombstone failure gets its own named code,
+  `ContractDepartedKeyUnmarked`, so the record has a probe name to carry. No phase-table
+  reshape: phase 33's summary scoped no follow-up work.
 
 - **2026-09-03, phase 33 implement — wired.** The override ladder's write-suppression
   dimension now reaches the keyed-fold consumer: `resolve_cumulative_write_suppression` folds
