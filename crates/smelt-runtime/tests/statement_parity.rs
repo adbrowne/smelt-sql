@@ -5155,13 +5155,28 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
 }
 
 /// `src/`-relative file paths excluded from the scan entirely: the two
-/// single-owner emitter modules (`docs/specs/architecture.md`
-/// §"Constraints & Invariants" item 12 — every maintenance/backbuild
-/// statement is the output of a pure emitter in one of these two files;
-/// scanning them for the shapes they themselves author would be circular).
+/// maintenance/backbuild single-owner emitter modules
+/// (`docs/specs/architecture.md` §"Constraints & Invariants" item 12 —
+/// every maintenance/backbuild statement is the output of a pure emitter in
+/// one of these two files; scanning them for the shapes they themselves
+/// author would be circular), plus `smelt-state`'s three per-dialect
+/// schema-evolution DDL modules. Schema-evolution DDL is declared a
+/// *separate* single-owner family, outside the maintenance/backbuild
+/// emitter rule (`docs/specs/incremental_models.md` §"Statement emission
+/// (single owner)"): it is multi-dialect and covers struct/nested/
+/// nullability operations the backbuild emitters have no forms for, and
+/// `smelt-state` sits below `smelt-logical`, so it cannot call into
+/// `backbuild::emit`. `ddl_duckdb.rs` is the actual per-dialect renderer
+/// owner; `ddl_spark.rs`/`ddl_bigquery.rs` are excluded on the same
+/// per-dialect-owner basis even though their DDL shapes (backtick-quoted
+/// identifiers, `ADD COLUMNS (...)`, `SET DATA TYPE`) don't match this
+/// scan's DuckDB-flavored `ALTER TABLE `/`UPDATE ` shapes anyway.
 const EMITTER_MODULE_EXCLUSIONS: &[&str] = &[
     "smelt-logical/src/maintenance/emit.rs",
     "smelt-logical/src/backbuild/emit.rs",
+    "smelt-state/src/ddl_duckdb.rs",
+    "smelt-state/src/ddl_spark.rs",
+    "smelt-state/src/ddl_bigquery.rs",
 ];
 
 fn is_emitter_module(path: &Path) -> bool {
@@ -5228,6 +5243,7 @@ fn no_maintenance_statement_authoring_outside_the_emitter() {
         "smelt-backends",
         "smelt-runtime",
         "smelt-logical",
+        "smelt-state",
     ] {
         scan_statement_authoring_dir(&crates_dir.join(crate_name).join("src"), &mut hits);
     }

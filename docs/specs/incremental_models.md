@@ -1337,8 +1337,13 @@ since which source keys count as "changed" is a derived maintenance-relevant com
 (introspection, seed loading, schema-evolution DDL) is outside this rule; single ownership is
 what makes maintenance SQL *observable* — the same emitters serve execution, the conformance
 equivalence gates, and `smelt explain --show-sql`, so printed SQL cannot drift from executed
-SQL. Definition-delta migration statements are inside this rule: they come from the same
-emitter layer (`definition_deltas.md` §"Plan-and-approve").
+SQL. Schema-evolution DDL is outside the maintenance/backbuild emitter rule but is itself
+single-owned per dialect by `smelt-state`'s `ddl_duckdb.rs`/`ddl_spark.rs`/`ddl_bigquery.rs` —
+it is not routed through `backbuild::emit` because those emitters are DuckDB-test-grade and
+have no forms for struct-field, nested-widening, or nullability operations, and because
+`smelt-state` sits below `smelt-logical`; no caller outside those three modules composes
+schema-evolution DDL text. Definition-delta migration statements are inside this rule: they
+come from the same emitter layer (`definition_deltas.md` §"Plan-and-approve").
 
 ### The frontier
 

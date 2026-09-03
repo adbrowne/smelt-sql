@@ -347,10 +347,21 @@ open — not that the excluded bullets themselves are gone.
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | done |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | done |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | done |
-| 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | planned |
+| 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 30b — schema-evolution DDL declared a separate single-owner family,
+  scan widened to `smelt-state`.** `smelt-state`'s `schema_tracking.rs` safe-path loop and the
+  nested-change fast path built their own `ALTER TABLE`/`UPDATE` text beside `ddl_duckdb.rs`'s
+  `generate_duckdb_ddl`. Extracted six renderers (`render_add_column`, `render_drop_column`,
+  `render_alter_column_type`, `render_set_not_null`, `render_drop_not_null`,
+  `render_backfill_update`) in `ddl_duckdb.rs` and routed both authors through them; widened
+  `statement_parity`'s structural scan to `smelt-state/src` with the three `ddl_<dialect>.rs`
+  modules as declared per-dialect exclusions. A quoting bug surfaced as a side effect: the safe
+  path previously interpolated column names unquoted, so a keyword-named column (`order`) would
+  have produced invalid SQL; delegation fixes it for free.
 
 - **2026-09-03, phase 30 — backbuild joins `statement_parity`; B3 fixtures need an explicit
   key pull-through column and no `SELECT *`.** Three new tests drive `definition_delta::

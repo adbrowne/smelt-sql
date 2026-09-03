@@ -9,6 +9,98 @@
 use crate::schema_tracking::{quote_identifier, SchemaOperation};
 use smelt_types::DataType;
 
+/// Render an `ALTER TABLE ... ADD COLUMN` statement, quoting `column` and
+/// appending an optional `DEFAULT` clause. The single owner of this shape —
+/// `docs/specs/incremental_models.md` §"Statement emission (single owner)":
+/// schema-evolution DDL is single-owned per dialect here, not routed through
+/// `backbuild::emit`. Both [`generate_duckdb_ddl`] and
+/// `schema_tracking::plan_migration_for_backend`'s DuckDB safe path call
+/// this rather than building the text themselves.
+pub fn render_add_column(
+    qualified: &str,
+    column: &str,
+    type_sql: &str,
+    nullable: bool,
+    default_expr: Option<&str>,
+) -> String {
+    let qname = quote_identifier(column);
+    let mut stmt = if nullable {
+        format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            qualified, qname, type_sql
+        )
+    } else {
+        format!(
+            "ALTER TABLE {} ADD COLUMN {} {} NOT NULL",
+            qualified, qname, type_sql
+        )
+    };
+    if let Some(default) = default_expr {
+        stmt.push_str(&format!(" DEFAULT {}", default));
+    }
+    stmt
+}
+
+/// Render an `ALTER TABLE ... DROP COLUMN` statement, quoting `column`.
+pub fn render_drop_column(qualified: &str, column: &str) -> String {
+    format!(
+        "ALTER TABLE {} DROP COLUMN {}",
+        qualified,
+        quote_identifier(column)
+    )
+}
+
+/// Render an `ALTER TABLE ... ALTER COLUMN ... TYPE ...` statement, quoting
+/// `column`.
+pub fn render_alter_column_type(qualified: &str, column: &str, type_sql: &str) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+        qualified,
+        quote_identifier(column),
+        type_sql
+    )
+}
+
+/// Render an `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` statement,
+/// quoting `column`.
+pub fn render_set_not_null(qualified: &str, column: &str) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
+        qualified,
+        quote_identifier(column)
+    )
+}
+
+/// Render an `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` statement,
+/// quoting `column`.
+pub fn render_drop_not_null(qualified: &str, column: &str) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
+        qualified,
+        quote_identifier(column)
+    )
+}
+
+/// Render a backfill `UPDATE` statement, quoting `column`. `where_null`
+/// scopes the update to `WHERE <column> IS NULL` (the nullable→NOT NULL gap
+/// fill); a freshly added column instead backfills every row unscoped.
+pub fn render_backfill_update(
+    qualified: &str,
+    column: &str,
+    expr: &str,
+    where_null: bool,
+) -> String {
+    let qname = quote_identifier(column);
+    if where_null {
+        format!(
+            "UPDATE {} SET {} = {} WHERE {} IS NULL",
+            qualified, qname, expr, qname
+        )
+    } else {
+        format!("UPDATE {} SET {} = {}", qualified, qname, expr)
+    }
+}
+
 /// Generate DuckDB-specific DDL statements from a list of `SchemaOperation`s.
 ///
 /// Returns a list of SQL statements to execute in order.
@@ -24,62 +116,33 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
                 nullable,
                 default_expr,
             } => {
-                let type_sql = data_type.to_sql();
-                let qname = quote_identifier(name);
-                let mut stmt = if *nullable {
-                    format!(
-                        "ALTER TABLE {} ADD COLUMN {} {}",
-                        qualified, qname, type_sql
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} ADD COLUMN {} {} NOT NULL",
-                        qualified, qname, type_sql
-                    )
-                };
-                if let Some(default) = default_expr {
-                    stmt.push_str(&format!(" DEFAULT {}", default));
-                }
-                stmts.push(stmt);
+                stmts.push(render_add_column(
+                    &qualified,
+                    name,
+                    &data_type.to_sql(),
+                    *nullable,
+                    default_expr.as_deref(),
+                ));
             }
             SchemaOperation::RemoveColumn { name } => {
-                stmts.push(format!(
-                    "ALTER TABLE {} DROP COLUMN {}",
-                    qualified,
-                    quote_identifier(name)
-                ));
+                stmts.push(render_drop_column(&qualified, name));
             }
             SchemaOperation::WidenColumnType { name, to, .. } => {
-                stmts.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                    qualified,
-                    quote_identifier(name),
-                    to.to_sql()
-                ));
+                stmts.push(render_alter_column_type(&qualified, name, &to.to_sql()));
             }
             SchemaOperation::ChangeNullability {
                 name,
                 to_nullable,
                 default_expr,
             } => {
-                let qname = quote_identifier(name);
                 if *to_nullable {
-                    stmts.push(format!(
-                        "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                        qualified, qname
-                    ));
+                    stmts.push(render_drop_not_null(&qualified, name));
                 } else {
                     // Fill NULLs first, then set NOT NULL
                     if let Some(default) = default_expr {
-                        stmts.push(format!(
-                            "UPDATE {} SET {} = {} WHERE {} IS NULL",
-                            qualified, qname, default, qname
-                        ));
+                        stmts.push(render_backfill_update(&qualified, name, default, true));
                     }
-                    stmts.push(format!(
-                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                        qualified, qname
-                    ));
+                    stmts.push(render_set_not_null(&qualified, name));
                 }
             }
             SchemaOperation::AddStructField {
@@ -151,12 +214,7 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
                 }
             }
             SchemaOperation::BackfillColumn { name, expression } => {
-                stmts.push(format!(
-                    "UPDATE {} SET {} = {}",
-                    qualified,
-                    quote_identifier(name),
-                    expression
-                ));
+                stmts.push(render_backfill_update(&qualified, name, expression, false));
             }
             SchemaOperation::RewriteColumn {
                 column,
@@ -739,6 +797,73 @@ mod tests {
     use smelt_types::DataType;
 
     // ── generate_duckdb_ddl tests ──────────────────────────────────────
+
+    // ── renderers are what generate_duckdb_ddl emits ───────────────────
+
+    #[test]
+    fn renderers_are_what_generate_duckdb_ddl_emits() {
+        let add_ops = vec![SchemaOperation::AddColumn {
+            name: "count".into(),
+            data_type: DataType::Integer,
+            nullable: false,
+            default_expr: Some("0".into()),
+        }];
+        assert_eq!(
+            generate_duckdb_ddl("main", "t", &add_ops),
+            vec![render_add_column(
+                "main.t",
+                "count",
+                &DataType::Integer.to_sql(),
+                false,
+                Some("0")
+            )]
+        );
+
+        let drop_ops = vec![SchemaOperation::RemoveColumn {
+            name: "old_col".into(),
+        }];
+        assert_eq!(
+            generate_duckdb_ddl("main", "t", &drop_ops),
+            vec![render_drop_column("main.t", "old_col")]
+        );
+
+        let alter_type_ops = vec![SchemaOperation::WidenColumnType {
+            name: "amount".into(),
+            from: DataType::Integer,
+            to: DataType::BigInt,
+        }];
+        assert_eq!(
+            generate_duckdb_ddl("main", "t", &alter_type_ops),
+            vec![render_alter_column_type(
+                "main.t",
+                "amount",
+                &DataType::BigInt.to_sql()
+            )]
+        );
+
+        let set_not_null_ops = vec![SchemaOperation::ChangeNullability {
+            name: "status".into(),
+            to_nullable: false,
+            default_expr: Some("'unknown'".into()),
+        }];
+        assert_eq!(
+            generate_duckdb_ddl("main", "t", &set_not_null_ops),
+            vec![
+                render_backfill_update("main.t", "status", "'unknown'", true),
+                render_set_not_null("main.t", "status"),
+            ]
+        );
+
+        let drop_not_null_ops = vec![SchemaOperation::ChangeNullability {
+            name: "status".into(),
+            to_nullable: true,
+            default_expr: None,
+        }];
+        assert_eq!(
+            generate_duckdb_ddl("main", "t", &drop_not_null_ops),
+            vec![render_drop_not_null("main.t", "status")]
+        );
+    }
 
     #[test]
     fn test_add_column_nullable() {
