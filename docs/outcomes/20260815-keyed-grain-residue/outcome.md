@@ -74,7 +74,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
 | 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | done |
 | 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | done |
-| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
+| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | planned |
 
 ## Decision log
 
@@ -214,6 +214,15 @@ six success criteria — criterion 1 is already met end-to-end without it.
   as a `tracing::warn!`) instead of a bare `tracing::warn!` with no reporter involvement; the run
   still succeeds. `smelt-ui`'s `BroadcastReporter` intentionally gets no override (it doesn't
   forward events verbatim). No new limitations discovered.
+
+- 2026-09-04 — Phase 8 planned. No reshape: phase 7's summary reports nothing new discovered and
+  names row 8 as next, and rows 1-7 are all `done` or `blocked`, so the remaining table is a single
+  close-out row that already maps onto criterion 6. Phase 8's scope was fixed to *validation plus
+  outcome-attributable fixes only*: drift the report surfaces that belongs to another outcome is
+  reported with its owner rather than fixed here, since fixing it would widen this outcome past its
+  six criteria. Criterion 3 is deliberately left unmet — phase 3's Blocked entry records a human
+  decision among three candidate options — and phase 8's summary states that per-criterion verdict
+  explicitly so the close-out step can judge the Success criteria on evidence.
 
 ## Blocked
 
