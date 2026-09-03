@@ -557,6 +557,47 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
 
+    /// Run zero or more idempotent `ensure_sqls` DDL statements, then zero or
+    /// more `pre_write_sqls` bookkeeping statements, then `write_group`, with
+    /// the `pre_write_sqls` + `write_group` portion sharing one backend
+    /// transaction where the backend can provide one — the generalised seam
+    /// underneath every "record something alongside a write" caller
+    /// (observed output deltas, T5; the re-run-tolerant keyed-model merge
+    /// ledger, `docs/specs/incremental_shapes.md` §"The transactional
+    /// frontier write (merge ledger)"). `ensure_sqls` run first and outside
+    /// that transaction — same precedent as [`Backend::fold_ledger_delta`]'s
+    /// `ensure_sql` handling — because idempotent `CREATE TABLE IF NOT
+    /// EXISTS` DDL is safe standalone and keeping DDL out of the transaction
+    /// avoids backend-specific DDL-vs-constraint-check interactions.
+    /// `pre_write_sqls` run in order, before `write_group`, because a
+    /// bookkeeping record commonly reads pre-write target state (the
+    /// observed-delta record does; see
+    /// [`Backend::execute_conditional_write_and_record_observed_delta`]).
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (each `ensure_sqls` entry, then each `pre_write_sqls` entry, then
+    /// [`Backend::execute_statement_group`]) for any backend that does not
+    /// override it — the same precedent as [`Backend::fold_ledger_delta`]'s
+    /// default. A backend that can wrap the pre-write statements and the
+    /// write in a native transaction (DuckDB) should override this so a
+    /// failed write never leaves a stale bookkeeping record behind, and a
+    /// failed pre-write record never lets the write proceed unrecorded.
+    async fn execute_write_with_bookkeeping(
+        &self,
+        ensure_sqls: &[String],
+        pre_write_sqls: &[String],
+        write_group: &StatementGroup,
+    ) -> Result<(), BackendError> {
+        for ensure_sql in ensure_sqls {
+            self.execute_sql(ensure_sql).await?;
+        }
+        for pre_write_sql in pre_write_sqls {
+            self.execute_sql(pre_write_sql).await?;
+        }
+        self.execute_statement_group(write_group).await?;
+        Ok(())
+    }
+
     /// Record a conditional write's observed output delta, THEN execute the
     /// write itself, both in the same backend transaction (T5,
     /// `docs/specs/incremental_models.md` §"The graph layer" — "Observed
@@ -577,24 +618,21 @@ pub trait Backend: Send + Sync {
     /// dependency — this trait does not depend on it, only executes the SQL
     /// text a caller built, same precedent as [`Backend::fold_ledger_delta`].
     ///
-    /// Default implementation is a best-effort, **non-atomic** fallback
-    /// (`ensure_sql`, then `record_sql`, then each of `write_group`'s
-    /// statements) for any backend that does not override it — the same
-    /// precedent as [`Backend::fold_ledger_delta`]'s default. A backend that
-    /// can wrap the record and the write in a native transaction (DuckDB)
-    /// should override this so a failed write never leaves a stale delta
-    /// record behind, and a failed record never lets the write proceed
-    /// unrecorded.
+    /// Thin delegation to [`Backend::execute_write_with_bookkeeping`] — the
+    /// one seam a backend needs to override to get a real transaction here;
+    /// this method itself is never overridden directly.
     async fn execute_conditional_write_and_record_observed_delta(
         &self,
         ensure_sql: &str,
         write_group: &StatementGroup,
         record_sql: &str,
     ) -> Result<(), BackendError> {
-        self.execute_sql(ensure_sql).await?;
-        self.execute_sql(record_sql).await?;
-        self.execute_statement_group(write_group).await?;
-        Ok(())
+        self.execute_write_with_bookkeeping(
+            &[ensure_sql.to_string()],
+            &[record_sql.to_string()],
+            write_group,
+        )
+        .await
     }
 
     /// Refresh the row-content fingerprint sidecar (F3,

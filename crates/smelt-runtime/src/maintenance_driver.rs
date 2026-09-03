@@ -299,8 +299,12 @@ pub trait WindowedKeyedRule: Send + Sync {
 /// already reflected — a reprocessed window — refuses the run with a
 /// `KeyedReprocessedWindow`-shaped error
 /// (`docs/specs/incremental_shapes.md` §"Reprocessing") instead of silently
-/// double-counting. `Grade::Idempotent` cells skip the ledger entirely — no
-/// warehouse table is ever created for them.
+/// double-counting. `Grade::Idempotent` cells also write to the same ledger
+/// table, keyed identically, but via an `ON CONFLICT DO NOTHING` upsert
+/// rather than a refusal — a re-run-tolerant model's re-merge of an
+/// already-recorded window is a no-op, not an error
+/// (`docs/specs/incremental_shapes.md` §"The transactional frontier write
+/// (merge ledger)").
 #[allow(clippy::too_many_arguments)]
 pub async fn run_windowed_keyed_maintenance(
     backend: &dyn Backend,
@@ -604,7 +608,7 @@ pub async fn run_windowed_keyed_maintenance(
                 // (single owner)"). The `Additive` branch above is the
                 // documented exception: its action statement is interleaved
                 // with the reconciliation ledger's own DDL/DML via
-                // `fold_ledger_delta`, unchanged by this phase.
+                // `fold_ledger_delta`.
                 //
                 // A change-suppressed keyed fold's MERGE (T5, `docs/specs/
                 // incremental_models.md` §"The graph layer" — "Observed
@@ -616,6 +620,50 @@ pub async fn run_windowed_keyed_maintenance(
                 // record from it. `Grade::Additive` (ledger-folded) ISN'T
                 // reached here — this arm only ever runs for
                 // `Grade::Idempotent` cells.
+                //
+                // Every step ALSO writes a re-run-tolerance bookkeeping
+                // record into the SAME merge ledger the `Additive` arm
+                // above uses (`docs/specs/incremental_shapes.md` §"The
+                // transactional frontier write (merge ledger)" — "every
+                // window-forward keyed model maintains a per-model
+                // frontier", unqualified by grading), keyed identically —
+                // `LEDGER_WHOLE_ROW_GROUP`/`rule.ledger_input()` — via
+                // `ON CONFLICT DO NOTHING` rather than `Additive`'s
+                // never-fold-twice `PRIMARY KEY` refusal, since a repeat
+                // merge of the same window is never a correctness violation
+                // for an idempotent cell. The first (table-creating) step
+                // is recorded too — that window is merged state — because
+                // it always falls into the `_` arm below (its `create_group`
+                // is never the `(None, Suppressed)` pattern the first arm
+                // matches). The ledger substrate is DuckDB-only today (same
+                // posture as the `Additive` arm and the observed-delta
+                // record below); on any other dialect the record is skipped
+                // with a warning rather than refusing the run — this is
+                // bookkeeping, not a correctness gate.
+                let ledger_bookkeeping = if backend.dialect() == SqlDialect::DuckDB {
+                    let ledger_ensure = ddl_duckdb::generate_ledger_table_ddl(schema);
+                    let ledger_upsert = ddl_duckdb::generate_ledger_upsert_sql(
+                        schema,
+                        model_name,
+                        LEDGER_WHOLE_ROW_GROUP,
+                        rule.ledger_input(),
+                        &step.partition_value,
+                        &step.range.start,
+                        &step.range.end,
+                    );
+                    Some((ledger_ensure, ledger_upsert))
+                } else {
+                    tracing::warn!(
+                        model = model_name,
+                        dialect = backend.dialect().name(),
+                        "re-run-tolerant keyed model merge-ledger bookkeeping record skipped: \
+                         the ledger substrate is DuckDB-only today (docs/specs/\
+                         incremental_shapes.md §\"The transactional frontier write (merge \
+                         ledger)\")"
+                    );
+                    None
+                };
+
                 match (&create_group, suppression) {
                     (None, WriteSuppression::Suppressed { compared_columns }) => {
                         if backend.dialect() != SqlDialect::DuckDB {
@@ -653,11 +701,17 @@ pub async fn run_windowed_keyed_maintenance(
                             &step.range.end,
                             &changed_keys_query,
                         );
+                        let mut ensure_sqls = vec![ensure_sql];
+                        let mut pre_write_sqls = vec![record_sql];
+                        if let Some((ledger_ensure, ledger_upsert)) = &ledger_bookkeeping {
+                            ensure_sqls.push(ledger_ensure.clone());
+                            pre_write_sqls.push(ledger_upsert.clone());
+                        }
                         crate::execute::retry_backend_call(retry, || {
-                            backend.execute_conditional_write_and_record_observed_delta(
-                                &ensure_sql,
+                            backend.execute_write_with_bookkeeping(
+                                &ensure_sqls,
+                                &pre_write_sqls,
                                 &action_group,
-                                &record_sql,
                             )
                         })
                         .await
@@ -670,20 +724,42 @@ pub async fn run_windowed_keyed_maintenance(
                             )
                         })?;
                     }
-                    _ => {
-                        crate::execute::retry_backend_call(retry, || {
-                            backend.execute_statement_group(&action_group)
-                        })
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
-                                model_name,
-                                action_sql,
-                                e
-                            )
-                        })?;
-                    }
+                    _ => match &ledger_bookkeeping {
+                        Some((ledger_ensure, ledger_upsert)) => {
+                            let ensure_sqls = vec![ledger_ensure.clone()];
+                            let pre_write_sqls = vec![ledger_upsert.clone()];
+                            crate::execute::retry_backend_call(retry, || {
+                                backend.execute_write_with_bookkeeping(
+                                    &ensure_sqls,
+                                    &pre_write_sqls,
+                                    &action_group,
+                                )
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                    model_name,
+                                    action_sql,
+                                    e
+                                )
+                            })?;
+                        }
+                        None => {
+                            crate::execute::retry_backend_call(retry, || {
+                                backend.execute_statement_group(&action_group)
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                    model_name,
+                                    action_sql,
+                                    e
+                                )
+                            })?;
+                        }
+                    },
                 }
             }
         }
@@ -5457,7 +5533,16 @@ mod tests {
         .unwrap();
 
         let calls = backend.calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
+        // Each of the 3 steps now also writes a re-run-tolerance bookkeeping
+        // record into the merge ledger (`Backend::execute_write_with_
+        // bookkeeping`'s default fallback: one `execute_sql` for the
+        // ledger's idempotent ensure DDL, one for the `ON CONFLICT DO
+        // NOTHING` upsert, then the create/merge statement itself) —
+        // `SumRule`'s default `ledger_grade()` is `Grade::Idempotent`, and
+        // `RecordingBackend`'s dialect is DuckDB (`docs/specs/
+        // incremental_shapes.md` §"The transactional frontier write (merge
+        // ledger)").
+        assert_eq!(calls.len(), 9);
         // The first-run CREATE now comes from `emit_create_table_as`,
         // executed via `execute_statement_group` (its default sequential
         // fallback routes through `execute_sql`, since `RecordingBackend`
@@ -5465,12 +5550,21 @@ mod tests {
         // `Backend::create_table_as` call for this family
         // (`docs/specs/incremental_models.md` §"Statement emission (single
         // owner)").
-        assert!(calls[0].starts_with("execute_sql: CREATE TABLE main.t AS"));
-        assert!(calls[0].contains("2024-01-01"));
-        assert!(calls[1].starts_with("execute_sql: MERGE INTO main.t"));
-        assert!(calls[1].contains("2024-01-02"));
-        assert!(calls[2].starts_with("execute_sql: MERGE INTO main.t"));
-        assert!(calls[2].contains("2024-01-03"));
+        assert!(calls[0].starts_with("execute_sql: CREATE TABLE IF NOT EXISTS main._smelt_ledger"));
+        assert!(calls[1].starts_with("execute_sql: INSERT INTO main._smelt_ledger"));
+        assert!(calls[1].contains("ON CONFLICT DO NOTHING"));
+        assert!(calls[2].starts_with("execute_sql: CREATE TABLE main.t AS"));
+        assert!(calls[2].contains("2024-01-01"));
+        assert!(calls[3].starts_with("execute_sql: CREATE TABLE IF NOT EXISTS main._smelt_ledger"));
+        assert!(calls[4].starts_with("execute_sql: INSERT INTO main._smelt_ledger"));
+        assert!(calls[4].contains("ON CONFLICT DO NOTHING"));
+        assert!(calls[5].starts_with("execute_sql: MERGE INTO main.t"));
+        assert!(calls[5].contains("2024-01-02"));
+        assert!(calls[6].starts_with("execute_sql: CREATE TABLE IF NOT EXISTS main._smelt_ledger"));
+        assert!(calls[7].starts_with("execute_sql: INSERT INTO main._smelt_ledger"));
+        assert!(calls[7].contains("ON CONFLICT DO NOTHING"));
+        assert!(calls[8].starts_with("execute_sql: MERGE INTO main.t"));
+        assert!(calls[8].contains("2024-01-03"));
     }
 
     /// MP12: an `Additive`-graded rule routes every step's create-or-merge

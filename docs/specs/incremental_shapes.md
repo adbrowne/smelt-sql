@@ -1195,14 +1195,13 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
-- **Re-run-tolerant keyed models do not yet write the frontier** — §"The transactional
-  frontier write (merge ledger)" has it written for every window-forward model whenever the
-  project's state mode supports it; the runtime only creates the ledger table for
-  additive-graded models, so a fully idempotent model has no merge record for `--auto` to
-  consult. Decision record: `docs/research/20260816-open-questions-triage.md`.
-- **The reconciliation ledger's fold is transactional on DuckDB only (Open Question)** — the
-  default `Backend::fold_ledger_delta` is best-effort check-then-act across separate
-  statements; only the DuckDB backend overrides it with a real transaction.
+- **The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is
+  transactional, and the ledger table itself exists, on DuckDB only (Open Question)** — the
+  default `Backend::fold_ledger_delta` and `Backend::execute_write_with_bookkeeping` are
+  best-effort check-then-act across separate statements; only the DuckDB backend overrides
+  either with a real transaction, and every merge-ledger record (additive `INSERT` or
+  re-run-tolerant `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB
+  window-forward keyed model writes no frontier record at all today.
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.

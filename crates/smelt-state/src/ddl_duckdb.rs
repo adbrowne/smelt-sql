@@ -382,10 +382,15 @@ fn format_dot_path(column: &str, path: &[String], leaf: Option<&str>) -> String 
 // generated below for backends that cannot wrap both statements in one
 // transaction; see `smelt_backend::Backend::fold_ledger_delta`'s default).
 //
-// Idempotent-graded groups never call any of these — a warehouse ledger
-// table only exists for a project once an additive-fold cell has actually
-// folded (`docs/specs/incremental_models.md` §Constraints; review checklist
-// "no warehouse tables for idempotent-only plans").
+// Idempotent-graded (re-run-tolerant) keyed groups write to this same
+// table too, via `generate_ledger_upsert_sql` below, but through an
+// `ON CONFLICT DO NOTHING` upsert rather than the never-fold-twice
+// `PRIMARY KEY` refusal above — a repeat merge of an already-recorded
+// window is a no-op for an idempotent cell, not a correctness violation
+// (`docs/specs/incremental_shapes.md` §"The transactional frontier write
+// (merge ledger)"). A warehouse ledger table only exists for a project
+// once some window-forward keyed cell has actually merged a window,
+// additive or idempotent.
 
 /// Table name for the warehouse-resident per-delta reconciliation ledger.
 pub const LEDGER_TABLE_NAME: &str = "_smelt_ledger";
@@ -431,6 +436,39 @@ pub fn generate_ledger_insert_sql(
         escape_sql_literal(delta_id),
         escape_sql_literal(region_start),
         escape_sql_literal(region_end),
+    )
+}
+
+/// `INSERT ... ON CONFLICT DO NOTHING` variant of [`generate_ledger_insert_sql`]
+/// for a **bookkeeping** record of a re-run-tolerant (`Grade::Idempotent`)
+/// window-forward keyed model's merged window
+/// (`docs/specs/incremental_shapes.md` §"The transactional frontier write
+/// (merge ledger)"). Unlike the additive-graded `INSERT` above, a repeat of
+/// the same `(model, group, input, delta_id)` here is never a correctness
+/// violation — an idempotent cell may legitimately re-merge the same window
+/// — so the constraint conflict is swallowed rather than surfaced as
+/// `AlreadyReflected`.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_ledger_upsert_sql(
+    schema: &str,
+    model: &str,
+    group: &str,
+    input: &str,
+    delta_id: &str,
+    region_start: &str,
+    region_end: &str,
+) -> String {
+    format!(
+        "{} ON CONFLICT DO NOTHING",
+        generate_ledger_insert_sql(
+            schema,
+            model,
+            group,
+            input,
+            delta_id,
+            region_start,
+            region_end
+        )
     )
 }
 
@@ -1352,6 +1390,33 @@ mod tests {
             "2026-01-02",
         );
         assert!(sql.contains("'model''s_name'"));
+    }
+
+    #[test]
+    fn ledger_upsert_is_conflict_tolerant() {
+        let insert_sql = generate_ledger_insert_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "smelt.events",
+            "2026-01-01",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        let upsert_sql = generate_ledger_upsert_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "smelt.events",
+            "2026-01-01",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        assert_eq!(
+            upsert_sql,
+            format!("{} ON CONFLICT DO NOTHING", insert_sql),
+            "upsert carries the same column list/values as the plain insert plus ON CONFLICT DO NOTHING"
+        );
     }
 
     #[test]

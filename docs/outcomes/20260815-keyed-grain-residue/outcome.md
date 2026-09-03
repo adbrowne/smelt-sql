@@ -68,7 +68,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
-| 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | planned |
+| 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
 | 3 | Transactional ledger fold on every shipped backend | pending |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | pending |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | pending |
@@ -100,6 +100,16 @@ six success criteria — criterion 1 is already met end-to-end without it.
   parallel ledger-write method, and to writing the bookkeeping record with **no** `state.mode`
   gate — `state.md` §"`state.mode` and what each posture provides" already places correctness
   structures in every posture.
+
+- 2026-09-03 — Phase 2 implemented and closed out (all green: `verify-phase.sh`,
+  `keyed_frontier_bookkeeping`, `statement_parity`, `execute_parity`, `maintenance_conformance`,
+  `smelt-backend-duckdb`, `smelt-state`). Generalised
+  `execute_conditional_write_and_record_observed_delta` into `Backend::execute_write_with_bookkeeping`
+  as planned, and the `Grade::Idempotent` arm now writes an `ON CONFLICT DO NOTHING` merge-ledger
+  record for every step (including the table-creating first one), keyed identically to the `Additive`
+  arm. A pre-existing unit test (`sequences_create_then_merge_across_partitions_in_temporal_order`)
+  needed its call-count assertions updated — an intentional consequence of this phase, not a
+  regression. No new limitations discovered.
 
 ## Blocked
 
