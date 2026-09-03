@@ -172,6 +172,7 @@ fn diagnostics_tables_carry_the_four_lattice_codes() {
         "ContractLateArrivalOutsideHorizon",
         "ContractDeferralInvalid",
         "ContractDeferralExceeded",
+        "ContractDepartedKeyUnmarked",
     ];
     for code in codes {
         assert!(

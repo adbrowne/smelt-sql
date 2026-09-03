@@ -568,6 +568,7 @@ position — is owned by `definition_deltas.md` §Surface.
 | `ContractDeferralInvalid` | A `contract.deferral` (model- or cell-level) is unparseable or negative, or declared on a cell with no clock to measure lag against (§"Contract relaxations (`contract:`)"). |
 | `ContractDeferralExceeded` | Runtime probe, deferral point only: the ledger-derived lag between a cell's maintained frontier and its input frontier exceeds the declared `D`; names the cell and the measured lag (§"The contract lattice"). |
 | `ContractRetainDepartedInvalid` | A `contract.retain_departed` is declared on anything other than a keyed shape consuming a mutable snapshot, or names a tombstone column absent from the model's output; names the failing condition (§"Contract relaxations (`contract:`)"). |
+| `ContractDepartedKeyUnmarked` | Runtime probe, `retain_departed` point only: a departed key survives the reconcile without its declared tombstone column marked; names the unmarked count (§"The contract lattice"). |
 
 ## Semantics
 
@@ -861,7 +862,12 @@ snapshot, the strict per-key equation holds unchanged; a stored key absent from 
 snapshot is exempt from comparison (and, when a tombstone column is declared, must be marked
 in it). The probe is the reconcile scan's own anti-join — the very computation that would
 otherwise have deleted — recording the retained-departed key count on the run manifest, with
-the retained set's tombstone marking checked where declared. The point is meaningful only
+the retained set's tombstone marking checked where declared. It is dispatched on **every**
+reconcile that suppresses the delete, independent of the project's `probes:` cadence — it
+stands in for the delete the default point would have run, so a cadence skip would suppress
+the delete while verifying nothing. Its manifest record (`run_state.md` §"Run manifest")
+carries fact `contract.retain_departed` with the retained-departed count in `observed`; an
+unmarked tombstone raises `ContractDepartedKeyUnmarked`. The point is meaningful only
 where departure is observable and deletion is the default, so it is admitted **only on a
 keyed shape consuming a mutable snapshot**; declaring it anywhere else is a configuration
 error (`ContractRetainDepartedInvalid`).

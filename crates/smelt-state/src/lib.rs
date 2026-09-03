@@ -115,6 +115,13 @@ pub struct ProbeRecord {
     /// The registry's named diagnostic code, e.g. `KeyedRecurrenceBoundViolated`.
     pub probe: String,
     pub outcome: ProbeRecordOutcome,
+    /// The probe's recorded scalar measurement, e.g. the retained-departed
+    /// key count `contract.retain_departed`'s reconcile anti-join probe
+    /// observes (`docs/specs/run_state.md` §"Run manifest"). `None` for a
+    /// probe that records no count, and for every manifest written before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<u64>,
 }
 
 /// Whether a probe actually ran this run, or was skipped by cadence policy
@@ -277,5 +284,32 @@ mod tests {
         let record: ModelRunRecord =
             serde_json::from_str(legacy_json).expect("legacy manifest entry must still parse");
         assert!(record.probes.is_empty());
+    }
+
+    /// A `probes[]` entry with no `observed` key deserializes to `None`,
+    /// and a `None` re-serializes without the key — no manifest churn for
+    /// the probes that record no measurement (`docs/specs/run_state.md`
+    /// §"Run manifest").
+    #[test]
+    fn probe_record_observed_defaults_absent() {
+        let json = r#"{"fact": "key_recurrence", "probe": "KeyedRecurrenceBoundViolated", "outcome": "dispatched"}"#;
+        let record: ProbeRecord = serde_json::from_str(json).expect("probe record must parse");
+        assert_eq!(record.observed, None);
+
+        let serialized = serde_json::to_string(&record).expect("probe record must serialize");
+        assert!(
+            !serialized.contains("observed"),
+            "a None observed must not appear in the serialized output: {serialized}"
+        );
+
+        let with_observed = ProbeRecord {
+            fact: "contract.retain_departed".to_string(),
+            probe: "ContractDepartedKeyUnmarked".to_string(),
+            outcome: ProbeRecordOutcome::Dispatched,
+            observed: Some(3),
+        };
+        let serialized =
+            serde_json::to_string(&with_observed).expect("probe record must serialize");
+        assert!(serialized.contains("\"observed\":3"), "{serialized}");
     }
 }

@@ -256,6 +256,7 @@ pub async fn dispatch_and_record_append_only_postures(
                             fact: probe.ctx.fact.clone(),
                             probe: probe.ctx.probe_code.clone(),
                             outcome: ProbeRecordOutcome::Skipped,
+                            observed: None,
                         });
                     }
                     ProbeVerdict::Held => {
@@ -270,6 +271,7 @@ pub async fn dispatch_and_record_append_only_postures(
                             fact: probe.ctx.fact.clone(),
                             probe: probe.ctx.probe_code.clone(),
                             outcome: ProbeRecordOutcome::Dispatched,
+                            observed: None,
                         });
                     }
                     ProbeVerdict::Violated { count, sample_keys } => {
@@ -297,6 +299,7 @@ pub async fn dispatch_and_record_append_only_postures(
                             fact: probe.ctx.fact.clone(),
                             probe: probe.ctx.probe_code.clone(),
                             outcome: ProbeRecordOutcome::Skipped,
+                            observed: None,
                         });
                     }
                     ProbeDispatch::Dispatch => {
@@ -311,6 +314,7 @@ pub async fn dispatch_and_record_append_only_postures(
                             fact: probe.ctx.fact.clone(),
                             probe: probe.ctx.probe_code.clone(),
                             outcome: ProbeRecordOutcome::Dispatched,
+                            observed: None,
                         });
                     }
                 }

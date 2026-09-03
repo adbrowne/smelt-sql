@@ -640,6 +640,7 @@ pub async fn execute_snapshot_reconcile(
     schema: &str,
     db_table_name: &str,
     classification: &CumulativeClassification,
+    probe_sink: &mut Vec<smelt_state::ProbeRecord>,
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
     let start = std::time::Instant::now();
@@ -756,6 +757,19 @@ pub async fn execute_snapshot_reconcile(
                     retained_departed_count = retained,
                     "contract.retain_departed: reconcile anti-join probe"
                 );
+                // Dispatched on every reconcile that suppresses the
+                // default point's delete, independent of the project's
+                // `probes:` cadence — this probe stands in for the delete
+                // the default point would otherwise have run, so a
+                // cadence skip would suppress the delete while verifying
+                // nothing (`docs/outcomes/20260815-definition-delta-migrate/
+                // phases/34-plan.md`).
+                probe_sink.push(smelt_state::ProbeRecord {
+                    fact: "contract.retain_departed".to_string(),
+                    probe: "ContractDepartedKeyUnmarked".to_string(),
+                    outcome: smelt_state::ProbeRecordOutcome::Dispatched,
+                    observed: Some(retained),
+                });
                 if tombstone.is_some() {
                     let unmarked: u64 = rows
                         .first()
@@ -764,10 +778,11 @@ pub async fn execute_snapshot_reconcile(
                         .unwrap_or(0);
                     anyhow::ensure!(
                         unmarked == 0,
-                        "Model '{}' declares contract.retain_departed with a tombstone column, \
-                         but {unmarked} departed key(s) are not marked departed — every row a \
-                         reconcile no longer scans from the source must have its tombstone set \
-                         before it is exempted from comparison \
+                        "ContractDepartedKeyUnmarked: model '{}' declares \
+                         contract.retain_departed with a tombstone column, but {unmarked} \
+                         departed key(s) are not marked departed — every row a reconcile no \
+                         longer scans from the source must have its tombstone set before it is \
+                         exempted from comparison \
                          (`docs/specs/incremental_models.md` §\"Retention (retain_departed)\")",
                         model_name
                     );

@@ -154,6 +154,14 @@ fn base_request() -> ExecuteRequest {
 }
 
 async fn run(project_dir: &Path, db_path: &Path, run_id: &str) -> anyhow::Result<()> {
+    run_outcome(project_dir, db_path, run_id).await.map(|_| ())
+}
+
+async fn run_outcome(
+    project_dir: &Path,
+    db_path: &Path,
+    run_id: &str,
+) -> anyhow::Result<smelt_runtime::types::RunOutcome> {
     let config = Arc::new(Config::load(project_dir).expect("load config"));
     let (db, graph) = build_db_and_graph(project_dir, &config);
     execute_project(
@@ -170,7 +178,6 @@ async fn run(project_dir: &Path, db_path: &Path, run_id: &str) -> anyhow::Result
         CancellationToken::new(),
     )
     .await
-    .map(|_| ())
 }
 
 fn stored_device_ids(db_path: &Path) -> Vec<i64> {
@@ -309,5 +316,83 @@ GROUP BY 1
     assert!(
         message.contains("retain_departed") && message.contains("not marked departed"),
         "refusal must name the unmarked-departure violation: {message}"
+    );
+    assert!(
+        message.contains("ContractDepartedKeyUnmarked"),
+        "refusal must name the diagnostic code: {message}"
+    );
+}
+
+/// The declared `retain_departed` point's reconcile anti-join probe is
+/// recorded on this model's manifest entry with the retained-departed
+/// count in `observed` (`docs/specs/run_state.md` §"Run manifest").
+#[tokio::test]
+async fn retain_departed_probe_is_recorded_with_the_retained_count() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_project(
+        &project_dir,
+        &db_path,
+        "contract:\n  retain_departed: true\n",
+    );
+    seed_devices(&db_path, &[(1, 10.0), (2, 5.0), (3, 1.0)]).expect("seed");
+    run(&project_dir, &db_path, "probe-recorded-run-1")
+        .await
+        .expect("first run creates the table");
+
+    // Devices 2 and 3 depart the source.
+    seed_devices(&db_path, &[(1, 10.0)]).expect("reseed");
+    let outcome = run_outcome(&project_dir, &db_path, "probe-recorded-run-2")
+        .await
+        .expect("reconcile run retains the departed keys");
+
+    let record = outcome
+        .models
+        .get("device_snapshot")
+        .expect("device_snapshot must have a manifest entry");
+    let probe = record
+        .probes
+        .iter()
+        .find(|p| p.fact == "contract.retain_departed")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a contract.retain_departed probe record, got {:?}",
+                record.probes
+            )
+        });
+    assert_eq!(probe.probe, "ContractDepartedKeyUnmarked");
+    assert_eq!(probe.outcome, smelt_state::ProbeRecordOutcome::Dispatched);
+    assert_eq!(probe.observed, Some(2));
+}
+
+/// The default point (no `contract.retain_departed` declared) records no
+/// probe at all — the delete leg it runs instead stays measurement-free.
+#[tokio::test]
+async fn default_point_records_no_probe() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_project(&project_dir, &db_path, "");
+    seed_devices(&db_path, &[(1, 10.0), (2, 5.0)]).expect("seed");
+    run(&project_dir, &db_path, "no-probe-run-1")
+        .await
+        .expect("first run creates the table");
+
+    seed_devices(&db_path, &[(1, 10.0)]).expect("reseed");
+    let outcome = run_outcome(&project_dir, &db_path, "no-probe-run-2")
+        .await
+        .expect("reconcile run deletes the departed key");
+
+    let record = outcome
+        .models
+        .get("device_snapshot")
+        .expect("device_snapshot must have a manifest entry");
+    assert!(
+        record.probes.is_empty(),
+        "the default point must record no probe: {:?}",
+        record.probes
     );
 }

@@ -128,5 +128,97 @@ pub fn probe_plan_for_model(
         }
     }
 
+    // The `contract.retain_departed` reconcile anti-join (phase 34,
+    // `docs/outcomes/20260815-definition-delta-migrate/phases/34-plan.md`) —
+    // dispatched on every snapshot-reconcile write that suppresses the
+    // default point's delete, so it is listed whenever the point is
+    // declared, independent of `plan_cells`/`key_locality` derivation.
+    if metadata
+        .and_then(|m| m.contract.as_ref())
+        .and_then(|c| c.retain_departed.as_ref())
+        .is_some()
+    {
+        entries.push(ProbePlanEntry {
+            fact: "contract.retain_departed".to_string(),
+            probe: "ContractDepartedKeyUnmarked".to_string(),
+            cell: format!("{schema}.{table} reconcile anti-join"),
+            cost: PROBE_COST.to_string(),
+        });
+    }
+
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::config::{ContractConfig, RetainDeparted};
+    use smelt_core::metadata::ModelMetadata;
+
+    fn model_file(name: &str) -> ModelFile {
+        let path = std::path::PathBuf::from(format!("models/{name}.sql"));
+        ModelFile {
+            name: name.to_string(),
+            model_id: smelt_core::ModelId::from_path(path.clone()),
+            path,
+            content: String::new(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: smelt_core::discovery::ModelKind::Sql,
+            address_segments: vec![name.to_string()],
+        }
+    }
+
+    #[test]
+    fn probe_plan_lists_declared_retain_departed() {
+        let model_file = model_file("device_snapshot");
+
+        let declared = ModelMetadata {
+            contract: Some(ContractConfig {
+                retain_departed: Some(RetainDeparted::Bool(true)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let entries = probe_plan_for_model(
+            "device_snapshot",
+            "main",
+            "device_snapshot",
+            Some(&declared),
+            None,
+            &model_file,
+            &[],
+            "dev",
+            &[],
+            None,
+            MaintenanceDialect::DuckDb,
+        );
+        let entry = entries
+            .iter()
+            .find(|e| e.fact == "contract.retain_departed")
+            .unwrap_or_else(|| {
+                panic!("expected a contract.retain_departed entry, got {entries:?}")
+            });
+        assert_eq!(entry.probe, "ContractDepartedKeyUnmarked");
+
+        let undeclared = ModelMetadata::default();
+        let entries = probe_plan_for_model(
+            "device_snapshot",
+            "main",
+            "device_snapshot",
+            Some(&undeclared),
+            None,
+            &model_file,
+            &[],
+            "dev",
+            &[],
+            None,
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(
+            !entries.iter().any(|e| e.fact == "contract.retain_departed"),
+            "an undeclared model must list no contract.retain_departed entry: {entries:?}"
+        );
+    }
 }

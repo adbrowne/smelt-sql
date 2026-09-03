@@ -352,9 +352,16 @@ open — not that the excluded bullets themselves are gone.
 | 32 | Posture-derived key departure (`retain_departed`), lattice-point half: declaration parsing, `ContractRetainDepartedInvalid` admissibility diagnostic, pure oracle transform (departed-key quotient) and probe emitter (the reconcile anti-join), single-owned in `smelt-logical/src/contract/retain_departed.rs` per the `frozen_horizon`/`deferral` precedent | done |
 | 32b | Posture-derived key departure, runtime half: the default point's anti-join delete leg in the snapshot-reconcile write path (today every keyed model behaves as if `retain_departed` were silently declared), suppressed where phase 32's point is declared; extend `statement_parity`; remove the residue of `incremental_models.md`'s "Posture-derived key departure" bullet | done |
 | 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | done |
-| 34 | Persist the `retain_departed` probe outcome on the run manifest: thread the snapshot-reconcile path's pre-write probe through `smelt-runtime`'s `ProbeRecord`/`ModelRunRecord.probes` ledger the `frozen_horizon`/`deferral` probes already use, so the declared lattice point is explain/run-report visible rather than only fail-loud inline (phase 32b summary follow-up) | planned |
+| 34 | Persist the `retain_departed` probe outcome on the run manifest: thread the snapshot-reconcile path's pre-write probe through `smelt-runtime`'s `ProbeRecord`/`ModelRunRecord.probes` ledger the `frozen_horizon`/`deferral` probes already use, so the declared lattice point is explain/run-report visible rather than only fail-loud inline (phase 32b summary follow-up) | done |
 
 ## Decision log
+
+- **2026-09-03, phase 34 implement — landed.** Shipped as planned: `ProbeRecord.observed`,
+  the `probe_sink` out-parameter threaded through `execute_snapshot_reconcile` into the
+  cumulative arm's `ModelRunRecord.probes`, the `ContractDepartedKeyUnmarked`-named refusal, and
+  the `probe_plan_for_model` entry. No cadence plumbing added (matches the plan's cadence-
+  independent framing). `cli.md` left unedited — its probe section names facts generically, not
+  per-fact, so nothing there was stale.
 
 - **2026-09-03, phase 34 plan — probe measurements become manifest data.** Recording the
   `retain_departed` anti-join's retained-departed count requires a place to put it:

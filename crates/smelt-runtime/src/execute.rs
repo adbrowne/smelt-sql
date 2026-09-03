@@ -2144,6 +2144,12 @@ pub async fn execute_project(
 
             let mut used_per_group_recompute = false;
             let mut used_diff_patch = false;
+            // Populated only by the snapshot-reconcile arm's declared
+            // `contract.retain_departed` point (phase 34): the reconcile
+            // anti-join probe's outcome, threaded to this model's manifest
+            // entry below instead of being dropped after only a
+            // `tracing::info!`.
+            let mut retain_departed_probes: Vec<smelt_state::ProbeRecord> = Vec::new();
             // A key-addressed model-edge cell has no run-window axis at all
             // (its bounded read is the upstream's own affected key set, not
             // an interval) — checked BEFORE the `(start_date, end_date)`
@@ -2419,6 +2425,7 @@ pub async fn execute_project(
                         schema,
                         &db_table_name,
                         &classification,
+                        &mut retain_departed_probes,
                     )
                     .await
                 }
@@ -2895,11 +2902,14 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: sink.retry_count(),
-                    // The cumulative arm dispatches no declared-fact probes
-                    // today — an empty array here is accurate, not a gap
-                    // (`docs/outcomes/20260809-probe-backed-facts/phases/
-                    // 08-plan.md`).
-                    probes: Vec::new(),
+                    // Every other cumulative-arm dispatch declares no
+                    // fact probe today; `retain_departed_probes` carries
+                    // the snapshot-reconcile arm's declared
+                    // `contract.retain_departed` probe record when that
+                    // point fired (`docs/outcomes/
+                    // 20260815-definition-delta-migrate/phases/
+                    // 34-plan.md`), and stays empty otherwise.
+                    probes: retain_departed_probes,
                     subsumed: None,
                     deferred_cells: Vec::new(),
                 },

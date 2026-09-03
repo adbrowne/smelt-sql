@@ -196,6 +196,7 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
                     fact: probe.ctx.fact.clone(),
                     probe: probe.ctx.probe_code.clone(),
                     outcome: ProbeRecordOutcome::Skipped,
+                    observed: None,
                 });
                 continue;
             }
@@ -257,6 +258,7 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
                 fact: probe.ctx.fact.clone(),
                 probe: probe.ctx.probe_code.clone(),
                 outcome: ProbeRecordOutcome::Dispatched,
+                observed: None,
             });
             continue;
         }
@@ -267,6 +269,7 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
             fact: probe.ctx.fact.clone(),
             probe: probe.ctx.probe_code.clone(),
             outcome: ProbeRecordOutcome::Dispatched,
+            observed: None,
         });
 
         if !arrivals.is_empty() {
@@ -384,6 +387,7 @@ pub fn evaluate_deferral(
                     fact: probe.ctx.fact.clone(),
                     probe: probe.ctx.probe_code.clone(),
                     outcome: ProbeRecordOutcome::Skipped,
+                    observed: None,
                 });
                 continue;
             }
@@ -394,6 +398,7 @@ pub fn evaluate_deferral(
             fact: probe.ctx.fact.clone(),
             probe: probe.ctx.probe_code.clone(),
             outcome: ProbeRecordOutcome::Dispatched,
+            observed: None,
         });
 
         if let Some(violation) = deferral_violations(
