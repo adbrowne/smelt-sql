@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788475184948,
+  "lastUpdate": 1788475188039,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.624271,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "994e6f3fd6654d1947940ac8006656f7b732b393",
+          "message": "Definition-delta migrate: smelt migrate/rebuild, contract lattice, and follow-up closures (#185)\n\nDefinition-delta migrate: smelt migrate/rebuild, contract lattice, and follow-up closures",
+          "timestamp": "2026-09-04T08:34:39+10:00",
+          "tree_id": "f4686216a058cd5d4e3e7e64cc481755868573c6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/994e6f3fd6654d1947940ac8006656f7b732b393"
+        },
+        "date": 1788475186907,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.302344617190897,
+            "unit": "MB/s"
           }
         ]
       }
