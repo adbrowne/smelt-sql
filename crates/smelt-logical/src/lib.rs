@@ -38,9 +38,10 @@ pub use lowering::as_struct::{as_struct_to_sql, backend_supports_struct_literal}
 pub use maintenance::edge_type::{type_edge, Addressing, EdgeComponent};
 pub use plan_builder::{build_logical_plan_pure, FnCallInput};
 pub use rules::cumulative::{
-    classify_cumulative, combiner_for, group_by_unique_key, state_column_summary, AggregatorColumn,
-    CrossPartitionCombiner, CumulativeClassification, DrivingSource, KeyedDiagnostic,
-    SourceTimeseriesMap, StateColumnSummary,
+    classify_cumulative, combiner_for, execution_postures, group_by_unique_key,
+    state_column_summary, AggregatorColumn, CrossPartitionCombiner, CumulativeClassification,
+    DrivingSource, ExecutionPostures, KeyedDiagnostic, PostureVerdict, SourceTimeseriesMap,
+    StateColumnSummary,
 };
 pub use rules::incremental::{
     analyze_batch_safety, batch_safety_from_bounds, derive_model_source_bounds, BatchSafety,

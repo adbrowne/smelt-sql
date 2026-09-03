@@ -32,6 +32,20 @@ Add `--technique <name>` alongside `--show-sql` to preview a *different* techniq
 
 One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the `BIGINT` default — a compile-order limitation shared identically by a real run, not an `explain`-specific divergence. See `docs/specs/cli.md` Known Divergences.
 
+## Execution postures
+
+For a `grain: key` model, `smelt explain <model>` derives and prints three model-level properties — never declared, folded from the model's column families: **re-run tolerance** (may a merged window be blindly re-merged over unchanged input?), **order-independence** (may windows apply out of order or in parallel?), and **reprocessing refusal** (a window whose input changed since merging must not be re-merged — unconditional across every family). Each verdict comes with a reason naming the deciding column, alongside the derived run shape (`window-forward` or `snapshot-reconcile`) the postures qualify:
+
+```
+Execution postures:
+  run shape: window-forward
+  re-run tolerance: no (column `total_amount` folds through an additive combiner (`Sum`) — a re-merged window double-counts or cancels)
+  order-independence: yes (every combiner is order-independent)
+  reprocessing: refused (a window whose input changed since merging must not be re-merged, for every family)
+```
+
+A model that never classifies as `grain: key` prints no execution-postures section. Order-independence is a derived verdict only — a windowed-keyed run still applies windows sequentially even where the verdict holds, forgoing the parallel/out-of-order application as an optimisation. With `--json`, the same information appears as a top-level `execution_postures` object: `{"run_shape": "window-forward", "rerun_tolerant": {"holds": false, "reason": "..."}, "order_independent": {"holds": true, "reason": "..."}, "reprocessing_refused": {"holds": true, "reason": "..."}}`.
+
 ## Internal state columns
 
 Some presented columns (`AVG`, the `STDDEV_*`/`VAR_*` family, `MAX_BY`/`MIN_BY`, and the fallback-bearing or multi-candidate once-write spellings) don't fold their presented value directly — they fold hidden **state columns** instead, and recompute the presented value from that state on every read. `smelt explain <model>` lists these state columns as internal state, distinct from the model's public schema:

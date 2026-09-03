@@ -753,6 +753,49 @@ pub fn build_maintenance_plan_report(
     }
     let _ = writeln!(out);
 
+    // Derived execution postures (`incremental_shapes.md` §"Derived
+    // execution postures", `docs/outcomes/20260815-keyed-grain-residue`
+    // phase 4): read straight off `result.execution_postures` — this
+    // function derives nothing, `smelt_logical::execution_postures` is the
+    // single owner. `None` for a model that never classified as `grain:
+    // key` (nothing to derive postures over); omitted entirely rather than
+    // printed as a false negative.
+    if let Some(postures) = &result.execution_postures {
+        let run_shape = match result.is_snapshot_reconcile {
+            Some(true) => "snapshot-reconcile",
+            Some(false) => "window-forward",
+            None => "n/a",
+        };
+        let _ = writeln!(out, "Execution postures:");
+        let _ = writeln!(out, "  run shape: {run_shape}");
+        let _ = writeln!(
+            out,
+            "  re-run tolerance: {} ({})",
+            if postures.rerun_tolerant.holds {
+                "yes"
+            } else {
+                "no"
+            },
+            postures.rerun_tolerant.reason
+        );
+        let _ = writeln!(
+            out,
+            "  order-independence: {} ({})",
+            if postures.order_independent.holds {
+                "yes"
+            } else {
+                "no"
+            },
+            postures.order_independent.reason
+        );
+        let _ = writeln!(
+            out,
+            "  reprocessing: refused ({})",
+            postures.reprocessing_refused.reason
+        );
+        let _ = writeln!(out);
+    }
+
     // Internal state columns (`incremental_shapes.md` §"Decomposed state
     // (rung 2) in keyed models", `docs/outcomes/20260809-rung2-state-shapes`
     // row 9): one entry per presented column that folds through hidden
@@ -1388,6 +1431,13 @@ pub struct ExplainMaintenanceJson {
     /// this JSON shape (`docs/specs/cli.md` §Constraints item 5).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub state_columns: Vec<smelt_logical::StateColumnSummary>,
+    /// The model's three derived execution postures
+    /// (`incremental_shapes.md` §"Derived execution postures"), absent for
+    /// a model that never classified as `grain: key` — an append-stable
+    /// addition to this JSON shape (`docs/specs/cli.md` §Constraints item
+    /// 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_postures: Option<ExplainExecutionPosturesJson>,
     /// The model's declared-fact probe set (`docs/specs/model_properties.md`
     /// §"Probe obligation"), empty for a model declaring none — an
     /// append-stable addition to this JSON shape (`docs/specs/cli.md`
@@ -1408,6 +1458,26 @@ pub struct ExplainDefinitionDeltaJson {
     pub status: String,
     pub verdict: String,
     pub plan_hash: String,
+}
+
+/// One derived execution posture's verdict, as reported by `smelt explain
+/// --json` — mirrors `smelt_logical::PostureVerdict`.
+#[derive(Debug, Serialize)]
+pub struct ExplainPostureVerdictJson {
+    pub holds: bool,
+    pub reason: String,
+}
+
+/// The `execution_postures` object of `smelt explain --json`'s output
+/// (`docs/specs/incremental_shapes.md` §"Derived execution postures"): the
+/// derived run shape plus the three posture verdicts, read verbatim from
+/// `smelt_logical::execution_postures` — never re-derived here.
+#[derive(Debug, Serialize)]
+pub struct ExplainExecutionPosturesJson {
+    pub run_shape: String,
+    pub rerun_tolerant: ExplainPostureVerdictJson,
+    pub order_independent: ExplainPostureVerdictJson,
+    pub reprocessing_refused: ExplainPostureVerdictJson,
 }
 
 /// One entry of a model's declared-fact probe set
@@ -1442,6 +1512,8 @@ pub fn build_maintenance_plan_json(
     diagnostics_cells: &[PlanCellDiagnostics],
     properties: PropertySet,
     state_columns: Vec<smelt_logical::StateColumnSummary>,
+    execution_postures: Option<smelt_logical::ExecutionPostures>,
+    is_snapshot_reconcile: Option<bool>,
     probe_entries: Vec<smelt_runtime::probe_plan::ProbePlanEntry>,
     cadence: smelt_core::config::ProbeCadence,
     column_groups: &[smelt_logical::maintenance::ColumnGroup],
@@ -1513,11 +1585,34 @@ pub fn build_maintenance_plan_json(
             verdict: format!("{:?}", verdict),
             plan_hash: plan_hash.clone(),
         });
+    let execution_postures = execution_postures.map(|postures| {
+        let run_shape = match is_snapshot_reconcile {
+            Some(true) => "snapshot-reconcile",
+            Some(false) => "window-forward",
+            None => "n/a",
+        };
+        ExplainExecutionPosturesJson {
+            run_shape: run_shape.to_string(),
+            rerun_tolerant: ExplainPostureVerdictJson {
+                holds: postures.rerun_tolerant.holds,
+                reason: postures.rerun_tolerant.reason,
+            },
+            order_independent: ExplainPostureVerdictJson {
+                holds: postures.order_independent.holds,
+                reason: postures.order_independent.reason,
+            },
+            reprocessing_refused: ExplainPostureVerdictJson {
+                holds: postures.reprocessing_refused.holds,
+                reason: postures.reprocessing_refused.reason,
+            },
+        }
+    });
     ExplainMaintenanceJson {
         model: model_name.to_string(),
         contract: own_contract,
         inbound_edges,
         cells,
+        execution_postures,
         properties,
         state_columns,
         probes,

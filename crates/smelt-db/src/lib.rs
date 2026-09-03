@@ -2044,6 +2044,8 @@ pub fn maintenance_plan_report(
             &metadata.functional_dependencies,
         ) {
             result.state_columns = smelt_logical::state_column_summary(&classification);
+            result.execution_postures = Some(classification.execution_postures());
+            result.is_snapshot_reconcile = Some(classification.is_snapshot_reconcile());
         }
     }
 

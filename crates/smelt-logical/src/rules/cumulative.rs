@@ -818,6 +818,108 @@ pub fn state_column_summary(classification: &CumulativeClassification) -> Vec<St
         .collect()
 }
 
+/// One derived execution posture's verdict plus the reason naming the
+/// deciding column/family (`docs/specs/incremental_shapes.md` §"Derived
+/// execution postures").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PostureVerdict {
+    pub holds: bool,
+    pub reason: String,
+}
+
+/// The three model-level properties §"Derived execution postures" folds
+/// from the column families — a pure read of `aggregator_columns`, never a
+/// re-derivation of anything `classify_cumulative` already decided.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionPostures {
+    /// May a merged window be blindly re-merged over unchanged input?
+    /// Mirrors `WindowedKeyedRule::ledger_grade`'s own rule exactly (single
+    /// owner: this function; the runtime rule delegates to it) — holds iff
+    /// no column (or column's own decomposed state) folds through an
+    /// additive combiner (`Sum`/`BitXor`).
+    pub rerun_tolerant: PostureVerdict,
+    /// May windows apply out of order or in parallel? Holds iff every
+    /// combiner is order-independent: extremal/lattice fold, additive
+    /// fold, decomposed fold, and proven once-write all qualify;
+    /// order-monotone overwrite and plain overwrite do not.
+    pub order_independent: PostureVerdict,
+    /// A window whose input changed since merging must not be re-merged —
+    /// unconditional across every family (`incremental_shapes.md`
+    /// §"Reprocessing").
+    pub reprocessing_refused: PostureVerdict,
+}
+
+/// Derive [`ExecutionPostures`] from a classification's aggregator columns.
+/// Takes the column slice (not the whole [`CumulativeClassification`]) so
+/// the runtime's `ledger_grade` rule can delegate to the same derivation it
+/// consumes for a subset of this struct without threading the classification
+/// through. Single owner (`architecture.md` §"Maintenance-plan purity"):
+/// every other site (runtime grading, `smelt-db`'s plan report, `smelt
+/// explain`) reads this function's output rather than re-deciding it.
+pub fn execution_postures(columns: &[AggregatorColumn]) -> ExecutionPostures {
+    let additive = columns.iter().find(|col| {
+        if let Some(state) = &col.state {
+            state.state_columns.iter().any(|s| {
+                matches!(
+                    s.combiner,
+                    CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+                )
+            })
+        } else {
+            matches!(
+                col.cross_partition_combiner,
+                CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+            )
+        }
+    });
+    let rerun_tolerant = match additive {
+        Some(col) => PostureVerdict {
+            holds: false,
+            reason: format!(
+                "column `{}` folds through an additive combiner (`{:?}`) — a re-merged window \
+                 double-counts or cancels",
+                col.output_name, col.cross_partition_combiner
+            ),
+        },
+        None => PostureVerdict {
+            holds: true,
+            reason: "no column folds through an additive combiner".to_string(),
+        },
+    };
+
+    let order_dependent = columns.iter().find(|col| {
+        matches!(
+            col.cross_partition_combiner,
+            CrossPartitionCombiner::OrderMonotone { .. } | CrossPartitionCombiner::PlainOverwrite
+        )
+    });
+    let order_independent = match order_dependent {
+        Some(col) => PostureVerdict {
+            holds: false,
+            reason: format!(
+                "column `{}` uses an order-dependent combiner (`{:?}`) — windows must apply \
+                 in order",
+                col.output_name, col.cross_partition_combiner
+            ),
+        },
+        None => PostureVerdict {
+            holds: true,
+            reason: "every combiner is order-independent".to_string(),
+        },
+    };
+
+    ExecutionPostures {
+        rerun_tolerant,
+        order_independent,
+        reprocessing_refused: PostureVerdict {
+            holds: true,
+            reason: "a window whose input changed since merging must not be re-merged, for \
+                     every family"
+                .to_string(),
+        },
+    }
+}
+
 /// The result of classifying a `cumulative_aggregate` model.
 #[derive(Debug, Clone, Serialize)]
 pub struct CumulativeClassification {
@@ -855,6 +957,13 @@ impl CumulativeClassification {
             .filter_map(|c| c.state.as_ref())
             .flat_map(|s| s.state_columns.clone())
             .collect()
+    }
+
+    /// The three derived execution postures for this classification's
+    /// columns (`execution_postures`) — a convenience wrapper, no second
+    /// derivation.
+    pub fn execution_postures(&self) -> ExecutionPostures {
+        execution_postures(&self.aggregator_columns)
     }
 }
 

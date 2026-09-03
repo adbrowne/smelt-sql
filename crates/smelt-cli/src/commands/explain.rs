@@ -756,6 +756,8 @@ async fn explain_maintenance_plan(
             &diagnostics.cells,
             diagnostics.properties.clone(),
             result.state_columns.clone(),
+            result.execution_postures.clone(),
+            result.is_snapshot_reconcile,
             probe_entries.clone(),
             config.probes.cadence,
             &result.column_groups,

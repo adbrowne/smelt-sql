@@ -665,12 +665,15 @@ Three model-level properties fold from the column families, derived and surfaced
 over unchanged input? Holds iff every column is idempotent (no additive-fold column); an
 additive model double-counts and must be refused (§"The transactional frontier write (merge
 ledger)"). **Order-independence:** may windows apply out of order or in parallel? Holds iff
-every combiner is order-independent — extremal/lattice, decomposed-fold, and proven once-write
-qualify; order-monotone overwrite does not (only up to ordering-key ties, §"Ordering ties
-(order-monotone overwrite)"), forcing sequential execution. **Reprocessing refusal:** a window
-whose input changed since merging must not be re-merged for **any** family — an irreversible
-fold cannot un-see a removed contribution, an overwrite cannot retract a superseded-by-nothing
-value (§"Reprocessing").
+every combiner is order-independent — the formal rule, applied per family: extremal/lattice
+fold, additive fold, decomposed fold, and proven once-write all qualify (additive fold's `+`/
+`XOR` are commutative and associative; decomposed fold's own hidden state columns are
+themselves additive); order-monotone overwrite does not (only up to ordering-key ties, §"Ordering
+ties (order-monotone overwrite)") and plain overwrite does not (the delta always wins, so the
+last-applied window determines the stored value) — both force sequential execution.
+**Reprocessing refusal:** a window whose input changed since merging must not be re-merged for
+**any** family — an irreversible fold cannot un-see a removed contribution, an overwrite cannot
+retract a superseded-by-nothing value (§"Reprocessing").
 
 #### The transactional frontier write (merge ledger)
 
@@ -1217,11 +1220,12 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   driving source's granularity; declared-vs-derived recurrence precedence and
   order-independent key-set comparison are implementation choices the spec text
   underdetermines. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **The derived execution postures are internal, and one of the three is not derived at all** —
-  order-independence is not derived as a named verdict anywhere: every window-forward run
-  applies its windows sequentially regardless of family, forgoing the parallel/out-of-order
-  application §"Derived execution postures" admits. Neither the derived run shape nor any
-  posture is printed by `smelt explain`, which names that as their surface.
+- **Order-independence is not yet acted on** — every window-forward run applies its windows
+  sequentially regardless of family, forgoing the parallel/out-of-order application
+  §"Derived execution postures" admits when order-independence holds. The verdict itself, and
+  the other two derived execution postures, are computed and printed by `smelt explain`
+  alongside the derived run shape; only the optimisation of actually reordering or
+  parallelising windows remains unbuilt.
 - **The generative conformance pool cannot stage NULL payloads (Open Question)** — the
   generated row type's payload field (`GenRow::val`) is a non-nullable `i64`, so the once-write
   family's NULL direction (a key whose first window carries only a NULL payload) is covered by

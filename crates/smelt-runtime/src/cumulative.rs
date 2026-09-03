@@ -250,33 +250,20 @@ impl WindowedKeyedRule for CumulativeClassification {
     /// cell `Additive` — conservative (never unsafe), per
     /// `WindowedKeyedRule::ledger_grade`'s doc comment.
     fn ledger_grade(&self) -> Grade {
-        let any_additive = self.aggregator_columns.iter().any(|col| {
-            // A state-bearing column's own `cross_partition_combiner`
-            // (`OrderMonotone`/`OnceWrite`/`Recomputed`) says nothing about
-            // whether its *state* folds additively — grade off each state
-            // column's own combiner instead. `AVG`/the variance family's
-            // state is entirely `Sum` (the first additive state this
-            // mechanism admits, `docs/outcomes/20260809-rung2-state-shapes`
-            // row 7); `MAX_BY`/`MIN_BY`'s `(v, o)` and once-write's
-            // `(value, written)` states are not, and stay `Idempotent`.
-            if let Some(state) = &col.state {
-                state.state_columns.iter().any(|s| {
-                    matches!(
-                        s.combiner,
-                        CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
-                    )
-                })
-            } else {
-                matches!(
-                    col.cross_partition_combiner,
-                    CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
-                )
-            }
-        });
-        if any_additive {
-            Grade::Additive
-        } else {
+        // Delegates to the single owner of the re-run-tolerance verdict
+        // (`smelt_logical::rules::cumulative::execution_postures`,
+        // `docs/outcomes/20260815-keyed-grain-residue` phase 4) rather than
+        // re-deriving it here — this rule's own doc comment above states
+        // the rationale (additive columns double-count/cancel on a re-run),
+        // but the derivation itself lives in `smelt-logical` so `smelt
+        // explain` prints the same verdict this grading consumes.
+        if smelt_logical::execution_postures(&self.aggregator_columns)
+            .rerun_tolerant
+            .holds
+        {
             Grade::Idempotent
+        } else {
+            Grade::Additive
         }
     }
 
@@ -1686,6 +1673,44 @@ mod tests {
             },
         };
         assert_eq!(classification.ledger_grade(), Grade::Idempotent);
+    }
+
+    /// `ledger_grade` delegates to `smelt_logical::execution_postures`
+    /// rather than re-deriving re-run tolerance
+    /// (`docs/outcomes/20260815-keyed-grain-residue` phase 4) — over a
+    /// mixed additive+idempotent column set, the runtime's grade must be
+    /// exactly the shared derivation's `rerun_tolerant` verdict.
+    #[test]
+    fn ledger_grade_agrees_with_shared_posture_derivation() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![
+                AggregatorColumn {
+                    output_name: "total_amount".to_string(),
+                    per_partition_agg: "SUM".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Sum,
+                    state: None,
+                },
+                AggregatorColumn {
+                    output_name: "max_val".to_string(),
+                    per_partition_agg: "MAX".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Max,
+                    state: None,
+                },
+            ],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let postures = smelt_logical::execution_postures(&classification.aggregator_columns);
+        let expected_grade = if postures.rerun_tolerant.holds {
+            Grade::Idempotent
+        } else {
+            Grade::Additive
+        };
+        assert_eq!(classification.ledger_grade(), expected_grade);
+        assert_eq!(classification.ledger_grade(), Grade::Additive);
     }
 
     /// The `WindowedKeyedRule` impl must refuse a non-monoid combiner

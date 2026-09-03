@@ -954,6 +954,8 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         }],
         degenerate: vec![],
         state_columns: vec![],
+        execution_postures: None,
+        is_snapshot_reconcile: None,
         comparability: vec![],
     };
     let report = build_maintenance_plan_report(
@@ -1079,6 +1081,8 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         ],
         degenerate: vec![],
         state_columns: vec![],
+        execution_postures: None,
+        is_snapshot_reconcile: None,
         comparability: vec![],
     };
     let report = build_maintenance_plan_report(
@@ -1287,6 +1291,8 @@ mod write_variant_explain_surface {
             }],
             degenerate: vec![],
             state_columns: vec![],
+            execution_postures: None,
+            is_snapshot_reconcile: None,
             comparability,
         };
         build_maintenance_plan_report(

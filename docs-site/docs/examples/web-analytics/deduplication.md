@@ -189,6 +189,12 @@ Cells (3):
       admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
 
+Execution postures:
+  run shape: window-forward
+  re-run tolerance: yes (no column folds through an additive combiner)
+  order-independence: yes (every combiner is order-independent)
+  reprocessing: refused (a window whose input changed since merging must not be re-merged, for every family)
+
 Key temporal locality:
   route: route 3 (recurrence-bounded, declared key_recurrence)
   slice: RecurrenceBounded { partition_column: "first_seen_date", margin_before: Seconds(259200), margin_after: Seconds(0), r: Seconds(259200) }

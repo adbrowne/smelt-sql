@@ -69,6 +69,21 @@ pub struct MaintenancePlanResult {
     /// internal derivation never re-decides which columns are
     /// state-bearing).
     pub state_columns: Vec<smelt_logical::StateColumnSummary>,
+    /// This model's three derived execution postures
+    /// (`incremental_shapes.md` §"Derived execution postures",
+    /// `docs/outcomes/20260815-keyed-grain-residue` phase 4) — `None` for a
+    /// model that never classifies as `grain: key` (nothing to derive
+    /// postures over), populated by the same `smelt-db/src/lib.rs` caller
+    /// that fills `state_columns` from the same classification call.
+    pub execution_postures: Option<smelt_logical::ExecutionPostures>,
+    /// The run shape [`execution_postures`] qualifies — `Some(true)` for
+    /// snapshot-reconcile (zero clocked driving sources), `Some(false)` for
+    /// window-forward, `None` alongside `execution_postures: None`. A
+    /// second field rather than folded into `ExecutionPostures` itself: the
+    /// run shape depends on the classification's `driving_source`, not on
+    /// `aggregator_columns` alone, so it can't be derived by
+    /// `execution_postures`'s pure column-slice signature.
+    pub is_snapshot_reconcile: Option<bool>,
     /// This model's per-column change-comparability (P3,
     /// `model_properties.md` §"Change comparability") — the SAME
     /// `analysis::walk::model_property_vector` call `derive_fold_spec` (or,
@@ -401,6 +416,8 @@ pub fn derive_model_maintenance_plan(
             column_groups: Vec::new(),
             degenerate: Vec::new(),
             state_columns: Vec::new(),
+            execution_postures: None,
+            is_snapshot_reconcile: None,
             comparability: Vec::new(),
         });
     }
@@ -451,6 +468,8 @@ pub fn derive_model_maintenance_plan(
                         column_groups: Vec::new(),
                         degenerate: Vec::new(),
                         state_columns: Vec::new(),
+                        execution_postures: None,
+                        is_snapshot_reconcile: None,
                         comparability: Vec::new(),
                     });
                 }
@@ -473,6 +492,8 @@ pub fn derive_model_maintenance_plan(
                     column_groups: Vec::new(),
                     degenerate: Vec::new(),
                     state_columns: Vec::new(),
+                    execution_postures: None,
+                    is_snapshot_reconcile: None,
                     comparability: Vec::new(),
                 });
             }
@@ -538,6 +559,8 @@ pub fn derive_model_maintenance_plan(
                             column_groups: Vec::new(),
                             degenerate: Vec::new(),
                             state_columns: Vec::new(),
+                            execution_postures: None,
+                            is_snapshot_reconcile: None,
                             comparability: Vec::new(),
                         });
                     }
@@ -642,6 +665,8 @@ pub fn derive_model_maintenance_plan(
         degenerate: grouping.degenerate,
         comparability,
         state_columns: Vec::new(),
+        execution_postures: None,
+        is_snapshot_reconcile: None,
     })
 }
 

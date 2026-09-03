@@ -70,7 +70,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
 | 3 | Transactional ledger fold on every shipped backend | blocked |
-| 4 | Derive and print execution postures (order-independence) in `smelt explain` | planned |
+| 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | pending |
 | 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
@@ -134,6 +134,15 @@ six success criteria — criterion 1 is already met end-to-end without it.
   is a partial gloss and is made explicit. Criterion 4's "not assumed sequential by default" is read
   as the *verdict* being derived and printed — actually applying windows out of order stays an
   unused optimisation and is retained honestly in §Known Divergences.
+
+- 2026-09-03 — Phase 4 implemented and closed out (all green: `verify-phase.sh`,
+  `execution_postures`/`keyed_families` (46), `smelt-runtime --lib cumulative` (25),
+  `explain_maintenance`/`explain_model`/`cli_docs_coverage`, `maintenance_conformance` (74),
+  `smelt-lsp --test example_workspaces` (35)). `execution_postures` derived once in
+  `smelt-logical`; `WindowedKeyedRule::ledger_grade` now delegates to it. `smelt explain` prints
+  an `Execution postures:` block (text and `--json`). The tutorial doc-sync gate required one
+  regeneration (`deduplication.md` picked up the new block) — expected, not a regression. No new
+  limitations discovered.
 
 ## Blocked
 
