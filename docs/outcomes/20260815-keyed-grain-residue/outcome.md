@@ -72,7 +72,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 3 | Transactional ledger fold on every shipped backend | blocked |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
-| 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | planned |
+| 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | done |
 | 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | pending |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
@@ -186,6 +186,15 @@ six success criteria — criterion 1 is already met end-to-end without it.
   this phase's changes stashed out (identical errors, none about `GenRow`/`Option`/`val`). Flagged
   for the next planner as a candidate short follow-up phase; it blocks that specific gated-twin
   compile check for any change until fixed.
+
+- 2026-09-04 — Phase 6 implemented and closed out (all green: `verify-phase.sh`,
+  `smelt-maintenance-testkit --features spark` (69), `smelt-cli --test maintenance_conformance`
+  (75, unchanged), `cargo check -p smelt-maintenance-testkit --features spark,bigquery
+  --all-targets` clean, `cargo check -p smelt-cli --tests --features smelt-cli/spark` and the
+  `bigquery` twin clean). The single missing `write_pin: None` argument at
+  `gate_composed.rs:343` was the root cause of all 5 reported errors; no further rot was found.
+  Added a per-PR "Gated conformance twin compile check" step to the `Lint` job in
+  `.github/workflows/test.yml`. No new limitations discovered.
 
 ## Blocked
 

@@ -20,6 +20,10 @@
 //! `registry`, `repair`) neither Spark nor BigQuery exercise. See this
 //! plan's "Explicitly deferred" section.
 
+// Kept compiling by the "Gated conformance twin compile check" step in the
+// Lint job (`.github/workflows/test.yml`), which runs `cargo check -p
+// smelt-maintenance-testkit --features spark,bigquery --all-targets` on every
+// PR — compile-only, no live Spark server or BigQuery credentials needed.
 #![cfg(any(feature = "spark", feature = "bigquery"))]
 
 use std::path::Path;

@@ -349,6 +349,8 @@ async fn drive_composed_route3_and_assert_for(
             &classification,
             Some(&slice),
             &composed_route3_suppression(),
+            // The route-3 composed recipe stages no `maintenance.cells[].write` pin.
+            None,
             compile_step,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
