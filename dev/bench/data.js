@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788518811745,
+  "lastUpdate": 1788518815482,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.278692,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "6fc35fe78e2d493d544bb28fcfcf72f236638897",
+          "message": "outcome(20260904-*): scaffold six low-input outcomes from the 2026-09-04 review\n\nprogramme-hygiene, state-residency, walk-migration-residue,\ndelta-signature-front-door, decided-gap-residue, ratchet-paydown.\nBacklog reordered per docs/research/20260904-incremental-state-review.md.\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
+          "timestamp": "2026-09-04T20:42:19+10:00",
+          "tree_id": "c528693b8d5e515526c0190f2166ca4fb6dec19d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6fc35fe78e2d493d544bb28fcfcf72f236638897"
+        },
+        "date": 1788518814122,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.14268757950658,
+            "unit": "MB/s"
           }
         ]
       }
