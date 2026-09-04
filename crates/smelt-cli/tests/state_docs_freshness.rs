@@ -101,3 +101,66 @@ fn state_reference_states_the_residency_invariant() {
          `.smelt/` does not change what a maintained model computes"
     );
 }
+
+/// `docs/specs/state.md` §References must not silently rot: every path it
+/// lists under Code / User docs must exist, and neither list may still read
+/// the placeholder `none yet` now that phases 1-10 landed real code and docs.
+#[test]
+fn spec_references_are_live() {
+    let text = fs::read_to_string(repo_root().join("docs/specs/state.md")).unwrap();
+
+    let references_start = text
+        .find("## References")
+        .expect("docs/specs/state.md has no §References section");
+    let references = &text[references_start..];
+
+    let section = |heading: &str| -> String {
+        let start = references
+            .find(heading)
+            .unwrap_or_else(|| panic!("§References has no `{heading}` bullet"));
+        let rest = &references[start..];
+        let end = rest[heading.len()..]
+            .find("\n- **")
+            .map(|i| i + heading.len())
+            .unwrap_or(rest.len());
+        rest[..end].to_string()
+    };
+
+    let code_section = section("**Code**:");
+    let user_docs_section = section("**User docs**:");
+
+    assert!(
+        !code_section.contains("none yet"),
+        "§References → Code still reads `none yet`"
+    );
+    assert!(
+        !user_docs_section.contains("none yet"),
+        "§References → User docs still reads `none yet`"
+    );
+
+    let paths: Vec<&str> = code_section
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .chain(user_docs_section.split('`').skip(1).step_by(2))
+        .filter(|s| {
+            s.starts_with("crates/") || s.starts_with("docs/") || s.starts_with("docs-site/")
+        })
+        .collect();
+
+    assert!(
+        !paths.is_empty(),
+        "no backtick-quoted paths found in §References → Code / User docs"
+    );
+
+    let root = repo_root();
+    let missing: Vec<&str> = paths
+        .into_iter()
+        .filter(|p| !root.join(p.trim_end_matches('/')).exists())
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "docs/specs/state.md §References cites paths that do not exist on disk: {missing:?}"
+    );
+}

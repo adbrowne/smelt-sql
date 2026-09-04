@@ -1,7 +1,7 @@
 ---
 feature: state
 status: experimental
-last_reviewed: 2026-09-04
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -314,14 +314,20 @@ this spec describes normatively above.
 - **Code**: `crates/smelt-state/src/` (the `.smelt/` store: `file_store.rs`, `intervals.rs`,
   `reconciliation.rs`, `landed_deltas.rs`, `schema_tracking.rs`, `snapshot_store.rs`,
   `source_postures.rs`, `frozen_band_baselines.rs`; backend ledger DDL: `ddl_duckdb.rs`,
-  `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`);
-  `crates/smelt-runtime/src/execute.rs` (state-write sites)
+  `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`, `parse_warehouse_tables`);
+  `crates/smelt-runtime/src/execute.rs` (state-write sites); `crates/smelt-logical/src/maintenance/availability.rs`
+  (the pure availability-resolution step)
 - **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance/`
   (the standing equivalence-oracle gate; `state_deletion.rs` is the leg that interleaves
   `.smelt/` deletion between run steps for every maintained recipe, the executable form of
   "no correctness state outside the engine")
-- **User docs**: none yet — `docs-site/docs/reference/smelt-yml.md` documents `state.mode`
-- **Plans (history)**: none yet — this spec precedes its first implementation plan
+- **User docs**: `docs-site/docs/reference/state.md` (state-structure inventory, per-posture
+  write set, recovery playbook), `docs-site/docs/reference/smelt-yml.md` §"State Configuration"
+  (`state.mode`, `state.warehouse_tables`, both diagnostics), `docs-site/docs/guide/targets.md`
+  (per-backend ledger availability), `docs-site/docs/guide/incremental-models.md` (per-model
+  maintenance-plan downgrade reporting), `docs-site/docs/reference/smelt-explain.md`
+  (`MaintenanceStateDowngraded` printing)
+- **Plans (history)**: `docs/outcomes/20260904-state-residency/outcome.md`
 - **Related specs**: `run_state.md` (`.smelt/` layout and formats), `incremental_models.md`
   (frontier semantics, equivalence invariant, graph layer), `incremental_shapes.md` (merge
   ledger, partition-grain state ownership), `virtual_environments.md` (`state.mode` surface,

@@ -80,7 +80,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | done |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | done |
 | 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | done |
-| 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | planned |
+| 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | done |
 
 ## Decision log
 
@@ -376,6 +376,18 @@ the invariant by deleting `.smelt/` between run steps.
   `state_docs_freshness` gate is green (red before edits), the keyed-grain residue outcome is
   closed (criterion 3 amended, Status `done`), `verify-phase.sh` ALL GREEN. No new gaps
   discovered.
+
+- 2026-09-05 (implement 11): phase 11 done — `/smelt:validate state` run end to end; drift
+  report at `docs/validations/2026-09-05-state.md`. Only drift found was §References bookkeeping
+  (Code missing the phase-4 `availability.rs` owner and `parse_warehouse_tables`; User docs and
+  Plans (history) both still `none yet`) — fixed, backed by a new `spec_references_are_live`
+  test (red before the edit, green after) in
+  `crates/smelt-cli/tests/state_docs_freshness.rs`. `front-matter last_reviewed` bumped to
+  2026-09-05. Gates: `verify-phase.sh` ALL GREEN; `statement_parity`+`execute_parity` 41/41;
+  `maintenance_conformance` 78/78; `walk_coverage` 4/4; `state_docs_freshness` 4/4;
+  timeless-oracle grep clean; `reconciliation.json` grep shows only the one sanctioned
+  `run_state.md` hit. No new gaps surfaced beyond the pre-existing freshness flag phase 6
+  already recorded in `docs/TODO.md`.
 
 ## Blocked
 
