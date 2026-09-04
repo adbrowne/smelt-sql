@@ -1,7 +1,7 @@
 ---
 feature: sources
 status: experimental
-last_reviewed: 2026-07-19
+last_reviewed: 2026-09-04
 owners: [andrew]
 ---
 
@@ -82,7 +82,7 @@ retention: '400 days'
 | `name` | no | derived | Override the database-side name. **Target-aware** (see §"Target-aware `name:` override"). |
 | `timeseries` | no | absent | Declares the source's clock (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Presence makes the source **clocked** (window-forward consumption, clampable reads); absence makes it an **unclocked lookup**, read in full on every recompute — a structural contract, not an accident. `granularity` is also the source's partition-axis grain for cross-model propagation (`incremental_models.md` §"The graph layer"). The named columns must appear in `columns:` with date/timestamp-compatible types. |
 | `mutation_profile` | no | absent (undeclared — strictest) | The structured mutation block (see §"`mutation_profile` — the structured block"). The bare string form `mutation_profile: append_only` (or `mutable_snapshot` / `change_feed`) is shorthand for `{ kind: <value> }`. |
-| `source_lateness` | no | absent (zero) | Alias for `mutation_profile.lateness` (the standalone key is retained as shorthand). Declaring both is a `MalformedSource` error. |
+| `source_lateness` | no | absent (zero) | Alias for `mutation_profile.lateness` (the standalone key is retained as shorthand). Declaring both is a `MalformedSource` error. Orchestration-only: never a plan input (§Semantics, trust rule). |
 | `watermark` | no | absent (derived) | Where the source's pipeline publishes a completeness marker: `watermark: { complete_through: <schema.table.column or column> }`. When absent, the derived watermark is `max(partition_column)` processed so far, and settle bounds stay watermark-relative. |
 | `unique_key` | no | absent | Row identity of the source, **composite-valued** (a single column is the one-element list). Licenses 1:1 join-cardinality proofs and dedup-free key-addressed merges. Verified, never trusted (§Semantics "The trust rule"). |
 | `referential_integrity` | no | absent (unguaranteed) | Asserts that a consuming model's equi-join into the declared column(s) never drops a driving row — every value a consumer joins on is guaranteed present, so an inner/equi-join enrichment is as row-preserving as a `LEFT JOIN`. Composite-valued like `unique_key`. Narrowing (§Semantics "The trust rule") — paired with the count-preservation tripwire (§"Referential integrity"). |
@@ -97,7 +97,7 @@ The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar YAML —
 mutation_profile:
   kind: append_only              # append_only | mutable_snapshot | change_feed
   # append_only sub-facts:
-  lateness: '7 days'             # optional; how far behind the clock a row can arrive
+  lateness: '7 days'             # optional; how far behind the clock a row can arrive (orchestration only)
   redelivery: none               # none | at_least_once      (default: at_least_once)
   # change_feed sub-facts:
   retractions: false             # does the feed carry deletes/updates as retraction events?  (default: true)
@@ -300,7 +300,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 1. **Sources are never loaded.** `smelt seed`, `smelt build` (seed phase), and any other ingest path skip sources entirely. A `smelt seed --select <source-path>` invocation is a hard error ("not a seed").
 2. **Schema is the contract.** When a model references a source column, the smelt type-checker uses the YAML's declared type. A column not declared in the YAML is undeclared and produces a diagnostic, even if the column exists in the upstream database.
 3. **The trust rule.** Every world-fact declaration is classified by what a mis-statement could do:
-   - A declaration that can only **widen** a scan (`lateness`) is safe against mis-statement and is **trusted as declared**.
+   - `lateness` is not a plan input at all. It is an **orchestration fact** — consumed by scheduling and staleness (`--auto`, when a window is treated as final) and printed by `smelt explain` — that is never read by plan derivation, never widens a scan, never gates a probe, and never changes emitted SQL. A mis-statement therefore cannot affect correctness and it needs no verification mechanism (`model_properties.md` §Constraints "Declared lateness is orchestration-only"; decision record `docs/research/20260904-decision-track.md`).
    - A declaration that **narrows** what maintenance reads or licenses a cheaper technique (`mutation_profile.kind`, `redelivery`, `retractions`, `unique_key`, `referential_integrity`, `delta_identity`, `key_recurrence`, `watermark`, `retention`) is admitted only **paired with a verification mechanism**: a runtime tripwire that fails the consuming run loudly, a plan-time refusal, or a scheduled probe. A violated narrowing declaration must never silently degrade to the conservative technique — the declaration was load-bearing for already-materialized state, so past outputs are suspect and the operator must be told (the `Source*Violated` diagnostics above).
    - A pure **assertion** that neither widens nor narrows is check-only and always safe.
 4. **Verification mechanisms** for `append_only` run as part of consuming maintenance runs, cheapest first: the watermark-monotonicity probe (per-partition row counts recorded and re-checked — catches deletes and reloads), the frontier checksum (a sampled per-partition fingerprint over skeleton columns — catches in-place updates), and full re-scan comparison (audit only). `unique_key` and `delta_identity` use the uniqueness probe scoped to the consuming run's scan window, full-table on demand via `smelt verify`. These are the source-side instances of the general probe-obligation rule (`model_properties.md` §"Probe obligation" generalizes this trust rule to model-scoped declarations) — its registry names each mechanism above by row, diagnostic, and cadence.

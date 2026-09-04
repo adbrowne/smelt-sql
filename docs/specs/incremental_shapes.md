@@ -374,6 +374,7 @@ chooser").
 | `KeyedSnapshotSourceUnsupportedColumn` | A column family inadmissible under snapshot-reconcile appears in a model with no clocked driving source; names the column, the family, and why the current-snapshot oracle cannot hold (§"Admission matrix (column family × source shape)"). |
 | `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source to reconcile against either (two or more unclocked candidates in the FROM clause) — neither run shape can be derived (§"The two run shapes (derived, never declared)"). |
 | `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window, and the repair family cannot admit a per-group recompute for the change; names the failing repair obligation and points at `--full-refresh` (§"Reprocessing", `incremental_models.md` §"The repair family"). |
+| `KeyedRecurrenceDeclarationMismatch` | Plan time: a declared `key_recurrence` disagrees with the recurrence bound derived from the SQL. Names both values; the derived value is authoritative and the declaration must be corrected or removed (key-grain rule 16). |
 | `KeyedRecurrenceBoundViolated` | Runtime, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice. The run's transaction rolls back; reports the violation count and sample keys (§"Key temporal locality (the time-partitioned output)"). |
 
 ## Semantics
@@ -482,9 +483,11 @@ finer-grained than `partition_column`, written in full per batch. Each chunk's D
 one transaction — INSERT failure rolls back only that chunk's DELETE, earlier committed chunks
 stay (each chunk is idempotent) — and a run halts at the first failed chunk, exits non-zero,
 and resumes correctly on re-run of the same range. smelt does not auto-re-run partitions on
-late data; interim mitigations are trailing `--event-time-end` behind known latency, or
-overlapping re-process ranges (a planned per-column `data_latency:` mechanism is §Known
-Divergences). The contract-level statement is the derived horizon (`incremental_models.md`
+late data; the mitigations are trailing `--event-time-end` behind known latency, or
+overlapping re-process ranges — both orchestration choices, never a plan input: declared
+source lateness is consumed by scheduling and staleness only and never widens a scan
+(`model_properties.md` §Constraints "Declared lateness is orchestration-only"). The
+contract-level statement is the derived horizon (`incremental_models.md`
 §"Windowed maintenance and the horizon"): a late arrival past the clamp is silently excluded —
 surfacing it is a model-author/data-quality concern.
 
@@ -839,7 +842,8 @@ column or a non-key projection provably NOT NULL from a key's first row, in the
 extremal-fold/overwrite/once-write family; `granularity` equal to the driving source's.
 
 One of three **routes** establishes it: **(1) key-embedded** — `partition_column` is a
-`unique_key` column; slice = scan window widened by lateness/skew margins. **(2)
+`unique_key` column; slice = scan window widened by the SQL-derived skew margin (never by
+declared source lateness). **(2)
 key-determined** — the partition projection is a per-key constant under once-write provenance;
 slice = the delta's own partition values, exact regardless of key age. **(3)
 recurrence-bounded** — a **key-recurrence bound** `r` (same-keyed rows lie within `r` on event
@@ -866,7 +870,7 @@ which a written slice provably receives no further changes (defined in `incremen
 | **Propagation admissibility** (graph layer) | interval propagation unavailable; admitted only where the output-delta verdict is `KeyedUpsert` (key-addressed edges, `incremental_models.md` §"The graph layer"); a `General` verdict refuses | admitted as a clocked node — the only way a keyed stage sits *inside* an interval-propagation chain |
 | **Key→partition dirt projection** (graph layer) | n/a | exact for routes 1–2; widened by `r` plus margins for route 3 |
 | **No-op write elimination** (statement emission) | whole key space | bounded by the pruned slice |
-| **Settle × observed-delta composition** | n/a — no settle bound | static settle bound (route 1: lateness margin; route 3: `r` plus margins; route 2: never) composes with the dynamic observed delta to skip settled/empty-delta slices |
+| **Settle × observed-delta composition** | n/a — no settle bound | static settle bound (route 1: the derived skew margin; route 3: `r` plus margins; route 2: never) composes with the dynamic observed delta to skip settled/empty-delta slices |
 | **Consumer-visible output shape** | a lookup table, read in full each run | a clocked, time-partitioned keyed table; a re-written slice is *changed input* (§"Interaction with `--auto` / staleness") |
 
 With locality established the invariant is checkable **per-slice** — stored rows equal the
@@ -1107,9 +1111,8 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
    the offending bound and the resolved column type — never coerced between domains. On an
    integer axis `--batch-size N` counts `N` partition units (not calendar days), and the only
    run-window validity requirement is a positive span (`end > start`) — no granularity-boundary
-   alignment, matching rule 8's carve-out. Day-typed widening inputs — a per-column
-   `data_latency`, a seconds-domain SQL-inferred lookback/lookahead, or a derived
-   partition-column skew — have no conversion into an integer axis's units; if any of them would
+   alignment, matching rule 8's carve-out. Day-typed widening inputs — a seconds-domain
+   SQL-inferred lookback/lookahead, or a derived partition-column skew — have no conversion into an integer axis's units; if any of them would
    be nonzero for an integer-axis model, that is a hard refusal (fail-closed), never silently
    zeroed or coerced 1:1 into "N units". A partition literal is rendered **in the axis's own
    domain** everywhere a run emits one — the output clamp, the per-source scan filter, and the
@@ -1191,6 +1194,13 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
     prune by proof; the declared route prunes only under the transactional runtime check
     (`KeyedRecurrenceBoundViolated`). A violated declaration fails the run; it never silently
     drops.
+16. **The derived recurrence is authoritative; a declared one is a check.** Where the
+    key-recurrence bound is derivable from the SQL, plan derivation uses the derived value. A
+    declared `key_recurrence` is compared against it and a disagreement is refused with
+    `KeyedRecurrenceDeclarationMismatch`, naming both values — the same posture as `grain:`.
+    Only where derivation is undecidable does the declaration stand alone (rule 15). Key-set
+    comparison anywhere in locality reasoning is order-independent: a key is a set of columns,
+    never a list.
 
 ## Known Divergences / Open Questions
 
@@ -1201,11 +1211,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The partition grain
 
-- **Per-column `data_latency` is unimplemented**; the two interim mitigations
-  (§"First-run and backfill") are the only options.
-- **Non-deterministic row-set-membership or grouping is out of scope** — always rejected;
-  admitting it needs a frozen-per-window-membership design
-  (`docs/research/20260703-model-updates.md` §9.1a).
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
   Divergences).
@@ -1246,18 +1251,21 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.
-- **Key temporal locality route 2 admits only a declared functional dependency (Open
-  Question)** — the key-derived-expression sub-route is never consulted, so a provably
-  key-derived partition projection still refuses without the declaration.
+- **Key temporal locality route 2 admits only a declared functional dependency** — the
+  key-derived-expression sub-route is never consulted, so a provably key-derived partition
+  projection still refuses without the declaration. Decided 2026-09-04: implement the derived
+  sub-route, declared FD as fallback (`docs/research/20260904-decision-track.md`). Scheduled:
+  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **Locality machinery gaps**: the per-input scope-map explain surface is specified but
   unbuilt; Route 2's declared-FD sub-route is unreachable for an arbitrary
   non-clock-derived dimension column, so no runnable end-to-end route-2 fixture exists yet
   (`docs/plans/20260705-keyed-collapse.md`); Route 2's `IN (SELECT DISTINCT …)` slice
   predicate is unexercised against a real backend due to a DuckDB MERGE binder limitation
   (confirmed v1.4.4/v1.5.4); plan derivation admits routes only where it can determine the
-  driving source's granularity; declared-vs-derived recurrence precedence and
-  order-independent key-set comparison are implementation choices the spec text
-  underdetermines. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+  driving source's granularity. Key-grain rule 16 (derived recurrence authoritative, declared
+  is a check, order-independent key sets) is decided but unimplemented: no
+  `KeyedRecurrenceDeclarationMismatch` is emitted today. Scheduled:
+  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **Order-independence is not yet acted on** — every window-forward run applies its windows
   sequentially regardless of family, forgoing the parallel/out-of-order application
   §"Derived execution postures" admits when order-independence holds. The verdict itself, and
@@ -1277,7 +1285,9 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the rung-2
   work above; rung 3 additionally depends on the change-feed consumption design. Deferred by
   `docs/plans/20260809-keyed-frontier.md` §Scope,
-  `docs/outcomes/20260809-rung2-state-shapes/outcome.md` §"Out of scope".
+  `docs/outcomes/20260809-rung2-state-shapes/outcome.md` §"Out of scope". Decided 2026-09-04:
+  both rungs stay gated on the change-feed consumption design and are not re-triaged by residue
+  outcomes before it exists (`docs/research/20260904-decision-track.md`).
 - **The `key_per_partition` grain derives no plan** — declaring it is refused at config parse,
   and the derived label (clock + identity with `partition_column ∈ unique_key`) refuses again
   at plan derivation (`MaintenanceUnsupportedGrain`); trajectory support is tracked by
@@ -1288,8 +1298,14 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 Ideas for widening the admission space that are **not decided**. Nothing here is surface;
 none of it may be relied on or implemented against until it graduates into §Surface/§Semantics
 via its own spec diff. Deferral decisions recorded 2026-08-16:
-`docs/research/20260816-open-questions-triage.md`.
+`docs/research/20260816-open-questions-triage.md` and 2026-09-04:
+`docs/research/20260904-decision-track.md`.
 
+- **Frozen-per-window membership.** Non-deterministic row-set membership or grouping is a
+  permanent refusal (partition-grain rule 12, `KeyedForbidsNondeterministic`); admitting it
+  would need a design that freezes each window's membership at first materialisation
+  (`docs/research/20260703-model-updates.md` §9.1a). Nobody is obliged to build it; it is
+  listed so the refusal is not mistaken for a gap.
 - **Multi-source snapshot-reconcile.** Admitting a join of two or more unclocked snapshot
   sources needs a proven multi-source scan design; today the loud
   `KeyedSnapshotPostureUnsupported` refusal is the intended behaviour, revisited when a real

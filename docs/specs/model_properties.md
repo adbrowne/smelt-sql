@@ -328,6 +328,8 @@ A property implementation must not re-derive composition by scanning the query t
 
 **Proofs are validators, never choosers.** A proof returns a verdict; it never picks a refresh mode or silently switches strategy. The declared mode is authoritative and the machinery only proves or refuses it (`incremental_models.md` §"Validator, not chooser").
 
+**Two temporal walks by design.** `EffectiveWindow` (day-granular, batch sizing) and `BoundResult` (second-granular, pushdown) answer different questions with deliberately different fail-closure: the former treats a bare `LAG`/`LEAD` as a bounded estimate, the latter refuses it (`NotDerivable`). Collapsing them would lose one of the two properties, so they stay separate; a per-consumer strictness parameter was considered and rejected as a merge that hides which question is being asked (decided 2026-09-04, `docs/research/20260904-decision-track.md`).
+
 ## Constraints & Invariants
 
 - **Proofs are fail-closed.** An undecidable construct yields the reject verdict (`NotTraceable` / `Unbounded` / `NotDerivable` / `NotAligned`), never an optimistic default. Absence of a proof is a rejection, not a pass.
@@ -336,7 +338,8 @@ A property implementation must not re-derive composition by scanning the query t
 - **One home per property.** Each property's normative verdict is defined once, here. A mode spec references it by name and must not re-specify it. The algebraic *ladder* (as opposed to the discriminants) is **not** defined here — it is owned by `incremental_models.md`.
 - **This spec is the complete catalogue.** Every derived-proof verdict any other spec consumes has a row here, including a composition consumed by only one feature today (§"Surface"). A new proof introduced by any spec must land its row here first; consumer specs (`incremental_models.md` above all) reference rows by name and never restate verdict logic inline — a consumer spec may state which cells demand a proof, the refusal policy, and the diagnostics, but not the proof's own derivation.
 - **Placement criterion.** A capability whose verdict names a refresh mode does not belong in this spec. Mode-only capabilities stay in the mode spec: batch-safety roll-up, column-locality, event-time outer-visibility, backfill chunking, run/partition granularity alignment (`incremental_shapes.md`); reprocessing detection, once-write verification (`incremental_shapes.md`, whose single classifier now consumes these discriminants for every keyed column family — running-aggregate, latest-value, and milestone alike, in place of what would once have been three per-mode classifiers); engine-incrementalizability (`materialized_view.md`). (Presentation-map purity is *not* mode-only — its verdict is stateable without naming a mode, so it is a derived proof above, not an exclusion.)
-- **Catalogued inputs are not re-homed.** The timeseries clock, source mutation profile, source-lateness margin, backend capability flags, and refresh selector are declared in their existing homes; this spec only references them.
+- **Catalogued inputs are not re-homed.** The timeseries clock, source mutation profile, backend capability flags, and refresh selector are declared in their existing homes; this spec only references them.
+- **Declared lateness is orchestration-only.** `mutation_profile.lateness` is never an input to any proof or to plan derivation: it never widens a scan window or an effective window, never gates a probe, never licenses or refuses a technique, and never changes emitted SQL. It is consumed by scheduling and staleness (`--auto`, when a window is treated as final) and printed by `smelt explain` as a world-fact. Late rows are caught by what actually landed — observed deltas, the ledger frontier and the probes — so the append-only posture probe classifies a row-count *increase* in a closed partition as a late arrival to re-process, never as a posture violation, without consulting lateness; only a decrease or a fingerprint change is a violation. Decision record: `docs/research/20260904-decision-track.md`.
 - **Composition happens in the walk, not in scans.** A composition-relevant verdict is produced by the shared bottom-up property walk (§"The composition walk"). Per-clause or substring scans are admissible only as leaf-level classifiers invoked by the walk, or as advisory heuristics that never feed admission.
 
 ## Known Divergences / Open Questions
@@ -353,11 +356,6 @@ recorded here — history lives in git and §References → Plans.
   identity has no write emitter or admission rule consuming it; the whole-model property vector
   (`model_property_vector`) has no consumer. Tracked: `docs/plans/20260704-model-updates-l3-declarations.md`,
   `docs/plans/20260707-property-composition-walk.md`.
-- **`EffectiveWindow` and `BoundResult` remain two separate walks (Open Question).** They answer
-  different questions with deliberately different fail-closure — `EffectiveWindow`
-  (day-granular, batch-sizing) treats a bare `LAG`/`LEAD` as a bounded estimate; `BoundResult`
-  (second-granular, pushdown) refuses the same construct (`NotDerivable`). Collapsing them would
-  lose one property; tracked as future work, not silently merged.
 - **The composition walk is not yet the sole source of every property.** Scopes inside
   expression-position (scalar/`EXISTS`) subqueries are not enumerated as walk nodes, so their
   window/`LIMIT`/reach/`DISTINCT`/`HAVING` content is judged only in the owning scope's region;
@@ -366,9 +364,11 @@ recorded here — history lives in git and §References → Plans.
   (`FROM ((SELECT …)) AS t`) falls back to the legacy whole-text derivation, same-scope chained
   bands still max-merge, and an absorbing verdict rejects every context source. Tracked:
   `docs/plans/20260707-property-composition-walk.md`.
-- **Declared source lateness reaches no live scan today (Open Question)** — `compute_effective_window`
-  sums it with the AST reach, but the output feeds batch fields no execute path consumes;
-  lateness becomes a scan obligation only with the tail-rewrite transform (`model_transforms.md`).
+- **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints
+  "Declared lateness is orchestration-only" forbids any proof from reading it; the summation
+  survives (its output feeds batch fields no execute path consumes, so it is inert today) and
+  must be removed rather than wired further. Scheduled:
+  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **`cumulative.rs`'s whole-SQL window-function admission scan is not yet classified onto the
   walk** (`classify_cumulative`'s `OVER(`/`OVER (` check) — remaining debt for a future
   property-discovery pass, not silently mislabeled. Tracked:
@@ -383,10 +383,6 @@ recorded here — history lives in git and §References → Plans.
   — whether an existing column's meaning changed is not derivable from the column/dependency-set
   diff alone; falls to a declared migration intent whose exact surface is open. Cross-ref
   `models.md` §Known Divergences.
-- **Skeleton-source closure v1 is restricted to non-aggregating enrichment scopes (Open Question)**
-  — a join feeding a `GROUP BY`/window is `Open` regardless of the five conjuncts, since
-  reasoning about a fold's own row-preservation is separate, harder work; widening past this
-  restriction is open future work, not scheduled.
 - **Only one maintenance-cell route consults a declared-RI closure today** — the source-enrichment
   `UpstreamMutation` route derives one; a model-edge creation cell's closure is always derived
   with an empty referential-integrity map. Tracked:
@@ -394,11 +390,12 @@ recorded here — history lives in git and §References → Plans.
   `docs/outcomes/20260809-probe-backed-facts/outcome.md`.
 - **Fingerprint projection (P4) has no consumer yet** — the sidecar build and digest compare are a
   later phase's scope. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **The append-only posture probe does not consult declared lateness** — a source that appends
-  into an already-closed partition beyond the open one (a legitimate late arrival under a
-  declared `mutation_profile.lateness`) is not consulted by this frontier gate, and can still fire
-  spuriously or, in principle, mask a genuine violation. Tracked:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **The append-only posture probe does not yet distinguish a late append from a violation** — a
+  row-count increase in an already-closed partition can fire the frontier gate as if it were a
+  reload. §Constraints "Declared lateness is orchestration-only" requires an increase to be
+  classified as a late arrival to re-process (an observed delta), with only decreases and
+  fingerprint changes counting as violations; lateness is not consulted either way. Scheduled:
+  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **`SourceUniqueKeyViolated` remains the one probe-registry row with no emitter at all (Open Question)**
   — whether it needs its own emitter or should fold into a general uniqueness probe family is
   undecided.
@@ -412,6 +409,17 @@ recorded here — history lives in git and §References → Plans.
   contract, plan, and graph layer".
 - **The grammar boundary between `columns.<c>.contract` and a future column `tests:` block is
   deliberately deferred (Open Question)** — cross-ref `models.md` §Known Divergences decision 8.
+
+## Future Extensions
+
+Ideas that are **not decided**; nothing here is surface or may be implemented against until it
+graduates into §Surface/§Semantics via its own spec diff.
+
+- **Skeleton-source closure through a fold.** Closure v1 is deliberately restricted to
+  non-aggregating enrichment scopes: a join feeding a `GROUP BY`/window is `Open` regardless of
+  the five conjuncts, because a fold's own row-preservation is separate, harder reasoning. The
+  restriction is the decided v1 boundary (2026-09-04, `docs/research/20260904-decision-track.md`).
+  Trigger for revisiting: a real model refused for exactly this reason.
 
 ## References
 

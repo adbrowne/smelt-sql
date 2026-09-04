@@ -47,6 +47,18 @@ at the end of the outcome backlog; pays the DuckDB and Spark gap ratchets down t
 type-inference rows and retires the unverified PostgreSQL emission column (#181, closed
 2026-09-04). BigQuery's rows need a human-run sweep afterwards.
 
+**Decision track (2026-09-04) — incremental programme product calls.** The eight open product
+calls the closure report left were decided in one session
+([`docs/research/20260904-decision-track.md`](research/20260904-decision-track.md)): non-deterministic
+membership is a permanent refusal; skeleton closure stays non-aggregating (future extension with a
+trigger); route 2 gets its derived sub-route; the derived recurrence is authoritative over a
+declaration (`KeyedRecurrenceDeclarationMismatch`); the two temporal walks stay separate by
+design; rungs 3–4 stay gated on the change-feed design; the `contract`/`tests:` boundary stays
+deferred; and **declared source lateness is orchestration-only** — never a plan, scan, probe or
+SQL input (`model_properties.md` §Constraints, `sources.md` trust rule). Implementation queued as
+[`docs/outcomes/20260904-decision-residue`](outcomes/20260904-decision-residue/outcome.md), right
+after `decided-gap-residue`; walk-migration-residue lost its probe-consults-lateness phase.
+
 ### 1. Type-System Axes — Collation
 
 ~~Silent Failures & Code-Health Hardening~~ ✅ (2026-06-10) — see [Recently Completed](#recently-completed).
