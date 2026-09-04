@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788519516362,
+  "lastUpdate": 1788519520008,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.2258,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c38c504c033a5075e65bf2d362d25fb91257a1c2",
+          "message": "settings: enable ralph-loop plugin\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-04T20:52:49+10:00",
+          "tree_id": "868721e05b62015d20b4337ddcf7c959afc57bd8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c38c504c033a5075e65bf2d362d25fb91257a1c2"
+        },
+        "date": 1788519518794,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.232450899070702,
+            "unit": "MB/s"
           }
         ]
       }
