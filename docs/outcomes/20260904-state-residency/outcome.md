@@ -78,7 +78,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | done |
 | 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | done |
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | done |
-| 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
+| 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | planned |
 | 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
 | 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
 
@@ -318,6 +318,24 @@ the invariant by deleting `.smelt/` between run steps.
   `cargo test`, `maintenance_conformance`, `execute_parity`/
   `statement_parity`, `smelt-lsp --test example_workspaces`). See
   `phases/08-summary.md`.
+
+- 2026-09-05 (plan 09): no phase reshape. Phase 8's summary surfaced one gap (nothing in
+  production writes the virtual-environments snapshot store), but that is virtual-environments
+  implementation work already outside this outcome's scope and serves no success criterion; the
+  remaining rows 10-11 are unaffected.
+- 2026-09-05 (plan 09): the deletion toggle lands as one seam inside
+  `LinkCProject::run` (the single point every recipe family's run reaches `execute_project`
+  through), not as a new `ConformanceStep` variant — a schedule-step variant would force a match
+  arm into every drive loop in `gate.rs` and its sibling modules, and the deletion is a property
+  of the *environment* between runs, not of the schedule.
+- 2026-09-05 (plan 09): the leg reuses the existing public staging + drive helpers over the
+  partition and keyed pools rather than duplicating each of the ~8 pool test bodies. Keyed is
+  the load-bearing half — its never-fold-twice check runs against `_smelt_ledger`, so a green
+  keyed leg under deletion is the executable proof of criterion 1, where the partition leg
+  proves interval state is reconstructible.
+- 2026-09-05 (plan 09): case counts default low (3 per pool, `SMELT_STATE_DELETION_CASES`
+  override) because this is a standing per-PR gate; an anti-vacuity test on the deletion counter
+  is what keeps a small sample from degrading into a no-op assertion.
 
 ## Blocked
 
