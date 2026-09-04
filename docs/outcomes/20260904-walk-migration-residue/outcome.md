@@ -39,6 +39,11 @@ says the rule holds.
   late-append classification is `docs/outcomes/20260904-decision-residue/outcome.md`'s.
 - Widening skeleton-source closure beyond non-aggregating scopes (MP-10, admission width).
 - `SourceUniqueKeyViolated`'s missing emitter (MP-14, undecided).
+- The membership-sensitivity **closure-pruning** pass (`maintenance/grouping.rs`'s
+  `closure_pruned_source`) consulting the declared-RI route. It is a column-provenance pruning
+  pass, not a maintenance-cell admission route, and `model_properties.md` §Semantics declares its
+  declared-RI exclusion deliberate, conditioning any widening on a paired probe dispatch that does
+  not exist for a prune — a narrowing decision, not migration backlog.
 
 ## Phases
 
@@ -48,7 +53,7 @@ says the rule holds.
 | 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | done |
 | 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | done |
 | 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | done |
-| 5 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
+| 5 | Declared-RI closure **and** declared unique-key facts reach every `JoinContext`-taking maintenance-cell route (model-edge cells, per-group repair admission); per-route fixtures + a structural empty-context check | planned |
 | 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
 
 ## Decision log
@@ -140,6 +145,22 @@ says the rule holds.
   parens) parses as a column reference, not a call, so the new `FUNCTION_CALL`-based classifier
   is behaviour-preserving with no extra case needed (the old scan's pattern always required a
   trailing `(` too). See `phases/04-summary.md`.
+
+- 2026-09-05 (plan, phase 5): read criterion 3's "route" as a maintenance-**cell admission** route
+  and enumerated them: `append_model_edge_cells` (empty RI input *and* a context carrying no
+  external source's declared `unique_key`), `repair::admit_per_group_recompute` (a literal
+  `JoinContext::new()`), and the already-wired `mutation_enrichment_closure`. The second of those
+  was not previously named anywhere in the outcome; it is folded into phase 5 rather than deferred,
+  and the row text is widened to say so. `grouping.rs`'s closure-pruning pass is the one
+  JoinContext-taking site deliberately left out, recorded under Out of scope with its rationale.
+- 2026-09-05 (plan, phase 5): a model edge has no referential-integrity declaration of its own —
+  models declare no `referential_integrity:`, and completeness is not derivable from an upstream's
+  SQL — so wiring the source-keyed RI map into the model-edge route by edge name would be inert
+  wiring with no constructible fixture. The reachable fact is instead the **external sources joined
+  in the same scope**, which that route ignores today: the phase widens its P1 verdict to an AND
+  over every enrichment relation in the scope, each judged with its own declared facts. Adding a
+  model-level `referential_integrity:` surface was rejected as a product decision outside this
+  outcome's migration-backlog mandate.
 
 ## Blocked
 
