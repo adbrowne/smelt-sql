@@ -87,6 +87,13 @@ and commits; exit 3). Tunables mirror the autonomy loop: `MAX_ITERATIONS`
 (bypassPermissions), `CARGO_BUILD_JOBS` (6), `ITER_MEMORY_MAX`/`_HIGH`
 (32G/28G), `ITER_COST_WARN` ($15). Logs: `~/.claude/logs/outcome/`.
 
+Each step runs with `--output-format stream-json --verbose`; the wrapper
+tees the raw JSONL to the iteration log (still what the sentinel/usage-log
+parsing reads) and also pipes it through
+`.claude/scripts/format-stream-json.sh`, which renders assistant text, tool
+calls, and truncated tool results as readable lines on stdout — so a
+`tmux attach` to a running loop shows live progress instead of raw JSON.
+
 Exit codes: 0 = backlog complete; 2 = backlog exhausted with blocked
 outcomes (needs a human); 3 = graceful stop; 4 = session/usage limit
 (forever-wrapper retries); 1 = infra failure / max iterations.

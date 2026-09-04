@@ -207,16 +207,18 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
     --disallowedTools "ScheduleWakeup,Monitor" \
     --no-session-persistence \
     --model "${model}" \
-    --output-format json \
+    --output-format stream-json \
+    --verbose \
     "$(cat "${prompt_file}")
 
-${hint}" 2>&1 | tee "${log}"
+${hint}" 2>&1 | tee "${log}" | "${SCRIPT_DIR}/format-stream-json.sh"
   rc="${PIPESTATUS[0]}"
 
   # Usage accounting (same shape as the autonomy loop, event tagged per step).
   USAGE_LOG="${REPO_ROOT}/.claude/usage-log.jsonl"
   jq -c --arg ts "${ts}" --arg step "${step}" --argjson iter "${iteration}" --argjson rc "${rc}" \
-    '{ts:$ts, event:("outcome-"+$step), iter:$iter, rc:$rc, session:.session_id,
+    'select(.type == "result") |
+     {ts:$ts, event:("outcome-"+$step), iter:$iter, rc:$rc, session:.session_id,
       total_cost_usd:.total_cost_usd, duration_ms:.duration_ms, num_turns:.num_turns,
       input:.usage.input_tokens, output:.usage.output_tokens,
       cache_create:.usage.cache_creation_input_tokens, cache_read:.usage.cache_read_input_tokens}' \
