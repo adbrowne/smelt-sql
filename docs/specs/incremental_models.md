@@ -418,11 +418,16 @@ contract:
 
 - `smelt explain <model>` — prints the plan (a worked rendering is §"Per-cell write
   addressing"'s `order_facts` example). Its sections:
-  - **Headline**: the model's **delta signature** — for a bare keyed model,
-    `emits: keyed upsert over [order_id], key-addressed`; for a composed model, the same with
-    its locality slice bound appended (the worked example below); for a partition-grain model,
-    `emits: append-only within a window, window-addressed by order_date` — with the derived
-    `grain` label alongside as the friendly name.
+  - **Headline**: the report's **first line** — the model's own **delta signature**: for a bare
+    keyed model, `emits: keyed upsert over [order_id], key-addressed`; for a composed model, the
+    same with its locality slice bound and settle bound appended (the worked example below); for
+    a partition-grain model, `emits: append-only within a window, window-addressed by
+    order_date`; for a model whose own SQL degrades to `general`,
+    `emits: general (degraded by: <reason>), not delta-addressable` — naming the construct or
+    world-fact responsible and making no addressing claim. Every form carries the derived
+    `grain` label alongside as the friendly name — the same label the report's own
+    `derived grain:` row prints. `--json` carries the identical fields as a top-level
+    `delta_signature` object (§Constraints item 5 of `cli.md`).
   - **Per cell**: the cells with their addressing, scan clamps, locality verdicts, the
     effective contract point, and the **per-column guarantee ledger** — the printed summary
     of what each output column is guaranteed (its equivalence contract and its **settle
@@ -2058,9 +2063,8 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   per-source watermark is persisted. Tracked:
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
-- **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes
-  the signature the first line; today's output leads with grain), nor the per-column guarantee
-  summary or derived run shape. Tracked:
+- **`smelt explain` does not yet print the per-column guarantee summary or derived run shape**
+  (§Surface "CLI"'s "Per cell" bullet). Tracked:
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
 - **A `contract.cells[].deferral` cell addressing a strict subset of the plain fold's own
   column groups cannot decline the fold's whole-row write.** The plain `Trigger::NewData`

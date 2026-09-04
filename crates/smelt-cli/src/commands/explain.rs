@@ -453,6 +453,13 @@ async fn explain_maintenance_plan(
     // (`output_delta::seed_shape_for_source`) — never re-derived, only
     // matched to the `edges` list already built above so `smelt explain`'s
     // rendering and this vector agree on which name labels which edge.
+    // This model's own delta signature (`incremental_models.md` §Surface
+    // "CLI", Headline bullet) — the SAME single-owner derivation
+    // `ref_model_edge` applies when a downstream reports this model as an
+    // upstream edge (`docs/outcomes/20260904-delta-signature-front-door/
+    // outcome.md` phase 1), never a second one.
+    let own_output_delta = smelt_db::model_output_delta_for(&db, ws, file);
+
     let edge_delta_types: Vec<(String, smelt_logical::analysis::output_delta::OutputDelta)> = {
         let model_edges = smelt_db::model_edges_for(&db, ws, file);
         edges
@@ -587,6 +594,7 @@ async fn explain_maintenance_plan(
         config.probes.cadence,
         &edge_delta_types,
         pending_definition_delta.as_ref(),
+        own_output_delta.as_ref(),
     )
     .with_context(|| {
         format!(
@@ -783,6 +791,8 @@ async fn explain_maintenance_plan(
             &result.column_groups,
             contract_cfg,
             pending_definition_delta.as_ref(),
+            own_output_delta.as_ref(),
+            result.plan.key_locality.as_ref(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

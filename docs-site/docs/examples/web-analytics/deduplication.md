@@ -151,6 +151,8 @@ smelt explain silver.events_deduped
 
 <!-- smelt-generate: @cwd=tutorial_stages/06_composed_dedupe @render=text explain silver.events_deduped -->
 ```text
+model silver.events_deduped  (emits: keyed upsert over [event_id], key-addressed, slice-bounded by first_seen_date under key temporal locality (settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }); grain: key)
+
 Maintenance plan: silver.events_deduped
 
 Cells (3):

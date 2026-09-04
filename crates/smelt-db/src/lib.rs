@@ -1702,22 +1702,13 @@ fn ref_model_edge(
     let sources = model_own_source_facts(db, workspace, project, &sql);
     let declared_unique_key = meta.unique_key.clone().unwrap_or_default();
     let partition_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
-    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+    let output_shape = own_output_delta_shape(
         &sql,
         &declared_unique_key,
         partition_col.as_deref(),
+        &sources,
+        model_verdicts,
     );
-    let output_shape =
-        smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
-            &sql,
-            &smelt_logical::analysis::join_shape::JoinContext::new(),
-            &sources,
-            &skeleton,
-            model_verdicts,
-        )
-        .into_iter()
-        .map(|(_, shape)| shape)
-        .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
@@ -1725,6 +1716,81 @@ fn ref_model_edge(
         unique_key,
         output_shape,
     })
+}
+
+/// A model's own derived output-delta shape: the meet across whatever
+/// per-column-group verdicts its own SQL derives, given the cross-model
+/// verdict map its own model-references should resolve against. Pure
+/// (Salsa purity rule) — extracted out of [`ref_model_edge`] so
+/// [`model_output_delta_for`] computes a model's own shape through the SAME
+/// derivation a downstream's edge view of that model already uses; the two
+/// call sites differ only in which model's SQL/sources/verdict-map they
+/// pass in, never in what this function does with them.
+fn own_output_delta_shape(
+    sql: &str,
+    unique_key: &[String],
+    partition_col: Option<&str>,
+    sources: &[smelt_logical::analysis::output_delta::SourceFacts],
+    model_verdicts: &std::collections::BTreeMap<
+        String,
+        smelt_logical::analysis::output_delta::OutputDeltaFacts,
+    >,
+) -> Option<smelt_logical::analysis::output_delta::OutputDelta> {
+    let skeleton =
+        smelt_logical::maintenance::skeleton::skeleton_columns(sql, unique_key, partition_col);
+    smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+        sources,
+        &skeleton,
+        model_verdicts,
+    )
+    .into_iter()
+    .map(|(_, shape)| shape)
+    .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet)
+}
+
+/// This model's own emitted output-delta shape (`incremental_models.md`
+/// §Surface "CLI" headline — the delta signature `smelt explain` prints
+/// first): the SAME derivation [`ref_model_edge`] applies when some
+/// downstream reports this model as an upstream edge, single-owned via
+/// [`own_output_delta_shape`] so `smelt explain`'s own-model headline and a
+/// downstream's edge view of this same model can never disagree
+/// (`docs/outcomes/20260904-delta-signature-front-door/outcome.md` phase
+/// 1). `None` for a generator/multi-model file (only a `Single`-model file
+/// has one address to report a shape for), a file with no frontmatter, or a
+/// model whose own SQL yields no output column groups.
+pub fn model_output_delta_for(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Option<smelt_logical::analysis::output_delta::OutputDelta> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single {
+        metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    else {
+        return None;
+    };
+    let sql = &text[sql_offset..];
+    let unique_key = metadata.unique_key.clone().unwrap_or_default();
+    let partition_col = metadata
+        .timeseries
+        .as_ref()
+        .map(|t| t.partition_column.clone());
+    let project = find_project(db, workspace, file.project_root(db));
+    let sources = model_own_source_facts(db, workspace, project, sql);
+    let model_verdicts = smelt_logical::analysis::output_delta::derive_workspace_output_deltas(
+        &model_delta_inputs(db, workspace, file),
+    );
+    own_output_delta_shape(
+        sql,
+        &unique_key,
+        partition_col.as_deref(),
+        &sources,
+        &model_verdicts,
+    )
 }
 
 /// Per-source clamp observability (`docs/specs/incremental_shapes.md`

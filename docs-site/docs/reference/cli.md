@@ -1203,13 +1203,25 @@ smelt explain [MODEL_NAME] [OPTIONS]
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
-With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: every
-cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
-the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
-derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-the model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
-contract block per **inbound edge**. This only applies to incremental models (`refresh:
+With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: the
+model's own **delta signature** as the report's first line (an `emits:` headline — see below),
+every cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes
+through the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)),
+the derived per-source scan clamps, each source's partition-locality verdict, any admission
+refusals, the model's own **Relation Contract** (its clock, identity, and derived `grain` label),
+and one contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
+
+The headline reads `model <name>  (emits: <shape>; grain: <label>)`: `keyed upsert over
+[<keys>], key-addressed` for a bare keyed model, the same with `, slice-bounded by <axis> under
+key temporal locality (settle bound: <bound>)` appended for a composed (key + time) model,
+`append-only within a window, window-addressed by <axis>` for a partition-grain model, or
+`general (degraded by: <reason>), not delta-addressable` when the model's own SQL degrades —
+naming the construct or world-fact responsible, never a silent fallback. The `grain:` clause is
+the same label the report's own `derived grain:` row prints. `--json` carries the identical
+fields as a top-level `delta_signature` object: `shape` (`keyed_upsert` | `append_only_window` |
+`general`), `addressing` (`key` | `window` | `none`), `keys`/`axis`/`degraded_by` (present per
+shape), and `slice_bound`/`settle_bound` (present when key temporal locality is admitted).
 
 Each cell also prints a `contract:` row — its effective [contract relaxation](../guide/incremental-models.md#contract-relaxations)
 (`default`, or `frozen_horizon`/`deferral` with their declared intervals); `--json` carries the

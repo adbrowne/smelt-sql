@@ -1,3 +1,5 @@
+model daily_events  (emits: general (degraded by: expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call)), not delta-addressable; grain: partition)
+
 Maintenance plan: daily_events
 
 Cells (2):

@@ -46,7 +46,7 @@ the tutorial pages in step.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | planned |
+| 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | done |
 | 2 | Regenerate tutorial pages; confirm every explain excerpt carries the headline; freshness gate green | pending |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | pending |
 | 4 | Rename `guide/backbuild-synthesis.md` to the rebuild verb; nav + cross-links | pending |
@@ -66,6 +66,13 @@ the tutorial pages in step.
   clauses describe IS-19 work this outcome lists under "Out of scope".
 - 2026-09-05 (plan, phase 1): no reshape of the phase table — phase 1 is the first row and
   no prior phase summary exists.
+- 2026-09-05 (implement, phase 1): shipped `smelt_db::model_output_delta_for`,
+  `DeltaSignatureHeadline`, and both report/JSON builders wired to it; 7 new tests; spec/doc
+  edits landed. A `None` own-shape (no derivable output-delta at all) renders as a degraded
+  `general` verdict rather than a third render path. Regenerated the golden `--show-sql` fixture
+  and one tutorial-doc excerpt (`deduplication.md`) to keep `verify-phase.sh` green — both
+  2-line diffs, the new headline only. `verify-phase.sh` ALL GREEN; see
+  `phases/01-summary.md`.
 
 ## Blocked
 

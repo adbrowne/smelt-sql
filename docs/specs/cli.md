@@ -148,23 +148,40 @@ Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly
 
 `smelt explain` accepts an optional positional model-name argument. When given, it prints that
 model's maintenance plan (`incremental_models.md` §Surface "The plan (derived, reported)") instead
-of the whole-project graph: every cell (its trigger, corner, technique, and `ledger_catch_up`
-flag), the derived per-source scan clamps, the per-source partition-locality verdict, any
-admission refusals, the model's own **Relation Contract** fill (`models.md` §"The Relation
-Contract": its clock, identity, and derived `grain` label), and one contract block per inbound
-edge (upstream dependency) — a declared source or an upstream maintained model, rendered through
-the identical `clock:` / `identity:` / `derived grain:` rows and labelled `(source)` or `(model)`
-so the reader knows which provider filled them; a row prints `(none)` when that provider declares
-neither fact. For every presented column that folds through decomposed state
-(`incremental_shapes.md` §"Decomposed state (rung 2) in keyed models"), the report also lists that
-column's hidden state columns and the presentation expression `π` that recomputes the presented
-value from them, labelled as internal state and explicitly not part of the model's public schema;
-a model with no decomposed-state columns prints no such section. The report is read-only and plain
-text. `--select` is ignored when a model-name argument is given. `--json` is honored with a
-model-name argument — with or without `--show-sql` — and emits the per-model report as JSON (the
-same schema either way, since the JSON form always carries every cell's `statements` and
-`technique_previews` arrays plus the model's `state_columns` array; `--show-sql` only changes the
-*text* rendering). A flag combination is never silently ignored.
+of the whole-project graph: the model's own **delta signature** as the report's first line
+(`incremental_models.md` §Surface "CLI", Headline bullet), every cell (its trigger, corner,
+technique, and `ledger_catch_up` flag), the derived per-source scan clamps, the per-source
+partition-locality verdict, any admission refusals, the model's own **Relation Contract** fill
+(`models.md` §"The Relation Contract": its clock, identity, and derived `grain` label), and one
+contract block per inbound edge (upstream dependency) — a declared source or an upstream
+maintained model, rendered through the identical `clock:` / `identity:` / `derived grain:` rows
+and labelled `(source)` or `(model)` so the reader knows which provider filled them; a row prints
+`(none)` when that provider declares neither fact. For every presented column that folds through
+decomposed state (`incremental_shapes.md` §"Decomposed state (rung 2) in keyed models"), the
+report also lists that column's hidden state columns and the presentation expression `π` that
+recomputes the presented value from them, labelled as internal state and explicitly not part of
+the model's public schema; a model with no decomposed-state columns prints no such section. The
+report is read-only and plain text. `--select` is ignored when a model-name argument is given.
+`--json` is honored with a model-name argument — with or without `--show-sql` — and emits the
+per-model report as JSON (the same schema either way, since the JSON form always carries every
+cell's `statements` and `technique_previews` arrays plus the model's `state_columns` array;
+`--show-sql` only changes the *text* rendering). A flag combination is never silently ignored.
+
+**Delta-signature headline.** The report's first line reads `model <name>  (emits: <shape>;
+grain: <label>)`. `<shape>` is `keyed upsert over [<keys>], key-addressed` for a bare `grain:
+key` model; the same with `, slice-bounded by <axis> under key temporal locality (settle bound:
+<bound>)` appended once key temporal locality is admitted (`incremental_shapes.md` §"Key
+temporal locality"); `append-only within a window, window-addressed by <axis>` for a
+partition-grain model; or `general (degraded by: <reason>), not delta-addressable` when the
+model's own SQL degrades — naming the construct or world-fact responsible, matching the vocabulary
+`format_output_delta` already uses for inbound edges. `<label>` is the identical string the
+report's own `derived grain:` row prints — one derivation, never a second label. With `--json`,
+the report carries a top-level `delta_signature` object (§Constraints item 5): `{"shape":
+"keyed_upsert"|"append_only_window"|"general", "addressing": "key"|"window"|"none", "keys":
+[...], "axis": "...", "degraded_by": "...", "slice_bound": "...", "settle_bound": "...", "grain":
+"..."}` — `keys` only for `keyed_upsert`, `axis` for `append_only_window` and for `keyed_upsert`
+once locality is admitted, `degraded_by` only for `general`, and `slice_bound`/`settle_bound`
+only once key temporal locality is admitted; an absent field is omitted, never `null`.
 
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
 that cell executes — the output of the same pure emitters a run executes
