@@ -69,11 +69,12 @@ the invariant by deleting `.smelt/` between run steps.
 | 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | done |
 | 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | done |
 | 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | done |
-| 6 | Surface: `smelt explain` prints downgrades (text + `--json`); LSP/CLI warning diagnostic; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
-| 7 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
-| 8 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
-| 9 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
-| 10 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
+| 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | planned |
+| 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | pending |
+| 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
+| 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
+| 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
+| 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
 
 ## Decision log
 
@@ -207,6 +208,27 @@ the invariant by deleting `.smelt/` between run steps.
   unresolved in this phase. They are analysis-time, where the target dialect is not known, and
   the diagnostic channel for a downgrade is phase 6's work; criterion 3 speaks of runtime
   consumers.
+
+- 2026-09-05 (plan 06): phase 6 split in two. The old row bundled four separable
+  deliverables across three crates; the two diagnostic codes are analysis-time work with a single
+  owner (`smelt-db`'s pure `maintenance_plan_diagnostics`, which already receives
+  `active_backends`) and their own gates (`diagnostics_catalogue`, `example_diagnostics`), while
+  the explain rendering and the reporter retirement are runtime/CLI surface. New phase 6 = the
+  run/explain surface + retiring `RunReporter::state_structure_unavailable`; new phase 7 = the two
+  `DiagnosticCode` variants and the `DeclaredContractRequiresState` refusal. Old phases 7-10
+  renumber to 8-11; no criterion-serving work left the outcome (criteria 4 and 5 are now served
+  jointly by phases 6 and 7).
+- 2026-09-05 (plan 06): `smelt explain` resolves availability at its own call site (declared target
+  dialect + `state.warehouse_tables`, offline) rather than through `smelt-db`'s Salsa
+  `maintenance_plan_report`. Plan 05 recorded that `smelt-db`'s derivation sites stay unresolved
+  because analysis time has no single target dialect; explain does know the model's declared
+  target, so resolving there uses the single-owner pure `resolve_availability` without pushing a
+  dialect into the Salsa query.
+- 2026-09-05 (plan 06): the keyed-grain merge-ledger skip (`maintenance_driver.rs`) is replaced
+  the same way phase 5 replaced the `execute.rs` ledger-reset skip — a `tracing::debug!` pointing
+  at the cell's recorded `state_downgrade`, which is now genuinely user-visible via `smelt
+  explain`. With both callers gone, `RunReporter::state_structure_unavailable` and its buffered
+  `ReporterEvent` variant are deleted rather than left dead.
 
 ## Blocked
 
