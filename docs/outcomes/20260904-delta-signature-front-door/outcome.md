@@ -1,7 +1,7 @@
 # Outcome: Delta-signature front door — explain prints it, the user docs describe it
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` row IM-02; `docs/TODO.md` §"docs-site sync"; `docs/research/20260904-incremental-state-review.md` §"What went wrong" (docs-site lag) and §"Recommended next sequence" item 6
 **Spec anchors:** `docs/specs/incremental_models.md` §Surface "CLI" and the delta-signature sections, `docs/specs/definition_deltas.md`, `docs/specs/incremental_shapes.md`
 
@@ -46,7 +46,7 @@ the tutorial pages in step.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | pending |
+| 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | planned |
 | 2 | Regenerate tutorial pages; confirm every explain excerpt carries the headline; freshness gate green | pending |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | pending |
 | 4 | Rename `guide/backbuild-synthesis.md` to the rebuild verb; nav + cross-links | pending |
@@ -55,6 +55,17 @@ the tutorial pages in step.
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-09-05 (plan, phase 1): criterion 1's "every example workspace model" is read as
+  every example model that *has* a maintenance-plan report — the spec gives a delta
+  signature to declared sources and maintained models only, so the no-plan notice path
+  keeps its existing one-line output rather than fabricating a signature for a
+  full-refresh model.
+- 2026-09-05 (plan, phase 1): the Known Divergences bullet is **narrowed**, not deleted —
+  its headline clause goes, but its per-column guarantee-ledger and derived-run-shape
+  clauses describe IS-19 work this outcome lists under "Out of scope".
+- 2026-09-05 (plan, phase 1): no reshape of the phase table — phase 1 is the first row and
+  no prior phase summary exists.
 
 ## Blocked
 
