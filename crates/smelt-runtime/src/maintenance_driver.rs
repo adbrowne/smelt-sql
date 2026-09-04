@@ -26,6 +26,7 @@ use smelt_logical::analysis::fingerprint::Projection as FingerprintProjection;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::maintenance::availability::StateAvailability;
 use smelt_logical::maintenance::choice::{
     effective_override, enrichment_restrict_column, resolve_cell_choice,
     resolve_cell_write_suppression, resolve_recompute_restriction, resolve_region_write_variant,
@@ -834,9 +835,10 @@ pub fn resolve_incremental_strategy(
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     backend_default: IncrementalStrategy,
     backend_supports_column_scoped_merge: bool,
+    availability: &StateAvailability,
 ) -> Result<IncrementalStrategy> {
     let result = if model_edges.is_empty() {
-        smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        crate::maintenance_availability::derive_resolved(
             sql,
             table,
             metadata,
@@ -857,11 +859,12 @@ pub fn resolve_incremental_strategy(
             &SourceReferentialIntegrity::new(),
             None,
             None,
+            availability,
         )
     } else {
         // Edge-aware derivation — the SAME derivation
         // `resolve_live_delta_restriction_facts` uses, never a second one.
-        smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+        crate::maintenance_availability::derive_resolved_with_edges(
             sql,
             table,
             metadata,
@@ -874,6 +877,7 @@ pub fn resolve_incremental_strategy(
             &SourceReferentialIntegrity::new(),
             None,
             None,
+            availability,
         )
     };
     let Some(result) = result else {
@@ -1038,6 +1042,7 @@ pub fn resolve_fold_deferral(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     cell_decisions: &[crate::contract_probes::CellDeferralDecision],
+    availability: &StateAvailability,
 ) -> (
     smelt_logical::contract::deferral::FoldDeferralVerdict,
     Vec<String>,
@@ -1069,7 +1074,7 @@ pub fn resolve_fold_deferral(
         return no_deferral;
     }
 
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1081,6 +1086,7 @@ pub fn resolve_fold_deferral(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return no_deferral;
     };
@@ -1306,6 +1312,7 @@ pub fn resolve_cell_technique_with_write_pin(
 /// mapped here to a real `Err` — the fail-loud discipline (root
 /// `CLAUDE.md`) forbids silently falling back to region recompute for a
 /// pin the derived plan does not admit.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_column_scoped_cell(
     sql: &str,
     table: &str,
@@ -1314,8 +1321,9 @@ pub fn resolve_live_column_scoped_cell(
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    availability: &StateAvailability,
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1342,6 +1350,7 @@ pub fn resolve_live_column_scoped_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -1524,11 +1533,12 @@ pub fn resolve_live_in_place_update_cell(
     metadata: &smelt_core::ModelMetadata,
     sources: &[SourceFacts],
     deployed_column_names: &[String],
+    availability: &StateAvailability,
 ) -> Option<(PlanCell, Vec<(String, String)>)> {
     if deployed_column_names.is_empty() {
         return None;
     }
-    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let result = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1540,6 +1550,7 @@ pub fn resolve_live_in_place_update_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     )?;
     let cell = result
         .plan
@@ -1651,8 +1662,9 @@ pub fn resolve_live_membership_recompute_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    availability: &StateAvailability,
 ) -> Result<Option<LiveMembershipRecomputeCell>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1667,6 +1679,7 @@ pub fn resolve_live_membership_recompute_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -2220,6 +2233,7 @@ pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
 /// posture, `diff_fingerprint_sidecar_changed_keys`) — a non-DuckDB target
 /// fails loud here, before any backend call, rather than silently falling
 /// back to the unsound current-source scan.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_per_group_recompute_cell(
     sql: &str,
     table: &str,
@@ -2228,8 +2242,9 @@ pub fn resolve_live_per_group_recompute_cell(
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
     dialect: SqlDialect,
+    availability: &StateAvailability,
 ) -> Result<Option<LiveRepairCell>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -2245,6 +2260,7 @@ pub fn resolve_live_per_group_recompute_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -2793,6 +2809,7 @@ pub type LiveKeyAddressedModelEdgeCell = (
 ///   names), never against the downstream's own guess. A mismatch (the
 ///   downstream renamed the key column it read) is refused by name rather
 ///   than silently querying a column the upstream table does not have.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_key_addressed_model_edge_cell(
     sql: &str,
     table: &str,
@@ -2801,8 +2818,9 @@ pub fn resolve_live_key_addressed_model_edge_cell(
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     dialect: SqlDialect,
+    availability: &StateAvailability,
 ) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
         sql,
         table,
         metadata,
@@ -2815,6 +2833,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -4534,11 +4553,12 @@ pub fn resolve_live_delta_restriction_facts(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+    availability: &StateAvailability,
 ) -> Result<Option<DeltaRestrictionFacts>, ChoiceRefusal> {
     let Some(driving_edge) = model_edges.first() else {
         return Ok(None);
     };
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
         sql,
         table,
         metadata,
@@ -4559,6 +4579,7 @@ pub fn resolve_live_delta_restriction_facts(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -4674,6 +4695,7 @@ pub struct ExternalDeltaRestrictionFacts {
 /// ([`enrichment_restrict_column`] returns `None`), or no P4 fingerprint
 /// projection resolved for it — every `None` case is the caller's safe
 /// default of falling back to the ordinary widened scan.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_external_delta_restriction_facts(
     sql: &str,
     table: &str,
@@ -4682,6 +4704,7 @@ pub fn resolve_live_external_delta_restriction_facts(
     explicitly_mutable: &HashSet<String>,
     source_referential_integrity: &SourceReferentialIntegrity,
     supports_fingerprint_sidecar: bool,
+    availability: &StateAvailability,
 ) -> Result<Option<ExternalDeltaRestrictionFacts>, ChoiceRefusal> {
     if !supports_fingerprint_sidecar {
         tracing::debug!(
@@ -4699,7 +4722,7 @@ pub fn resolve_live_external_delta_restriction_facts(
     let Some(source_facts) = sources.iter().find(|s| &s.name == source_name) else {
         return Ok(None);
     };
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
         sql,
         table,
         metadata,
@@ -4712,6 +4735,7 @@ pub fn resolve_live_external_delta_restriction_facts(
         source_referential_integrity,
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -5136,6 +5160,7 @@ mod tests {
             &explicitly_mutable,
             &external_facts_source_ri(),
             true,
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver does not refuse")
         .expect("facts resolve for a declared-RI mutable dimension");
@@ -5170,6 +5195,7 @@ mod tests {
             &explicitly_mutable,
             &external_facts_source_ri(),
             true,
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver does not refuse");
         assert!(
@@ -5194,6 +5220,7 @@ mod tests {
             &explicitly_mutable,
             &external_facts_source_ri(),
             false,
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver does not refuse");
         assert!(

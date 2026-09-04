@@ -923,7 +923,7 @@ fn derive_clamp_and_locality_pass(
             None
         };
 
-        let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+        let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
             &sql,
             &table,
             metadata,
@@ -953,6 +953,16 @@ fn derive_clamp_and_locality_pass(
             &smelt_db::queries::maintenance::build_source_referential_integrity(&source_refs),
             None,
             None,
+            // This walk never reads `PlanCell::technique` or
+            // `state_downgrade` (only `trigger`, `scans`, `partition_local`,
+            // `key_locality` below) — availability resolution mutates
+            // neither of the fields this consumer looks at, so full
+            // availability is behaviourally identical to a real per-target
+            // resolution here. Still routed through the shared seam (never
+            // the bare `smelt-db` function) so the structural
+            // one-seam-only rule holds without a second, dialect-aware
+            // derivation this module has no per-model dialect to build.
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         ) else {
             continue;
         };

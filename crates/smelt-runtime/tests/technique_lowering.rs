@@ -2161,6 +2161,7 @@ mod keyed_membership_recompute_e2e {
             &sources,
             &explicitly_mutable,
             &[],
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver must not error")
         .expect("a live membership-recompute cell must resolve for raw.users");

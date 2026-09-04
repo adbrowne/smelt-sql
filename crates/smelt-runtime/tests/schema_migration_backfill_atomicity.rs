@@ -207,6 +207,7 @@ fn derived_assignments() -> Vec<(String, String)> {
         &md,
         &sources(),
         &old_column_names(),
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("PureBackfill column-add must resolve a live InPlaceUpdate cell");
     assert_eq!(

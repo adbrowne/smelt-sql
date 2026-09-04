@@ -68,7 +68,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | done |
 | 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | done |
 | 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | done |
-| 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | planned |
+| 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | done |
 | 6 | Surface: `smelt explain` prints downgrades (text + `--json`); LSP/CLI warning diagnostic; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
 | 7 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
 | 8 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
@@ -97,6 +97,15 @@ the invariant by deleting `.smelt/` between run steps.
   catalogue rows may precede their `DiagnosticCode` variants (the posture already used by the
   `Maintenance*` and contract-lattice rows). Phase 1 adds the two rows now and records the
   catalogue-ahead-of-variant gap; phases 4-5 land the variants.
+- 2026-09-05 (phase 5 implement): landed the single `smelt-runtime` availability-resolution seam
+  (`maintenance_availability.rs`) and threaded `availability: &StateAvailability` through all 9
+  `maintenance_driver.rs` resolvers plus `propagation.rs`'s graph walk (`StateAvailability::all()`
+  there — that consumer never reads `technique`/`state_downgrade`). The `execute.rs` ledger-reset
+  site now gates on `availability.contains(ReconciliationLedger)` instead of a raw DuckDB dialect
+  check, and no longer calls `reporter.state_structure_unavailable(...)`. See `phases/05-summary.md`
+  — phase 6 still owns the keyed-grain caller of that reporter method and the `smelt explain`
+  surface.
+
 - 2026-09-04 (phase 1 implement): landed the spec delta — `state.md` cross-reference sentence
   and outcome-linked divergences, `run_state.md` de-restatement (layout tree, locking/atomic-write
   sentences, Fixed-layout invariant, §"Relationship to the reconciliation ledger"),

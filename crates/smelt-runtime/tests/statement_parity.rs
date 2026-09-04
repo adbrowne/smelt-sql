@@ -6068,14 +6068,16 @@ async fn ledger_reset_rolls_back_with_a_failed_write() {
 }
 
 /// A non-DuckDB dialect's DeleteInsert batch write emits no `_smelt_ledger`
-/// SQL at all — never a silent skip — and the run reports the gap on
-/// `RunReporter::state_structure_unavailable` (the documented gap
-/// `docs/outcomes/20260904-state-residency/outcome.md` phase 4's
-/// `MaintenanceStateDowngraded` record replaces). Uses a fully mocked
-/// `Backend` (never a real connection) so the dialect mismatch between the
-/// claimed `SqlDialect::SparkSQL` and no real Spark engine can never itself
-/// cause a spurious failure — this test is about which SQL gets BUILT, not
-/// whether it executes against a live warehouse.
+/// SQL at all — the skip is now driven by the run's resolved
+/// `StateAvailability` (`docs/outcomes/20260904-state-residency/
+/// outcome.md` phase 5), not a raw `backend.dialect() == DuckDB` check, and
+/// no longer calls `RunReporter::state_structure_unavailable` — the
+/// affected cell's own recorded `MaintenanceStateDowngraded` is the
+/// user-visible channel now (phase 6 surfaces it via `smelt explain`).
+/// Uses a fully mocked `Backend` (never a real connection) so the dialect
+/// mismatch between the claimed `SqlDialect::SparkSQL` and no real Spark
+/// engine can never itself cause a spurious failure — this test is about
+/// which SQL gets BUILT, not whether it executes against a live warehouse.
 #[tokio::test]
 async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
     struct NonDuckDbBackend {
@@ -6258,11 +6260,9 @@ async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
 
     let calls = reporter.calls.lock().unwrap();
     assert!(
-        calls.iter().any(
-            |(_, structure, dialect)| structure == "reconciliation ledger"
-                && dialect == "Spark SQL"
-        ),
-        "a non-DuckDB dialect must report the reconciliation-ledger gap via \
-         state_structure_unavailable rather than silently skipping it: {calls:?}"
+        calls.is_empty(),
+        "a non-DuckDB dialect's ledger-reset skip must no longer call \
+         state_structure_unavailable — the recorded state_downgrade on the affected cell is \
+         the user-visible channel now: {calls:?}"
     );
 }

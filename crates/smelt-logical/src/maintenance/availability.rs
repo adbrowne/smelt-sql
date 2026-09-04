@@ -21,8 +21,31 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 
 use smelt_core::config::WarehouseTables;
+use smelt_dialect::SqlDialect;
 
 use super::{Corner, PlanCell, Technique};
+
+/// The [`StateStructure`]s `dialect` has a builder for, independent of
+/// `state.warehouse_tables`. Exhaustive over [`SqlDialect`]: a new dialect
+/// is a compile error here, not a silent default. Today only DuckDB has a
+/// ledger builder (`smelt-state/src/ddl_duckdb.rs`); every dialect realises
+/// the sidecar/output-delta structures, which have no per-dialect builder
+/// gate (`sources.md` §"The fingerprint sidecar", `incremental_models.md`
+/// §"The graph layer").
+pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
+    match dialect {
+        SqlDialect::DuckDB => vec![
+            StateStructure::MergeLedger,
+            StateStructure::ReconciliationLedger,
+            StateStructure::ObservedOutputDeltas,
+            StateStructure::FingerprintSidecar,
+        ],
+        SqlDialect::SparkSQL | SqlDialect::PostgreSQL | SqlDialect::BigQuery => vec![
+            StateStructure::ObservedOutputDeltas,
+            StateStructure::FingerprintSidecar,
+        ],
+    }
+}
 
 /// A persistent structure the maintenance plan may depend on, classified as
 /// "correctness" and engine-resident by `docs/specs/state.md` §"The

@@ -68,6 +68,7 @@ fn key_addressed_cell_resolves_live_from_the_real_plan() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolution must not error")
     .expect("a live key-addressed cell must resolve");
@@ -134,6 +135,7 @@ fn partition_grain_downstream_resolves_the_key_addressed_cell() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolution must not error")
     .expect(
@@ -183,6 +185,7 @@ fn grain_route_groups_sidecar_at_downstream_grain() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolution must not error")
     .expect("a grain-over-upstream cell must resolve");
@@ -231,6 +234,7 @@ fn missing_key_scope_column_on_the_upstream_fails_loud() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     );
     match result {
         Ok(None) => {}
@@ -262,6 +266,7 @@ fn non_duckdb_dialect_refuses_key_addressed_discovery() {
         &HashSet::new(),
         &edges,
         SqlDialect::SparkSQL,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect_err("a non-DuckDB dialect must refuse before any backend call");
     assert!(

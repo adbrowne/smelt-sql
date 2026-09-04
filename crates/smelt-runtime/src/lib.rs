@@ -28,6 +28,7 @@ pub mod dimension_horizon_merge;
 pub mod execute;
 pub mod fn_bodies;
 pub mod gate;
+pub mod maintenance_availability;
 pub mod maintenance_driver;
 pub mod meta_eval;
 pub mod model_probes;

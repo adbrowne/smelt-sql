@@ -2686,6 +2686,7 @@ fn keyed_enriched_recipe_admits_membership_recompute() {
         &sources,
         &explicitly_mutable,
         &[],
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error")
     .expect(

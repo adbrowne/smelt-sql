@@ -551,6 +551,29 @@ pub async fn execute_project(
     let selected = selection.ordered_models;
     let target_assignments = selection.target_assignments;
     let cross_edges = selection.cross_engine_edges;
+
+    // The run's availability-resolution input (`docs/specs/state.md` §"The
+    // degradation contract" step 2): one `StateAvailability` per target this
+    // run touches, built once here (never rebuilt per model) from the
+    // target's declared dialect and the project-wide `state.warehouse_tables`
+    // — both pure `Config` facts, so this needs no live backend and is
+    // reused by the dry-run statement preview, the pre-loop deferral pass,
+    // and the real per-model execute loop alike.
+    let state_availability: HashMap<
+        String,
+        smelt_logical::maintenance::availability::StateAvailability,
+    > = target_assignments
+        .values()
+        .cloned()
+        .collect::<HashSet<String>>()
+        .into_iter()
+        .map(|target| {
+            let dialect = sql_dialect_for_target(&config, &target);
+            let availability =
+                crate::maintenance_availability::availability_for_run(dialect, &config);
+            (target, availability)
+        })
+        .collect();
     if !cross_edges.is_empty() {
         tracing::info!(
             "Cross-engine references detected ({} transfer(s) via Parquet)",
@@ -909,6 +932,11 @@ pub async fn execute_project(
                                 &sources,
                                 &explicitly_mutable,
                                 &model_edges_dry,
+                                &availability_for_target(
+                                    &state_availability,
+                                    &model_target,
+                                    &config,
+                                ),
                             )
                             .map_err(|e| anyhow::anyhow!("{}", e))?
                         }
@@ -1429,6 +1457,8 @@ pub async fn execute_project(
                     if !declared_addresses.is_empty() {
                         fold_addresses.insert(plan.name.clone(), declared_addresses);
                     }
+                    let plan_target =
+                        config.get_target(&plan.name, Some(metadata), &request.target);
                     let (verdict, addresses) = crate::maintenance_driver::resolve_fold_deferral(
                         &plan.sql,
                         &plan.model_file.db_name_owned(),
@@ -1436,6 +1466,7 @@ pub async fn execute_project(
                         &source_facts,
                         &explicitly_mutable,
                         &cell_decisions,
+                        &availability_for_target(&state_availability, &plan_target, &config),
                     );
                     if let smelt_logical::contract::deferral::FoldDeferralVerdict::SkipFold {
                         ..
@@ -1522,6 +1553,7 @@ pub async fn execute_project(
     let selected = &selected;
     let file_store = &file_store;
     let config = &config;
+    let state_availability = &state_availability;
     let prior_runs = &prior_runs;
     let target_assignments = &target_assignments;
     let backends = &backends;
@@ -1719,6 +1751,7 @@ pub async fn execute_project(
         let model_target = &target_assignments[&plan.name];
         let backend = backends[model_target].as_ref();
         let schema = &config.targets[model_target].schema;
+        let availability = availability_for_target(state_availability, model_target, config);
 
         // The deployed-schema snapshot's column names, captured BEFORE the
         // schema-evolution gate below runs `check_and_migrate` (which, on
@@ -1760,6 +1793,7 @@ pub async fn execute_project(
                     metadata,
                     &in_place_sources,
                     &deployed_column_names,
+                    &availability,
                 )
             })
         } else {
@@ -2072,6 +2106,7 @@ pub async fn execute_project(
                     &explicitly_mutable,
                     backend.capabilities().supports_column_scoped_merge,
                     &request.technique_overrides,
+                    &availability,
                 )?,
                 None => None,
             };
@@ -2093,6 +2128,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         &request.technique_overrides,
+                        &availability,
                     )?
                 }
                 None => None,
@@ -2129,6 +2165,7 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         &request.technique_overrides,
                         backend.dialect(),
+                        &availability,
                     )?
                 }
                 None => None,
@@ -2159,6 +2196,7 @@ pub async fn execute_project(
                 resolver,
                 run_id,
                 reporter,
+                &availability,
             )
             .await?;
 
@@ -3117,6 +3155,7 @@ pub async fn execute_project(
                         &model_edges,
                         backend_default_strategy.clone(),
                         backend.capabilities().supports_column_scoped_merge,
+                        &availability,
                     )?,
                     None => backend_default_strategy,
                 };
@@ -3133,6 +3172,7 @@ pub async fn execute_project(
                                 &maint_source_facts,
                                 &explicitly_mutable,
                                 &model_edges,
+                                &availability,
                             )
                             .map_err(|e| anyhow::anyhow!("{}", e))?
                         }
@@ -3183,6 +3223,7 @@ pub async fn execute_project(
                                 &explicitly_mutable,
                                 &source_ri,
                                 backend.capabilities().supports_fingerprint_sidecar,
+                                &availability,
                             )
                             .map_err(|e| anyhow::anyhow!("{}", e))?
                         }
@@ -3235,6 +3276,7 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         backend.capabilities().supports_column_scoped_merge,
                         &request.technique_overrides,
+                        &availability,
                     )?,
                     None => None,
                 };
@@ -3264,6 +3306,7 @@ pub async fn execute_project(
                             &maint_source_facts,
                             &explicitly_mutable,
                             &request.technique_overrides,
+                            &availability,
                         )?
                         .filter(|(_, cell, _, write)| {
                             matches!(
@@ -3458,6 +3501,7 @@ pub async fn execute_project(
                     &ephemeral_resolvers[model_target],
                     run_id,
                     reporter,
+                    &availability,
                 )
                 .await?;
                 // Mutual exclusion with `column_scoped_cell`/`delta_restriction_
@@ -3939,14 +3983,20 @@ pub async fn execute_project(
                     // Not built when a live `ColumnScopedMerge` cell dispatches
                     // (`column_merge_dispatch.is_some()`) — that technique is not a
                     // region DeleteInsert and its own MP12 ledger interaction is
-                    // unrelated to this reset. The ledger substrate is DuckDB-only
-                    // today (same posture as `maintenance_driver`'s MP12 callers);
-                    // on any other dialect the reset is skipped with no silent file
-                    // fallback — `docs/outcomes/20260904-state-residency/
-                    // outcome.md` phase 4 owns replacing this gap with a recorded
-                    // `MaintenanceStateDowngraded` downgrade.
+                    // unrelated to this reset. Whether the ledger is available at
+                    // all is now this run's own resolved
+                    // `StateAvailability` (`docs/outcomes/20260904-state-residency/
+                    // outcome.md` phase 5), not a raw dialect check — on a
+                    // ledger-less target this is no longer a silent skip: the
+                    // per-cell technique already carries a recorded
+                    // `state_downgrade` (`smelt-logical`'s
+                    // `resolve_availability`), which `smelt explain` and the
+                    // warning diagnostic surface (phase 6). No
+                    // `state_structure_unavailable` reporter call here anymore.
                     let ledger_reset_sqls = if column_merge_dispatch.is_none()
-                        && backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                        && availability.contains(
+                            smelt_logical::maintenance::availability::StateStructure::ReconciliationLedger,
+                        )
                     {
                         Some(smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
                             schema,
@@ -3959,14 +4009,12 @@ pub async fn execute_project(
                         ))
                     } else {
                         if column_merge_dispatch.is_none() {
-                            reporter.state_structure_unavailable(
-                                run_id,
-                                &plan.name,
-                                "reconciliation ledger",
-                                backend.dialect().name(),
-                                "region-recompute reset skipped: the ledger substrate is \
-                                 DuckDB-only today (docs/specs/incremental_models.md §\"The \
-                                 reconciliation ledger\")",
+                            tracing::debug!(
+                                model = %plan.name,
+                                dialect = backend.dialect().name(),
+                                "region-recompute reset skipped: the reconciliation ledger is \
+                                 unavailable for this target — the affected cell's own \
+                                 recorded state_downgrade is the user-visible channel"
                             );
                         }
                         None
@@ -5765,6 +5813,45 @@ fn maintenance_dialect_for_target(
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
 }
 
+/// `target`'s declared [`smelt_backend::SqlDialect`], purely from `Config`
+/// (no live backend needed) — the same `BackendType` match
+/// [`maintenance_dialect_for_target`] uses, stopping one step earlier so
+/// availability resolution (which needs `SqlDialect`, not
+/// `MaintenanceDialect`) can share it.
+fn sql_dialect_for_target(config: &Config, target: &str) -> smelt_backend::SqlDialect {
+    config
+        .targets
+        .get(target)
+        .and_then(|t| t.backend_type().ok())
+        .map(|bt| match bt {
+            smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
+            smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+            smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
+        })
+        .unwrap_or(smelt_backend::SqlDialect::DuckDB)
+}
+
+/// `state_availability`'s value for `target`, falling back to a fresh
+/// (pure, cheap) derivation for a target the run's own
+/// `target_assignments` did not cover — defensive only; every production
+/// call site's `target` is itself sourced from `target_assignments` or
+/// `config.get_target`, which agree by construction.
+fn availability_for_target(
+    state_availability: &HashMap<
+        String,
+        smelt_logical::maintenance::availability::StateAvailability,
+    >,
+    target: &str,
+    config: &Config,
+) -> smelt_logical::maintenance::availability::StateAvailability {
+    state_availability.get(target).cloned().unwrap_or_else(|| {
+        crate::maintenance_availability::availability_for_run(
+            sql_dialect_for_target(config, target),
+            config,
+        )
+    })
+}
+
 /// Build `model_file`'s upstream **maintained-model** edge list
 /// (`docs/specs/incremental_models.md` §"Upstream model edges") — the input
 /// T3 delta restriction (`docs/plans/20260715-composed-axes-conditional-
@@ -5987,6 +6074,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
     resolver: &EphemeralResolver,
     run_id: &str,
     reporter: &dyn RunReporter,
+    availability: &smelt_logical::maintenance::availability::StateAvailability,
 ) -> Result<Option<KeyAddressedEdgeDispatch>> {
     if model_edges.is_empty() || !table_exists_before_run {
         return Ok(None);
@@ -6003,6 +6091,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
             explicitly_mutable,
             model_edges,
             backend.dialect(),
+            availability,
         )?
     else {
         return Ok(None);

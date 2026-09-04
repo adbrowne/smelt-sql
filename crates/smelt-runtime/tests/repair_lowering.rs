@@ -95,6 +95,7 @@ fn resolve_live_per_group_recompute_cell_finds_the_admitted_repair_cell() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error")
     .expect("a live per-group-recompute cell must resolve for raw.orders");
@@ -142,6 +143,7 @@ fn snapshot_source_discovery_uses_the_sidecar_diff() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error")
     .expect("a live per-group-recompute cell must resolve for raw.orders");
@@ -178,6 +180,7 @@ fn snapshot_discovery_fails_loud_on_a_non_duckdb_backend() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::SparkSQL,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect_err(
         "a MutableSnapshot source's sidecar-diff discovery must fail loud on a non-DuckDB \
@@ -223,6 +226,7 @@ fn diff_patch_pin_over_a_repair_cell_resolves_a_diff_patch_write() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error")
     .expect("a live per-group-recompute cell must resolve for raw.orders");
@@ -281,6 +285,7 @@ fn resolve_live_per_group_recompute_cell_ignores_a_pin_with_no_repair_cell_to_ad
         &HashSet::new(),
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error");
     assert!(
@@ -379,6 +384,7 @@ fn resolve_live_per_group_recompute_cell_none_for_an_append_only_model() {
         &HashSet::new(),
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error");
 

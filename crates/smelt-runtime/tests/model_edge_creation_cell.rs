@@ -76,6 +76,7 @@ fn model_edge_creation_cell_drives_the_incremental_strategy() {
         &model_edges,
         IncrementalStrategy::DeleteInsert,
         false,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("a clocked model edge must admit DeleteInsert, not refuse");
     assert_eq!(strategy, IncrementalStrategy::DeleteInsert);
@@ -104,6 +105,7 @@ fn clockless_maintained_upstream_refuses_instead_of_silently_region_recomputing(
         &model_edges,
         IncrementalStrategy::DeleteInsert,
         false,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect_err("a clockless model edge with no fallback cell must refuse, not silently default");
     let message = err.to_string();
@@ -141,6 +143,7 @@ fn clockless_upstream_alongside_a_clocked_source_still_runs() {
         &model_edges,
         IncrementalStrategy::DeleteInsert,
         false,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect(
         "a clockless model edge must not refuse the whole run when another creation-trigger \

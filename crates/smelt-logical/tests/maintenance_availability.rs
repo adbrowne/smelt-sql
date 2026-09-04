@@ -5,9 +5,10 @@
 
 use std::collections::BTreeSet;
 
+use smelt_dialect::SqlDialect;
 use smelt_logical::maintenance::availability::{
-    recompute_equivalent, required_state_structure, resolve_availability, StateAvailability,
-    StateStructure,
+    realisable_state_structures, recompute_equivalent, required_state_structure,
+    resolve_availability, StateAvailability, StateStructure,
 };
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::{
@@ -198,4 +199,34 @@ fn a_cell_with_key_scope_downgrades_to_per_group_recompute() {
         discovery: KeyDiscovery::UpstreamKeyed,
     });
     assert_eq!(recompute_equivalent(&cell), Technique::PerGroupRecompute);
+}
+
+#[test]
+fn duckdb_realises_every_state_structure() {
+    let realised: BTreeSet<StateStructure> = realisable_state_structures(SqlDialect::DuckDB)
+        .into_iter()
+        .collect();
+    assert_eq!(
+        realised,
+        [
+            StateStructure::MergeLedger,
+            StateStructure::ReconciliationLedger,
+            StateStructure::ObservedOutputDeltas,
+            StateStructure::FingerprintSidecar,
+        ]
+        .into_iter()
+        .collect(),
+    );
+}
+
+#[test]
+fn a_ledger_less_dialect_realises_no_ledger() {
+    for dialect in [SqlDialect::SparkSQL, SqlDialect::BigQuery] {
+        let realised: BTreeSet<StateStructure> =
+            realisable_state_structures(dialect).into_iter().collect();
+        assert!(!realised.contains(&StateStructure::MergeLedger));
+        assert!(!realised.contains(&StateStructure::ReconciliationLedger));
+        assert!(realised.contains(&StateStructure::FingerprintSidecar));
+        assert!(realised.contains(&StateStructure::ObservedOutputDeltas));
+    }
 }
