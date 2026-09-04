@@ -322,10 +322,10 @@ lands.
   Spark-dialect ledger builder is built when a real Spark-targeted incremental workload
   demands the fold-family techniques the downgrade forgoes — not speculatively before.
   Decision record: `docs/research/20260816-open-questions-triage.md` item 12.
-- **Conformance gate leg for state deletion.** A generative gate variant that interleaves
-  `.smelt/` deletion (and, later, downgrade-forcing) between run steps and asserts the
-  equivalence oracle still holds — the executable form of the "no correctness state outside
-  the engine" invariant. Sensible only after the reconciliation ledger's move makes it pass.
+- **Downgrade-forcing conformance leg.** A generative gate variant that forces an availability
+  downgrade (`MaintenanceStateDowngraded`) mid-schedule and asserts the equivalence oracle
+  still holds across the switch — the state-deletion leg (§References → Tests) proves ledger
+  residency; this residual proves the recompute-family fallback itself.
 
 ## References
 
@@ -334,8 +334,10 @@ lands.
   `source_postures.rs`, `frozen_band_baselines.rs`; backend ledger DDL: `ddl_duckdb.rs`,
   `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`);
   `crates/smelt-runtime/src/execute.rs` (state-write sites)
-- **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance.rs`
-  (the equivalence oracle this doctrine's gate leg would extend)
+- **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance/`
+  (the standing equivalence-oracle gate; `state_deletion.rs` is the leg that interleaves
+  `.smelt/` deletion between run steps for every maintained recipe, the executable form of
+  "no correctness state outside the engine")
 - **User docs**: none yet — `docs-site/docs/reference/smelt-yml.md` documents `state.mode`
 - **Plans (history)**: none yet — this spec precedes its first implementation plan
 - **Related specs**: `run_state.md` (`.smelt/` layout and formats), `incremental_models.md`

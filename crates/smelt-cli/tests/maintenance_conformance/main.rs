@@ -23,3 +23,4 @@ mod pinned;
 mod probes;
 mod registry;
 mod repair;
+mod state_deletion;

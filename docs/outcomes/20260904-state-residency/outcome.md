@@ -78,7 +78,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | done |
 | 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | done |
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | done |
-| 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | planned |
+| 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | done |
 | 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
 | 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
 
@@ -336,6 +336,16 @@ the invariant by deleting `.smelt/` between run steps.
 - 2026-09-05 (plan 09): case counts default low (3 per pool, `SMELT_STATE_DELETION_CASES`
   override) because this is a standing per-PR gate; an anti-vacuity test on the deletion counter
   is what keeps a small sample from degrading into a no-op assertion.
+
+- 2026-09-05 (phase 9 implement): landed the deletion toggle
+  (`LinkCProject::with_state_deletion(StateDeletion::BetweenRuns)`, wired into the single `run`
+  seam) and three new `state_deletion.rs` gate tests (partition pool, keyed pool — the
+  criterion-1 proof, anti-vacuity), plus a `smelt-maintenance-testkit`-local unit test locking
+  the toggle itself. No family needed `.smelt/` continuity to stay equivalent — every admitted
+  case in both pools upholds its oracle with `.smelt/` deleted before every run, so no Blocked
+  entry was needed. All gates green (`verify-phase.sh`, `maintenance_conformance` full run,
+  `execute_parity`/`statement_parity`, `smelt-maintenance-testkit`, and a
+  `SMELT_STATE_DELETION_CASES=8` deep sweep). See `phases/09-summary.md`.
 
 ## Blocked
 
