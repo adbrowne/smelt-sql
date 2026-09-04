@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "stream-view"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone crate deliberately outside the main workspace (../../../Cargo.toml
+# only globs `crates/*`): this is a dev-loop display tool, not shipped
+# product code, and must not be pulled into the workspace's clippy/test/
+# hardening-budget gates. Build with:
+#   cargo build --release --manifest-path .claude/tools/stream-view/Cargo.toml
+
+[[bin]]
+name = "stream-view"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+nix = { version = "0.29", features = ["term", "process"] }
+
+[profile.release]
+opt-level = 1
+debug = false
