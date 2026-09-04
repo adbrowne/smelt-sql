@@ -47,7 +47,7 @@ says the rule holds.
 | 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | done |
 | 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | done |
 | 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | done |
-| 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | planned |
+| 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | done |
 | 5 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
 | 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
 
@@ -128,6 +128,18 @@ says the rule holds.
   but the implementation has always refused on an `OVER` anywhere in the model text. The wider rule
   is the sound one (a window over a delta-filtered CTE scope is not the window over history), so
   the spec row is corrected to match rather than the refusal narrowed.
+
+- 2026-09-05 (implement, phase 4): shipped — both `classify_cumulative` whole-SQL scans replaced
+  by `walk::first_scope_hit` over two new leaf classifiers (`scope_has_window_function`,
+  `scope_nondeterministic_fn`), built on a new shared `visit_own_region` (factored out of
+  `own_region_text`'s pruning traversal). `walk_coverage`'s `KNOWN_NONCOMPLIANT` is now empty and
+  `is_raw_scan_line` catches the case-folded-variable scan form. Spec-first correction:
+  `incremental_shapes.md` narrowed `KeyedForbidsWindowFunctions`/`KeyedForbidsNondeterministic` to
+  "the outer SELECT", but the implementation always refused on any scope — the spec text is
+  corrected to match rather than the refusal narrowed. Confirmed bare `CURRENT_TIMESTAMP` (no
+  parens) parses as a column reference, not a call, so the new `FUNCTION_CALL`-based classifier
+  is behaviour-preserving with no extra case needed (the old scan's pattern always required a
+  trailing `(` too). See `phases/04-summary.md`.
 
 ## Blocked
 

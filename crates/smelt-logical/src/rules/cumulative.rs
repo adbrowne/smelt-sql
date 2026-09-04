@@ -31,9 +31,11 @@ use crate::analysis::functional_dependency::{
     functional_dependency_verdict, FunctionalDependencyVerdict,
 };
 use crate::analysis::join_shape::JoinContext;
-use crate::analysis::monotonicity::NONDETERMINISTIC_FUNCTIONS;
 use crate::analysis::source_bounds::{resolve_single_anchor, AnchorAmbiguity};
-use crate::analysis::walk::{model_property_vector, PropertyVector};
+use crate::analysis::walk::{
+    first_scope_hit, model_property_vector, scope_has_window_function, scope_nondeterministic_fn,
+    PropertyVector,
+};
 use crate::analysis::{analyze_select, SelectItemKind};
 use smelt_types::SqlFunction;
 
@@ -1469,33 +1471,22 @@ pub fn classify_cumulative(
         }
     }
 
-    // Rule: no window functions in the outer body.
-    //
-    // Known walk-invariant violation: this is a raw whole-SQL text scan in an
-    // admission path, not a leaf classifier invoked by the shared
-    // composition walk (`docs/specs/architecture.md` §"Property composition
-    // walk rule"). It predates that walk and is excluded from the
-    // `walk_coverage` structural gate (`crates/smelt-logical/tests/walk_coverage.rs`'s
-    // `KNOWN_NONCOMPLIANT` skip-list) rather than mislabeled with a
-    // classification tag it doesn't actually carry. Migrating this admission
-    // check onto the walk is tracked as deferred work in
-    // `docs/plans/20260707-property-composition-walk.md` (see "Deferred
-    // during implementation") and `docs/specs/model_properties.md` §Known
-    // Divergences ("Heuristic text-scanning layer").
-    let upper_sql = sql.to_uppercase();
-    if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
+    // Rule: no window functions in any scope. Leaf classifier
+    // (`walk::scope_has_window_function`) folded across every scope of the
+    // model as parallel OR (`walk::first_scope_hit`) — see
+    // `docs/specs/model_properties.md` §"The composition walk" "Keyed-admission
+    // presence verdicts": the keyed state *is* the window, so an `OVER`
+    // anywhere in the scope tree refuses, not only in the outer body.
+    if first_scope_hit(sql, &|s| scope_has_window_function(s).then_some(())).is_some() {
         diagnostics.push(KeyedDiagnostic::KeyedForbidsWindowFunctions);
     }
 
-    // Rule: no non-deterministic functions in the outer body.
-    for nd in NONDETERMINISTIC_FUNCTIONS {
-        let pattern = format!("{}(", nd);
-        if upper_sql.contains(&pattern) {
-            diagnostics.push(KeyedDiagnostic::KeyedForbidsNondeterministic {
-                offending: nd.to_string(),
-            });
-            break;
-        }
+    // Rule: no non-deterministic functions in any scope. Same shared
+    // scope-presence fold, over `walk::scope_nondeterministic_fn`.
+    if let Some(offending) = first_scope_hit(sql, &scope_nondeterministic_fn) {
+        diagnostics.push(KeyedDiagnostic::KeyedForbidsNondeterministic {
+            offending: offending.to_string(),
+        });
     }
 
     // Rule: GROUP BY must not contain the driving source's partition column
@@ -2001,6 +1992,152 @@ GROUP BY device_id"#;
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
+    /// A string literal containing `OVER (` is not a window function — the
+    /// leaf classifier reads a parsed `WINDOW_SPEC` node, not a substring, so
+    /// the old whole-SQL scan's false positive is gone.
+    #[test]
+    fn over_inside_a_string_literal_does_not_forbid_windows() {
+        let sql = r#"SELECT
+    device_id,
+    'flagged OVER (x)' AS note,
+    COUNT(*) AS n
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        if let Err(diagnostics) = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+        {
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
+                "a string literal containing 'OVER (' must not trip the window-function \
+                 refusal; diagnostics: {:?}",
+                diagnostics
+            );
+        }
+    }
+
+    /// A window function tucked inside a CTE body still refuses — the walk
+    /// fold reaches every scope, not just the outer body.
+    #[test]
+    fn window_in_a_cte_still_forbids_windows() {
+        let sql = r#"WITH ranked AS (
+    SELECT
+        device_id,
+        ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY event_ts) AS rn
+    FROM smelt.silver.events_parsed
+)
+SELECT
+    device_id,
+    COUNT(*) AS n
+FROM ranked
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
+    /// A window function inside an expression-position (scalar) subquery
+    /// still refuses — the phase-1/2 walk nodes are covered by the same
+    /// scope-presence fold.
+    #[test]
+    fn window_in_an_expression_position_subquery_forbids_windows() {
+        let sql = r#"SELECT
+    device_id,
+    COUNT(*) AS n
+FROM smelt.silver.events_parsed
+WHERE event_ts > (
+    SELECT MAX(event_ts) OVER (ORDER BY event_ts)
+    FROM smelt.silver.events_parsed
+    LIMIT 1
+)
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
+    /// A function name that merely ends in a listed nondeterministic name
+    /// (`SNOW` vs `NOW`) must not trip the refusal — the leaf classifier
+    /// matches a parsed call name exactly, not a substring.
+    #[test]
+    fn nondeterministic_name_suffix_does_not_forbid_nondeterministic() {
+        let sql = r#"SELECT
+    device_id,
+    SNOW(event_ts) AS flake,
+    COUNT(*) AS n
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        if let Err(diagnostics) = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+        {
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
+                "'SNOW(...)' must not trip the NOW nondeterminism refusal; diagnostics: {:?}",
+                diagnostics
+            );
+        }
+    }
+
+    /// A non-deterministic call tucked inside a CTE body still refuses.
+    #[test]
+    fn random_in_a_cte_still_forbids_nondeterministic() {
+        let sql = r#"WITH tagged AS (
+    SELECT device_id, RANDOM() AS r FROM smelt.silver.events_parsed
+)
+SELECT
+    device_id,
+    COUNT(*) AS n
+FROM tagged
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
+    /// A shape the tree normalization cannot model (a `RECURSIVE` CTE) still
+    /// refuses on a window function — proving the CST flat-enumeration
+    /// fallback (`walk::first_scope_hit`) is load-bearing, mirroring
+    /// `model_has_trajectory_column`'s fallback.
+    #[test]
+    fn unparseable_scope_shape_still_refuses_via_flat_enumeration() {
+        let sql = r#"WITH RECURSIVE r AS (
+    SELECT device_id, 1 AS n FROM smelt.silver.events_parsed
+    UNION ALL
+    SELECT device_id, n + 1 FROM r WHERE n < 3
+)
+SELECT
+    device_id,
+    COUNT(*) OVER (PARTITION BY device_id) AS n
+FROM r
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
             "diagnostics: {:?}",
             err
         );

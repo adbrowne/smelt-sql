@@ -356,6 +356,15 @@ belonging to either property's own section:
   contributes no trajectory (only filters rows or orders them). Both folds are widening — the
   conservative direction is *more* skew / *more* trajectory — so admitting either only over-approximates,
   never under-derives.
+- **Keyed-admission presence verdicts (window-function presence, non-deterministic-call
+  presence).** The two `grain: key` admission checks (`incremental_shapes.md` §"Key-grain
+  codes" `KeyedForbidsWindowFunctions`/`KeyedForbidsNondeterministic`) compose as **parallel OR
+  over the whole children slice** (`ctes ++ inputs ++ expr_scopes`) — an `OVER` clause or a
+  non-deterministic call anywhere in the model's scope tree refuses, since the keyed state is
+  the window and row identity must not be time-of-run-dependent regardless of which scope the
+  construct sits in. Each node is classified over its own region only — the leaf classifier
+  never descends into a child that is itself a walk node — so a scope's contribution is counted
+  exactly once.
 
 ## Design
 
@@ -410,11 +419,6 @@ recorded here — history lives in git and §References → Plans.
   survives (its output feeds batch fields no execute path consumes, so it is inert today) and
   must be removed rather than wired further. Scheduled:
   `docs/outcomes/20260904-decision-residue/outcome.md`.
-- **`cumulative.rs`'s whole-SQL window-function admission scan is not yet classified onto the
-  walk** (`classify_cumulative`'s `OVER(`/`OVER (` check) — remaining debt for a future
-  property-discovery pass, not silently mislabeled. Tracked:
-  `docs/plans/20260707-property-composition-walk.md` (standing gate:
-  `cargo test -p smelt-logical --test walk_coverage`).
 - **`INTERSECT`/`EXCEPT` are unclassified for filter distribution** — their arm scopes are judged
   by the admission walk only; this is independent of the per-arm mutation-sensitivity combination
   rule (§"Per-column mutation-sensitivity / column provenance" "Across set-operation arms"), which

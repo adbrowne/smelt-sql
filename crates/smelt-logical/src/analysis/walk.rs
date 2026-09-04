@@ -1663,44 +1663,180 @@ fn collect_scope_region(
     (windows, has_limit, subqueries)
 }
 
-/// The raw text of one SELECT scope's own region: every token of the scope's
-/// node except the subtrees that are walk nodes of their own — its WITH
-/// clause (CTE bodies), derived-table bodies in FROM, and a direct-child
-/// SELECT (the next set-operation arm). Expression-position subqueries
-/// (`EXISTS (…)`, a scalar subquery) are NOT walk nodes, so their text stays
-/// in the owning scope's region — fail-closed coverage for content the tree
-/// normalization does not model. Join `ON` conditions live in the FROM
-/// clause and are kept (only the derived-table `SUBQUERY` bodies under a
-/// `TABLE_REF` are pruned).
-pub(crate) fn own_region_text(select: &SelectStmt) -> String {
-    use smelt_parser::syntax_kind::SyntaxNode;
+/// Visit every element (token or node) of one SELECT scope's own region:
+/// everything under the scope's node except the subtrees that are walk nodes
+/// of their own — its WITH clause (CTE bodies), a direct-child SELECT (the
+/// next set-operation arm), and every `SUBQUERY` (a FROM-position derived
+/// table's own, nested in `TABLE_REF`, or an expression-position scope's,
+/// `SelectNode::expr_scopes`) — each already folded through its own child
+/// verdict elsewhere in the walk, so visiting it here would double-count.
+/// Join `ON` conditions live in the FROM clause and are visited (only the
+/// derived-table `SUBQUERY` bodies under a `TABLE_REF` are pruned). Shared
+/// by [`own_region_text`] (collects token text) and every per-scope leaf
+/// classifier that instead needs to inspect the region's own *nodes*
+/// ([`scope_has_window_function`], [`scope_nondeterministic_fn`]).
+fn visit_own_region_elements(
+    node: &smelt_parser::syntax_kind::SyntaxNode,
+    root: &smelt_parser::syntax_kind::SyntaxNode,
+    visit: &mut dyn FnMut(&smelt_parser::syntax_kind::SyntaxElement),
+) {
     use smelt_parser::SyntaxKind::{SELECT_STMT, SUBQUERY, WITH_CLAUSE};
 
-    fn collect(node: &SyntaxNode, root: &SyntaxNode, out: &mut String) {
-        for element in node.children_with_tokens() {
-            if let Some(token) = element.as_token() {
-                out.push_str(token.text());
-            } else if let Some(child) = element.as_node() {
-                match child.kind() {
-                    WITH_CLAUSE => {}
-                    SELECT_STMT if node == root => {}
-                    // Every `SUBQUERY` — a FROM-position derived table's own
-                    // (nested in `TABLE_REF`) or an expression-position
-                    // scope's (`SelectNode::expr_scopes`) — is a walk node
-                    // of its own; including its text here would double-count
-                    // whatever it contributes once it is folded through its
-                    // own child verdict.
-                    SUBQUERY => {}
-                    _ => collect(child, root, out),
+    for element in node.children_with_tokens() {
+        if element.as_token().is_some() {
+            visit(&element);
+        } else if let Some(child) = element.as_node() {
+            match child.kind() {
+                WITH_CLAUSE => {}
+                SELECT_STMT if node == root => {}
+                SUBQUERY => {}
+                _ => {
+                    visit(&element);
+                    visit_own_region_elements(child, root, visit);
                 }
             }
         }
     }
+}
 
+/// The raw text of one SELECT scope's own region ([`visit_own_region_elements`]).
+pub(crate) fn own_region_text(select: &SelectStmt) -> String {
     let root = select.syntax();
     let mut out = String::new();
-    collect(root, root, &mut out);
+    visit_own_region_elements(root, root, &mut |element| {
+        if let Some(token) = element.as_token() {
+            out.push_str(token.text());
+        }
+    });
     out
+}
+
+/// Visit every *node* (not token) of one SELECT scope's own region
+/// ([`visit_own_region_elements`]) — the entry point a per-scope leaf
+/// classifier uses to inspect the region's own parsed shape (a `WINDOW_SPEC`,
+/// a `FUNCTION_CALL`, …) without re-parsing text and without descending into
+/// a child that is itself a walk node.
+pub(crate) fn visit_own_region(
+    select: &SelectStmt,
+    visit: &mut dyn FnMut(&smelt_parser::syntax_kind::SyntaxNode),
+) {
+    let root = select.syntax();
+    visit_own_region_elements(root, root, &mut |element| {
+        if let Some(node) = element.as_node() {
+            visit(node);
+        }
+    });
+}
+
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): whether one SELECT scope's own region ([`visit_own_region`])
+/// contains a window function (`OVER (...)`) — the keyed-admission rule
+/// `KeyedForbidsWindowFunctions` (`incremental_shapes.md` §"Key-grain
+/// codes"). Folded across the whole model by [`first_scope_hit`].
+pub(crate) fn scope_has_window_function(select: &SelectStmt) -> bool {
+    let mut found = false;
+    visit_own_region(select, &mut |node| {
+        if node.kind() == smelt_parser::SyntaxKind::WINDOW_SPEC {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): the first non-deterministic function call (by
+/// `monotonicity::classify_function_determinism`) in one SELECT scope's own
+/// region ([`visit_own_region`]), matched as a parsed `FUNCTION_CALL` node's
+/// name — never a substring — so `SNOW(x)` never matches `NOW` and a listed
+/// name inside a string literal never fires. Named for
+/// `KeyedForbidsNondeterministic` (`incremental_shapes.md` §"Key-grain
+/// codes"). Folded across the whole model by [`first_scope_hit`].
+pub(crate) fn scope_nondeterministic_fn(select: &SelectStmt) -> Option<&'static str> {
+    let mut hit: Option<&'static str> = None;
+    visit_own_region(select, &mut |node| {
+        if hit.is_some() || node.kind() != smelt_parser::SyntaxKind::FUNCTION_CALL {
+            return;
+        }
+        let Some(func) = smelt_parser::FunctionCall::cast(node.clone()) else {
+            return;
+        };
+        let Some(name) = func.name() else {
+            return;
+        };
+        if !matches!(
+            classify_function_determinism(&name),
+            FunctionDeterminism::Neither
+        ) {
+            hit = crate::analysis::monotonicity::NONDETERMINISTIC_FUNCTIONS
+                .iter()
+                .find(|nd| nd.eq_ignore_ascii_case(&name))
+                .copied();
+        }
+    });
+    hit
+}
+
+/// A `Transfer` folding a per-scope `Option<T>` classifier as parallel OR
+/// (first `Some` wins) over the whole children slice (`ctes ++ inputs ++
+/// expr_scopes`) — the composition shape `model_properties.md` §"The
+/// composition walk" gives the keyed-admission presence verdicts: an `OVER`
+/// or a non-deterministic call anywhere in the model's scope tree refuses,
+/// regardless of which scope it sits in. Each node's own contribution comes
+/// from `classify` invoked over that node's own region only ([`ExprScope`]
+/// children participate exactly like any other child — there is no
+/// join-sibling carve-out to protect here, since this fold has no sibling
+/// slack computation, only presence).
+struct ScopePresenceTransfer<'a, T> {
+    classify: &'a dyn Fn(&SelectStmt) -> Option<T>,
+}
+
+impl<T: Clone> Transfer for ScopePresenceTransfer<'_, T> {
+    type Verdict = Option<T>;
+
+    fn leaf(&self, _leaf: &LeafInput<'_>, _cx: &NodeCx) -> Option<T> {
+        None
+    }
+
+    fn operator(&self, op: &OpNode<'_>, children: &[Option<T>], _cx: &NodeCx) -> Option<T> {
+        match op {
+            OpNode::Unsupported { .. } | OpNode::SetOp(_) => {
+                children.iter().find_map(|c| c.clone())
+            }
+            OpNode::Select(sn) => children
+                .iter()
+                .find_map(|c| c.clone())
+                .or_else(|| (self.classify)(&sn.select)),
+        }
+    }
+}
+
+/// The shared scope-presence entry point: `classify` judges one SELECT
+/// scope's own region ([`visit_own_region`]) and the verdict is folded as
+/// parallel OR (first `Some`) over every scope of the model
+/// ([`ScopePresenceTransfer`]). For a tree the walk cannot normalize (no
+/// SELECT statement at all, or an `Unsupported` subtree), falls back to
+/// classifying every `SelectStmt` scope of the parsed CST directly — the
+/// same fallback shape [`model_partition_skew`] and
+/// `footprint::model_has_trajectory_column` use, so coverage never degrades
+/// below the flat enumeration.
+pub(crate) fn first_scope_hit<T: Clone>(
+    sql: &str,
+    classify: &dyn Fn(&SelectStmt) -> Option<T>,
+) -> Option<T> {
+    match QueryTree::from_sql(sql) {
+        Some(tree) if !tree.root.has_unsupported() => {
+            walk(&tree, &ScopePresenceTransfer { classify })
+        }
+        _ => {
+            let stripped = crate::types::Frontmatter::strip(sql);
+            let parse = smelt_parser::parse(stripped);
+            parse
+                .syntax()
+                .descendants()
+                .filter_map(SelectStmt::cast)
+                .find_map(|s| classify(&s))
+        }
+    }
 }
 
 /// Convenience entry: every batched-admission violation in a model's SQL,
