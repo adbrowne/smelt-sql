@@ -55,7 +55,7 @@ says the rule holds.
 | 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | done |
 | 5 | Declared-RI closure **and** declared unique-key facts reach every `JoinContext`-taking maintenance-cell route (model-edge cells, per-group repair admission); per-route fixtures + a structural empty-context check | done |
 | 6 | Retire the whole-SQL flat-scan bound floor in `derive_model_bounds` (its recorded justification — expression subqueries are not walk nodes — died in phase 1); correct the stale `has_unsupported` fallback comment | done |
-| 7 | Delete the divergence bullets this outcome closed; `/smelt:validate model_properties`; all gates green | pending |
+| 7 | Verify each of MP-03/05/11/13 against the code and delete only what is false (MP-13 stays — it now names a different, live gap); durable `walk_coverage` assertion against the closed claims; `/smelt:validate model_properties`; all gates green | planned |
 
 ## Decision log
 
@@ -213,6 +213,15 @@ says the rule holds.
   plus a `model_properties.md` §Known Divergences line. 22 pre-existing unit tests and 2 integration
   tests had fixture SQL that only ever passed because the floor was blind to table names; fixed to
   reference sources the way every real caller does. See `phases/06-summary.md`.
+
+- 2026-09-05 (plan, phase 7): no phase added or removed. Rewrote phase 7's row from "delete the
+  divergence bullets" to "verify each bullet and delete only what is false" — phase 6's summary
+  established that MP-13's bullet no longer states its original (lateness) claim but a different,
+  live gap owned by `docs/outcomes/20260904-decision-residue/outcome.md`, and MP-03's surviving
+  clauses are MP-02 / admission-width residue already under §Out of scope. Criterion 4's literal
+  "MP-13 deleted" is therefore satisfied by the retirement of its *claim*, not by removing a line
+  that documents live behaviour; deleting it would hide a real gap. Added a durable
+  `walk_coverage` assertion so the MP-11/MP-05 deletions cannot silently regress into the spec.
 
 ## Blocked
 
