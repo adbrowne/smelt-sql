@@ -1,7 +1,7 @@
 ---
 feature: state
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-04
 owners: [andrew]
 ---
 
@@ -29,7 +29,9 @@ smelt is a compiler and orchestrator, not a database — yet several features ne
 between runs: an incremental fold must know which deltas it already absorbed, `--resume` must
 know what the last run did, forward propagation must know what landed upstream. This spec
 answers one question for every such memory: **who is trusted to keep it, and what does smelt
-do when it isn't there?**
+do when it isn't there?** Other specs that touch state cite §"The residency rule",
+§"The degradation contract" or §Diagnostics by name rather than restating the residency class
+of a structure or the downgrade rule; this spec is the sole normative statement of both.
 
 The central rule is a two-class split:
 
@@ -281,7 +283,8 @@ lands.
   reconciliation entries, landed deltas, and schema snapshots on every run
   (`crates/smelt-runtime/src/execute.rs`) — `StateMode` is parsed (`smelt-core/src/config.rs`)
   but never consulted. The optionality rule is therefore entirely unimplemented: today every
-  project behaves as (at least) `intervals`. No tracking plan yet; this spec is the intent.
+  project behaves as (at least) `intervals`. Tracking:
+  `docs/outcomes/20260904-state-residency/outcome.md` (criterion 2).
 - **The reconciliation ledger is `.smelt/`-resident, violating the residency rule.** Both
   gradings live in `.smelt/reconciliation.json` (`crates/smelt-state/src/reconciliation.rs`)
   rather than in a backend table transactional with the fold. `run_state.md`
@@ -289,15 +292,18 @@ lands.
   already record the intended move; this spec makes the end-state normative. Until the move,
   the additive grade's never-fold-twice check rides on `.smelt/`, so deleting `.smelt/`
   today *can* affect correctness for keyed additive folds — the flagship gap this doctrine
-  exists to close.
+  exists to close. Tracking: `docs/outcomes/20260904-state-residency/outcome.md`
+  (criterion 1).
 - **No availability-resolution step exists in derivation.** Today an additive-graded cell on
   a backend without a ledger builder fails loudly (the ledger's warehouse substrate is
   DuckDB-only, `incremental_models.md` §Known Divergences) instead of downgrading with
-  `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented.
+  `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented. Tracking:
+  `docs/outcomes/20260904-state-residency/outcome.md` (criteria 3-5).
 - **`state.warehouse_tables` is unimplemented.** The key (§"Opting out of warehouse
   bookkeeping") is not parsed, and availability resolution — which it feeds — does not exist
   (previous bullet). Decision record:
-  `docs/research/20260816-open-questions-triage.md` item 11.
+  `docs/research/20260816-open-questions-triage.md` item 11. Tracking:
+  `docs/outcomes/20260904-state-residency/outcome.md` (criterion 5).
 
 ## Future Extensions
 

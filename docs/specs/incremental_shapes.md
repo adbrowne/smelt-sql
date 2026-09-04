@@ -709,10 +709,10 @@ bookkeeping, not refusal. The two grades differ in classification, not existence
 additive-fold model the frontier is a correctness structure and always exists; for a
 re-run-tolerant model it is bookkeeping, written automatically whenever the project's state
 mode supports it (`state.md`), so `--auto` staleness always has a record to consult. Where the
-backend offers no ledger substrate, the re-run-tolerant bookkeeping record is **not written**,
-and the omission is reported as a named fact on the run's reporter channel — never silently
-dropped; the additive grade has no such fallback and refuses the run outright there, since for
-it the frontier is a correctness structure. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
+backend offers no ledger substrate, availability resolution downgrades the cell to its
+recompute-family equivalent and records the downgrade as `MaintenanceStateDowngraded`
+(`state.md` §"The degradation contract") rather than skipping the bookkeeping write or refusing
+the run. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
 describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
 state-structure inventory"), distinct from the opt-in run-state observability surface
 (`run_state.md`), and the model realisation of `state.md` §"The residency rule".
@@ -1235,14 +1235,18 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is
-  transactional, and the ledger table itself exists, on DuckDB only (Open Question)** — the
-  default `Backend::fold_ledger_delta` and `Backend::execute_write_with_bookkeeping` are
-  best-effort check-then-act across separate statements; only the DuckDB backend overrides
-  either with a real transaction, and every merge-ledger record (additive `INSERT` or
-  re-run-tolerant `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB
-  window-forward keyed model writes no frontier record at all today — the re-run-tolerant grade
-  reports the omission on the run's reporter channel rather than dropping it silently; the
-  additive grade instead refuses the run.
+  transactional, and the ledger table itself exists, on DuckDB only.** The default
+  `Backend::fold_ledger_delta` and `Backend::execute_write_with_bookkeeping` are best-effort
+  check-then-act across separate statements; only the DuckDB backend overrides either with a
+  real transaction, and every merge-ledger record (additive `INSERT` or re-run-tolerant
+  `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB window-forward keyed
+  model writes no frontier record at all today. §"The transactional frontier write (merge
+  ledger)" now specifies the end-state (a recorded `MaintenanceStateDowngraded` downgrade for
+  both grades); today's implementation instead reports the omission on the run's reporter
+  channel for the re-run-tolerant grade (`RunReporter::state_structure_unavailable`, a stand-in
+  for the recorded downgrade, not the specified behaviour) and refuses the run outright for the
+  additive grade. Tracking: `docs/outcomes/20260904-state-residency/outcome.md`
+  (criterion 3).
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.
@@ -1373,8 +1377,9 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   `crates/smelt-backend/src/lib.rs` (`merge_into`, `Backend::execute_write_with_bookkeeping` —
   the transactional-write seam), impls in `crates/smelt-backend-duckdb` (the transactional
   override) `/-spark`; `crates/smelt-runtime/src/reporter.rs`
-  (`RunReporter::state_structure_unavailable` — the fail-loud report when a non-DuckDB backend
-  skips the idempotent-grade ledger record).
+  (`RunReporter::state_structure_unavailable` — today's stand-in for the recorded
+  `MaintenanceStateDowngraded` downgrade when a non-DuckDB backend skips the idempotent-grade
+  ledger record; see §Known Divergences).
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`);
   `crates/smelt-logical/tests/execution_postures.rs`; the keyed end-state-equivalence harness;
   `crates/smelt-runtime/tests/keyed_frontier_bookkeeping.rs`; `smelt-backend-duckdb` `merge_into`

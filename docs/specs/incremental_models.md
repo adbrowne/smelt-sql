@@ -2098,7 +2098,13 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   recompute family, explain-visible). A Spark-dialect ledger builder is deliberately deferred
   until a real Spark-targeted incremental workload demands one — on a ledger-less backend the
   recorded downgrade is the intended behaviour, not a stopgap (decision record:
-  `docs/research/20260816-open-questions-triage.md`).
+  `docs/research/20260816-open-questions-triage.md`). Tracking the availability-resolution step
+  that implements the downgrade: `docs/outcomes/20260904-state-residency/outcome.md`
+  (criteria 3-5).
+- **The reconciliation ledger is `.smelt/`-resident, not engine-resident.** `state.md`
+  §"The residency rule" is the normative statement (a backend table transactional with the
+  fold); tracking the move: `docs/outcomes/20260904-state-residency/outcome.md`
+  (criterion 1).
 - **Graph-layer gaps**: a `grain: key` model that also declares `timeseries:` but cannot
   establish key temporal locality still refuses (`MaintenanceGraphUnsupportedNode`) — key-
   temporal-locality establishment (§"Key temporal locality") is a separate proof from

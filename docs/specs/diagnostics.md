@@ -551,6 +551,15 @@ Owned by `docs/specs/incremental_models.md` §"The contract lattice".
 | `ContractRetainDepartedInvalid` | Error | A `contract.retain_departed` is neither a bare bool nor `{tombstone: <col>}`, is declared on anything other than a keyed shape consuming a mutable snapshot, or names a tombstone column absent from the model's output. |
 | `ContractDepartedKeyUnmarked` | Error | Runtime probe, `retain_departed` point only: a departed key survives the reconcile without its declared tombstone column marked; names the unmarked count. |
 
+### State residency
+
+Owned by `docs/specs/state.md` §Diagnostics.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `MaintenanceStateDowngraded` | Warning | Advisory, plan derivation: a cell's derived technique requires a state structure with no available realisation on the target backend (no ledger builder, `state.warehouse_tables: none`, or a posture that excludes it), and the cell was downgraded to its recompute-family equivalent. Names the cell, the original technique, the missing structure, and the reason (`state.md` §"The degradation contract"). Printed by `smelt explain`. |
+| `DeclaredContractRequiresState` | Error | Validation, fail-loud: a declared contract point whose semantics require a state structure (e.g. `contract.deferral`'s ledger-measured lag) is declared in a project whose posture, backend, or `state.warehouse_tables: none` opt-out cannot supply it. Names the declaration and the missing structure. |
+
 ---
 
 ## Known divergences
@@ -560,6 +569,13 @@ Owned by `docs/specs/incremental_models.md` §"The contract lattice".
 - **Three probe-obligation codes are specified and unimplemented.** `DeclaredMonotonicityViolated`, `DeclaredFunctionalDependencyViolated`, and `DeclaredBoundedDomainExceeded` (`model_properties.md` §"Probe obligation") have no `DiagnosticCode` variant yet, though their probe emitters (`emit_monotonicity_probe`, `emit_functional_dependency_probe`, `emit_bounded_domain_probe`) now exist in `crates/smelt-logical/src/maintenance/emit.rs`, proven against a real DuckDB — the coverage gate only asserts enum → catalogue coverage, so a catalogue row may precede its variant, the same posture as the `Maintenance*` rows above. No live run dispatches any of the three yet. Landing the variants and run-driver dispatch is `docs/outcomes/20260809-probe-backed-facts/outcome.md` phases 3-4. The append-only posture's probe (`emit_append_only_posture_probe`, also now built) reuses the already-catalogued `SourceMutationProfileViolated` rather than a new code.
 - **The write-addressing pin's equivalence-invariant factor is structural-facts-only.** `resolve_write_pin` implements the available-addressings rule's declared-facts, trigger, and backend-capability factors; the third factor (a per-cell equivalence proof beyond a pattern's declared required facts) is a caller-supplied hook that always accepts today (`incremental_models.md` §Known Divergences). Deepening it — e.g. threading P3 column-comparability into a `column`/`keyed_conditional` pin's own check — is later work.
 - **All five contract-lattice codes have live derivation or probe-emitter sites; `ContractDeferralExceeded` remains catalogue-ahead-of-variant.** `ContractFrozenHorizonInvalid`, `ContractDeferralInvalid`, and `ContractRetainDepartedInvalid` (`incremental_models.md` §"The contract lattice") each have a `DiagnosticCode` variant: `ContractFrozenHorizonInvalid` is raised at frontmatter-parse time (an unparseable `contract.frozen_horizon`) and by the grain-admissibility check (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon`); `ContractDeferralInvalid` is raised at frontmatter-parse time (an unparseable `contract.deferral`) and by the clock-admissibility check (`smelt_logical::contract::deferral::validate_deferral`); `ContractRetainDepartedInvalid` is raised at frontmatter-parse time (a malformed `contract.retain_departed` value) and by the posture/tombstone-column check (`smelt_logical::contract::retain_departed::validate`) — all three folded into `check_file_diagnostics`. `ContractLateArrivalOutsideHorizon`, `ContractDeferralExceeded`, and `ContractDepartedKeyUnmarked` are raised by `smelt_runtime`'s pure comparisons (`smelt_logical::contract::frozen_horizon::late_arrivals`, `smelt_logical::contract::deferral::deferral_violations`, `smelt_logical::contract::retain_departed::classify_key`), dispatched at the same pre-write site as the other declared-fact probes — runtime probe failures, like `SourceMutationProfileViolated` and `DeclaredMonotonicityViolated`, so none of the three has a `DiagnosticCode` variant (the coverage gate only asserts enum → catalogue coverage, not the reverse). `retain_departed`'s own probe (the reconcile anti-join, `smelt_logical::contract::retain_departed::emit_departed_key_probe`) is dispatched on every reconcile that suppresses the default point's delete and its outcome is recorded on the run manifest's `probes[]` (`run_state.md` §"Run manifest"). Landing: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`, `docs/outcomes/20260815-definition-delta-migrate/outcome.md`.
+- **Both state-residency codes are catalogue-ahead-of-variant.** `MaintenanceStateDowngraded`
+  and `DeclaredContractRequiresState` (`state.md` §Diagnostics) have no `DiagnosticCode`
+  variant yet — availability resolution, the derivation step that would raise them, does not
+  exist (`state.md` §Known Divergences). The coverage gate only asserts enum → catalogue
+  coverage, so the rows are admissible ahead of their variants, the same posture as the
+  `Maintenance*` and contract-lattice rows above. Landing:
+  `docs/outcomes/20260904-state-residency/outcome.md` (phases 4-5).
 
 ## Open questions
 

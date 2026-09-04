@@ -64,7 +64,7 @@ the invariant by deleting `.smelt/` between run steps.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | planned |
+| 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | done |
 | 2 | Engine-resident reconciliation ledger on DuckDB: table DDL/DML emitted from `smelt-logical`'s maintenance layer, fold + never-fold-twice check transactional with the write; delete `.smelt/reconciliation.json` | pending |
 | 3 | Statement-parity and keyed-frontier tests cover the ledger statements; conformance gate green with the file ledger gone | pending |
 | 4 | Availability resolution as a pure derivation step: `MaintenanceStateDowngraded` record on the cell, recompute-family downgrade, `state.warehouse_tables` parsed and fed in | pending |
@@ -96,6 +96,13 @@ the invariant by deleting `.smelt/` between run steps.
   catalogue rows may precede their `DiagnosticCode` variants (the posture already used by the
   `Maintenance*` and contract-lattice rows). Phase 1 adds the two rows now and records the
   catalogue-ahead-of-variant gap; phases 4-5 land the variants.
+- 2026-09-04 (phase 1 implement): landed the spec delta — `state.md` cross-reference sentence
+  and outcome-linked divergences, `run_state.md` de-restatement (layout tree, locking/atomic-write
+  sentences, Fixed-layout invariant, §"Relationship to the reconciliation ledger"),
+  `incremental_models.md`/`incremental_shapes.md` divergence-bullet updates, and the new
+  `diagnostics.md` §"State residency" catalogue section. Both `rg` sweeps and
+  `verify-phase.sh`/`diagnostics_catalogue` gates confirmed clean; see
+  `phases/01-summary.md`.
 
 ## Blocked
 
