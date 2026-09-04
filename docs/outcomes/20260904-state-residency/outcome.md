@@ -67,12 +67,13 @@ the invariant by deleting `.smelt/` between run steps.
 | 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | done |
 | 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | done |
 | 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | done |
-| 4 | Availability resolution as a pure derivation step: `MaintenanceStateDowngraded` record on the cell, recompute-family downgrade, `state.warehouse_tables` parsed and fed in | pending |
-| 5 | Surface: `smelt explain` prints downgrades; LSP/CLI warning; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
-| 6 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
-| 7 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
-| 8 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
-| 9 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
+| 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | planned |
+| 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | pending |
+| 6 | Surface: `smelt explain` prints downgrades (text + `--json`); LSP/CLI warning diagnostic; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
+| 7 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
+| 8 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
+| 9 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
+| 10 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
 
 ## Decision log
 
@@ -153,6 +154,23 @@ the invariant by deleting `.smelt/` between run steps.
   gates green (`verify-phase.sh`, `statement_parity`, `execute_parity`, `keyed_frontier_
   bookkeeping`, `maintenance_conformance`); `rg` confirms no production `reconciliation.json`
   reader/writer remains. See `phases/03-summary.md`.
+
+- 2026-09-04 (plan 04): phase 4 split in two. The old row bundled the pure derivation step with
+  "fed in", but the plan is derived at ~10 `smelt-db` `derive_model_maintenance_plan{,_with_edges}`
+  call sites in `smelt-runtime`'s maintenance driver, none of which carry backend/config facts
+  today — wiring is a distinct, mechanical, separately-reviewable change. New phase 4 = the pure
+  function plus the config key; new phase 5 = the wiring seam (which also retires phase 3's
+  documented non-DuckDB `state_structure_unavailable` skip). Old phases 5-9 renumber to 6-10; no
+  criterion-serving work left the outcome.
+- 2026-09-04 (plan 04): `state.warehouse_tables` is user-visible `smelt.yml` surface, so phase 4
+  carries a small spec delta after all — `smelt_yml.md` §"Top-level keys" row for `state` lists
+  only `mode:` today. `state.md` §"Opting out of warehouse bookkeeping" is already normative
+  (phase 1), so the delta is one table row pointing at it, not a new normative statement.
+- 2026-09-04 (plan 04): the downgrade record lands as a `state_downgrade: Option<StateDowngrade>`
+  field on `PlanCell` (spec: "recorded on the cell"), which costs a mechanical
+  `state_downgrade: None` in the ~38 existing `PlanCell` literals. A side-table on
+  `MaintenancePlan` was rejected: it would let a consumer read a cell's technique without its
+  downgrade, which is exactly the silent substitution §"The degradation contract" forbids.
 
 ## Blocked
 
