@@ -49,7 +49,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | planned |
+| 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | done |
 | 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | pending |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | pending |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment; remove the TODO note | pending |
@@ -70,6 +70,10 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   stale-citation list, so phase 2 would not have caught it.
 - 2026-09-04 (plan 01): `.claude/active-plan` staleness recorded under Out of scope rather than
   given a phase row — see the rationale there.
+- 2026-09-04 (implement 01): phase 1 done — banner added to the 2026-08-16 handoff,
+  `run_state.md` re-pointed, backlog order confirmed unchanged, `verify-phase.sh` green. The
+  dangling-outcome sweep's literal directory-arg form also flags `.claude/usage-log.jsonl` (a
+  gitignored local log); restricting to `git ls-files` is the correct read and is clean.
 
 ## Blocked
 

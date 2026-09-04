@@ -1,5 +1,14 @@
 # Handoff: the delta-signature closure programme (2026-08-16)
 
+> **Superseded (2026-09-04).** The programme below was replanned in flight and did not run as
+> written: the 2026-08-15 queue it retired was in fact executed
+> (`20260815-definition-delta-migrate` and `20260815-partition-grain-residue` are `done`,
+> `20260815-keyed-grain-residue` is `blocked`), and outcomes 2–6 of §The programme were never
+> scaffolded. The current statement of the programme is
+> `docs/research/20260904-incremental-state-review.md` §"Recommended next sequence" plus
+> `.claude/outcome-backlog`. Read everything below as a historical record of the 2026-08-16
+> replanning decision, not as the live queue.
+
 **For:** a fresh session picking up the replanning of the incremental-spec implementation work.
 **Branch context:** written on `spec-redraft-incremental-models` (worktree `incremental3`), 308 commits ahead of `main`, main has nothing this branch lacks.
 **Status:** programme design agreed with Andrew in-session; **nothing executed yet**. The concrete actions in §Immediate actions are all still to do.
@@ -63,6 +72,8 @@ Andrew's three shaping answers (asked and answered 2026-08-16):
 
 ## The programme
 
+*Superseded — see the banner.*
+
 Sequenced outcomes, one coherent capability each, success criteria drawn verbatim from the
 Known Divergences bullets each closes, conformance-gate-backed, scaffolded via
 `/smelt:outcome`, run by the outcome loop:
@@ -101,6 +112,8 @@ granularities, self-referential keyed models. Each decision is a spec diff first
 departure first) if the triage wants a starting order.
 
 ## Immediate actions (none done yet)
+
+*Superseded — see the banner.*
 
 1. Open the merge PR `spec-redraft-incremental-models` → `main`; let standing gates run;
    merge.
