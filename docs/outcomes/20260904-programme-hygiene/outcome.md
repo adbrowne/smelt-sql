@@ -52,7 +52,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | done |
 | 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | done |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | done |
-| 4 | Correct the `daily_events_enriched.sql` fixture comment; remove the TODO note | pending |
+| 4 | Correct the `daily_events_enriched.sql` fixture comment and the docs-site transcript that repeats its claim; remove the TODO note | planned |
 | 5 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
 
 ## Decision log
@@ -100,6 +100,17 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 - 2026-09-04 (plan 03): no phase reshape — the phase-02 summary's one open item (the dangling
   `§"What the composed shape uniquely enables"` citations) is outside this outcome's success
   criteria and is already recorded as a fresh `docs/TODO.md` bullet.
+- 2026-09-04 (plan 04): phase 4 widened (not reshaped) to include
+  `docs-site/docs/guide/incremental-models.md` §"Enrichment joins and dimension updates", whose
+  `smelt explain daily_events_enriched` transcript prints `ColumnScopedMerge` for the `{user_name}`
+  cell that model does not derive. It is the identical false claim about the identical model, one
+  layer up, so leaving it would defeat criterion 5's point (one consistent record) while satisfying
+  its letter. The docs-site delta-signature pass stays out of scope as declared.
+- 2026-09-04 (plan 04): technique confirmed empirically at plan time —
+  `smelt explain daily_events_enriched` reports `RecomputeRegion`/`DeleteInsert`/`WholeRow` for all
+  four cells. No pinning cargo test is added: the outcome is docs-only and this fixture's technique
+  is already the subject of `docs/TODO.md`'s reachability entry, so a test here would duplicate a
+  tracked gap rather than close one.
 - 2026-09-04 (implement 03): phase 3 done — all three owner-spec sentences landed verbatim as
   the plan specified, the `state.md` divergence bullet deleted, all five `rg` checks green,
   `verify-phase.sh` green. No new gaps surfaced.
