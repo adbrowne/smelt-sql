@@ -349,11 +349,12 @@ pub use queries::project::{
     emitted_models, evaluate_generator, generator_files, models_all, models_all_with_generators,
     models_with_tag, project_active_backends, project_address_collisions,
     project_emitted_name_collisions, project_paths, project_seeds, project_source_diagnostics,
-    project_sources, project_unstable_schema, resolve_seed_or_source_path, smelt_yml_vars_query,
-    sorted_workspace_files, sources_all, sources_config, sources_type_errors, sources_with_tag,
-    sources_yaml_error, AddressCollisionDiagnostic, EmissionBodyAnalysis, EmittedModelDef,
-    EmittedModelsResult, EmittedNameCollisionDiagnostic, EvaluatedGenerator, SourceDiagnostic,
-    SourceTypeError, YamlParseError,
+    project_sources, project_unstable_schema, project_warehouse_tables,
+    resolve_seed_or_source_path, smelt_yml_vars_query, sorted_workspace_files, sources_all,
+    sources_config, sources_type_errors, sources_with_tag, sources_yaml_error,
+    AddressCollisionDiagnostic, EmissionBodyAnalysis, EmittedModelDef, EmittedModelsResult,
+    EmittedNameCollisionDiagnostic, EvaluatedGenerator, SourceDiagnostic, SourceTypeError,
+    YamlParseError,
 };
 pub use queries::schema::{
     add_source_info_to_type_context, apply_outer_join_nullability, available_columns,
@@ -1896,6 +1897,15 @@ pub fn maintenance_plan(
         .and_then(|p| project_active_backends(db, p))
         .unwrap_or_default();
 
+    // `state.warehouse_tables` (`docs/specs/state.md` §"Opting out of
+    // warehouse bookkeeping") — the other availability-resolution input,
+    // threaded alongside `active_backends` above. Absent/unparseable config
+    // resolves to the default posture (`Allowed`), same as an absent
+    // `state:` block.
+    let warehouse_tables = project
+        .and_then(|p| project_warehouse_tables(db, p))
+        .unwrap_or_default();
+
     // The deployed-schema snapshot (`docs/specs/definition_deltas.md`
     // §"Detection"): a Salsa world-fact input the CLI and LSP both register
     // at workspace load (`workspace_ingest::register_deployed_schemas_from_disk`).
@@ -1939,6 +1949,7 @@ pub fn maintenance_plan(
         project_scan_bounds.as_ref(),
         &extra_model_sources,
         &active_backends,
+        warehouse_tables,
         &deployed_column_names,
         deployed_model_sql.as_deref(),
         deployed_partition_column.as_deref(),
@@ -3021,6 +3032,34 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message,
                 range: rowan::TextRange::empty(body_start),
                 code: Some(code),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for downgrade in &plan_diags.state_downgrades {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "MaintenanceStateDowngraded: cell {} downgraded from {} to its \
+                     recompute-family equivalent — {}",
+                    downgrade.cell, downgrade.original_technique, downgrade.reason
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceStateDowngraded),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for refusal in &plan_diags.contract_state_refusals {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "DeclaredContractRequiresState: {} requires the {}, which is unavailable \
+                     on backend '{}'",
+                    refusal.declaration, refusal.missing_structure, refusal.backend
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::DeclaredContractRequiresState),
                 data: None,
             })
             .accumulate(db);

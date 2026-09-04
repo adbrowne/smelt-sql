@@ -60,36 +60,14 @@ cargo run --bin smelt -- run --project-dir examples/timeseries --verbose
 cargo run --bin smelt -- run --project-dir examples/timeseries --dry-run
 ```
 
-### Spark (with feature flag)
-
-**Note**: The Spark backend is currently a stub implementation for architectural validation.
-
-```bash
-# Build with Spark support
-cargo build --features spark
-
-# Select Spark target (will show backend selection)
-cargo run --features spark --bin smelt -- run --project-dir examples/timeseries --target spark --dry-run
-```
-
-To use Spark in production, you would need:
-1. A running Spark Connect server (Spark 3.4+ with Connect enabled)
-2. Source tables created in Spark
-3. Real Spark Connect implementation (current version is stub)
-
 ## Configuration
 
 ### smelt.yml
 
-The project configuration defines two targets:
+The project configuration defines one target:
 
 - **dev** (DuckDB): Local development using DuckDB
   - Database: `target/dev.duckdb`
-  - Schema: `main`
-
-- **spark** (Spark Connect): For Spark execution
-  - Connect URL: `sc://localhost:15002`
-  - Catalog: `spark_catalog`
   - Schema: `main`
 
 ### sources.yml
@@ -138,7 +116,7 @@ Summary
 | Purpose | Testing & demonstration | Editor integration testing |
 | Models | All working | May include broken models |
 | Source tables | Defined in sources.yml | Uses SQL setup script |
-| Backend testing | DuckDB + Spark (stub) | DuckDB only |
+| Backend testing | DuckDB | DuckDB only |
 | Use case | CLI testing, feature demos | LSP testing, parsing edge cases |
 
 ## Notes
@@ -156,5 +134,3 @@ Summary
   ```
 
 - **Source table setup**: Run `setup_sources.sql` before first execution to populate raw source tables in DuckDB.
-
-- **Spark backend**: Currently a stub implementation. Shows correct backend selection but execution will fail until real Spark Connect integration is implemented.

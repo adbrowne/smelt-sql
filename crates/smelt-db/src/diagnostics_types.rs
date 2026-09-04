@@ -1014,6 +1014,25 @@ pub enum DiagnosticCode {
     /// `refresh: materialized_view` or DAG composition. Anchored at the
     /// model SQL body start.
     KeyedRetractableContribution,
+
+    /// Emitted (Warning) when availability resolution
+    /// (`smelt_logical::maintenance::availability::resolve_availability`)
+    /// downgrades a plan cell's technique to its recompute-family
+    /// equivalent because the state structure it needs has no available
+    /// realisation on a declared backend — no ledger builder,
+    /// `state.warehouse_tables: none`, or a posture that excludes it
+    /// (`docs/specs/state.md` §"The degradation contract",
+    /// §Diagnostics). Names the cell, the original technique, the missing
+    /// structure, and the backend the downgrade was observed against.
+    /// Printed by `smelt explain`. Anchored at the model SQL body start.
+    MaintenanceStateDowngraded,
+    /// Emitted (Error) when a declared contract-lattice point whose
+    /// semantics require a state structure (e.g. `contract.deferral`'s
+    /// ledger-measured lag) is declared in a project whose posture,
+    /// backend, or `state.warehouse_tables: none` opt-out cannot supply it
+    /// (`docs/specs/state.md` §Diagnostics). Names the declaration and the
+    /// missing structure. Anchored at the model SQL body start.
+    DeclaredContractRequiresState,
 }
 
 /// Structured metadata attached to diagnostics for code actions

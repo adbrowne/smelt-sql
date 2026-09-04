@@ -12,12 +12,6 @@ targets:
     database: target/dev.duckdb
     schema: main
 
-  spark:
-    type: spark
-    connect_url: sc://localhost:15002
-    catalog: spark_catalog
-    schema: main
-
 default_materialization: view
 
 models:

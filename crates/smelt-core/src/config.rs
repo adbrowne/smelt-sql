@@ -1306,6 +1306,19 @@ pub fn parse_active_backends(text: &str) -> Option<Vec<String>> {
     Some(backends)
 }
 
+/// Parse `state.warehouse_tables` from the text of a `smelt.yml` file. Pure
+/// function — takes the text rather than a path, same posture as
+/// [`parse_active_backends`]. Returns `None` on empty or unparseable text;
+/// an absent `state.warehouse_tables` key resolves to
+/// [`WarehouseTables::Allowed`] via `Config`'s own `#[serde(default)]`.
+pub fn parse_warehouse_tables(text: &str) -> Option<WarehouseTables> {
+    if text.is_empty() {
+        return None;
+    }
+    let config = serde_yaml::from_str::<Config>(text).ok()?;
+    Some(config.state.warehouse_tables)
+}
+
 /// Resolve `${VAR}` environment-variable references in raw `smelt.yml` text,
 /// before it is parsed into a typed `Config` (`smelt_yml.md` §Semantics item
 /// 8 — interpolation runs exactly once, in the config-load pass, before any

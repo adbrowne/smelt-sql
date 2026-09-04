@@ -334,9 +334,44 @@ pub fn settled_cutoff(point: &ContractPoint, input_frontier: i64) -> Option<i64>
     }
 }
 
+/// The state structure `point`'s semantics require to be correct
+/// (`state.md` §Diagnostics `DeclaredContractRequiresState`) — part of the
+/// point's own definition, per the contract-lattice point single-ownership
+/// invariant (`CLAUDE.md` §"Contract-lattice point single ownership"): a
+/// caller must never decide this ad hoc. `deferral`'s settled cutoff is
+/// measured against the reconciliation ledger's frontier record
+/// (`run_state.md` §"Relationship to the reconciliation ledger"); the
+/// default point and `frozen_horizon` need no state structure at all.
+/// Exhaustive over [`ContractPoint`]: a new point is a compile error here,
+/// not a silently-unclassified one.
+pub fn required_state_structure(
+    point: &ContractPoint,
+) -> Option<crate::maintenance::availability::StateStructure> {
+    match point {
+        ContractPoint::Deferral { .. } => {
+            Some(crate::maintenance::availability::StateStructure::ReconciliationLedger)
+        }
+        ContractPoint::Default | ContractPoint::FrozenHorizon { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod point_tests {
     use super::*;
+    use crate::maintenance::availability::StateStructure;
+
+    #[test]
+    fn deferral_requires_the_reconciliation_ledger() {
+        assert_eq!(
+            required_state_structure(&ContractPoint::Deferral { d: 6 }),
+            Some(StateStructure::ReconciliationLedger)
+        );
+        assert_eq!(required_state_structure(&ContractPoint::Default), None);
+        assert_eq!(
+            required_state_structure(&ContractPoint::FrozenHorizon { h: 90 }),
+            None
+        );
+    }
 
     #[test]
     fn default_point_obligation_is_exact() {

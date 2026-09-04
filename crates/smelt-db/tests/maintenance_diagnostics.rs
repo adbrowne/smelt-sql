@@ -2269,3 +2269,312 @@ FROM smelt.sources.raw_events
         smelt_logical::maintenance::Technique::DeleteInsert
     );
 }
+
+// ============================================================================
+// State residency (phase 7, docs/outcomes/20260904-state-residency):
+// `MaintenanceStateDowngraded` and `DeclaredContractRequiresState`, both
+// folded from availability resolution
+// (`smelt_logical::maintenance::availability::resolve_availability`) by the
+// pure `maintenance_plan_diagnostics`.
+// ============================================================================
+
+const STATE_RESIDENCY_EVENTS_SOURCE: &str = r#"
+description: Events, append-only, clocked on event_date.
+mutation_profile: append_only
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+columns:
+  - { name: device_id, type: INTEGER, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+
+/// A `grain: key` model whose only fold column (`AVG`) admits
+/// `Technique::KeyedFold` — the same fixture shape
+/// `avg_model_derives_fold_spec_and_keyed_fold_cell` uses at the pure-function
+/// layer, here driven through the real Salsa workspace so it also exercises
+/// `project_active_backends`/`project_warehouse_tables`.
+const KEYED_FOLD_MODEL: &str = r#"---
+materialization: table
+refresh: incremental
+grain: key
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
+---
+SELECT device_id, AVG(amount) AS avg_amount
+FROM smelt.sources.events
+GROUP BY device_id
+"#;
+
+fn smelt_yml_single_target(target_type: &str) -> String {
+    format!(
+        r#"
+name: state_residency_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: {target_type}
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+"#
+    )
+}
+
+/// A `grain: key` fold cell (`Technique::KeyedFold`, needs the
+/// reconciliation ledger) on a project whose only declared target is Spark —
+/// no ledger builder — gets a Warning `MaintenanceStateDowngraded` naming
+/// its creation cell (`NewData`). The plan also derives a companion
+/// `UpstreamMutation` cell over the same fold column, which needs the
+/// (also-DuckDB-only) transactional merge ledger and downgrades
+/// independently — both are expected, not just the fold cell.
+#[test]
+fn keyed_fold_on_a_spark_target_warns_state_downgraded() {
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("spark")),
+            ("models/sources/events.yml", STATE_RESIDENCY_EVENTS_SOURCE),
+            ("models/device_avg.sql", KEYED_FOLD_MODEL),
+        ],
+        "device_avg",
+    );
+    let downgrades: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceStateDowngraded))
+        .collect();
+    assert!(
+        downgrades
+            .iter()
+            .any(|d| d.message.contains("NewData") && d.message.contains("KeyedFold")),
+        "expected a MaintenanceStateDowngraded naming the KeyedFold creation cell, got {diags:?}"
+    );
+    assert!(
+        downgrades
+            .iter()
+            .all(|d| d.severity == smelt_db::DiagnosticSeverity::Warning),
+        "MaintenanceStateDowngraded must be a Warning, never blocking"
+    );
+}
+
+/// The same model on a DuckDB-only project — the reconciliation ledger is
+/// realisable — emits no downgrade at all.
+#[test]
+fn keyed_fold_on_duckdb_emits_no_state_downgrade() {
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("duckdb")),
+            ("models/sources/events.yml", STATE_RESIDENCY_EVENTS_SOURCE),
+            ("models/device_avg.sql", KEYED_FOLD_MODEL),
+        ],
+        "device_avg",
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::MaintenanceStateDowngraded)),
+        "DuckDB realises the reconciliation ledger; expected no downgrade, got {diags:?}"
+    );
+}
+
+/// `state.warehouse_tables: none` forces the downgrade even on DuckDB — the
+/// opt-out overrides what the backend could otherwise realise.
+#[test]
+fn warehouse_tables_none_warns_state_downgraded_on_duckdb() {
+    let smelt_yml = format!(
+        "{}\nstate:\n  warehouse_tables: none\n",
+        smelt_yml_single_target("duckdb")
+    );
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml),
+            ("models/sources/events.yml", STATE_RESIDENCY_EVENTS_SOURCE),
+            ("models/device_avg.sql", KEYED_FOLD_MODEL),
+        ],
+        "device_avg",
+    );
+    let downgrades: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceStateDowngraded))
+        .collect();
+    assert!(
+        downgrades
+            .iter()
+            .any(|d| d.message.contains("NewData") && d.message.contains("KeyedFold")),
+        "warehouse_tables: none must force the downgrade even on DuckDB, got {diags:?}"
+    );
+}
+
+/// `MaintenanceStateDowngraded`'s Warning severity never blocks the plan —
+/// the downgraded cell still resolves (no accompanying
+/// `MaintenanceNoAdmissibleTechnique`/`GrainAssertionMismatch` refusal).
+#[test]
+fn state_downgrade_warning_never_blocks() {
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("spark")),
+            ("models/sources/events.yml", STATE_RESIDENCY_EVENTS_SOURCE),
+            ("models/device_avg.sql", KEYED_FOLD_MODEL),
+        ],
+        "device_avg",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::MaintenanceStateDowngraded)),
+        "expected the downgrade to still fire, got {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != smelt_db::DiagnosticSeverity::Error),
+        "a state downgrade must never accompany an Error-severity refusal, got {diags:?}"
+    );
+}
+
+const CONTRACT_ORDERS_SOURCE: &str = r#"
+description: Orders, append-only, clocked on order_date.
+mutation_profile: append_only
+columns:
+  - { name: order_date, type: DATE, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+
+/// A model-level `contract.deferral` declaration on a Spark-only target (no
+/// reconciliation ledger) gets one Error `DeclaredContractRequiresState`
+/// naming the declaration and the missing structure.
+#[test]
+fn deferral_without_a_ledger_refuses_declared_contract_requires_state() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  deferral: 1 day
+---
+SELECT order_date, SUM(amount) AS total
+FROM smelt.sources.orders
+GROUP BY order_date
+"#;
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("spark")),
+            ("models/sources/orders.yml", CONTRACT_ORDERS_SOURCE),
+            ("models/order_totals.sql", model),
+        ],
+        "order_totals",
+    );
+    let refusals: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one DeclaredContractRequiresState, got {diags:?}"
+    );
+    assert_eq!(
+        refusals[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "DeclaredContractRequiresState must be an Error"
+    );
+    assert!(
+        refusals[0].message.contains("contract.deferral"),
+        "message must name the declaration, got: {}",
+        refusals[0].message
+    );
+}
+
+/// Same refusal, declared via `contract.cells[].deferral` instead of the
+/// model-level default.
+#[test]
+fn cell_level_deferral_without_a_ledger_refuses() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  cells:
+    - columns: [total]
+      on: orders
+      deferral: 1 day
+---
+SELECT order_date, SUM(amount) AS total
+FROM smelt.sources.orders
+GROUP BY order_date
+"#;
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("spark")),
+            ("models/sources/orders.yml", CONTRACT_ORDERS_SOURCE),
+            ("models/order_totals.sql", model),
+        ],
+        "order_totals",
+    );
+    let refusals: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one DeclaredContractRequiresState, got {diags:?}"
+    );
+    assert!(
+        refusals[0].message.contains("contract.cells"),
+        "message must name the cell-level declaration, got: {}",
+        refusals[0].message
+    );
+}
+
+/// The same declaration on a DuckDB-only project (default
+/// `warehouse_tables: allowed`) is admitted — no refusal.
+#[test]
+fn deferral_on_duckdb_is_admitted() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  deferral: 1 day
+---
+SELECT order_date, SUM(amount) AS total
+FROM smelt.sources.orders
+GROUP BY order_date
+"#;
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("duckdb")),
+            ("models/sources/orders.yml", CONTRACT_ORDERS_SOURCE),
+            ("models/order_totals.sql", model),
+        ],
+        "order_totals",
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::DeclaredContractRequiresState)),
+        "DuckDB realises the reconciliation ledger; expected no refusal, got {diags:?}"
+    );
+}

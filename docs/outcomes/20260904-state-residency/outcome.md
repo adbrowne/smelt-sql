@@ -76,7 +76,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | done |
 | 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | done |
 | 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | done |
-| 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | planned |
+| 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | done |
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
 | 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
@@ -271,6 +271,16 @@ the invariant by deleting `.smelt/` between run steps.
 - 2026-09-05 (plan 07): "which state structure does a contract point require" lands as a pure
   function in `smelt-logical`'s `contract` module, exhaustive over `ContractPoint`, per the
   contract-lattice point single-ownership invariant — a caller must never decide this ad hoc.
+
+- 2026-09-05 (phase 7 implement): landed both `DiagnosticCode` variants
+  (`MaintenanceStateDowngraded` Warning, `DeclaredContractRequiresState` Error), the pure
+  `contract::required_state_structure`, `parse_warehouse_tables`/`project_warehouse_tables`, and
+  `backend_dialect_for`, all folded into `maintenance_plan_diagnostics`. Both catalogue-ahead-of-
+  variant divergence bullets deleted (`diagnostics.md`, `state.md`). Real availability resolution
+  against `examples/timeseries`'s declared backends surfaced a genuine gap: an illustrative
+  `spark` target in that example's `smelt.yml` (never exercised by any test) made three real
+  models correctly downgrade/refuse — removed the target and the matching stale README sections
+  rather than suppress a correct new diagnostic. All gates green; see `phases/07-summary.md`.
 
 ## Blocked
 

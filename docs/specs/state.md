@@ -294,14 +294,9 @@ lands.
   today *can* affect correctness for keyed additive folds — the flagship gap this doctrine
   exists to close. Tracking: `docs/outcomes/20260904-state-residency/outcome.md`
   (criterion 1).
-- **No availability-resolution step exists in derivation.** Today an additive-graded cell on
-  a backend without a ledger builder fails loudly (the ledger's warehouse substrate is
-  DuckDB-only, `incremental_models.md` §Known Divergences) instead of downgrading with
-  `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented. Tracking:
-  `docs/outcomes/20260904-state-residency/outcome.md` (criteria 3-5).
 - **`state.warehouse_tables` is unimplemented.** The key (§"Opting out of warehouse
-  bookkeeping") is not parsed, and availability resolution — which it feeds — does not exist
-  (previous bullet). Decision record:
+  bookkeeping") is not parsed, and availability resolution — which it feeds — is described in
+  §"The degradation contract" above. Decision record:
   `docs/research/20260816-open-questions-triage.md` item 11. Tracking:
   `docs/outcomes/20260904-state-residency/outcome.md` (criterion 5).
 

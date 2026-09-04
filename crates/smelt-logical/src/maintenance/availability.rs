@@ -11,10 +11,13 @@
 //! technique that preserves the equivalence invariant, recording the
 //! downgrade on the cell rather than silently substituting it.
 //!
-//! No consumer calls [`resolve_availability`] yet — that is a later phase's
-//! wiring seam (`docs/outcomes/20260904-state-residency/outcome.md` phase 5).
-//! Ideal derivation itself never consults availability: early resolution
-//! would violate the degradation contract's two-step shape.
+//! `smelt-runtime`'s maintenance driver, `smelt explain`, and `smelt-db`'s
+//! own `maintenance_plan_diagnostics` (the `MaintenanceStateDowngraded` /
+//! `DeclaredContractRequiresState` diagnostics) each call
+//! [`resolve_availability`] at their own seam, against their own target
+//! dialect(s) — never against the ideal-derivation plan itself. Ideal
+//! derivation itself never consults availability: early resolution would
+//! violate the degradation contract's two-step shape.
 
 use std::collections::BTreeSet;
 

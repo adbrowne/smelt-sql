@@ -101,6 +101,23 @@ pub fn project_active_backends(
     smelt_core::parse_active_backends(project.smelt_yml_text(db))
 }
 
+/// Return the project's `state.warehouse_tables` posture
+/// (`docs/specs/state.md` §"Opting out of warehouse bookkeeping") — the
+/// availability-resolution input `maintenance_plan_diagnostics` folds
+/// alongside [`project_active_backends`] into the two state-residency
+/// diagnostics. `None` means the workspace config could not be parsed;
+/// callers treat that the same as `project_active_backends`' own `None`
+/// case.
+///
+/// Reads from `ProjectInput::smelt_yml_text`, which is tracked by Salsa.
+#[salsa::tracked]
+pub fn project_warehouse_tables(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Option<smelt_core::WarehouseTables> {
+    smelt_core::parse_warehouse_tables(project.smelt_yml_text(db))
+}
+
 /// Return the `vars:` block from `smelt.yml` as a `BTreeMap<String, serde_yaml::Value>`.
 ///
 /// Returns an empty map when the `vars:` key is absent or the YAML cannot be
