@@ -24,13 +24,11 @@ committed; these are the loose ends the redraft deliberately left for follow-up 
   against the restated landed-vs-processed form (`incremental_models.md` §"The contract
   lattice") — the previous spec text was vacuous and a comparator built from it checks
   nothing.
-- **Stale citations flagged by the sweep** (could not be confidently re-pointed; each names a
-  heading that no longer exists anywhere): `materialized_view.md` §"The composition contract"
-  (×2), `run_state.md` §"Failure mode", `timeseries.md` §"Granularity values", `models.md` +
-  `rules/incremental.rs:708` + one e2e test §"Non-determinism and the payload rule",
-  `maintenance_conformance/gate.rs` §"Per-slice…" (×2), `propagate.rs` §"Row movement",
-  `propagation.rs` §"The clamp both directions", `refresh_axis.rs` §"The declared shape axis".
-  These pre-date the redraft; fix opportunistically.
+- **Dangling "What the composed shape uniquely enables" citations**: `docs/specs/models.md:134`
+  and `crates/smelt-logical/src/maintenance/propagate.rs` (two sites) cite this heading in
+  `incremental_models.md`/`incremental_shapes.md`; it does not exist in either spec today. Not
+  covered by the 2026-09-04 programme-hygiene sweep (it wasn't on that sweep's site list); needs
+  its own re-point-or-drop pass.
 
 
 ## `ColumnScopedMerge` reachability gap on membership-sensitive `grain: partition` cells — RESOLVED (2026-08-09)

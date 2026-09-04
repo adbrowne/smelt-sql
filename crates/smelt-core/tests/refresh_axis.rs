@@ -448,7 +448,7 @@ fn refresh_on_ephemeral_is_error() {
 // ── S1: top-level unique_key: is the declared identity fact ──────────────────
 //
 // Spec oracle: `docs/specs/models.md` §"Refresh axis", §"The Relation
-// Contract"; `docs/specs/incremental_models.md` §"The declared shape axis".
+// Contract"; `docs/specs/incremental_models.md` §"The declared shape".
 
 /// Top-level `unique_key:` parses in `.sql` frontmatter — both the list form
 /// and the single-string sugar form — and via a `smelt.yml` model override,

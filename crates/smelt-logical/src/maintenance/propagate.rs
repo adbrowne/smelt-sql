@@ -408,8 +408,9 @@ fn parse_iso_day(s: &str) -> Option<i64> {
 ///   partition that key's row lives in; there is no "could also be
 ///   elsewhere" case to widen for.
 /// - **Both route-3 sub-routes widen** by `r` plus lateness/skew margins
-///   (`incremental_models.md` §"Row movement", §"What the composed shape
-///   uniquely enables"): a key that most recently touched partition `p`
+///   (`incremental_shapes.md` §"Key temporal locality", "Row movement";
+///   `incremental_models.md` §"What the composed shape uniquely enables"):
+///   a key that most recently touched partition `p`
 ///   may still hold a row recorded up to `r` earlier that this write's
 ///   observed-delta record does not itself carry.
 ///   - The **statically-derived** sub-route renders as

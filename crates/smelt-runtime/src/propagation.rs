@@ -1720,7 +1720,7 @@ pub struct ResolvedBuildPlan {
 /// `period`, over the SAME real per-workspace graph
 /// [`build_forward_graph`] assembles for `--since-upstream` — the graph
 /// layer's two directions share one edge object
-/// (`incremental_models.md` §"The clamp both directions"). Delegates the
+/// (`incremental_models.md` §"Windowed maintenance and the horizon"). Delegates the
 /// actual reverse-topological resolution to
 /// [`smelt_logical::maintenance::propagate::required_inputs`]; this
 /// function only assembles the graph, renders the report, and shapes the

@@ -50,7 +50,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | done |
-| 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | planned |
+| 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | done |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | pending |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment; remove the TODO note | pending |
 | 5 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
@@ -83,6 +83,12 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   `run_state.md` re-pointed, backlog order confirmed unchanged, `verify-phase.sh` green. The
   dangling-outcome sweep's literal directory-arg form also flags `.claude/usage-log.jsonl` (a
   gitignored local log); restricting to `git ls-files` is the correct read and is clean.
+- 2026-09-04 (implement 02): phase 2 done — all eight sites re-pointed or dropped; site 4's
+  plan-suggested target (§"Batch safety classification") didn't actually carry the claim, so the
+  real target (§"Safety checks (per-cell admission for recompute-a-region)") was used instead
+  after reading both. A new gap surfaced and was recorded as a fresh `docs/TODO.md` bullet rather
+  than fixed: `§"What the composed shape uniquely enables"` is cited from three sites but doesn't
+  exist in either incremental spec; out of this phase's site list, so left for a future sweep.
 
 ## Blocked
 

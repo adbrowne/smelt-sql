@@ -5186,8 +5186,8 @@ async fn assert_composed_route1_equivalence(
     Ok(())
 }
 
-/// Per-slice equivalence for route 1 (`incremental_models.md` §"Per-slice
-/// equivalence"): the stored rows of one output slice (`d = slice_date`)
+/// Per-slice equivalence for route 1 (`incremental_shapes.md` §"Key temporal
+/// locality (the time-partitioned output)"): the stored rows of one output slice (`d = slice_date`)
 /// equal the model SQL evaluated over the source rows within that slice's
 /// derived reach — zero margin here (`SIMPLE_SQL`-shaped, no lookback), so
 /// the reach is exactly the source rows sharing that same date.
@@ -5397,8 +5397,8 @@ async fn assert_composed_route2_equivalence(
     .await
 }
 
-/// Per-slice equivalence for route 2 (`incremental_models.md` §"Per-slice
-/// equivalence"): route 2 never settles by date — its slice is the
+/// Per-slice equivalence for route 2 (`incremental_shapes.md` §"Key temporal
+/// locality (the time-partitioned output)"): route 2 never settles by date — its slice is the
 /// delta's own partition **values**, not a date-range window — so the
 /// natural slice here is one distinct `pdate` value; each such slice must
 /// equal the oracle restricted to that same value.
