@@ -44,7 +44,7 @@ says the rule holds.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | planned |
+| 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | done |
 | 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | pending |
 | 3 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
 | 4 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
@@ -65,6 +65,13 @@ says the rule holds.
   the behaviour-preserving structural half (normalize + fold + per-transfer audit); phase 2 is the
   verdict-affecting half (bound/reach/grain consume the new verdicts) plus criterion 1's
   inline-equivalence property test. Nothing left the outcome; later phases renumbered 3–5.
+
+- 2026-09-05 (implement, phase 1): shipped — expression-position subqueries
+  (scalar/`EXISTS`/`IN`/quantified) and parenthesised join groups are now walk nodes, folded as a
+  documented `ctes ++ inputs ++ expr_scopes` children tail. Audited all 11 production `Transfer`
+  impls; 3 needed an explicit bound to stay tail-safe (`TrajectoryTransfer`, `ReachTransfer`,
+  `SkewTransfer`). Behaviour-preserving by design — no verdict changed, only reachability. See
+  `phases/01-summary.md` for the full account.
 
 ## Blocked
 

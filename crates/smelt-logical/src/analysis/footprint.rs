@@ -149,13 +149,19 @@ impl Transfer for TrajectoryTransfer<'_> {
     }
 
     fn operator(&self, op: &OpNode<'_>, children: &[bool], _cx: &NodeCx) -> bool {
-        let child_hit = children.iter().any(|c| *c);
         match op {
             // Unreachable in practice: `model_has_trajectory_column` routes
             // unsupported trees to the CST fallback before walking.
-            OpNode::Unsupported { .. } => child_hit,
-            OpNode::SetOp(_) => child_hit,
+            // `children` is always empty here (no `Unsupported` children).
+            OpNode::Unsupported { .. } => children.iter().any(|c| *c),
+            OpNode::SetOp(_) => children.iter().any(|c| *c),
             OpNode::Select(sn) => {
+                // Bounded to ctes ++ inputs: an expr_scopes tail is not yet
+                // a trajectory contributor (`model_properties.md` §"The
+                // composition walk"'s children convention) — an unbounded
+                // `.any()` over the whole slice would silently pull it in.
+                let n = sn.ctes.len() + sn.inputs.len();
+                let child_hit = children[..n].iter().any(|c| *c);
                 child_hit || scope_has_running_fold_over_axis(&sn.select, self.axis)
             }
         }

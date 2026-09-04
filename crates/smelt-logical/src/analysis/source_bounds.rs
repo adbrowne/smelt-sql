@@ -609,7 +609,12 @@ impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
                 // Skip the CTE-definition children — each reference site's
                 // child already carries the definition's verdict, so repeated
                 // references merge in parallel like any other pair of inputs.
-                let input_children = &children[sn.ctes.len()..];
+                // Also bounded above at `sn.inputs.len()`: an expr_scopes
+                // tail is not yet a reach contributor (`model_properties.md`
+                // §"The composition walk"'s children convention) — this
+                // loop iterates the whole slice it's given, unlike a
+                // `.zip()`, so it must be told where `inputs` ends.
+                let input_children = &children[sn.ctes.len()..sn.ctes.len() + sn.inputs.len()];
                 let mut out = HashMap::new();
                 for child in input_children {
                     Self::merge_child(&mut out, child);

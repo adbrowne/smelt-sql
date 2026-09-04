@@ -40,6 +40,23 @@ pub enum PathSeg {
     /// Inside a derived table (subquery in FROM) with the given alias
     /// (empty string when unaliased).
     DerivedTable(String),
+    /// Inside the body of the enclosing scope's i-th expression-position
+    /// subquery (0-based, source order across the scope's own select list,
+    /// `WHERE`, `HAVING`, `QUALIFY`, then `ORDER BY`).
+    ExprScope { kind: ExprScopeKind, index: usize },
+}
+
+/// The syntactic position of an [`ExprScope`]'s subquery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprScopeKind {
+    /// A bare scalar subquery, e.g. `SELECT (SELECT max(b) FROM u) FROM t`.
+    Scalar,
+    /// `EXISTS (SELECT …)`.
+    Exists,
+    /// `expr [NOT] IN (SELECT …)`.
+    In,
+    /// `expr {op} {ANY|ALL|SOME} (SELECT …)`.
+    Quantified,
 }
 
 /// The normalized query tree for one model.
@@ -70,6 +87,27 @@ pub struct SelectNode {
     /// FROM items in source order (comma items and join arms alike);
     /// more than one input means a join.
     pub inputs: Vec<InputItem>,
+    /// Expression-position subquery scopes in this scope's own select list,
+    /// `WHERE`, `HAVING`, `QUALIFY`, then `ORDER BY`, in that order. Folded
+    /// into the walk's children tail *after* `inputs` (`ctes ++ inputs ++
+    /// expr_scopes`, see [`OpNode`]) — every production [`Transfer`] impl
+    /// (`footprint.rs`, `monotonicity.rs`, `source_bounds.rs`,
+    /// `fingerprint.rs`, `affected_keys.rs`, `output_delta.rs`, and this
+    /// module's `ScopeEnum`, `PartitionGrainAdmission`, `SkewTransfer`,
+    /// `PropertyTransfer`, `Discard`) is audited to either slice this tail
+    /// off explicitly or already index `inputs` by a `.zip()` that
+    /// truncates to it, so this phase's addition is behaviour-preserving:
+    /// no verdict changes until a later phase makes a transfer actually
+    /// consume the tail.
+    pub expr_scopes: Vec<ExprScope>,
+}
+
+/// One expression-position subquery scope of a [`SelectNode`] — see
+/// [`SelectNode::expr_scopes`].
+#[derive(Debug, Clone)]
+pub struct ExprScope {
+    pub kind: ExprScopeKind,
+    pub body: QueryNode,
 }
 
 /// One CTE definition.
@@ -199,10 +237,18 @@ pub struct LeafInput<'a> {
 ///
 /// Child-verdict convention: for `Select(node)` the children slice is the
 /// verdicts of `node.ctes` in order (each CTE body folded exactly once at
-/// its definition site) followed by the verdicts of `node.inputs` in order;
-/// a `CteRef` input's verdict is a clone of its definition's verdict. For
-/// `SetOp(node)` the children are `node.ctes` verdicts followed by the
-/// branch verdicts in arm order. `Unsupported` has no children.
+/// its definition site), followed by the verdicts of `node.inputs` in
+/// order (a `CteRef` input's verdict is a clone of its definition's
+/// verdict), followed by the verdicts of `node.expr_scopes` in order —
+/// `ctes ++ inputs ++ expr_scopes`. A transfer that indexes `inputs` by
+/// slicing off `node.ctes.len()` leading children, or by `.zip()`ing
+/// `node.inputs` against that slice, is automatically safe against the
+/// `expr_scopes` tail (the zip truncates); one that folds the *whole*
+/// children slice unconditionally is not, and must slice to
+/// `node.ctes.len() + node.inputs.len()` first. For `SetOp(node)` the
+/// children are `node.ctes` verdicts followed by the branch verdicts in arm
+/// order (`SetOpNode` has no `expr_scopes` of its own). `Unsupported` has no
+/// children.
 #[derive(Debug)]
 pub enum OpNode<'a> {
     Select(&'a SelectNode),
@@ -252,9 +298,8 @@ impl QueryNode {
     /// not model (an `Unsupported` node or FROM item). Consumers that need
     /// exact whole-tree coverage — rather than fail-closed rejection — use
     /// this to fall back to their legacy whole-text derivation. Known case:
-    /// the parser does not nest a redundantly-parenthesized derived table
-    /// (`FROM ((SELECT …)) AS t`, the shape function expansion emits), so
-    /// that FROM item normalizes to `Unsupported`.
+    /// a `RECURSIVE` CTE (`normalize_ctes` rejects the self-reference
+    /// explicitly, not yet modelled by the walk).
     pub(crate) fn has_unsupported(&self) -> bool {
         match self {
             QueryNode::Unsupported { .. } => true,
@@ -265,6 +310,7 @@ impl QueryNode {
                         InputItem::Derived { body, .. } => body.has_unsupported(),
                         InputItem::Table { .. } | InputItem::CteRef { .. } => false,
                     })
+                    || sn.expr_scopes.iter().any(|es| es.body.has_unsupported())
             }
             QueryNode::SetOp(so) => {
                 so.ctes.iter().any(|c| c.body.has_unsupported())
@@ -307,10 +353,12 @@ fn normalize(select: &SelectStmt, scope: &CteScope) -> QueryNode {
         let mut scope = scope.clone();
         let ctes = normalize_ctes(select, &mut scope);
         let inputs = normalize_from(select, &scope);
+        let expr_scopes = normalize_expr_scopes(select, &scope);
         return QueryNode::Select(SelectNode {
             select: select.clone(),
             ctes,
             inputs,
+            expr_scopes,
         });
     }
 
@@ -325,10 +373,12 @@ fn normalize(select: &SelectStmt, scope: &CteScope) -> QueryNode {
     for (i, branch) in chain.iter().enumerate() {
         ctes.extend(normalize_ctes(branch, &mut scope));
         let inputs = normalize_from(branch, &scope);
+        let expr_scopes = normalize_expr_scopes(branch, &scope);
         branches.push(QueryNode::Select(SelectNode {
             select: branch.clone(),
             ctes: Vec::new(),
             inputs,
+            expr_scopes,
         }));
         if i + 1 < chain.len() {
             ops.push(match setop_kind_after(branch) {
@@ -406,8 +456,34 @@ fn normalize_from(select: &SelectStmt, scope: &CteScope) -> Vec<InputItem> {
     let refs = from
         .table_refs()
         .chain(from.joins().filter_map(|j| j.table_ref()));
-    refs.map(|table_ref| normalize_table_ref(&table_ref, scope))
+    refs.flat_map(|table_ref| normalize_table_ref_items(&table_ref, scope))
         .collect()
+}
+
+/// Normalize one FROM-position `TableRef`, flattening a parenthesised join
+/// group (`FROM (a JOIN b ON …)`) into its member items rather than one
+/// opaque item — the parser nests the group as a `TABLE_REF` wrapping a
+/// nested `TABLE_REF` plus `JOIN_CLAUSE` children (`parser/select.rs`'s
+/// `LPAREN` branch of `parse_table_ref`), so recursion here mirrors the
+/// parser's own recursion and an arbitrarily nested group
+/// (`FROM ((a JOIN b) JOIN c)`) flattens fully. The group's own alias (if
+/// any — `FROM (a JOIN b) AS g`, aliasing the joined-table result as a
+/// whole) is not modelled; that shape is rare enough, and different enough
+/// from every other `InputItem`, to defer rather than guess at here.
+fn normalize_table_ref_items(
+    table_ref: &smelt_parser::TableRef,
+    scope: &CteScope,
+) -> Vec<InputItem> {
+    if let Some(nested) = table_ref.nested_table_ref() {
+        let mut items = normalize_table_ref_items(&nested, scope);
+        for join in table_ref.nested_joins() {
+            if let Some(member) = join.table_ref() {
+                items.extend(normalize_table_ref_items(&member, scope));
+            }
+        }
+        return items;
+    }
+    vec![normalize_table_ref(table_ref, scope)]
 }
 
 fn normalize_table_ref(table_ref: &smelt_parser::TableRef, scope: &CteScope) -> InputItem {
@@ -489,6 +565,89 @@ fn setop_kind_after(select: &SelectStmt) -> Option<SetOpKind> {
         });
     }
     None
+}
+
+/// Normalize `select`'s own expression-position subquery scopes: every
+/// `SUBQUERY` node reachable from the select list, `WHERE`, `HAVING`,
+/// `QUALIFY`, then `ORDER BY` clauses, in that order, without descending
+/// past a found `SUBQUERY` into its own nested `SELECT_STMT` (that body's
+/// own expression scopes are collected by the recursive [`normalize`] call
+/// on it, not repeated here) and without visiting the `FROM` clause (its
+/// derived tables and join groups are [`normalize_from`]'s job, not this
+/// one's). `scope` is the CTE names visible at this point — the same
+/// environment a `FROM`-position derived table normalizes its body against,
+/// so a correlated reference to an outer CTE resolves the same way in
+/// either position.
+fn normalize_expr_scopes(select: &SelectStmt, scope: &CteScope) -> Vec<ExprScope> {
+    let mut nodes = Vec::new();
+    if let Some(select_list) = select.select_list() {
+        collect_expr_scope_nodes(select_list.syntax(), &mut nodes);
+    }
+    if let Some(where_clause) = select.where_clause() {
+        collect_expr_scope_nodes(where_clause.syntax(), &mut nodes);
+    }
+    if let Some(having) = select.having_clause() {
+        if let Some(expr) = having.expression() {
+            collect_expr_scope_nodes(expr.syntax(), &mut nodes);
+        }
+    }
+    if let Some(qualify) = select.qualify_clause() {
+        if let Some(expr) = qualify.expression() {
+            collect_expr_scope_nodes(expr.syntax(), &mut nodes);
+        }
+    }
+    if let Some(order_by) = select.order_by_clause() {
+        collect_expr_scope_nodes(order_by.syntax(), &mut nodes);
+    }
+
+    nodes
+        .into_iter()
+        .map(|(kind, subquery_node)| {
+            let body =
+                match smelt_parser::Subquery::cast(subquery_node).and_then(|sq| sq.select_stmt()) {
+                    Some(inner) => normalize(&inner, scope),
+                    None => QueryNode::Unsupported {
+                        reason: "expression-position subquery body is not a SELECT statement \
+                             (e.g. VALUES)"
+                            .to_string(),
+                    },
+                };
+            ExprScope { kind, body }
+        })
+        .collect()
+}
+
+/// Depth-first, source-order collection of top-level `SUBQUERY` syntax
+/// nodes under `node`, each tagged with its [`ExprScopeKind`] by its
+/// immediate parent construct. Recursion stops at a found `SUBQUERY` (its
+/// interior is a separate scope's business).
+fn collect_expr_scope_nodes(
+    node: &smelt_parser::syntax_kind::SyntaxNode,
+    out: &mut Vec<(ExprScopeKind, smelt_parser::syntax_kind::SyntaxNode)>,
+) {
+    for child in node.children() {
+        if child.kind() == smelt_parser::SyntaxKind::SUBQUERY {
+            let kind = classify_expr_scope_kind(&child);
+            out.push((kind, child));
+        } else {
+            collect_expr_scope_nodes(&child, out);
+        }
+    }
+}
+
+/// Classify a `SUBQUERY` node's [`ExprScopeKind`] by its immediate parent —
+/// `EXISTS_EXPR`, `IN_EXPR`, `ANY_EXPR` (the shared node for `ANY`/`ALL`/
+/// `SOME`), or a bare scalar subquery otherwise.
+fn classify_expr_scope_kind(
+    subquery_node: &smelt_parser::syntax_kind::SyntaxNode,
+) -> ExprScopeKind {
+    use smelt_parser::SyntaxKind::*;
+    match subquery_node.parent().map(|p| p.kind()) {
+        Some(EXISTS_EXPR) => ExprScopeKind::Exists,
+        Some(IN_EXPR) => ExprScopeKind::In,
+        Some(ANY_EXPR) => ExprScopeKind::Quantified,
+        _ => ExprScopeKind::Scalar,
+    }
 }
 
 // ===== The fold =====
@@ -667,6 +826,21 @@ fn walk_select<T: Transfer>(
         aliases,
         columns,
     };
+
+    // Expression-position subquery scopes fold last, after ctes and inputs
+    // (`ctes ++ inputs ++ expr_scopes`, see `OpNode`'s doc comment) — an
+    // outer-scope reference cannot resolve into one (it is not a FROM-tree
+    // alias), so it needs no `cx.aliases` entry, only its own child verdict.
+    for (index, es) in sn.expr_scopes.iter().enumerate() {
+        let mut expr_path = path.to_vec();
+        expr_path.push(PathSeg::ExprScope {
+            kind: es.kind,
+            index,
+        });
+        let (verdict, _lineage) = walk_node(&es.body, transfer, &expr_path, &env);
+        children.push(verdict);
+    }
+
     let verdict = transfer.operator(&OpNode::Select(sn), &children, &cx);
     (verdict, cx.columns)
 }
@@ -1245,6 +1419,15 @@ impl AdmissionViolation {
                     "an unaliased derived table".to_string()
                 }
                 PathSeg::DerivedTable(alias) => format!("derived table '{alias}'"),
+                PathSeg::ExprScope { kind, index } => {
+                    let kind = match kind {
+                        ExprScopeKind::Scalar => "scalar",
+                        ExprScopeKind::Exists => "EXISTS",
+                        ExprScopeKind::In => "IN",
+                        ExprScopeKind::Quantified => "quantified",
+                    };
+                    format!("{kind} subquery {}", index + 1)
+                }
             })
             .collect();
         format!(" (in {})", segs.join(" → "))
@@ -1547,11 +1730,17 @@ impl Transfer for SkewTransfer<'_> {
     }
 
     fn operator(&self, op: &OpNode<'_>, children: &[Skew], cx: &NodeCx) -> Skew {
-        let acc = children
-            .iter()
-            .fold(Skew::ZERO, |acc, child| acc.union(*child));
         match op {
             OpNode::Select(sn) => {
+                // Bounded to ctes ++ inputs: an expr_scopes tail is not yet
+                // a skew contributor (`model_properties.md` §"The
+                // composition walk"'s children convention) — a bare
+                // `.iter().fold()` over the whole slice would silently pull
+                // it in.
+                let n = sn.ctes.len() + sn.inputs.len();
+                let acc = children[..n]
+                    .iter()
+                    .fold(Skew::ZERO, |acc, child| acc.union(*child));
                 let own = match self.exclude_source {
                     Some(self_name) => {
                         let quals = scope_self_qualifiers(cx, self_name);
@@ -1561,11 +1750,14 @@ impl Transfer for SkewTransfer<'_> {
                 };
                 acc.union(derive_partition_skew(&own, self.partition_column))
             }
-            OpNode::SetOp(_) => acc,
-            // An `Unsupported` node carries no readable text; whole-tree
-            // coverage is restored by [`model_partition_skew`]'s whole-text
-            // fallback (it never walks a tree containing one).
-            OpNode::Unsupported { .. } => acc,
+            OpNode::SetOp(_) => children
+                .iter()
+                .fold(Skew::ZERO, |acc, child| acc.union(*child)),
+            // An `Unsupported` node carries no readable text and no
+            // children; whole-tree coverage is restored by
+            // [`model_partition_skew`]'s whole-text fallback (it never
+            // walks a tree containing one).
+            OpNode::Unsupported { .. } => Skew::ZERO,
         }
     }
 }

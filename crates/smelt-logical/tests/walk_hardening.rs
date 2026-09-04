@@ -13,14 +13,18 @@
 //! doc's campaign addendum, not duplicated here; each test's doc comment
 //! names only the mutant(s) it targets.
 
+use std::cell::RefCell;
+
 use smelt_logical::analysis::fingerprint::{fingerprint_projection, Projection};
 use smelt_logical::analysis::functional_dependency::{
     functional_dependency_verdict_over_vector, FunctionalDependencyVerdict,
 };
 use smelt_logical::analysis::join_shape::JoinContext;
+use smelt_logical::analysis::source_bounds::{derive_model_bounds, BoundContext};
 use smelt_logical::analysis::walk::{
     batched_admission_violations, enumerate_scopes, model_partition_skew_excluding_self,
-    model_property_vector, AdmissionGate, Determinism, PathSeg,
+    model_property_vector, walk, AdmissionGate, Determinism, ExprScopeKind, InputItem, LeafInput,
+    NodeCx, OpNode, PathSeg, QueryNode, QueryTree, Transfer,
 };
 
 fn vector(sql: &str) -> smelt_logical::analysis::walk::PropertyVector {
@@ -466,5 +470,276 @@ fn unsupported_sql_falls_back_to_whole_text_skew() {
         },
         "an unsupported (RECURSIVE) CTE body must not suppress the whole-text fallback's \
          derivation of a genuine Form B bound"
+    );
+}
+
+// ===== Phase 1 (walk-migration residue): expression-position subqueries and
+// parenthesised join groups as walk nodes
+// (`docs/outcomes/20260904-walk-migration-residue/phases/01-plan.md`). =====
+
+/// Collects every leaf source name the walk visits, paired with the
+/// `NodeCx.path` of the scope it was seen in — a public-surface probe for
+/// asserting which relational scopes the walk actually reaches (it does not
+/// participate in any production property; it exists only in this test).
+struct LeafPaths;
+
+impl Transfer for LeafPaths {
+    type Verdict = Vec<(String, Vec<PathSeg>)>;
+
+    fn leaf(&self, leaf: &LeafInput<'_>, cx: &NodeCx) -> Self::Verdict {
+        vec![(leaf.name.to_string(), cx.path.clone())]
+    }
+
+    fn operator(
+        &self,
+        _op: &OpNode<'_>,
+        children: &[Self::Verdict],
+        _cx: &NodeCx,
+    ) -> Self::Verdict {
+        children.iter().flatten().cloned().collect()
+    }
+}
+
+/// `FROM ((SELECT a FROM t)) AS x` already normalizes to a `Derived` node —
+/// the parser's `Subquery::select_stmt` unwraps redundant parens (probed
+/// 2026-09-05, outcome decision log). This pins that fact and corrects the
+/// once-stale `has_unsupported` doc comment that named it as the known gap.
+#[test]
+fn redundantly_parenthesised_derived_table_is_a_derived_node() {
+    let sql = "SELECT a FROM ((SELECT a FROM t)) AS x";
+    let tree = QueryTree::from_sql(sql).expect("parses");
+    let QueryNode::Select(sn) = &tree.root else {
+        panic!("expected a Select root");
+    };
+    assert_eq!(
+        sn.inputs.len(),
+        1,
+        "expected one FROM item; got {:?}",
+        sn.inputs
+    );
+    match &sn.inputs[0] {
+        InputItem::Derived { alias, body } => {
+            assert_eq!(alias.as_deref(), Some("x"));
+            assert!(
+                matches!(body, QueryNode::Select(_)),
+                "the derived table's body must itself normalize, not fall back to Unsupported; \
+                 got {body:?}"
+            );
+        }
+        other => panic!("expected a Derived input, got {other:?}"),
+    }
+    match fingerprint_projection(sql, "sources.t") {
+        Projection::FullRow { reason } => assert!(
+            !reason.contains("cannot normalize"),
+            "a redundantly-parenthesised derived table must not trip has_unsupported(); \
+             got fallback reason: {reason}"
+        ),
+        Projection::Columns(_) => {}
+    }
+}
+
+/// `FROM (a JOIN b ON …)` — a parenthesised join group — flattens into the
+/// enclosing scope's own inputs rather than normalizing to `Unsupported`.
+#[test]
+fn parenthesised_join_group_is_not_unsupported() {
+    let sql = "SELECT a FROM (a JOIN b ON a.id = b.id)";
+    let tree = QueryTree::from_sql(sql).expect("parses");
+    let QueryNode::Select(sn) = &tree.root else {
+        panic!("expected a Select root");
+    };
+    assert_eq!(
+        sn.inputs.len(),
+        2,
+        "expected two flattened Table inputs; got {:?}",
+        sn.inputs
+    );
+    for item in &sn.inputs {
+        assert!(
+            matches!(item, InputItem::Table { .. }),
+            "expected a Table input, got {item:?}"
+        );
+    }
+    match fingerprint_projection(sql, "sources.a") {
+        Projection::FullRow { reason } => assert!(
+            !reason.contains("cannot normalize"),
+            "a parenthesised join group must not trip has_unsupported(); got: {reason}"
+        ),
+        Projection::Columns(_) => {}
+    }
+}
+
+/// A nested parenthesised join group (`(a JOIN b) JOIN c`) flattens fully,
+/// mirroring the parser's own recursion through the shape.
+#[test]
+fn nested_parenthesised_join_group_flattens() {
+    let sql = "SELECT x FROM ((a JOIN b ON a.id = b.id) JOIN c ON b.id = c.id)";
+    let tree = QueryTree::from_sql(sql).expect("parses");
+    let QueryNode::Select(sn) = &tree.root else {
+        panic!("expected a Select root");
+    };
+    assert_eq!(
+        sn.inputs.len(),
+        3,
+        "expected three flattened Table inputs; got {:?}",
+        sn.inputs
+    );
+}
+
+/// A scalar subquery in select-list position (`SELECT (SELECT …) FROM t`) is
+/// a walk node: its leaf source is visible to the walk, tagged with the
+/// `PathSeg::ExprScope` segment identifying it.
+#[test]
+fn scalar_subquery_body_is_a_walk_node() {
+    let sql = "SELECT (SELECT max(b) FROM u) AS m FROM t";
+    let tree = QueryTree::from_sql(sql).expect("parses");
+    let leaves = walk(&tree, &LeafPaths);
+    let names: Vec<&str> = leaves.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["t", "u"],
+        "leaf set must be {{t, u}}; got {leaves:?}"
+    );
+    let u_path = &leaves.iter().find(|(n, _)| n == "u").unwrap().1;
+    assert_eq!(
+        u_path,
+        &vec![PathSeg::ExprScope {
+            kind: ExprScopeKind::Scalar,
+            index: 0
+        }]
+    );
+}
+
+/// `EXISTS (…)` and `expr IN (…)` subquery bodies are walk nodes too, tagged
+/// with their own `ExprScopeKind`.
+#[test]
+fn exists_and_in_subquery_bodies_are_walk_nodes() {
+    let exists_sql = "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u)";
+    let tree = QueryTree::from_sql(exists_sql).expect("parses");
+    let leaves = walk(&tree, &LeafPaths);
+    let u = leaves
+        .iter()
+        .find(|(n, _)| n == "u")
+        .expect("u must be a walk leaf");
+    assert_eq!(
+        u.1,
+        vec![PathSeg::ExprScope {
+            kind: ExprScopeKind::Exists,
+            index: 0
+        }]
+    );
+
+    let in_sql = "SELECT a FROM t WHERE a IN (SELECT id FROM u)";
+    let tree = QueryTree::from_sql(in_sql).expect("parses");
+    let leaves = walk(&tree, &LeafPaths);
+    let u = leaves
+        .iter()
+        .find(|(n, _)| n == "u")
+        .expect("u must be a walk leaf");
+    assert_eq!(
+        u.1,
+        vec![PathSeg::ExprScope {
+            kind: ExprScopeKind::In,
+            index: 0
+        }]
+    );
+}
+
+/// An unsupported construct inside an expression-scope's own body (a table
+/// function in FROM — the same known-Unsupported shape
+/// `unsupported_node_fails_closed` uses) is only reachable through the new
+/// `expr_scopes` arm of `has_unsupported()`; this pins that it still fails
+/// loud rather than being silently invisible.
+#[test]
+fn unsupported_expression_scope_body_is_fail_loud() {
+    let sql = "SELECT (SELECT 1 FROM read_csv('x.csv')) AS m FROM t";
+    match fingerprint_projection(sql, "sources.t") {
+        Projection::FullRow { reason } => assert!(
+            reason.contains("cannot normalize"),
+            "expected the has_unsupported fail-closed fallback reason, got: {reason}"
+        ),
+        Projection::Columns(cols) => panic!(
+            "an unsupported construct nested in an expression scope must fall back to FullRow, \
+             not a proven column set: {cols:?}"
+        ),
+    }
+}
+
+/// A transfer that records the children slice it receives at the root scope
+/// — proving the documented `ctes ++ inputs ++ expr_scopes` order for a
+/// scope with one of each kind of child.
+struct ChildOrderProbe {
+    record: RefCell<Vec<String>>,
+}
+
+impl Transfer for ChildOrderProbe {
+    type Verdict = String;
+
+    fn leaf(&self, leaf: &LeafInput<'_>, _cx: &NodeCx) -> String {
+        leaf.name.to_string()
+    }
+
+    fn operator(&self, op: &OpNode<'_>, children: &[String], cx: &NodeCx) -> String {
+        if cx.path.is_empty() {
+            if let OpNode::Select(_) = op {
+                *self.record.borrow_mut() = children.to_vec();
+            }
+        }
+        children.join(",")
+    }
+}
+
+#[test]
+fn expression_scope_verdicts_are_the_documented_children_tail() {
+    let sql = "WITH c AS (SELECT 1 AS x FROM cte_src) \
+               SELECT (SELECT 1 FROM expr_src) AS es \
+               FROM input_a JOIN input_b ON 1 = 1";
+    let tree = QueryTree::from_sql(sql).expect("parses");
+    let probe = ChildOrderProbe {
+        record: RefCell::new(Vec::new()),
+    };
+    walk(&tree, &probe);
+    assert_eq!(
+        probe.record.into_inner(),
+        vec!["cte_src", "input_a", "input_b", "expr_src"],
+        "children must fold as ctes ++ inputs ++ expr_scopes"
+    );
+}
+
+/// Characterization pin: adding an expression-position subquery to a model
+/// must not change any existing transfer's verdict — the fixture below has
+/// a scalar subquery reading an unrelated source, and every one of these
+/// public verdicts must equal what it was before `expr_scopes` existed
+/// (phase 1 is behaviour-preserving by design; phase 2 is what changes
+/// these).
+#[test]
+fn existing_transfer_verdicts_are_unchanged_by_expression_scopes() {
+    let baseline = "SELECT a FROM events WHERE event_date > '2024-01-01'";
+    let with_expr_scope = "SELECT a, (SELECT max(b) FROM other) AS m FROM events \
+               WHERE event_date > '2024-01-01'";
+
+    let ctx = BoundContext::new().with_source("events", "event_date");
+    assert_eq!(
+        derive_model_bounds(with_expr_scope, &ctx).get("events"),
+        derive_model_bounds(baseline, &ctx).get("events"),
+        "source_bounds verdict for 'events' must be unaffected by the scalar subquery"
+    );
+
+    let baseline_vector =
+        model_property_vector(baseline, &JoinContext::new()).expect("model parses");
+    let with_expr_scope_vector =
+        model_property_vector(with_expr_scope, &JoinContext::new()).expect("model parses");
+    assert_eq!(
+        baseline_vector.grain, with_expr_scope_vector.grain,
+        "grain must be unaffected by the scalar subquery"
+    );
+    assert_eq!(
+        baseline_vector.fds, with_expr_scope_vector.fds,
+        "functional dependencies must be unaffected by the scalar subquery"
+    );
+
+    assert_eq!(
+        fingerprint_projection(with_expr_scope, "sources.events"),
+        fingerprint_projection(baseline, "sources.events"),
+        "fingerprint projection over 'events' must be unaffected by the scalar subquery"
     );
 }

@@ -316,6 +316,8 @@ Every **composition-relevant** verdict — any verdict that can differ between a
 
 A property implementation must not re-derive composition by scanning the query text or a single clause in isolation: a flat scan cannot express series composition (stacked frames must *add* reach — merging with max under-derives the scan) and cannot see scope nesting (a scope inside a CTE body must be judged by the same rule as the same scope at the top level). Per-clause and substring classifiers remain admissible only as **leaf-level classifiers invoked by the walk** (e.g. the interval parser, the function-name determinism predicate) or as **advisory heuristics that never feed admission** (e.g. batch-size estimation). Fail-closure is preserved by construction: an operator with no registered transfer rule for a property yields that property's reject verdict for the subtree above it.
 
+A node of the operator tree is: a CTE body, a set-operation arm, a derived table (including a redundantly-parenthesized one, `FROM ((SELECT …)) AS t`), the members of a parenthesised join group (`FROM (a JOIN b ON …)`, flattened into the enclosing scope's join inputs), and the body of an expression-position subquery — a scalar subquery, an `EXISTS (…)`, an `IN (…)`, or a quantified `ANY`/`ALL`/`SOME (…)` — appearing in the enclosing scope's own select list, `WHERE`, `HAVING`, `QUALIFY`, or `ORDER BY`. An expression-position scope composes as a scope of its own: its verdict is folded and made available to every transfer function like any other child, with the per-property consumption rule (what a property does with that verdict) specified in that property's own section.
+
 ## Design
 
 **Properties are named for what they are, not for maintenance.** A monotonicity trace, an algebraic discriminant, a partition-alignment signal, an additive-only diff are each useful well beyond the refresh modes — backfills, schema evolution, query optimisation — so they live in a capability spec keyed on the SQL property, not filed under any one consumer. This is what lets a single proof serve several consumers without a private copy per mode.
@@ -356,14 +358,13 @@ recorded here — history lives in git and §References → Plans.
   identity has no write emitter or admission rule consuming it; the whole-model property vector
   (`model_property_vector`) has no consumer. Tracked: `docs/plans/20260704-model-updates-l3-declarations.md`,
   `docs/plans/20260707-property-composition-walk.md`.
-- **The composition walk is not yet the sole source of every property.** Scopes inside
-  expression-position (scalar/`EXISTS`) subqueries are not enumerated as walk nodes, so their
-  window/`LIMIT`/reach/`DISTINCT`/`HAVING` content is judged only in the owning scope's region;
-  the `temporal` proof and the driving-fact/anchor join resolution still run their own traversal
-  rather than the shared walk; a redundantly-parenthesized derived table
-  (`FROM ((SELECT …)) AS t`) falls back to the legacy whole-text derivation, same-scope chained
-  bands still max-merge, and an absorbing verdict rejects every context source. Tracked:
-  `docs/plans/20260707-property-composition-walk.md`.
+- **The composition walk is not yet the sole source of every property.** Expression-position
+  subquery bodies are enumerated as walk nodes (§"The composition walk"), but bound/reach and
+  grain do not yet consume their verdicts, so their window/`LIMIT`/reach/`DISTINCT`/`HAVING`
+  content is still judged only in the owning scope's region; the `temporal` proof and the
+  driving-fact/anchor join resolution still run their own traversal rather than the shared walk;
+  same-scope chained bands still max-merge, and an absorbing verdict rejects every context source.
+  Tracked: `docs/plans/20260707-property-composition-walk.md`.
 - **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints
   "Declared lateness is orchestration-only" forbids any proof from reading it; the summation
   survives (its output feeds batch fields no execute path consumes, so it is inert today) and

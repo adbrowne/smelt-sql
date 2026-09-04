@@ -431,6 +431,7 @@ fn setop_arm_trees(tree: &QueryTree) -> Option<Vec<QueryTree>> {
                 select: sn.select.clone(),
                 ctes,
                 inputs: sn.inputs.clone(),
+                expr_scopes: sn.expr_scopes.clone(),
             }),
         });
     }
@@ -898,6 +899,7 @@ mod tests {
             select,
             ctes: Vec::new(),
             inputs: Vec::new(),
+            expr_scopes: Vec::new(),
         });
         let nested_branch = QueryNode::SetOp(SetOpNode {
             ctes: Vec::new(),
