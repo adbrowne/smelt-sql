@@ -68,7 +68,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | done |
 | 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | done |
 | 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | done |
-| 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | pending |
+| 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | planned |
 | 6 | Surface: `smelt explain` prints downgrades (text + `--json`); LSP/CLI warning diagnostic; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
 | 7 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
 | 8 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
@@ -182,6 +182,22 @@ the invariant by deleting `.smelt/` between run steps.
   `verify-phase.sh` failure (`partition_grain_residues_stay_closed` stale after the 2026-09-04
   decision track's `data_latency` retirement) since it blocked the mandatory gate for every
   phase; see `phases/04-summary.md` for detail and the decision-residue follow-up note.
+
+- 2026-09-04 (plan 05): no phase reshape. Phase 4's summary flagged that no backend
+  "realisable structures" enumeration exists; phase 5 adds it as an exhaustive
+  `realisable_state_structures(SqlDialect)` table in `smelt-logical`'s `availability.rs` rather
+  than a `Backend` trait query — the mapping is pure data (maintenance-plan purity) and
+  `smelt-state`, where the only ledger builders live (`ddl_duckdb.rs`), cannot host it because it
+  does not depend on `smelt-logical`.
+- 2026-09-04 (plan 05): the ~12 `derive_model_maintenance_plan{,_with_edges}` call sites in
+  `smelt-runtime` are routed through one new seam module (`maintenance_availability.rs`) with an
+  `rg`-based structural gate, instead of calling `resolve_availability` at each site — a
+  per-site call is exactly the "consumer re-derives the plan" shape the maintenance-plan-purity
+  invariant forbids.
+- 2026-09-04 (plan 05): `smelt-db`'s own derivation sites (diagnostics, `lib.rs:2111`) stay
+  unresolved in this phase. They are analysis-time, where the target dialect is not known, and
+  the diagnostic channel for a downgrade is phase 6's work; criterion 3 speaks of runtime
+  consumers.
 
 ## Blocked
 
