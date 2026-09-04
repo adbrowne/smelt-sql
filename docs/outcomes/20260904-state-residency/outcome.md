@@ -67,7 +67,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | done |
 | 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | done |
 | 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | done |
-| 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | planned |
+| 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | done |
 | 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | pending |
 | 6 | Surface: `smelt explain` prints downgrades (text + `--json`); LSP/CLI warning diagnostic; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
 | 7 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
@@ -171,6 +171,17 @@ the invariant by deleting `.smelt/` between run steps.
   `state_downgrade: None` in the ~38 existing `PlanCell` literals. A side-table on
   `MaintenancePlan` was rejected: it would let a consumer read a cell's technique without its
   downgrade, which is exactly the silent substitution §"The degradation contract" forbids.
+
+- 2026-09-04 (phase 4 implement): landed the pure availability-resolution step —
+  `crates/smelt-logical/src/maintenance/availability.rs` (`StateStructure`,
+  `required_state_structure`, `StateAvailability`, `recompute_equivalent`,
+  `resolve_availability`), `PlanCell::state_downgrade`, and `state.warehouse_tables` parsing in
+  `smelt-core`. All 10 tests green; `verify-phase.sh` and the unchanged-gates checks
+  (`walk_coverage`, `statement_parity`, `execute_parity`) all green. No consumer calls
+  `resolve_availability` yet — phase 5's wiring seam. Also fixed an unrelated pre-existing
+  `verify-phase.sh` failure (`partition_grain_residues_stay_closed` stale after the 2026-09-04
+  decision track's `data_latency` retirement) since it blocked the mandatory gate for every
+  phase; see `phases/04-summary.md` for detail and the decision-residue follow-up note.
 
 ## Blocked
 

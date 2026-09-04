@@ -360,11 +360,29 @@ impl StateMode {
     }
 }
 
+/// Whether smelt may create its own engine-resident bookkeeping tables in the
+/// target backend (`state.warehouse_tables`, `docs/specs/state.md` §"Opting
+/// out of warehouse bookkeeping"). `None` makes every engine-resident
+/// correctness structure unavailable to availability resolution, downgrading
+/// each cell that needed one to its recompute-family equivalent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WarehouseTables {
+    /// Default: engine-resident correctness structures are created as the
+    /// derived plan needs them.
+    #[default]
+    Allowed,
+    /// smelt authors no tables of its own in the target backend.
+    None,
+}
+
 /// `state:` block in `smelt.yml` (D-47).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct StateConfig {
     #[serde(default)]
     pub mode: StateMode,
+    #[serde(default)]
+    pub warehouse_tables: WarehouseTables,
 }
 
 fn default_config_version() -> u32 {
@@ -3800,6 +3818,34 @@ vars:
         assert!(!StateMode::Stateless.can_narrow_to(&StateMode::Environments));
         // intervals cannot widen to environments
         assert!(!StateMode::Intervals.can_narrow_to(&StateMode::Environments));
+    }
+
+    #[test]
+    fn warehouse_tables_defaults_to_allowed() {
+        let yaml = "name: p\nversion: 1\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.warehouse_tables, WarehouseTables::Allowed);
+
+        let yaml = "name: p\nversion: 1\nstate:\n  mode: intervals\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.warehouse_tables, WarehouseTables::Allowed);
+    }
+
+    #[test]
+    fn warehouse_tables_none_parses() {
+        let yaml = "name: p\nversion: 1\nstate:\n  warehouse_tables: none\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.warehouse_tables, WarehouseTables::None);
+    }
+
+    #[test]
+    fn warehouse_tables_unknown_value_is_an_error() {
+        let yaml = "name: p\nversion: 1\nstate:\n  warehouse_tables: sometimes\n";
+        let result = Config::parse_with_warnings(yaml);
+        assert!(
+            result.is_err(),
+            "unknown warehouse_tables must fail to parse"
+        );
     }
 
     #[test]

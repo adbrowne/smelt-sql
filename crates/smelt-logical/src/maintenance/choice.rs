@@ -1975,6 +1975,7 @@ mod tests {
                 skeleton_source_closure: None,
                 fingerprint_projections: std::collections::BTreeMap::new(),
                 key_scope: None,
+                state_downgrade: None,
             }],
             refusals: vec![],
             key_locality: None,
@@ -2301,6 +2302,7 @@ mod tests {
                 skeleton_source_closure: None,
                 fingerprint_projections: std::collections::BTreeMap::new(),
                 key_scope: None,
+                state_downgrade: None,
             }
         }
         let plan = MaintenancePlan {

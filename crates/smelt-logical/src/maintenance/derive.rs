@@ -502,6 +502,7 @@ pub fn append_model_edge_cells(
                     // cell's own empty verdict.
                     fingerprint_projections: BTreeMap::new(),
                     key_scope: Some(key_scope),
+                    state_downgrade: None,
                 });
             }
             Err(refusal) => {
@@ -621,6 +622,7 @@ pub fn append_model_edge_cells(
             // empty case).
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
+            state_downgrade: None,
         });
     }
 }
@@ -1186,6 +1188,7 @@ fn derive_new_data(
                 skeleton_source_closure: None,
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: None,
+                state_downgrade: None,
             });
         }
         Grain::Key { unique_key } => {
@@ -1580,6 +1583,7 @@ fn derive_new_data(
                 skeleton_source_closure: None,
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: None,
+                state_downgrade: None,
             });
         }
     }
@@ -1745,6 +1749,7 @@ fn derive_mutation(
             skeleton_source_closure: closure.clone(),
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
+            state_downgrade: None,
         });
     }
 }
@@ -2012,6 +2017,7 @@ fn derive_column_added(
                         skeleton_source_closure: None,
                         fingerprint_projections: BTreeMap::new(),
                         key_scope: None,
+                        state_downgrade: None,
                     });
                 }
                 (Some(DefinitionChangeClass::UpstreamRederive), None) => {
@@ -2112,6 +2118,7 @@ fn derive_column_added(
             skeleton_source_closure: None,
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
+            state_downgrade: None,
         });
     }
 }
@@ -2137,6 +2144,7 @@ fn derive_backfill(
         skeleton_source_closure: None,
         fingerprint_projections: BTreeMap::new(),
         key_scope: None,
+        state_downgrade: None,
     });
 }
 

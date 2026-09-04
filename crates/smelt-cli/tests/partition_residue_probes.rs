@@ -446,8 +446,6 @@ fn partition_grain_residues_stay_closed() {
         .collect();
 
     let expected_leads = [
-        "Per-column `data_latency` is unimplemented",
-        "Non-deterministic row-set-membership or grouping is out of scope",
         "Schema evolution on the partition grain is largely a definition delta now",
         "The `PartitionGrainForbidsMetrics` refusal is unimplemented",
         "The sub-`g_part` rejection does not yet name the coarsened window",
@@ -457,8 +455,9 @@ fn partition_grain_residues_stay_closed() {
     assert_eq!(
         bullets.len(),
         expected_leads.len(),
-        "expected exactly {} partition-grain Known Divergences bullets (the six this outcome \
-         does not own), found {}:\n{}",
+        "expected exactly {} partition-grain Known Divergences bullets (the four this outcome \
+         does not own — the decision track retired `data_latency` and the row-set-membership \
+         bullet separately), found {}:\n{}",
         expected_leads.len(),
         bullets.len(),
         bullets.join("\n")

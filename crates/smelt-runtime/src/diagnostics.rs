@@ -1182,6 +1182,7 @@ mod tests {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            state_downgrade: None,
         }
     }
 

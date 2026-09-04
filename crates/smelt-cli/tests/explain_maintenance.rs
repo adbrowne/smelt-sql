@@ -810,6 +810,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        state_downgrade: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
