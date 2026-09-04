@@ -50,7 +50,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | done |
-| 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | pending |
+| 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | planned |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | pending |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment; remove the TODO note | pending |
 | 5 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
@@ -70,6 +70,15 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   stale-citation list, so phase 2 would not have caught it.
 - 2026-09-04 (plan 01): `.claude/active-plan` staleness recorded under Out of scope rather than
   given a phase row — see the rationale there.
+- 2026-09-04 (plan 02): phase 2's citation sites include five Rust files (`metadata.rs`,
+  `rules/incremental.rs`, `gate.rs`, `propagate.rs`, `propagation.rs`, `refresh_axis.rs`). The
+  outcome's "no crate changes" rule is read as *no behaviour change*: doc-comment-only edits are in
+  scope, since criterion 3 names those sites explicitly and they cannot be closed otherwise.
+- 2026-09-04 (plan 02): the TODO's inventory is slightly wrong — its "one e2e test" site is
+  actually production `crates/smelt-core/src/metadata.rs`, and `rules/incremental.rs:708` has moved
+  to :457. Phase 2 resolves sites by *heading text*, not by the TODO's line numbers.
+- 2026-09-04 (plan 02): `docs/plans/` and `docs/research/` also cite the dead headings; they stay
+  untouched as historical records and are not added as a phase row.
 - 2026-09-04 (implement 01): phase 1 done — banner added to the 2026-08-16 handoff,
   `run_state.md` re-pointed, backlog order confirmed unchanged, `verify-phase.sh` green. The
   dangling-outcome sweep's literal directory-arg form also flags `.claude/usage-log.jsonl` (a
