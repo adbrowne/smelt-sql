@@ -36,6 +36,17 @@ consumes delta signatures; wire backbuild behind `smelt migrate`; lattice v2; pr
 
 **Parallel track (2026-07-18):** the **quality-grind programme** ([master plan](plans/20260718-quality-grind.md)) works the small root-caused deferred items (parser ledger categories, VALUES arity, UTF-8 positions, registry gaps, doc gaps) and the well-understood larger ones (generator deferred coverage, smelt-planner↔smelt-logical consolidation, the cold-Salsa benchmark regression) via a second autonomy loop on `worktree-roadmap_todo`; decision-gated items are queued in the master's "Tier 3 — decision queue".
 
+**Parallel track (2026-09-04) — dialect emission vocabulary.** The BigQuery work showed the
+per-dialect lowering model runs out of vocabulary, not structure: closing the 81 open gaps
+(#177/#178/#179) with today's `Emission` enum would mean one hand-written printer function per
+built-in. [`multi_backend.md`](specs/multi_backend.md) §"Template emission" and
+§"Operand-conditional verdicts" add a declarative `Template` verdict (registry data, one generic
+interpreter) and arity/operand-class–guarded arms settled on the compile path. Queued as
+[`docs/outcomes/20260904-dialect-emission-vocabulary`](outcomes/20260904-dialect-emission-vocabulary/outcome.md)
+at the end of the outcome backlog; pays the DuckDB and Spark gap ratchets down to the
+type-inference rows and retires the unverified PostgreSQL emission column (#181, closed
+2026-09-04). BigQuery's rows need a human-run sweep afterwards.
+
 ### 1. Type-System Axes — Collation
 
 ~~Silent Failures & Code-Health Hardening~~ ✅ (2026-06-10) — see [Recently Completed](#recently-completed).
@@ -168,7 +179,7 @@ Dagster/Airflow plugin API. `smelt explain --json` already provides the graph st
 
 ### 10. PostgreSQL Backend
 
-Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
+Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap. The `PostgreSQL` *emission* dialect (`SqlDialect`/`DialectId` variant, capabilities, coverage column) is being retired by [`20260904-dialect-emission-vocabulary`](outcomes/20260904-dialect-emission-vocabulary/outcome.md) phase 1 (#181, closed 2026-09-04): with no backend and no oracle its verdicts were unverifiable claims. The pg_query grammar anchor in `smelt-parser-compat` is unaffected. When this backend is built, the cross-engine audit derives its column from probes; nothing authored beforehand would survive that.
 
 ### 11. Databricks Support + Metrics-View Compatibility (low priority)
 
@@ -261,7 +272,7 @@ Every residual row points at a live tracking issue rather than at #171, which th
 [#177](https://github.com/adbrowne/smelt-sql/issues/177) / [#178](https://github.com/adbrowne/smelt-sql/issues/178) / [#179](https://github.com/adbrowne/smelt-sql/issues/179)
 (the per-dialect verdict backlogs),
 [#180](https://github.com/adbrowne/smelt-sql/issues/180) (documenting the accepted divergences for users),
-[#181](https://github.com/adbrowne/smelt-sql/issues/181) (PostgreSQL is unverified).
+[#181](https://github.com/adbrowne/smelt-sql/issues/181) (PostgreSQL is unverified — closed 2026-09-04 by deciding to retire the emission dialect; see the 2026-09-04 parallel track under What's Next).
 
 The coverage table issue #171 asked for is generated and drift-gated at
 [`docs/reference/dialect-coverage.md`](reference/dialect-coverage.md).

@@ -1,5 +1,29 @@
 # TODO
 
+## Follow-ups from the dialect emission vocabulary spec (2026-09-04)
+
+Spec: `docs/specs/multi_backend.md` §"Template emission", §"Operand-conditional verdicts"
+(commit `03828a14`). Implementation is queued as
+`docs/outcomes/20260904-dialect-emission-vocabulary/outcome.md` (last in `.claude/outcome-backlog`).
+
+- **BigQuery sweep after the outcome lands** (human-run, bills): close #179 and the BigQuery arms
+  of #173 (`%` → `MOD` for integral/decimal, truncated-remainder template for floating) and #174
+  (`LOG` one-arg → `LOG10`, two-arg argument-reversed) with `scripts/bigquery-dialect-audit.sh`.
+  The loop cannot run this; the outcome's last phase leaves the issues stating what remains.
+- **Two spec claims stated without measurement**, to verify on the value leg before they are
+  claimed as verdicts: DuckDB's floating-point `%` keeps the dividend's sign (truncating, not
+  floor); Spark accepts `DIV(a, b)` in call form rather than only infix `a div b`.
+- **`LOG` is registered at one arity.** The two-argument overload must be admitted by the
+  signature before an arity arm can name it (spec: an arity guard cannot claim a shape the entry
+  does not recognise).
+- **Invariant text**: `docs/specs/architecture.md` §Constraints item 14 and CLAUDE.md's
+  function-registry bullet do not yet mention templates or compile-path settlement of conditional
+  verdicts — outcome phase 8.
+- **#175 / #176** (FIRST/LAST lexed as keywords; `Unknown` from UNNEST/DATE_ADD inference) stay
+  open: they are the rows the ratchet paydown leaves standing.
+- **Reversal hook**: if the #181 decision (retire PostgreSQL from the emission set) is reversed,
+  delete outcome phase 1 and criterion 8 and reopen the issue.
+
 ## Follow-ups from the 2026-08-12 incremental spec re-architecture
 
 The spec set (`incremental_models.md` + `incremental_shapes.md` + `definition_deltas.md`) is
