@@ -10,9 +10,12 @@ Spec: `docs/specs/multi_backend.md` §"Template emission", §"Operand-conditiona
   of #173 (`%` → `MOD` for integral/decimal, truncated-remainder template for floating) and #174
   (`LOG` one-arg → `LOG10`, two-arg argument-reversed) with `scripts/bigquery-dialect-audit.sh`.
   The loop cannot run this; the outcome's last phase leaves the issues stating what remains.
-- **Two spec claims stated without measurement**, to verify on the value leg before they are
-  claimed as verdicts: DuckDB's floating-point `%` keeps the dividend's sign (truncating, not
-  floor); Spark accepts `DIV(a, b)` in call form rather than only infix `a div b`.
+- **Two spec claims measured 2026-09-04** (DuckDB 1.4.4 CLI, Spark 4.0.0 via Spark Connect):
+  DuckDB's floating-point `%` is truncating (`-7.5 % 2 = -1.5`, `7.5 % -2 = 1.5`; DOUBLE and
+  DECIMAL agree; `fmod` is floor-style but is not what `%` lowers to), and Spark accepts
+  `DIV(a, b)` in call form with results identical to infix `a div b`, including on floating
+  operands (`div(7.5, 2) = 3`). Spark's `%` is also truncating. The value leg should still pin
+  both as verdict rows, but neither spec sentence needs correcting.
 - **`LOG` is registered at one arity.** The two-argument overload must be admitted by the
   signature before an arity arm can name it (spec: an arity guard cannot claim a shape the entry
   does not recognise).
