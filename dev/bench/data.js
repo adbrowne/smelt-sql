@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788525244564,
+  "lastUpdate": 1788525248101,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.722532,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "8f12d106d8e3e09e84406c26d11aba3757ff9347",
+          "message": "docs: roadmap + TODO for the dialect emission vocabulary outcome and the #181 decision\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
+          "timestamp": "2026-09-04T22:31:28+10:00",
+          "tree_id": "31519853982f3519e2ef26c97773b5a6f3c5af2d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/8f12d106d8e3e09e84406c26d11aba3757ff9347"
+        },
+        "date": 1788525246979,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.12116568574954,
+            "unit": "MB/s"
           }
         ]
       }
