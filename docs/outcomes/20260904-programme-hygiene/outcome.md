@@ -1,7 +1,7 @@
 # Outcome: Programme hygiene — one consistent record of the incremental programme
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260904-incremental-state-review.md` §"Recommended next sequence" items 5 and 6 (record half); `docs/TODO.md` §"Follow-ups from the 2026-08-12 incremental spec re-architecture"; `docs/specs/state.md` §Known Divergences bullet 4
 **Spec anchors:** `docs/specs/state.md`, `docs/specs/run_state.md`, `docs/specs/sources.md`, `docs/specs/schema_evolution.md` (or whichever spec owns schema snapshots), `docs/specs/model_properties.md`
 
@@ -54,7 +54,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | done |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment and the docs-site transcript that repeats its claim; remove the TODO note | done |
 | 5 | Correct `daily_events_status.sql` + `user_status.yml`'s `ColumnScopedMerge` overclaim to the derived `DeleteInsert`; remove that TODO bullet | done |
-| 6 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | planned |
+| 6 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | done |
 
 ## Decision log
 
@@ -146,6 +146,13 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   own wording. Phase 6 therefore classifies every validate finding as outcome-introduced (fix it,
   since it is this outcome's own damage) or pre-existing (record in `docs/TODO.md`, do not fix —
   fixing it would be the code/spec work this outcome puts out of scope).
+
+- 2026-09-04 (implement 06): phase 6 done — both `/smelt:validate` runs clean, all six
+  criterion `rg` checks PASS, `verify-phase.sh` ALL GREEN, `example_diagnostics` and
+  `explain_model` green. One pre-existing (not outcome-introduced) freshness flag found on
+  `state.md` vs. an unrelated 2026-09-04 commit; recorded as a new `docs/TODO.md` bullet rather
+  than fixed, per the outcome's docs-only/no-crate-changes scope. **All six success criteria
+  are now met — this outcome is closed.**
 
 ## Blocked
 

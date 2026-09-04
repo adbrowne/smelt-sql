@@ -486,3 +486,14 @@ planner surface:
   model-edge-only; source-level enrichment joins get no delta restriction.
   Fix the guide or wire the source-level route (flagged 2026-08-09 during the
   sensitivity-precision docs sweep).
+
+## `docs/specs/state.md` freshness gap (flagged 2026-09-04, programme-hygiene phase 6)
+
+`/smelt:validate state` flags `docs/specs/state.md` (`last_reviewed: 2026-08-16`) as stale
+against its own Reference → Code paths (`crates/smelt-state/src/`, `smelt-core/src/config.rs`,
+`smelt-runtime/src/execute.rs`): the most recent commit touching those paths is `6bb11ffc`
+(2026-09-04, "refuse a partition_column rename with a named diagnostic"), unrelated to this
+spec's subject matter. Likely a false positive — the touching commit doesn't concern state
+residency — but a `/smelt:spec state` pass should confirm and bump `last_reviewed` rather than
+leaving the mismatch standing. Not fixed here: `docs/outcomes/20260904-programme-hygiene` is
+docs-only and scoped to specific stale citations, not general spec-review.
