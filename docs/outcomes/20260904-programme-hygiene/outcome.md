@@ -53,7 +53,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | done |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | done |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment and the docs-site transcript that repeats its claim; remove the TODO note | done |
-| 5 | Correct `daily_events_status.sql` + `user_status.yml`'s `ColumnScopedMerge` overclaim to the derived `DeleteInsert`; remove that TODO bullet | planned |
+| 5 | Correct `daily_events_status.sql` + `user_status.yml`'s `ColumnScopedMerge` overclaim to the derived `DeleteInsert`; remove that TODO bullet | done |
 | 6 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
 
 ## Decision log
@@ -133,6 +133,11 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   `raw.user_status`/`changed_at` `ScanClamp` **are** real. Only the MP11/F15 column-scoped-`MERGE`
   sentences are false; the clocked-dimension / `PartitionLocal::Yes` contrast with
   `daily_events_enriched.sql` must be preserved, since it is the reason this fixture exists.
+
+- 2026-09-04 (implement 05): phase 5 done — `daily_events_status.sql` and
+  `user_status.yml` comments corrected to the derived `RecomputeRegion`/`DeleteInsert`
+  technique, the `ColumnScopedMerge` overclaim removed, `docs/TODO.md` bullet deleted.
+  Ground truth matched the plan exactly; no new gaps surfaced.
 
 ## Blocked
 

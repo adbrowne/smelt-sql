@@ -11,9 +11,11 @@ timeseries:
 # top-level `unique_key:` slot of its own (declaring one makes an output
 # key-shaped, `docs/specs/models.md` §"The Relation Contract"), so this
 # cell's own row identity resolves `WholeRow`, not a declared key. That is
-# still the correct row identity for MP11's horizon-clamped column-scoped
-# `MERGE` (`PartitionLocal::Yes` corner) when a `raw.user_status` mutation
-# drives the `{status}` cell — the retired `batched.unique_key: [event_id]`
+# still the correct row identity for the derived `RecomputeRegion` /
+# `Technique::DeleteInsert` corner (`docs/specs/incremental_models.md`
+# §"Per-cell admission", `PartitionLocal::Yes`) when a `raw.user_status`
+# mutation drives the `{status}` cell — the retired
+# `batched.unique_key: [event_id]`
 # sub-block spelling (now `merge_key:` in smelt.yml) this model used to
 # carry here never fed row-identity derivation for a partition-grain output
 # either (`derive::ModelInputs::declared_unique_key`
@@ -21,9 +23,8 @@ timeseries:
 ---
 -- Fact (events) enriched with a CLOCKED, mutable dimension
 -- (raw.user_status) — the genuine scan-clamp corner (`PartitionLocal::Yes`)
--- MP11's horizon-clamped column-scoped MERGE (F15,
--- `smelt_runtime::maintenance_driver::execute_column_scoped_merge`) is wired
--- to dispatch through, distinct from `daily_events_enriched.sql`'s
+-- the `UpstreamMutation` cells derive as `RecomputeRegion` /
+-- `Technique::DeleteInsert`, distinct from `daily_events_enriched.sql`'s
 -- accepted-full-scan corner (`PartitionLocal::No`, driven by the unclocked
 -- `raw.users`). `raw.user_status` is clocked (`timeseries.partition_column:
 -- changed_at`) and this join carries an explicit, derivable window
