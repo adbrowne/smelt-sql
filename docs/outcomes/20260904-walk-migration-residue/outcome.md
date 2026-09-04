@@ -45,10 +45,11 @@ says the rule holds.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | done |
-| 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | pending |
-| 3 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
-| 4 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
-| 5 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
+| 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | planned |
+| 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | pending |
+| 4 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
+| 5 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
+| 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
 
 ## Decision log
 
@@ -72,6 +73,14 @@ says the rule holds.
   impls; 3 needed an explicit bound to stay tail-safe (`TrajectoryTransfer`, `ReachTransfer`,
   `SkewTransfer`). Behaviour-preserving by design — no verdict changed, only reachability. See
   `phases/01-summary.md` for the full account.
+
+- 2026-09-05 (plan, phase 2): added a phase for the **skew** and **trajectory** transfers. Phase 1
+  left three transfers explicitly bounded to `ctes ++ inputs` (`ReachTransfer`, `SkewTransfer`,
+  `TrajectoryTransfer`); phase 2 retires the reach bound (criterion 1 names bound/reach/grain),
+  but skew and footprint-trajectory are composition-relevant verdicts too — the outcome's headline
+  ("the walk is the sole source of every property") is unmet while their bound stands on a
+  "not yet" comment. Rather than leave them as a silent deferral they get their own row (new
+  phase 3); later phases renumbered 4-6. Nothing left the outcome.
 
 ## Blocked
 
