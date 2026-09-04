@@ -1,7 +1,7 @@
 ---
 feature: model_properties
 status: experimental
-last_reviewed: 2026-09-04
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -408,14 +408,14 @@ recorded here — history lives in git and §References → Plans.
   identity has no write emitter or admission rule consuming it; the whole-model property vector
   (`model_property_vector`) has no consumer. Tracked: `docs/plans/20260704-model-updates-l3-declarations.md`,
   `docs/plans/20260707-property-composition-walk.md`.
-- **The composition walk is not yet the sole source of every property.** Expression-position
-  subquery bodies are enumerated as walk nodes and bound/reach, grain (key set, determinism,
+- **The join driving-fact/anchor resolution the event-time monotonicity trace consumes is not
+  migrated onto the composition walk.** `resolve_join_driving_fact` runs its own single-level
+  FROM-clause traversal rather than the shared walk, and its verdict feeds admission (unlike the
+  deliberately separate, advisory-only `EffectiveWindow` walk in `analysis/temporal.rs`,
+  `architecture.md` §"Property composition walk rule"). Expression-position subquery bodies,
+  by contrast, are enumerated as walk nodes and bound/reach, grain (key set, determinism,
   comparability), partition skew, and footprint-trajectory all consume their verdicts
-  (§"The composition walk"); the `temporal` proof and the driving-fact/anchor join resolution
-  still run their own traversal rather than the shared walk; same-scope chained bands still
-  max-merge, and an absorbing verdict rejects every context source.
-  Tracked: `docs/plans/20260707-property-composition-walk.md`,
-  `docs/outcomes/20260904-walk-migration-residue/outcome.md`.
+  (§"The composition walk"). Tracked: `docs/plans/20260707-property-composition-walk.md`.
 - **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints
   "Declared lateness is orchestration-only" forbids any proof from reading it; the summation
   survives (its output feeds batch fields no execute path consumes, so it is inert today) and
@@ -430,11 +430,14 @@ recorded here — history lives in git and §References → Plans.
   — whether an existing column's meaning changed is not derivable from the column/dependency-set
   diff alone; falls to a declared migration intent whose exact surface is open. Cross-ref
   `models.md` §Known Divergences.
-- **Only one maintenance-cell route consults a declared-RI closure today** — the source-enrichment
-  `UpstreamMutation` route derives one; a model-edge creation cell's closure is always derived
-  with an empty referential-integrity map. Tracked:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
-  `docs/outcomes/20260809-probe-backed-facts/outcome.md`.
+- **Two FD-backed readers build their `JoinContext` empty because their callers hold no declared
+  source facts to populate it with.** `rules/cumulative.rs`'s once-write route and
+  `maintenance/locality.rs`'s key-temporal-locality route 2 each call
+  `model_property_vector`/`functional_dependency_verdict_over_vector` with a literal
+  `JoinContext::new()`; this is a correct fail-closed default today (neither is a
+  model-edge/repair admission route), not a live admission gap, but widening either needs its
+  caller to gain declared-fact access first. Tracked:
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Fingerprint projection (P4) has no consumer yet** — the sidecar build and digest compare are a
   later phase's scope. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **The append-only posture probe does not yet distinguish a late append from a violation** — a

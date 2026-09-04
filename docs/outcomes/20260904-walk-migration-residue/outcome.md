@@ -1,7 +1,7 @@
 # Outcome: Walk-migration residue — the composition walk is the sole source of every property
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** done
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows MP-03, MP-05, MP-11, MP-13 (each classified "migration backlog, not a design question"); `docs/specs/model_properties.md` §Known Divergences
 **Spec anchors:** `docs/specs/model_properties.md` §Constraints "Composition happens in the walk, not in scans", `docs/specs/architecture.md` §"Property composition walk rule"
 
@@ -55,7 +55,7 @@ says the rule holds.
 | 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | done |
 | 5 | Declared-RI closure **and** declared unique-key facts reach every `JoinContext`-taking maintenance-cell route (model-edge cells, per-group repair admission); per-route fixtures + a structural empty-context check | done |
 | 6 | Retire the whole-SQL flat-scan bound floor in `derive_model_bounds` (its recorded justification — expression subqueries are not walk nodes — died in phase 1); correct the stale `has_unsupported` fallback comment | done |
-| 7 | Verify each of MP-03/05/11/13 against the code and delete only what is false (MP-13 stays — it now names a different, live gap); durable `walk_coverage` assertion against the closed claims; `/smelt:validate model_properties`; all gates green | planned |
+| 7 | Verify each of MP-03/05/11/13 against the code and delete only what is false (MP-13 stays — it now names a different, live gap); durable `walk_coverage` assertion against the closed claims; `/smelt:validate model_properties`; all gates green | done |
 
 ## Decision log
 
@@ -222,6 +222,23 @@ says the rule holds.
   "MP-13 deleted" is therefore satisfied by the retirement of its *claim*, not by removing a line
   that documents live behaviour; deleting it would hide a real gap. Added a durable
   `walk_coverage` assertion so the MP-11/MP-05 deletions cannot silently regress into the spec.
+
+- 2026-09-05 (implement, phase 7): shipped — verified each surviving MP-03 clause against the
+  code rather than trusting the plan's framing outright: the `temporal` proof's separateness
+  turned out to already be correctly classified as an advisory heuristic (not a gap at all), and
+  the "same-scope chained bands max-merge / absorbing verdict" clause turned out to describe the
+  walk's own intended tropical-composition design (§313), already correctly implemented — both
+  deleted rather than narrowed. The one clause that verification confirmed still true
+  (`resolve_join_driving_fact`'s own FROM-clause traversal, which does feed admission) is what
+  the rewritten MP-03 bullet now states, with its tracking link narrowed to the general
+  `20260707-property-composition-walk.md` plan (this outcome's own success criteria never covered
+  it, so the `walk-migration-residue` link was dropped rather than left dangling on a closing
+  outcome). MP-11 replaced with a bullet naming exactly the two non-admission FD-backed readers
+  phase 5 found still building an empty `JoinContext`. MP-13 verified unchanged. New
+  `walk_coverage` tests (`spec_divergences_do_not_claim_closed_walk_gaps`,
+  `spec_divergence_gate_detects_a_stale_claim`) lock the deletions; verified red-before/green-after
+  by stashing just the spec edit and confirming the gate failed on the old MP-11 wording. All
+  outcome phases now done. See `phases/07-summary.md`.
 
 ## Blocked
 
