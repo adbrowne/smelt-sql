@@ -54,7 +54,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | done |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment and the docs-site transcript that repeats its claim; remove the TODO note | done |
 | 5 | Correct `daily_events_status.sql` + `user_status.yml`'s `ColumnScopedMerge` overclaim to the derived `DeleteInsert`; remove that TODO bullet | done |
-| 6 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
+| 6 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | planned |
 
 ## Decision log
 
@@ -138,6 +138,14 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   `user_status.yml` comments corrected to the derived `RecomputeRegion`/`DeleteInsert`
   technique, the `ColumnScopedMerge` overclaim removed, `docs/TODO.md` bullet deleted.
   Ground truth matched the plan exactly; no new gaps surfaced.
+
+- 2026-09-04 (plan 06): no reshape — the phase-05 summary surfaced no new gaps, and its one
+  carried-over item (the dangling `§"What the composed shape uniquely enables"` citations) is
+  already recorded as a `docs/TODO.md` bullet and sits outside this outcome's success criteria.
+- 2026-09-04 (plan 06): criterion 6 is read as "no drift *introduced by this outcome*", per its
+  own wording. Phase 6 therefore classifies every validate finding as outcome-introduced (fix it,
+  since it is this outcome's own damage) or pre-existing (record in `docs/TODO.md`, do not fix —
+  fixing it would be the code/spec work this outcome puts out of scope).
 
 ## Blocked
 
