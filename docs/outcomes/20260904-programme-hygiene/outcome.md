@@ -1,0 +1,60 @@
+# Outcome: Programme hygiene — one consistent record of the incremental programme
+
+**Created:** 2026-09-04
+**Status:** queued
+**Source:** `docs/research/20260904-incremental-state-review.md` §"Recommended next sequence" items 5 and 6 (record half); `docs/TODO.md` §"Follow-ups from the 2026-08-12 incremental spec re-architecture"; `docs/specs/state.md` §Known Divergences bullet 4
+**Spec anchors:** `docs/specs/state.md`, `docs/specs/run_state.md`, `docs/specs/sources.md`, `docs/specs/schema_evolution.md` (or whichever spec owns schema snapshots), `docs/specs/model_properties.md`
+
+## The outcome
+
+A fresh session that reads the handoffs, the backlog and the specs finds one statement of the
+incremental programme, not two. The 2026-08-16 handoff is marked superseded with a pointer to the
+2026-09-04 review, and the backlog reflects the sequence that review recommends. Every stale spec
+citation `docs/TODO.md` lists is re-pointed or deleted. Each state structure whose owning spec
+does not yet say what happens when it is absent gets its one sentence, as `state.md`'s
+optionality rule requires. The timeseries enriched-events fixture's doc comment describes the
+technique the fixture actually derives. This is a docs-only outcome: no crate changes.
+
+## Success criteria (checkable)
+
+1. `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` carries a dated
+   "Superseded" banner at the top linking `docs/research/20260904-incremental-state-review.md`,
+   and its queue section is not restated anywhere as current.
+2. `.claude/outcome-backlog` lists every `done`/`blocked` outcome after every queued one, in the
+   review's recommended order, with a comment line naming the review as the ordering source.
+3. Every citation in `docs/TODO.md` §"Stale citations flagged by the sweep" either points at a
+   heading that exists (verified by `rg` for the heading text) or is deleted along with the
+   sentence that depended on it; the TODO bullet itself is removed.
+4. Schema snapshots, source postures and probe baselines each have one sentence in their owning
+   spec stating absent-state behaviour, and `state.md` §Known Divergences bullet
+   "Structure-level degradation behaviours are unevenly specified" is deleted.
+5. `examples/timeseries/models/daily_events_enriched.sql`'s comment matches the technique
+   `smelt explain` reports for its `{user_name}` cell (currently `DeleteInsert`), and
+   `docs/TODO.md`'s note about that inaccuracy is removed.
+6. `/smelt:validate state` and `/smelt:validate model_properties` report no drift introduced
+   by this outcome; `bash .claude/scripts/verify-phase.sh` green (doc-sync gates included).
+
+## Out of scope
+
+- Any code change. If a stale citation reveals a behaviour gap, record it under
+  `docs/TODO.md` and move on.
+- The docs-site delta-signature pass (`docs/outcomes/20260904-delta-signature-front-door`).
+- Reopening any decision recorded in `docs/research/20260816-open-questions-triage.md`.
+
+## Phases
+
+| # | Phase | Status |
+|---|-------|--------|
+| 1 | Supersede the 2026-08-16 handoff with a banner + pointer; reorder `.claude/outcome-backlog` per the review | pending |
+| 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | pending |
+| 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | pending |
+| 4 | Correct the `daily_events_enriched.sql` fixture comment; remove the TODO note | pending |
+| 5 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
+
+## Decision log
+
+<!-- Dated one-liners appended by plan/implement steps. -->
+
+## Blocked
+
+<!-- Dated entries; each names the phase, what blocked it, and what a human must decide. -->

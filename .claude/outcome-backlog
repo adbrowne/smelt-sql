@@ -2,6 +2,16 @@
 # One outcome directory per non-comment line, priority order. The loop works
 # the first entry whose outcome.md **Status:** is neither `done` nor `blocked`,
 # then advances to the next. Scaffold + append via /smelt:outcome.
+#
+# Order below follows docs/research/20260904-incremental-state-review.md
+# §"Recommended next sequence" (hygiene first, state-residency as the blocker).
+docs/outcomes/20260904-programme-hygiene
+docs/outcomes/20260904-state-residency
+docs/outcomes/20260904-walk-migration-residue
+docs/outcomes/20260904-delta-signature-front-door
+docs/outcomes/20260904-decided-gap-residue
+docs/outcomes/20260904-ratchet-paydown
+# --- done / blocked ---
 docs/outcomes/20260815-definition-delta-migrate
 docs/outcomes/20260815-keyed-grain-residue
 docs/outcomes/20260815-partition-grain-residue
