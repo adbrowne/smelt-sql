@@ -283,27 +283,9 @@ lands.
 
 ## Known Divergences / Open Questions
 
-- **The runtime ignores `state.mode` entirely.** `execute_project` unconditionally creates
-  the `.smelt/` file store, acquires the lock, and writes manifests, intervals,
-  reconciliation entries, landed deltas, and schema snapshots on every run
-  (`crates/smelt-runtime/src/execute.rs`) — `StateMode` is parsed (`smelt-core/src/config.rs`)
-  but never consulted. The optionality rule is therefore entirely unimplemented: today every
-  project behaves as (at least) `intervals`. Tracking:
-  `docs/outcomes/20260904-state-residency/outcome.md` (criterion 2).
-- **The reconciliation ledger is `.smelt/`-resident, violating the residency rule.** Both
-  gradings live in `.smelt/reconciliation.json` (`crates/smelt-state/src/reconciliation.rs`)
-  rather than in a backend table transactional with the fold. `run_state.md`
-  §"Relationship to the reconciliation ledger" and `incremental_models.md` §Known Divergences
-  already record the intended move; this spec makes the end-state normative. Until the move,
-  the additive grade's never-fold-twice check rides on `.smelt/`, so deleting `.smelt/`
-  today *can* affect correctness for keyed additive folds — the flagship gap this doctrine
-  exists to close. Tracking: `docs/outcomes/20260904-state-residency/outcome.md`
-  (criterion 1).
-- **`state.warehouse_tables` is unimplemented.** The key (§"Opting out of warehouse
-  bookkeeping") is not parsed, and availability resolution — which it feeds — is described in
-  §"The degradation contract" above. Decision record:
-  `docs/research/20260816-open-questions-triage.md` item 11. Tracking:
-  `docs/outcomes/20260904-state-residency/outcome.md` (criterion 5).
+None currently open — `state.mode` is honoured by `execute_project`, the reconciliation ledger
+is engine-resident, and `state.warehouse_tables` is parsed and feeds availability resolution, as
+this spec describes normatively above.
 
 ## Future Extensions
 

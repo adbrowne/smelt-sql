@@ -332,7 +332,7 @@ multiset-equivalence oracle as the DuckDB leg. What is **not** covered by that s
 
 | Area | Status |
 |---|---|
-| `Additive`-combiner keyed/composed folds (e.g. `SUM` across a keyed or composed cumulative fold) | No Spark ledger dialect yet for the never-fold-twice reconciliation ledger; the runtime fails loud rather than silently mishandling it |
+| `Additive`-combiner keyed/composed folds (e.g. `SUM` across a keyed or composed cumulative fold) | No Spark ledger dialect yet for the never-fold-twice reconciliation ledger; the cell takes a recorded, explain-visible downgrade (`MaintenanceStateDowngraded`) to its recompute-family equivalent rather than failing loud |
 | Feed-declared source recompute, replayed against a change-log oracle (admission is covered) | Oracle-replay machinery is DuckDB-connection-specific; execution-driven leg not yet ported |
 | Probe harness (`window_order_permutations_converge`, write-window byte-equality, technique-pin agreement) | Staging/read-back is DuckDB-connection-specific; not yet generalized to the backend trait |
 | Skeleton-position-add refusal path | No Spark fixture yet |

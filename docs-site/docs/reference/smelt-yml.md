@@ -15,6 +15,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 | `python` | string | no | | Path to Python interpreter. Can also be set via the `SMELT_PYTHON` environment variable, which takes precedence over this field. |
 | `maintenance` | object | no | | Project-level maintenance-plan baseline (today only `scan_bounds`); a per-model `maintenance:` block in SQL frontmatter refines it (see [Maintenance Configuration](#maintenance-configuration)) |
 | `probes` | object | no | `{cadence: per_run}` | Project-wide dispatch cadence for declared-fact probes (see [Probes Configuration](#probes-configuration)) |
+| `state` | object | no | `{mode: stateless, warehouse_tables: allowed}` | Project state posture: `mode` (`stateless` \| `intervals` \| `environments`) and `warehouse_tables` (`allowed` \| `none`) (see [State Configuration](#state-configuration)) |
 
 ---
 
@@ -31,7 +32,7 @@ targets:
 
 You can define multiple targets and select one at runtime with the `--target` CLI flag (default: `dev`).
 
-**State isolation per target.** Run state (interval coverage, reconciliation ledgers, deployed-schema snapshots, run history) is stored under `.smelt/targets/<target_name>/`, so each target has its own closed, disjoint state store — a `dev` run can never mask a coverage gap in `prod`, and vice versa. See `docs/reference/cli.md` §"State isolation per target" and `docs/specs/run_state.md` §"`.smelt/` directory layout" for the full on-disk shape.
+**State isolation per target.** Run state (interval coverage, deployed-schema snapshots, run history) is stored under `.smelt/targets/<target_name>/`, so each target has its own closed, disjoint state store — a `dev` run can never mask a coverage gap in `prod`, and vice versa. The reconciliation ledger is separately isolated per target by living in that target's own backend schema rather than under `.smelt/`. See `docs/reference/cli.md` §"State isolation per target" and `docs/specs/run_state.md` §"`.smelt/` directory layout" for the full on-disk shape.
 
 ### DuckDB Target
 
@@ -358,6 +359,31 @@ maintenance:
 `smelt explain <model>` prints each cell's admissible pattern set and its active pin (if any), so you can see what a pin would resolve against before setting one.
 
 Within a keyed-fold cell, `write: keyed` (or its explicit alias `write: keyed_conditional`) and `write: staged_candidate` are not two different techniques — both keep the fold, they just pin a different *mechanism* for it. `keyed`/`keyed_conditional` pin the ordinary `MERGE`; unavailable on a backend without `MERGE` fails `MaintenanceWritePatternUnavailable` rather than silently downgrading. `staged_candidate` pins the merge-less staged conditional `DELETE`+`INSERT` — even on a backend that *can* run `MERGE`, since an explicit pin is a deliberate choice, not a downgrade to second-guess. A `staged_candidate` pin over a cell whose write-suppression proof resolved to the unconditional (always-rewrite) form fails `MaintenanceWriteAddressingRefused`: the staged-candidate mechanism has no unconditional shape to fall back to.
+
+---
+
+## State Configuration
+
+`state:` controls how much observability bookkeeping a run persists under `.smelt/`, and whether
+smelt may author correctness-bearing tables of its own in the target backend:
+
+```yaml
+state:
+  mode: stateless             # default — stateless | intervals | environments
+  warehouse_tables: allowed   # default — allowed | none
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | no | `stateless` | `stateless` writes nothing under `.smelt/`. `intervals` additionally writes run manifests, reports, the interval ledger, landed deltas, deployed-schema snapshots, source postures, and probe/migration baselines. `environments` writes everything `intervals` does plus the snapshot/environment store. Correctness structures (the reconciliation ledger, the transactional merge ledger) are unaffected by this key — they live in the target backend under every posture. See [State — `state.mode` and what is written](state.md#statemode-and-what-is-written). |
+| `warehouse_tables` | string | no | `allowed` | `allowed` lets smelt create the engine-resident correctness tables (e.g. the reconciliation ledger) a maintenance technique needs. `none` forbids smelt from authoring any table of its own in the target backend: every cell whose technique needs one downgrades to its recompute-family equivalent, recorded and printed as `MaintenanceStateDowngraded`, and a declaration whose semantics require one (e.g. `contract.deferral`) refuses with `DeclaredContractRequiresState`. Project-wide and binary — there is no per-table or per-model opt-out. |
+
+`MaintenanceStateDowngraded` and `DeclaredContractRequiresState` are `warehouse_tables: none`'s
+only two consequences: a downgrade never changes what a maintained table equals, only how it's
+computed, while a declaration whose guarantee cannot be verified without the missing structure
+refuses outright rather than silently going unchecked. See
+[State — The reconciliation ledger](state.md#the-reconciliation-ledger) for the structure these
+keys govern.
 
 ---
 

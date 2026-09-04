@@ -78,14 +78,13 @@ Any target with `state.mode` other than the default `stateless` persists run sta
   targets/<target>/
     runs/<run_id>.json              # one run manifest per execution
     intervals.json                  # cumulative interval coverage across runs
-    reconciliation.json             # reconciliation ledger for grain: key models
     landed_deltas.json              # per-source landed-delta intervals
     snapshots.json                  # fingerprint snapshots (state.mode: environments)
     schemas/<model>.json            # deployed schema snapshot per model
     reports/<run_id>.json           # run-report artifact for the run
 ```
 
-Every run-scoped artifact is nested under `.smelt/targets/<target>/`, keyed by the target the run executed against -- a `dev` run's interval ledger or reconciliation state never answers a question about `prod`, and vice versa. Only `meta.json` and `lock` live at the project root, shared across every target.
+Every run-scoped artifact is nested under `.smelt/targets/<target>/`, keyed by the target the run executed against -- a `dev` run's interval ledger never answers a question about `prod`, and vice versa. Only `meta.json` and `lock` live at the project root, shared across every target. The reconciliation ledger is not part of this tree: it is engine-resident (a table in the target backend, transactional with the fold it protects), independent of `state.mode` -- see [State -- The reconciliation ledger](../reference/state.md#the-reconciliation-ledger).
 
 Set `state.mode` in `smelt.yml` to opt into persistence -- `stateless` (the default) writes nothing and requires no `.smelt/` directory at all:
 

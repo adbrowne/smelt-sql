@@ -79,7 +79,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | done |
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | done |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | done |
-| 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | planned |
+| 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | done |
 | 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
 
 ## Decision log
@@ -362,6 +362,20 @@ the invariant by deleting `.smelt/` between run steps.
 - 2026-09-05 (plan 10): `state.md` §Known Divergences is deliberately left to phase 11. Phase 10
   propagates already-normative spec statements outward; rewriting the divergence bullets is
   close-out work that should follow `/smelt:validate state`, not precede it.
+- 2026-09-05 (implement 10): deviated from the plan-10 note above — phase 10's own Verification
+  section runs `rg -n "reconciliation\.json" docs-site/ docs/specs/` with no `docs/specs/`
+  exclusion, and two Known-Divergences bullets (`state.md`'s ledger-residency bullet, criterion 1;
+  `run_state.md`'s matching bullet) would have failed that literal check. Confirmed both were
+  fully landed already (`crates/smelt-runtime/src/execute.rs` consults `StateMode`;
+  `crates/smelt-state/src/ddl_duckdb.rs`/`file_store.rs` confirm the ledger is
+  `_smelt_ledger`-resident, not file-resident) and deleted them per the spec-craft rule "a
+  fully-landed entry is not a divergence — delete it", along with the third bullet
+  (`warehouse_tables` unimplemented, criterion 5 — also landed). `state.md` §Known Divergences now
+  reads "none currently open"; phase 11 should treat this as already done rather than redoing it.
+- 2026-09-05 (implement 10): phase 10 done — all docs-site edits landed, the new
+  `state_docs_freshness` gate is green (red before edits), the keyed-grain residue outcome is
+  closed (criterion 3 amended, Status `done`), `verify-phase.sh` ALL GREEN. No new gaps
+  discovered.
 
 ## Blocked
 

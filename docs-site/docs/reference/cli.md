@@ -60,7 +60,7 @@ See `docs/specs/run_state.md` §"Locking" for the full semantics.
 
 ## State isolation per target
 
-Run state lives under `.smelt/targets/<target>/`, keyed by the `--target` a command ran against (default `dev`). A run against `dev` and a run against `prod` never share interval coverage, reconciliation ledgers, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. This means:
+Run state lives under `.smelt/targets/<target>/`, keyed by the `--target` a command ran against (default `dev`). A run against `dev` and a run against `prod` never share interval coverage, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. (The reconciliation ledger is separately isolated per target by virtue of living in that target's own backend schema, not `.smelt/`.) This means:
 
 - `smelt run --target prod` and `smelt run --target dev` can each be resumed, inspected, and reasoned about independently; a `dev` backfill can never mask a coverage gap in `prod`.
 - `smelt status`, `smelt history`, and `smelt diff` accept `--target` (default `dev`) and report on that target's state only — pass the target you actually care about, especially in CI where the default `dev` is rarely the one that matters.
