@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788526010772,
+  "lastUpdate": 1788526014318,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.864568,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "124de4947e855a3865b2d0ad8e07c6f16aaf322d",
+          "message": "docs(TODO): record measured DuckDB % sign and Spark DIV call-form results\n\nBoth dialect-spec claims verified live: DuckDB 1.4.4 float % is truncating,\nSpark 4.0.0 accepts div(a, b) in call form. No spec change needed.\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
+          "timestamp": "2026-09-04T22:41:25+10:00",
+          "tree_id": "ad2ed968a200ac26d8534d68615651450dbdda01",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/124de4947e855a3865b2d0ad8e07c6f16aaf322d"
+        },
+        "date": 1788526012957,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.863811119105907,
+            "unit": "MB/s"
           }
         ]
       }
