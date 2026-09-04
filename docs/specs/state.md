@@ -76,6 +76,8 @@ structure's format and semantics; this table owns only its class.
 | Snapshot / environment store | observability | `.smelt/targets/<t>/snapshots.json` | `run_state.md`, `virtual_environments.md` |
 | Source postures | observability | `.smelt/` (per target) | `sources.md` |
 | Probe baselines (frozen-band) | observability | `.smelt/` (per target) | `incremental_models.md` §"The contract lattice" |
+| Source-mutation baselines | observability | `.smelt/targets/<t>/source_mutations.json` | `sources.md` |
+| Migration approvals | observability | `.smelt/targets/<t>/migration_approvals.json` | `definition_deltas.md` |
 
 The class assignment is itself normative: a structure listed as correctness may never be
 realised only in `.smelt/`, and a structure listed as observability may never become a
@@ -90,7 +92,7 @@ the consequence table:
 | Posture | Observability structures written | Correctness structures |
 |---|---|---|
 | `stateless` (default) | none — `.smelt/` need not exist | all, whenever the plan derives them |
-| `intervals` | manifests, reports, interval ledger, landed deltas, schema snapshots, source postures, probe baselines | all |
+| `intervals` | manifests, reports, interval ledger, landed deltas, schema snapshots, source postures, probe baselines, source-mutation baselines, migration approvals | all |
 | `environments` | everything in `intervals` plus the snapshot/environment store | all |
 
 Correctness structures are identical in every row: they are a property of the *plan*, not of
@@ -158,7 +160,10 @@ maintained table equals. Concretely:
   landed deltas recomputes the full dirty set and reports why) or **refuse loudly by name**
   (`--resume` with no manifest refuses, `run_state.md` §"`--resume` semantics") — never
   silently pretend the state was empty. Which of the two applies is owned by the consuming
-  feature's spec; this spec requires that one of them is specified.
+  feature's spec; this spec requires that one of them is specified. Under `state.mode:
+  stateless`, `--resume` is always in the refuse-by-name case: there is no manifest to resume
+  from *by posture*, not by accident, so the error names the posture rather than reading as an
+  ordinary "no partially-failed run found".
 
 ### The degradation contract
 

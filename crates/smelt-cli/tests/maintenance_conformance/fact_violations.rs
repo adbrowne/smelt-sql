@@ -445,6 +445,7 @@ fn stage_append_only_project(tmp: &tempfile::TempDir) -> anyhow::Result<LinkCPro
          paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
          default_materialization: table\n\
+         state:\n  mode: intervals\n\
          probes:\n  cadence: per_run\n",
     );
     write_file(

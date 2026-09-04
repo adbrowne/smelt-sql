@@ -324,8 +324,14 @@ pub fn render_smelt_yml_for(target: ConformanceTarget, db_path: &Path) -> String
     // probe cannot yet distinguish from an in-place mutation (the declared
     // `mutation_profile.lateness` limitation recorded in that section's
     // §Known Divergences).
+    // `state.mode: intervals` — this harness reads back run manifests and
+    // interval history via a permissive `FileStore::new` (e.g.
+    // `gate.rs`'s post-run interval assertions), which requires the run
+    // pipeline to have actually written them; the default `stateless`
+    // posture (`docs/specs/state.md` §"`state.mode` and what each posture
+    // provides") would leave `.smelt/` empty.
     format!(
-        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
     )
 }
 
@@ -1372,7 +1378,7 @@ mod tests {
 
         let duckdb_yaml = render_smelt_yml_for(ConformanceTarget::DuckDb, &db_path);
         let expected_duckdb = format!(
-            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
             db = db_path.display(),
         );
         assert_eq!(
@@ -1385,7 +1391,7 @@ mod tests {
         let warehouse = crate::recipe::spark_warehouse_dir(&db_path);
         let connect_url = crate::recipe::spark_connect_url();
         let expected_spark = format!(
-            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  spark:\n    type: spark\n    connect_url: {connect_url}\n    catalog: spark_catalog\n    schema: {schema}\n    warehouse: {warehouse}\n    format: delta\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  spark:\n    type: spark\n    connect_url: {connect_url}\n    catalog: spark_catalog\n    schema: {schema}\n    warehouse: {warehouse}\n    format: delta\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
             schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA,
             warehouse = warehouse.display(),
         );

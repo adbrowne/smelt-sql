@@ -280,7 +280,7 @@ fn probe_partition_column_rename_refusal() {
          version: 1\n\
          paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
-         default_materialization: table\n",
+         default_materialization: table\nstate:\n  mode: intervals\n",
     );
     // Two date columns are both already projected and grouped on in v1, so
     // repointing `partition_column` from one to the other in v2 changes

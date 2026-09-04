@@ -8,10 +8,64 @@ use crate::source_postures::SourcePostureStore;
 use crate::RunManifest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use smelt_core::config::StateMode;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use tracing::warn;
+
+/// A distinct `.smelt/` structure `FileStore` reads or writes
+/// (`docs/specs/state.md` §"The state-structure inventory", observability
+/// rows only — correctness structures never go through `FileStore`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateArtifact {
+    RunManifest,
+    RunReport,
+    Intervals,
+    LandedDeltas,
+    SourcePostures,
+    SourceMutations,
+    MigrationApprovals,
+    FrozenBandBaselines,
+    SchemaSnapshot,
+    SnapshotStore,
+}
+
+/// The exact set of [`StateArtifact`]s a `state.mode` posture writes
+/// (`docs/specs/state.md` §"`state.mode` and what each posture provides").
+/// Pure data — the single table the posture gate in [`FileStore`] consults;
+/// a future artifact is added here once, not at each save/load call site.
+pub fn state_artifacts_written(mode: StateMode) -> &'static [StateArtifact] {
+    use StateArtifact::*;
+    const INTERVALS: [StateArtifact; 9] = [
+        RunManifest,
+        RunReport,
+        Intervals,
+        LandedDeltas,
+        SourcePostures,
+        SourceMutations,
+        MigrationApprovals,
+        FrozenBandBaselines,
+        SchemaSnapshot,
+    ];
+    const ENVIRONMENTS: [StateArtifact; 10] = [
+        RunManifest,
+        RunReport,
+        Intervals,
+        LandedDeltas,
+        SourcePostures,
+        SourceMutations,
+        MigrationApprovals,
+        FrozenBandBaselines,
+        SchemaSnapshot,
+        SnapshotStore,
+    ];
+    match mode {
+        StateMode::Stateless => &[],
+        StateMode::Intervals => &INTERVALS,
+        StateMode::Environments => &ENVIRONMENTS,
+    }
+}
 
 /// The on-disk `.smelt/` layout version this binary writes and the highest
 /// version it can read (`docs/specs/run_state.md` §"`meta.json` and layout
@@ -74,12 +128,17 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// ordinary local binding) releases the lock.
 #[derive(Debug)]
 pub struct StateLock {
-    file: File,
+    /// `None` under a posture that writes no artifact (`state.mode:
+    /// stateless`): `lock()` touched no path, so there is nothing to
+    /// unlock on drop.
+    file: Option<File>,
 }
 
 impl Drop for StateLock {
     fn drop(&mut self) {
-        let _ = fs4::FileExt::unlock(&self.file);
+        if let Some(file) = &self.file {
+            let _ = fs4::FileExt::unlock(file);
+        }
     }
 }
 
@@ -117,23 +176,71 @@ pub struct FileStore {
     /// legacy-layout migration, which needs to know which target's
     /// subtree legacy root-level artifacts move into.
     target: String,
+    /// The posture gate: `None` is the permissive read/tooling posture
+    /// (every artifact allowed — [`FileStore::new`]'s long-standing
+    /// behaviour, used by `smelt history`/`status`/`diff`/`migrate` and by
+    /// every test that predates `state.mode` gating). `Some(mode)` gates
+    /// every save/load to [`state_artifacts_written`]`(mode)`
+    /// ([`FileStore::with_state_mode`], used by the run pipeline).
+    mode: Option<StateMode>,
 }
 
 impl FileStore {
     /// Create a new FileStore rooted at `.smelt/targets/<target>/` under the
     /// given project directory. `meta.json` and `lock` remain project-wide
-    /// at `.smelt/` regardless of `target`.
+    /// at `.smelt/` regardless of `target`. Permissive: every artifact may
+    /// be read or written regardless of any project's `state.mode` — the
+    /// constructor for read/tooling paths (history, status, diff, migrate)
+    /// that must see whatever a run actually wrote, not what an unrelated
+    /// posture would have allowed.
     pub fn new(project_dir: &Path, target: &str) -> Self {
         let root_dir = project_dir.join(".smelt");
         Self {
             target_dir: root_dir.join("targets").join(target),
             root_dir,
             target: target.to_string(),
+            mode: None,
         }
     }
 
-    /// Ensure the state directories exist.
+    /// Create a `FileStore` gated to exactly the artifacts `mode` writes
+    /// (`docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides"). The run pipeline's constructor: every `save_*`/`load_*`/
+    /// `init`/`lock` call is a no-op (writes touch no path; reads return
+    /// the default) for an artifact `mode` excludes, so a `stateless`
+    /// project's run never creates `.smelt/` at all.
+    pub fn with_state_mode(project_dir: &Path, target: &str, mode: StateMode) -> Self {
+        Self {
+            mode: Some(mode),
+            ..Self::new(project_dir, target)
+        }
+    }
+
+    /// Whether `artifact` is writable/readable under this store's posture.
+    fn allows(&self, artifact: StateArtifact) -> bool {
+        match self.mode {
+            None => true,
+            Some(mode) => state_artifacts_written(mode).contains(&artifact),
+        }
+    }
+
+    /// Whether this store's posture writes any artifact at all — `lock()`
+    /// and `init()` no-op entirely when this is false, since a posture
+    /// that writes nothing must not create `.smelt/` itself.
+    fn allows_any(&self) -> bool {
+        match self.mode {
+            None => true,
+            Some(mode) => !state_artifacts_written(mode).is_empty(),
+        }
+    }
+
+    /// Ensure the state directories exist. A no-op under a posture that
+    /// writes no artifact at all (`state.mode: stateless`) — never creates
+    /// `.smelt/` on a project that opted out of it.
     pub fn init(&self) -> Result<()> {
+        if !self.allows_any() {
+            return Ok(());
+        }
         self.check_version()?;
         std::fs::create_dir_all(self.runs_dir())
             .with_context(|| format!("Failed to create runs directory: {:?}", self.runs_dir()))?;
@@ -296,6 +403,9 @@ impl FileStore {
     /// legacy-layout `meta.json` upgrade / future-version hard-error check
     /// under the lock.
     pub fn lock(&self) -> Result<StateLock> {
+        if !self.allows_any() {
+            return Ok(StateLock { file: None });
+        }
         std::fs::create_dir_all(&self.root_dir)
             .with_context(|| format!("Failed to create state directory: {:?}", self.root_dir))?;
         let lock_path = self.lock_path();
@@ -336,13 +446,16 @@ impl FileStore {
             return Err(err);
         }
 
-        Ok(StateLock { file })
+        Ok(StateLock { file: Some(file) })
     }
 
     // --- Run Manifests ---
 
     /// Save a run manifest to disk.
     pub fn save_run(&self, manifest: &RunManifest) -> Result<()> {
+        if !self.allows(StateArtifact::RunManifest) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.runs_dir().join(format!("{}.json", manifest.run_id));
         write_json_atomic(&path, manifest)
@@ -355,6 +468,9 @@ impl FileStore {
     /// Files are sorted by name (descending) before loading, so with a limit
     /// only the newest files are read from disk.
     pub fn load_runs(&self, limit: Option<usize>) -> Result<Vec<RunManifest>> {
+        if !self.allows(StateArtifact::RunManifest) {
+            return Ok(Vec::new());
+        }
         self.check_version()?;
         let runs_dir = self.runs_dir();
         if !runs_dir.exists() {
@@ -397,6 +513,9 @@ impl FileStore {
 
     /// Load a specific run manifest by ID.
     pub fn load_run(&self, run_id: &str) -> Result<Option<RunManifest>> {
+        if !self.allows(StateArtifact::RunManifest) {
+            return Ok(None);
+        }
         self.check_version()?;
         let path = self.runs_dir().join(format!("{}.json", run_id));
         if !path.exists() {
@@ -414,6 +533,9 @@ impl FileStore {
     /// Save a run report to disk, alongside its manifest
     /// (`docs/specs/run_state.md` §"Run report").
     pub fn save_report(&self, report: &crate::RunReport) -> Result<()> {
+        if !self.allows(StateArtifact::RunReport) {
+            return Ok(());
+        }
         self.init()?;
         let dir = self.reports_dir();
         std::fs::create_dir_all(&dir)
@@ -425,6 +547,9 @@ impl FileStore {
 
     /// Load a specific run report by ID.
     pub fn load_report(&self, run_id: &str) -> Result<Option<crate::RunReport>> {
+        if !self.allows(StateArtifact::RunReport) {
+            return Ok(None);
+        }
         self.check_version()?;
         let path = self.reports_dir().join(format!("{}.json", run_id));
         if !path.exists() {
@@ -441,6 +566,9 @@ impl FileStore {
 
     /// Load the interval store from disk. Returns default if file doesn't exist.
     pub fn load_intervals(&self) -> Result<IntervalStore> {
+        if !self.allows(StateArtifact::Intervals) {
+            return Ok(IntervalStore::default());
+        }
         self.check_version()?;
         let path = self.intervals_path();
         if !path.exists() {
@@ -455,6 +583,9 @@ impl FileStore {
 
     /// Save the interval store to disk.
     pub fn save_intervals(&self, store: &IntervalStore) -> Result<()> {
+        if !self.allows(StateArtifact::Intervals) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.intervals_path();
         write_json_atomic(&path, store)
@@ -468,6 +599,9 @@ impl FileStore {
     /// doesn't exist — a source with no entry has never had a landing
     /// recorded.
     pub fn load_landed_deltas(&self) -> Result<LandedDeltaStore> {
+        if !self.allows(StateArtifact::LandedDeltas) {
+            return Ok(LandedDeltaStore::default());
+        }
         self.check_version()?;
         let path = self.landed_deltas_path();
         if !path.exists() {
@@ -482,6 +616,9 @@ impl FileStore {
 
     /// Save the per-source landed-delta store to disk.
     pub fn save_landed_deltas(&self, store: &LandedDeltaStore) -> Result<()> {
+        if !self.allows(StateArtifact::LandedDeltas) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.landed_deltas_path();
         write_json_atomic(&path, store)
@@ -496,6 +633,9 @@ impl FileStore {
     /// doesn't exist — a source with no entry has never had its posture
     /// verified, so builds no probe.
     pub fn load_source_postures(&self) -> Result<SourcePostureStore> {
+        if !self.allows(StateArtifact::SourcePostures) {
+            return Ok(SourcePostureStore::default());
+        }
         self.check_version()?;
         let path = self.source_postures_path();
         if !path.exists() {
@@ -510,6 +650,9 @@ impl FileStore {
 
     /// Save the per-source append-only posture baseline store to disk.
     pub fn save_source_postures(&self, store: &SourcePostureStore) -> Result<()> {
+        if !self.allows(StateArtifact::SourcePostures) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.source_postures_path();
         write_json_atomic(&path, store)
@@ -524,6 +667,9 @@ impl FileStore {
     /// with no entry has never had a dispatched `UpstreamMutation` cell
     /// record a baseline, so its cell unconditionally dispatches.
     pub fn load_source_mutations(&self) -> Result<SourceMutationStore> {
+        if !self.allows(StateArtifact::SourceMutations) {
+            return Ok(SourceMutationStore::default());
+        }
         self.check_version()?;
         let path = self.source_mutations_path();
         if !path.exists() {
@@ -538,6 +684,9 @@ impl FileStore {
 
     /// Save the per-source mutation-fingerprint baseline store to disk.
     pub fn save_source_mutations(&self, store: &SourceMutationStore) -> Result<()> {
+        if !self.allows(StateArtifact::SourceMutations) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.source_mutations_path();
         write_json_atomic(&path, store)
@@ -553,6 +702,9 @@ impl FileStore {
     pub fn load_migration_approvals(
         &self,
     ) -> Result<crate::migration_approvals::MigrationApprovalStore> {
+        if !self.allows(StateArtifact::MigrationApprovals) {
+            return Ok(crate::migration_approvals::MigrationApprovalStore::default());
+        }
         self.check_version()?;
         let path = self.migration_approvals_path();
         if !path.exists() {
@@ -570,6 +722,9 @@ impl FileStore {
         &self,
         store: &crate::migration_approvals::MigrationApprovalStore,
     ) -> Result<()> {
+        if !self.allows(StateArtifact::MigrationApprovals) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.migration_approvals_path();
         write_json_atomic(&path, store)
@@ -584,6 +739,9 @@ impl FileStore {
     /// no entry has never had its frozen band snapshotted, so its next
     /// observation is unconditionally established.
     pub fn load_frozen_band_baselines(&self) -> Result<FrozenBandBaselineStore> {
+        if !self.allows(StateArtifact::FrozenBandBaselines) {
+            return Ok(FrozenBandBaselineStore::default());
+        }
         self.check_version()?;
         let path = self.frozen_band_baselines_path();
         if !path.exists() {
@@ -598,6 +756,9 @@ impl FileStore {
 
     /// Save the per-source frozen-band row-count baseline store to disk.
     pub fn save_frozen_band_baselines(&self, store: &FrozenBandBaselineStore) -> Result<()> {
+        if !self.allows(StateArtifact::FrozenBandBaselines) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.frozen_band_baselines_path();
         write_json_atomic(&path, store)
@@ -608,6 +769,9 @@ impl FileStore {
 
     /// Load the snapshot store from disk. Returns an empty store if the file doesn't exist.
     pub fn load_snapshot_store(&self) -> Result<SnapshotStore> {
+        if !self.allows(StateArtifact::SnapshotStore) {
+            return Ok(SnapshotStore::default());
+        }
         self.check_version()?;
         let path = self.snapshots_path();
         if !path.exists() {
@@ -622,6 +786,9 @@ impl FileStore {
 
     /// Save the snapshot store to disk.
     pub fn save_snapshot_store(&self, store: &SnapshotStore) -> Result<()> {
+        if !self.allows(StateArtifact::SnapshotStore) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.snapshots_path();
         write_json_atomic(&path, store)
@@ -632,6 +799,9 @@ impl FileStore {
 
     /// Save a deployed schema for a model.
     pub fn save_schema(&self, schema: &DeployedSchema) -> Result<()> {
+        if !self.allows(StateArtifact::SchemaSnapshot) {
+            return Ok(());
+        }
         self.check_version()?;
         let dir = self.schemas_dir();
         std::fs::create_dir_all(&dir)
@@ -643,6 +813,9 @@ impl FileStore {
 
     /// Load the deployed schema for a model. Returns None if not found.
     pub fn load_schema(&self, model_name: &str) -> Result<Option<DeployedSchema>> {
+        if !self.allows(StateArtifact::SchemaSnapshot) {
+            return Ok(None);
+        }
         self.check_version()?;
         let path = self.schemas_dir().join(format!("{}.json", model_name));
         if !path.exists() {
@@ -660,6 +833,9 @@ impl FileStore {
     /// Returns the file stems from `.smelt/targets/<target>/schemas/*.json`.
     /// Returns an empty vec if the schemas directory doesn't exist.
     pub fn list_deployed_model_names(&self) -> Vec<String> {
+        if !self.allows(StateArtifact::SchemaSnapshot) {
+            return Vec::new();
+        }
         let dir = self.schemas_dir();
         if !dir.exists() {
             return Vec::new();
@@ -687,6 +863,9 @@ impl FileStore {
     /// No-ops silently if the file does not exist. Called by the build lifecycle
     /// after a successful run to remove orphan entries for deleted model files.
     pub fn delete_schema(&self, model_name: &str) -> Result<()> {
+        if !self.allows(StateArtifact::SchemaSnapshot) {
+            return Ok(());
+        }
         let path = self.schemas_dir().join(format!("{}.json", model_name));
         if path.exists() {
             std::fs::remove_file(&path)
@@ -1349,5 +1528,163 @@ mod tests {
         let all_runs = store.load_runs(None).unwrap();
         assert_eq!(all_runs.len(), 1);
         assert!(all_runs[0].completed_at.is_none());
+    }
+
+    // --- Phase 8: state.mode posture gating ---
+
+    #[test]
+    fn written_artifacts_match_the_posture_table() {
+        use StateArtifact::*;
+        assert_eq!(state_artifacts_written(StateMode::Stateless), &[] as &[_]);
+        assert_eq!(
+            state_artifacts_written(StateMode::Intervals),
+            &[
+                RunManifest,
+                RunReport,
+                Intervals,
+                LandedDeltas,
+                SourcePostures,
+                SourceMutations,
+                MigrationApprovals,
+                FrozenBandBaselines,
+                SchemaSnapshot,
+            ]
+        );
+        assert_eq!(
+            state_artifacts_written(StateMode::Environments),
+            &[
+                RunManifest,
+                RunReport,
+                Intervals,
+                LandedDeltas,
+                SourcePostures,
+                SourceMutations,
+                MigrationApprovals,
+                FrozenBandBaselines,
+                SchemaSnapshot,
+                SnapshotStore,
+            ]
+        );
+        // environments is a strict superset of intervals.
+        for artifact in state_artifacts_written(StateMode::Intervals) {
+            assert!(state_artifacts_written(StateMode::Environments).contains(artifact));
+        }
+    }
+
+    #[test]
+    fn stateless_store_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::with_state_mode(dir.path(), "dev", StateMode::Stateless);
+
+        store.init().unwrap();
+        let _guard = store.lock().unwrap();
+        store.save_run(&test_manifest()).unwrap();
+        store
+            .save_report(&crate::RunReport {
+                run_id: "r1".to_string(),
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                duration_ms: 0,
+                outcome_counts: crate::OutcomeCounts::default(),
+                failures: Vec::new(),
+            })
+            .unwrap();
+        store.save_intervals(&IntervalStore::default()).unwrap();
+        store
+            .save_landed_deltas(&crate::landed_deltas::LandedDeltaStore::default())
+            .unwrap();
+        store
+            .save_source_postures(&SourcePostureStore::default())
+            .unwrap();
+        store
+            .save_source_mutations(&crate::source_mutations::SourceMutationStore::default())
+            .unwrap();
+        store
+            .save_migration_approvals(
+                &crate::migration_approvals::MigrationApprovalStore::default(),
+            )
+            .unwrap();
+        store
+            .save_frozen_band_baselines(&FrozenBandBaselineStore::default())
+            .unwrap();
+        store
+            .save_schema(&DeployedSchema {
+                model: "m".to_string(),
+                version: 1,
+                deployed_at: Utc::now(),
+                model_hash: "sha256:abc".to_string(),
+                model_sql: None,
+                partition_column: None,
+                columns: vec![],
+            })
+            .unwrap();
+        drop(_guard);
+
+        assert!(
+            !dir.path().join(".smelt").exists(),
+            "stateless posture must leave no .smelt/ entry"
+        );
+    }
+
+    #[test]
+    fn intervals_store_denies_snapshot_store() {
+        let dir = TempDir::new().unwrap();
+        let intervals_store = FileStore::with_state_mode(dir.path(), "dev", StateMode::Intervals);
+
+        let mut snap = SnapshotStore::default();
+        snap.upsert(SnapshotEntry {
+            model: "orders".to_string(),
+            environment: "prod".to_string(),
+            physical_table: "orders__prod".to_string(),
+            source_sql: "SELECT 1".to_string(),
+            fingerprint_hex: None,
+        });
+        intervals_store.save_snapshot_store(&snap).unwrap();
+        assert!(
+            !dir.path()
+                .join(".smelt/targets/dev/snapshots.json")
+                .exists(),
+            "intervals posture must not write the snapshot store"
+        );
+
+        let env_dir = TempDir::new().unwrap();
+        let env_store = FileStore::with_state_mode(env_dir.path(), "dev", StateMode::Environments);
+        env_store.save_snapshot_store(&snap).unwrap();
+        assert!(
+            env_dir
+                .path()
+                .join(".smelt/targets/dev/snapshots.json")
+                .exists(),
+            "environments posture must write the snapshot store"
+        );
+    }
+
+    #[test]
+    fn stateless_loads_return_defaults_over_stale_files() {
+        let dir = TempDir::new().unwrap();
+
+        // A prior, higher-posture run left real state behind.
+        let env_store = FileStore::with_state_mode(dir.path(), "dev", StateMode::Environments);
+        env_store
+            .save_intervals(&{
+                let mut intervals = IntervalStore::default();
+                intervals
+                    .get_or_create("m", "sha256:abc")
+                    .record_interval("2026-01-01", "2026-01-02");
+                intervals
+            })
+            .unwrap();
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/intervals.json")
+            .exists());
+
+        // A stateless store over the same project dir must not read it back.
+        let stateless_store = FileStore::with_state_mode(dir.path(), "dev", StateMode::Stateless);
+        let loaded = stateless_store.load_intervals().unwrap();
+        assert!(
+            loaded.models.is_empty(),
+            "stateless posture must not read back a stale higher-posture file"
+        );
     }
 }

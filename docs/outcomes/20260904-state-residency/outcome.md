@@ -77,7 +77,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | done |
 | 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | done |
 | 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | done |
-| 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | planned |
+| 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | done |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
 | 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
 | 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
@@ -299,6 +299,25 @@ the invariant by deleting `.smelt/` between run steps.
   unless a project opts in, so several in-code test Configs (which get `StateMode::Stateless` by
   default) must declare `state.mode: intervals` to keep asserting manifests/intervals. That
   fixture sweep is listed as a phase task, not treated as a regression.
+
+- 2026-09-05 (phase 8 implement): landed the posture gate inside `FileStore`
+  (`StateArtifact` + `state_artifacts_written` + `with_state_mode`), wired
+  `execute.rs` to build the run pipeline's store from `config.state.mode`,
+  and made `--resume` under `stateless` refuse by naming the posture before
+  it reaches history load. No new production logic was needed for
+  `contract.deferral` to degrade correctly under `stateless` —
+  `run_license`'s existing `None`-frontier fallback already covers it; a new
+  test locks that. Discovered mid-phase: honouring `state.mode` for real
+  (previously unconditional) broke 9 test files beyond the plan's named
+  list, all now fixed by declaring `state.mode: intervals` in their
+  fixtures; also discovered `SnapshotStore::save_snapshot_store` has no
+  production caller anywhere — virtual environments' distinguishing
+  structure is currently never persisted by a real run (pre-existing gap,
+  not touched here; flagged for whoever next works `virtual_
+  environments.md`). All gates green (`verify-phase.sh`, full workspace
+  `cargo test`, `maintenance_conformance`, `execute_parity`/
+  `statement_parity`, `smelt-lsp --test example_workspaces`). See
+  `phases/08-summary.md`.
 
 ## Blocked
 

@@ -1148,7 +1148,10 @@ pub async fn execute_project(
         HashMap::new()
     };
 
-    let file_store = FileStore::new(project_dir, &request.target);
+    // The run pipeline's store is posture-gated (`docs/specs/state.md`
+    // §"`state.mode` and what each posture provides"): under `stateless`
+    // every save/load below is a no-op and `.smelt/` is never created.
+    let file_store = FileStore::with_state_mode(project_dir, &request.target, config.state.mode);
 
     // Legacy `sources.yml` — best-effort input to the definition-delta gate's
     // upstream-facts map (`docs/specs/definition_deltas.md` §"The migration
@@ -1235,6 +1238,18 @@ pub async fn execute_project(
     // project can't be mistaken for "nothing needed doing".
     let current_selection: HashSet<&str> = model_plans.iter().map(|p| p.name.as_str()).collect();
     let resume_manifest: Option<RunManifest> = if request.resume {
+        // `docs/specs/state.md` §"The optionality rule": `stateless` has no
+        // manifest to resume from *by posture*, not by accident — refuse by
+        // name rather than falling through to the generic "no partially-
+        // failed run" message a missing manifest would otherwise produce.
+        if config.state.mode == smelt_core::config::StateMode::Stateless {
+            anyhow::bail!(
+                "--resume: target '{}' is running with state.mode: stateless, which writes no \
+                 run history — there is nothing to resume from. Set state.mode to intervals or \
+                 environments to enable --resume.",
+                request.target
+            );
+        }
         let latest_candidate = file_store
             .load_runs(None)
             .context("--resume: failed to load run history")?

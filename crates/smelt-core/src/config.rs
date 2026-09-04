@@ -318,7 +318,7 @@ pub struct Config {
 ///
 /// The three modes form a capability lattice: `environments ⊇ intervals ⊇ stateless`.
 /// A model may narrow (declare a lower mode than the project) but not widen.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StateMode {
     /// Default: no `.smelt/` state store required; no snapshot reuse.

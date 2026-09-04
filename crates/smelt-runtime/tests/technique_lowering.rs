@@ -2311,6 +2311,17 @@ mod keyed_membership_recompute_e2e {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let project_dir = tmp.path().join("project");
         copy_dir_recursive(&source_dir, &project_dir);
+        // `examples/timeseries/smelt.yml` declares no `state:` key, so it
+        // defaults to `state.mode: stateless`; this fixture's third run
+        // needs the source-mutation baseline run 2 recorded
+        // (`docs/specs/state.md` §"`state.mode` and what each posture
+        // provides").
+        {
+            let smelt_yml_path = project_dir.join("smelt.yml");
+            let mut smelt_yml = std::fs::read_to_string(&smelt_yml_path).unwrap();
+            smelt_yml.push_str("\nstate:\n  mode: intervals\n");
+            std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
+        }
         std::fs::write(
             project_dir.join("models/user_lifetime_status.sql"),
             model_file_text(),
@@ -2566,6 +2577,17 @@ mod keyed_membership_recompute_e2e {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let project_dir = tmp.path().join("project");
         copy_dir_recursive(&source_dir, &project_dir);
+        // `examples/timeseries/smelt.yml` declares no `state:` key, so it
+        // defaults to `state.mode: stateless`; this fixture's third run
+        // needs the source-mutation baseline run 2 recorded
+        // (`docs/specs/state.md` §"`state.mode` and what each posture
+        // provides").
+        {
+            let smelt_yml_path = project_dir.join("smelt.yml");
+            let mut smelt_yml = std::fs::read_to_string(&smelt_yml_path).unwrap();
+            smelt_yml.push_str("\nstate:\n  mode: intervals\n");
+            std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
+        }
         std::fs::write(
             project_dir.join("models/user_lifetime_status.sql"),
             model_file_text_diff_patch(),

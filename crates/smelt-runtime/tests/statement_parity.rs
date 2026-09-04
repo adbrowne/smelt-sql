@@ -5034,7 +5034,7 @@ async fn stage_and_migrate(
 
     let db_path = project_dir.join("run.duckdb");
     let smelt_yml = format!(
-        "name: backbuild_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        "name: backbuild_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\nstate:\n  mode: intervals\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();

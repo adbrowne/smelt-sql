@@ -29,7 +29,7 @@ fn setup_workspace(dir: &Path) {
 
     std::fs::write(
         dir.join("smelt.yml"),
-        "name: evo-full-refresh-test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: test.duckdb\n    schema: main\n",
+        "name: evo-full-refresh-test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: test.duckdb\n    schema: main\nstate:\n  mode: intervals\n",
     )
     .unwrap();
 
