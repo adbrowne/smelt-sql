@@ -51,7 +51,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 |---|-------|--------|
 | 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | done |
 | 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | done |
-| 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | pending |
+| 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | planned |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment; remove the TODO note | pending |
 | 5 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
 
@@ -89,6 +89,17 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   after reading both. A new gap surfaced and was recorded as a fresh `docs/TODO.md` bullet rather
   than fixed: `§"What the composed shape uniquely enables"` is cited from three sites but doesn't
   exist in either incremental spec; out of this phase's site list, so left for a future sweep.
+- 2026-09-04 (plan 03): phase 3 requires three normative calls the outcome did not pre-decide;
+  made here rather than blocked, because `state.md` §"The optionality rule" constrains each to one
+  of two shapes and each reuses a diagnostic `state.md` §Surface already owns. Schema snapshots →
+  degrade (every model reads as `new`, ordinary create/replace, never `NoChange`); source postures
+  → degrade (cross-run-baseline verification cannot run, so the narrowing declaration's fold
+  licence is withheld to the undeclared row, recorded `MaintenanceStateDowngraded`; scan-window
+  probes unaffected); frozen-band probe baselines → refuse by name
+  (`DeclaredContractRequiresState`, the same call `state.md` makes for `contract.deferral`).
+- 2026-09-04 (plan 03): no phase reshape — the phase-02 summary's one open item (the dangling
+  `§"What the composed shape uniquely enables"` citations) is outside this outcome's success
+  criteria and is already recorded as a fresh `docs/TODO.md` bullet.
 
 ## Blocked
 
