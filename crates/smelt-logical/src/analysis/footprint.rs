@@ -137,6 +137,19 @@ fn model_has_trajectory_column(sql: &str, output_partition_col: &str) -> bool {
 /// The trajectory-detection transfer over the composition walk: each SELECT
 /// node contributes its own scope's verdict; children compose in parallel
 /// (OR — any scope's trajectory column makes the stored model a trajectory).
+///
+/// `ctes` and `inputs` fold in unconditionally, same as every other
+/// child-tail consumer. An `expr_scopes` child folds in only when its own
+/// `ExprScope::range` sits inside one of this scope's own select-list
+/// items' expression range — i.e. only when the subquery's value actually
+/// flows into a stored output column. Trajectory is a property of a
+/// *stored* column (`docs/specs/model_properties.md` §"Footprint reflection
+/// / bounded write footprint": "a stored trajectory column … whose stored
+/// value is still mutable arbitrarily far downstream"); a running fold
+/// buried in a `WHERE`/`HAVING`/`QUALIFY`/`ORDER BY` scalar or `EXISTS`/`IN`/
+/// quantified subquery never becomes a stored column of this scope, so it
+/// contributes no trajectory here (`window_inside_a_where_subquery_is_not_a_trajectory_of_the_outer_select`
+/// pins this: an unconditional whole-slice fold would misclassify it).
 struct TrajectoryTransfer<'a> {
     axis: &'a str,
 }
@@ -156,13 +169,24 @@ impl Transfer for TrajectoryTransfer<'_> {
             OpNode::Unsupported { .. } => children.iter().any(|c| *c),
             OpNode::SetOp(_) => children.iter().any(|c| *c),
             OpNode::Select(sn) => {
-                // Bounded to ctes ++ inputs: an expr_scopes tail is not yet
-                // a trajectory contributor (`model_properties.md` §"The
-                // composition walk"'s children convention) — an unbounded
-                // `.any()` over the whole slice would silently pull it in.
                 let n = sn.ctes.len() + sn.inputs.len();
                 let child_hit = children[..n].iter().any(|c| *c);
-                child_hit || scope_has_running_fold_over_axis(&sn.select, self.axis)
+                let expr_scope_hit = sn
+                    .select
+                    .select_list()
+                    .map(|select_list| {
+                        sn.expr_scopes.iter().zip(&children[n..]).any(|(es, hit)| {
+                            *hit && select_list.items().any(|item| {
+                                item.expression().is_some_and(|expr| {
+                                    expr.syntax().text_range().contains_range(es.range)
+                                })
+                            })
+                        })
+                    })
+                    .unwrap_or(false);
+                child_hit
+                    || expr_scope_hit
+                    || scope_has_running_fold_over_axis(&sn.select, self.axis)
             }
         }
     }

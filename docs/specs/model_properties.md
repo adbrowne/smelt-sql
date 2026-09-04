@@ -343,6 +343,19 @@ belonging to either property's own section:
   syntactic verdict — computed excluding the subquery's own subtree, since that subtree is a walk
   node judged on its own — and the worst per-column verdict of the matching expression scope's own
   property vector.
+- **Partition skew and footprint-trajectory.** An expression-position scope composes into both
+  exactly as any other child does. Skew folds the scope's verdict into the enclosing node's fold by
+  `Skew::union` (max before, max after) — a Form B relation living inside a scalar/`EXISTS`/`IN`/
+  quantified subquery body can push rows into a neighbouring partition just as one in a
+  `FROM`-position derived table can, so there is no carve-out: unlike bound/reach this transfer has
+  no join-sibling slack computation to protect from an unrelated scope's contribution. Footprint
+  trajectory folds by parallel OR, but only for a scope whose value **flows into a stored output
+  column** — a running fold over the output axis inside a select-list scalar subquery still makes
+  the model a trajectory, but the same fold inside a `WHERE`/`HAVING`/`QUALIFY`/`ORDER BY` scalar,
+  `EXISTS`, `IN`, or quantified subquery never becomes a stored column of the enclosing scope, so it
+  contributes no trajectory (only filters rows or orders them). Both folds are widening — the
+  conservative direction is *more* skew / *more* trajectory — so admitting either only over-approximates,
+  never under-derives.
 
 ## Design
 
@@ -385,13 +398,11 @@ recorded here — history lives in git and §References → Plans.
   (`model_property_vector`) has no consumer. Tracked: `docs/plans/20260704-model-updates-l3-declarations.md`,
   `docs/plans/20260707-property-composition-walk.md`.
 - **The composition walk is not yet the sole source of every property.** Expression-position
-  subquery bodies are enumerated as walk nodes and bound/reach and grain (key set,
-  determinism, comparability) consume their verdicts (§"The composition walk"), but partition
-  skew and footprint-trajectory still bound the walk's children tail to `ctes ++ inputs`, so an
-  expression-position scope's window/`DISTINCT`/`HAVING` content is invisible to those two
-  properties; the `temporal` proof and the driving-fact/anchor join resolution still run their own
-  traversal rather than the shared walk; same-scope chained bands still max-merge, and an absorbing
-  verdict rejects every context source.
+  subquery bodies are enumerated as walk nodes and bound/reach, grain (key set, determinism,
+  comparability), partition skew, and footprint-trajectory all consume their verdicts
+  (§"The composition walk"); the `temporal` proof and the driving-fact/anchor join resolution
+  still run their own traversal rather than the shared walk; same-scope chained bands still
+  max-merge, and an absorbing verdict rejects every context source.
   Tracked: `docs/plans/20260707-property-composition-walk.md`,
   `docs/outcomes/20260904-walk-migration-residue/outcome.md`.
 - **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints

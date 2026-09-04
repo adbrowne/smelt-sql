@@ -8,11 +8,14 @@
 
 use proptest::prelude::*;
 
+use smelt_logical::analysis::footprint::{reflect_footprint, FootprintResult};
 use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::source_bounds::{
-    derive_model_bounds, BoundContext, BoundResult, Seconds,
+    derive_model_bounds, BoundContext, BoundResult, Seconds, Skew,
 };
-use smelt_logical::analysis::walk::{model_property_vector, Comparability, Determinism};
+use smelt_logical::analysis::walk::{
+    model_partition_skew, model_property_vector, Comparability, Determinism,
+};
 
 fn ctx() -> BoundContext {
     BoundContext::new()
@@ -243,4 +246,111 @@ fn taint_flag_actually_taints() {
         .find(|c| c.output.eq_ignore_ascii_case("m"))
         .expect("column m is projected");
     assert_eq!(comparability.comparability, Comparability::Incomparable);
+}
+
+// ===== Phase 3: skew and footprint-trajectory consume the expr-scope tail =====
+// (`docs/outcomes/20260904-walk-migration-residue` phase 3). Both transfers
+// were bounded to `ctes ++ inputs` after phase 1/2; phase 3 retires the
+// bound.
+
+/// A Form B relation living only inside a `WHERE EXISTS (…)` filter body
+/// must be seen by skew — before phase 3 the expr-scopes tail was not a
+/// skew contributor at all, so this scope's relation was invisible.
+#[test]
+fn skew_from_expr_position_subquery_is_seen() {
+    let sql = "SELECT e.d AS d, e.amt AS amt \
+               FROM smelt.sources.events e \
+               WHERE EXISTS ( \
+                   SELECT 1 FROM smelt.marts.running_balance bal \
+                   WHERE bal.d >= e.d - INTERVAL '2 days' AND bal.d < e.d \
+               )";
+    let skew = model_partition_skew(sql, "d");
+    assert_eq!(
+        skew,
+        Skew {
+            before: Seconds::days(2),
+            after: Seconds::ZERO,
+        },
+        "a Form B relation living only inside an EXISTS filter body must be seen by skew: {skew:?}"
+    );
+}
+
+fn render_skew_pair(agg: &str, before_days: i64) -> (String, String) {
+    let cond = format!("bal.d >= t.d - INTERVAL '{before_days} day' AND bal.d < t.d");
+    let expr_position = format!(
+        "SELECT t.a, (SELECT {agg}(bal.balance) FROM smelt.marts.running_balance bal \
+         WHERE {cond}) AS m FROM smelt.sources.events t"
+    );
+    let inlined = format!(
+        "SELECT t.a, __e.m AS m FROM smelt.sources.events t, \
+         (SELECT {agg}(bal.balance) AS m FROM smelt.marts.running_balance bal WHERE {cond}) AS __e"
+    );
+    (expr_position, inlined)
+}
+
+/// The skew verdict for a model reading a Form B relation via an
+/// uncorrelated scalar subquery equals the verdict for the same relation
+/// rewritten as a cross-joined derived table.
+#[test]
+fn skew_expr_scope_equals_inlined_derived_table() {
+    let (expr_position, inlined) = render_skew_pair("MAX", 1);
+    assert_eq!(
+        model_partition_skew(&expr_position, "d"),
+        model_partition_skew(&inlined, "d")
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_skew_expr_scope_inline_equivalence(agg in agg_strategy(), before_days in 1i64..30) {
+        let (expr_position, inlined) = render_skew_pair(&agg, before_days);
+        prop_assert_eq!(
+            model_partition_skew(&expr_position, "d"),
+            model_partition_skew(&inlined, "d")
+        );
+    }
+}
+
+fn footprint_ctx() -> BoundContext {
+    BoundContext::new()
+        .with_source("silver.events", "event_date")
+        .with_source("silver.other", "other_date")
+}
+
+/// A running `SUM(…) OVER (ORDER BY <axis>)` inside a select-list scalar
+/// subquery's body makes the enclosing model a trajectory of that source —
+/// before phase 3 this fold sat outside the `ctes ++ inputs` bound and was
+/// invisible to `TrajectoryTransfer`.
+#[test]
+fn trajectory_from_expr_position_subquery_is_seen() {
+    let sql = "SELECT event_date, \
+               (SELECT SUM(amount) OVER (ORDER BY event_date) FROM smelt.silver.other) AS m \
+               FROM smelt.silver.events";
+    let fps = reflect_footprint(sql, &footprint_ctx(), Some("event_date"));
+    assert_eq!(
+        fps.get("silver.other"),
+        Some(&FootprintResult::Unbounded),
+        "a running fold over the output axis inside a select-list scalar subquery must be seen \
+         as a trajectory column: {fps:?}"
+    );
+}
+
+/// Same claim as an equivalence: the reflected footprint for a model reading
+/// the running fold via a select-list scalar subquery equals the footprint
+/// for the same fold rewritten as a cross-joined derived table.
+#[test]
+fn trajectory_expr_scope_equals_inlined_derived_table() {
+    let expr_position = "SELECT t.event_date, \
+        (SELECT SUM(amount) OVER (ORDER BY event_date) FROM smelt.silver.other) AS m \
+        FROM smelt.silver.events t";
+    let inlined = "SELECT t.event_date, __e.m AS m \
+        FROM smelt.silver.events t, \
+        (SELECT SUM(amount) OVER (ORDER BY event_date) AS m FROM smelt.silver.other) AS __e";
+    let ctx = footprint_ctx();
+    assert_eq!(
+        reflect_footprint(expr_position, &ctx, Some("event_date")),
+        reflect_footprint(inlined, &ctx, Some("event_date"))
+    );
 }

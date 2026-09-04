@@ -46,7 +46,7 @@ says the rule holds.
 |---|-------|--------|
 | 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | done |
 | 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | done |
-| 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | planned |
+| 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | done |
 | 4 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
 | 5 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
 | 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
@@ -99,6 +99,15 @@ says the rule holds.
   `TrajectoryTransfer` has a sibling-slack computation, and both folds (`Skew::union`, parallel
   OR) widen conservatively, so the plan folds the whole children slice and keeps
   `tracer_propagation`/`footprint_reflection`/`since_upstream` as regression fences.
+
+- 2026-09-05 (implement, phase 3): shipped — `SkewTransfer` folds the whole children slice
+  unconditionally (no join-sibling carve-out, purely widening); `TrajectoryTransfer` folds an
+  `expr_scopes` child only when its value flows into a select-list output column. Deviated from
+  the plan's literal "unconditional `.any()` over the whole slice" for trajectory: that broke
+  `window_inside_a_where_subquery_is_not_a_trajectory_of_the_outer_select`
+  (`footprint_reflection.rs`) — a running fold inside a `WHERE`-clause scalar subquery is never a
+  stored column, so per task 6 the widening was judged unsound at that node and narrowed, with the
+  narrowing written into the spec delta. See `phases/03-summary.md`.
 
 ## Blocked
 

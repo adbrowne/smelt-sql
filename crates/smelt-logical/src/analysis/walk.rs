@@ -94,16 +94,19 @@ pub struct SelectNode {
     /// (`footprint.rs`, `monotonicity.rs`, `source_bounds.rs`,
     /// `fingerprint.rs`, `affected_keys.rs`, `output_delta.rs`, and this
     /// module's `ScopeEnum`, `PartitionGrainAdmission`, `SkewTransfer`,
-    /// `PropertyTransfer`, `Discard`) was audited (phase 1) to either slice
-    /// this tail off explicitly or already index `inputs` by a `.zip()` that
-    /// truncates to it, so its addition was behaviour-preserving on its own.
-    /// Phase 2 made `source_bounds.rs`'s `ReachTransfer` and this module's
-    /// `PropertyTransfer` actually consume the tail (bound/reach folds an
-    /// expr scope as a read; grain/determinism/comparability take the
-    /// per-column verdict and the set-op barrier — `model_properties.md`
-    /// §"The composition walk"). `footprint.rs`'s `TrajectoryTransfer` and
-    /// this module's `SkewTransfer` remain explicitly bounded to `ctes ++
-    /// inputs` pending phase 3.
+    /// `PropertyTransfer`, `Discard`) either consumes the tail or explicitly
+    /// slices it off, so no production transfer opts out by silent omission
+    /// (`model_properties.md` §"The composition walk"). Bound/reach
+    /// (`source_bounds.rs`'s `ReachTransfer`) folds an expr scope as a read;
+    /// grain/determinism/comparability (this module's `PropertyTransfer`)
+    /// take the per-column verdict and the set-op barrier; partition skew
+    /// (`SkewTransfer`) folds the whole tail by `Skew::union`, since a Form
+    /// B relation in any scope can push rows into a neighbouring partition;
+    /// footprint trajectory (`footprint.rs`'s `TrajectoryTransfer`) folds
+    /// only the sub-slice whose `ExprScope::range` sits inside one of this
+    /// scope's own select-list items — a running fold buried in a
+    /// `WHERE`/`HAVING`/`QUALIFY`/`ORDER BY` subquery never becomes a
+    /// stored output column, so it is not a trajectory contributor.
     pub expr_scopes: Vec<ExprScope>,
 }
 
@@ -1724,14 +1727,17 @@ use crate::analysis::source_bounds::{derive_partition_skew, Skew};
 /// [`Skew::union`] (max before, max after), since a Form B relation in any
 /// scope can push rows into a neighbouring partition.
 ///
-/// This transfer is still bounded to `ctes ++ inputs` (`SkewTransfer::operator`'s
-/// own comment) and does not yet fold the `expr_scopes` children tail — since
-/// [`own_region_text`] now excludes every `SUBQUERY` subtree unconditionally
-/// (phase 2 correctness fix for [`ReachTransfer`]'s double-counting), a
-/// skew-relevant Form B relation living only inside an expression-position
-/// subquery is temporarily invisible to this transfer, not merely uncounted
-/// twice as before. Retiring this bound is phase 3's job
-/// (`docs/outcomes/20260904-walk-migration-residue/outcome.md`).
+/// This transfer folds the *whole* children slice (`ctes ++ inputs ++
+/// expr_scopes`) by [`Skew::union`] — an expression-position scope composes
+/// exactly as any other child does: a Form B relation living inside a
+/// scalar/`EXISTS`/`IN`/quantified subquery body can push rows into a
+/// neighbouring partition just as one in a `FROM`-position derived table
+/// can, so it is not excluded from the fold the way grain/key derivation
+/// excludes an expr scope's contribution (`model_properties.md` §"The
+/// composition walk"). Unlike bound/reach there is no join-sibling
+/// carve-out to make here: this transfer has no sibling-slack computation,
+/// and the fold's conservative direction is *more* skew, so widening it can
+/// only over-approximate, never under-derive.
 ///
 /// `exclude_source` names the model's own source path (dotted, as it appears
 /// in a `smelt.<path>` self-reference) for a self-referential model
@@ -1758,13 +1764,12 @@ impl Transfer for SkewTransfer<'_> {
     fn operator(&self, op: &OpNode<'_>, children: &[Skew], cx: &NodeCx) -> Skew {
         match op {
             OpNode::Select(sn) => {
-                // Bounded to ctes ++ inputs: an expr_scopes tail is not yet
-                // a skew contributor (`model_properties.md` §"The
-                // composition walk"'s children convention) — a bare
-                // `.iter().fold()` over the whole slice would silently pull
-                // it in.
-                let n = sn.ctes.len() + sn.inputs.len();
-                let acc = children[..n]
+                // Folds the whole children slice (ctes ++ inputs ++
+                // expr_scopes): a Form B relation in any scope — including
+                // an expression-position subquery body — can push rows into
+                // a neighbouring partition (`model_properties.md` §"The
+                // composition walk").
+                let acc = children
                     .iter()
                     .fold(Skew::ZERO, |acc, child| acc.union(*child));
                 let own = match self.exclude_source {
