@@ -456,6 +456,15 @@ recorded here — history lives in git and §References → Plans.
   contract, plan, and graph layer".
 - **The grammar boundary between `columns.<c>.contract` and a future column `tests:` block is
   deliberately deferred (Open Question)** — cross-ref `models.md` §Known Divergences decision 8.
+- **A source read only as an argument to a table-valued function call is invisible to the
+  composition walk.** `smelt.functions.<fn>(source => smelt.silver.x, …)` normalizes to a single
+  opaque leaf named after the call itself; the walk never descends into the call's argument list,
+  so a source passed that way (the real shape `examples/web_analytics/models/silver/sessions.sql`
+  reads its upstream through) never becomes a walk leaf under any tree shape. Bound derivation
+  (`derive_model_bounds`) covers the gap with a per-source whole-text fallback classified as a leaf
+  classifier (`docs/specs/architecture.md` §"Property composition walk rule"); every other walk
+  consumer (grain, footprint, cross-axis links, the driving-fact/anchor resolution) does not.
+  Tracked: `docs/outcomes/20260904-walk-migration-residue/outcome.md`.
 
 ## Future Extensions
 

@@ -54,7 +54,7 @@ says the rule holds.
 | 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | done |
 | 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | done |
 | 5 | Declared-RI closure **and** declared unique-key facts reach every `JoinContext`-taking maintenance-cell route (model-edge cells, per-group repair admission); per-route fixtures + a structural empty-context check | done |
-| 6 | Retire the whole-SQL flat-scan bound floor in `derive_model_bounds` (its recorded justification — expression subqueries are not walk nodes — died in phase 1); correct the stale `has_unsupported` fallback comment | planned |
+| 6 | Retire the whole-SQL flat-scan bound floor in `derive_model_bounds` (its recorded justification — expression subqueries are not walk nodes — died in phase 1); correct the stale `has_unsupported` fallback comment | done |
 | 7 | Delete the divergence bullets this outcome closed; `/smelt:validate model_properties`; all gates green | pending |
 
 ## Decision log
@@ -200,6 +200,19 @@ says the rule holds.
   live gap (late append vs violation) already scheduled onto
   `docs/outcomes/20260904-decision-residue/outcome.md`. Phase 7 verifies each bullet against the
   code and deletes only what is false.
+
+- 2026-09-05 (implement, phase 6): shipped — the per-source flat-scan floor is gone;
+  walk-only equals floored across the full existing test corpus (verified before deletion). Two
+  real bugs surfaced and were fixed rather than papered over with a wider floor: (1)
+  `ReachTransfer::leaf` never resolved the maintenance-plan subsystem's "sources."-stripped
+  bare-name `BoundContext` convention, silently masked by the floor's table-identity blindness for
+  as long as the floor existed; (2) a source read only as a table-valued function call's argument
+  (`smelt.functions.sessionize(source => smelt.silver.x, …)`, `examples/web_analytics`'s real
+  `silver.sessions` shape) is structurally invisible to the walk under any tree shape, not just an
+  `Unsupported` one — kept as one named, tested leaf classifier per the plan's task-5 escape hatch,
+  plus a `model_properties.md` §Known Divergences line. 22 pre-existing unit tests and 2 integration
+  tests had fixture SQL that only ever passed because the floor was blind to table names; fixed to
+  reference sources the way every real caller does. See `phases/06-summary.md`.
 
 ## Blocked
 
