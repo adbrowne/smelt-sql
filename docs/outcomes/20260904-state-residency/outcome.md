@@ -59,6 +59,12 @@ the invariant by deleting `.smelt/` between run steps.
   (`run_state.md` §Known Divergences bullet 1; `scheduler-delta-signatures`, which needs a
   human-reviewed first plan).
 - The virtual-environments snapshot/environment store (`run_state.md` §Known Divergences).
+- The `Config.targets` iteration-order fix (`resolve_default_target` is a stopgap; the real fix is
+  a "no target declared and 2+ targets" diagnostic or an ordered map). Flagged by phase 6; no
+  success criterion depends on it, and it is a repo-wide config change.
+- Confirming/removing the now-likely-dead ledger-less `else` branch in
+  `maintenance_driver.rs::run_windowed_keyed_maintenance` (phase 6's flag). Availability
+  resolution already makes it unreachable in production, so no criterion depends on the cleanup.
 
 ## Phases
 
@@ -70,7 +76,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | done |
 | 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | done |
 | 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | done |
-| 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | pending |
+| 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | planned |
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
 | 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
@@ -246,6 +252,25 @@ the invariant by deleting `.smelt/` between run steps.
   `explain_show_sql.rs`'s BigQuery-median test (scoped its assertions to the `DeleteInsert` cell,
   since a `ColumnScopedMerge` repair cell now correctly downgrades and its `s.*` copy statement
   was never the thing under test).
+
+- 2026-09-05 (plan 07): no phase reshape — phase 6's split already isolated this phase's scope, and
+  reading the code confirmed the two codes have exactly one pure owner to come from. Two items
+  phase 6 flagged for a follow-up (`Config.targets` ordering; the dead ledger-less branch in
+  `run_windowed_keyed_maintenance`) are recorded under "## Out of scope": neither serves a success
+  criterion.
+- 2026-09-05 (plan 07): both diagnostics are emitted from `maintenance_plan_diagnostics`, including
+  the `contract.deferral` refusal — rather than at `check_file_diagnostics`'s existing
+  `validate_deferral` sites. That keeps the availability inputs (declared backends +
+  `state.warehouse_tables`) assembled once, in one pure function, instead of a second ad hoc
+  resolution in the Salsa wrapper.
+- 2026-09-05 (plan 07): the analysis-time resolution runs over a **clone** of the derived cells.
+  Plan 05 recorded that `smelt-db`'s derivation sites stay unresolved because analysis time has no
+  single target dialect; this phase keeps that true for the returned plan/report (which
+  `smelt explain` and the runtime resolve themselves) and resolves per declared backend only to
+  compute the diagnostics — the same all-declared-backends posture `write_pin_diagnostics` uses.
+- 2026-09-05 (plan 07): "which state structure does a contract point require" lands as a pure
+  function in `smelt-logical`'s `contract` module, exhaustive over `ContractPoint`, per the
+  contract-lattice point single-ownership invariant — a caller must never decide this ad hoc.
 
 ## Blocked
 
