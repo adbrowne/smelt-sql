@@ -754,12 +754,12 @@ Cells (4):
       technique: DeleteInsert
       ...
   - group {user_name} on trigger UpstreamMutation { source: "raw.users" }
-      corner:    ColumnMerge
-      technique: ColumnScopedMerge
+      corner:    RecomputeRegion
+      technique: DeleteInsert
       ...
 ```
 
-The `UpstreamMutation` cell for `raw.users` shows that a dimension change only needs a **column-scoped `MERGE`** touching `{user_name}` — not a rebuild of the whole partition. That targeted repair is only available when the join cannot change *which* fact rows exist: a `LEFT JOIN` against a dimension that declares its own `unique_key` proves this (the join can only ever change a value, never admit or drop a fact row), so only the dimension-derived column group repairs column-scoped while everything else the dimension's `ON` predicate might otherwise gate stays untouched. A plain (inner) `JOIN`, or a `LEFT JOIN` against a dimension with no declared `unique_key`, cannot be proven this way — every column group the join touches falls back to the region `DELETE`+`INSERT` recompute instead, since a row-admitting join can change which rows exist, not just their values. Declare the dimension's mutability explicitly on its source YAML so smelt derives a mutation cell at all instead of assuming worst-case immutability:
+This model's plain inner `JOIN` is exactly the shape that *cannot* be proven row-preserving — its `ON` predicate makes row membership sensitive to the dimension, so no column group of the `SELECT` can be proven value-only — and the `{user_name}` cell falls back to the region `DELETE`+`INSERT` recompute rather than a **column-scoped `MERGE`**. That targeted repair is only available when the join cannot change *which* fact rows exist: a `LEFT JOIN` against a dimension that declares its own `unique_key` proves this (the join can only ever change a value, never admit or drop a fact row), so only the dimension-derived column group repairs column-scoped while everything else the dimension's `ON` predicate might otherwise gate stays untouched. A plain (inner) `JOIN`, or a `LEFT JOIN` against a dimension with no declared `unique_key`, cannot be proven this way — every column group the join touches falls back to the region `DELETE`+`INSERT` recompute instead, since a row-admitting join can change which rows exist, not just their values. Declare the dimension's mutability explicitly on its source YAML so smelt derives a mutation cell at all instead of assuming worst-case immutability:
 
 ```yaml
 # models/sources/raw/users.yml

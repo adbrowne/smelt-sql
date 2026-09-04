@@ -54,10 +54,7 @@ itself remains unpinned even though the technique's normal admission path is now
 The bare inner-join fixture `examples/timeseries/models/daily_events_enriched.sql` (this item's
 original repro) is unaffected by the fix — it derives `Technique::DeleteInsert` for its
 `{user_name}` cell today, same as before, because its join is an inner `JOIN` with no dimension
-`unique_key` proving closure; that fixture was never the shape the fix targets. Its own doc
-comment (predating this resolution) still claims a live column-scoped `MERGE` for that cell — a
-pre-existing inaccuracy in the fixture's comments, not touched by this docs-only pass since
-`examples/` is out of scope for a docs sweep; worth a follow-up correction.
+`unique_key` proving closure; that fixture was never the shape the fix targets.
 
 ### Original entry (2026-08-08, corrected same day)
 
@@ -489,3 +486,19 @@ planner surface:
   model-edge-only; source-level enrichment joins get no delta restriction.
   Fix the guide or wire the source-level route (flagged 2026-08-09 during the
   sensitivity-precision docs sweep).
+- [ ] **`daily_events_status.sql`'s comments also overclaim `ColumnScopedMerge`** —
+  found 2026-09-04 while correcting `daily_events_enriched.sql`'s sibling
+  inaccuracy (`docs/outcomes/20260904-programme-hygiene` phase 4).
+  `smelt explain daily_events_status --project-dir examples/timeseries`
+  derives `Technique::DeleteInsert` (not `ColumnScopedMerge`) for both the
+  `{event_id, event_type, user_id}` and `{status}` `UpstreamMutation` cells,
+  even though `raw.user_status` declares `unique_key: [user_id]` and the
+  join is clocked — likely because the join's `ON` also carries the
+  `changed_at BETWEEN …` window predicate alongside the equality, so it is
+  not proven row-preserving the way a bare `user_id` equijoin would be. The
+  fixture's frontmatter comment (`daily_events_status.sql:9-20`), body
+  comment (`:22-33`), and `models/sources/raw/user_status.yml`'s comment
+  (`:9-16`) all claim this model dispatches through "MP11's horizon-clamped
+  column-scoped `MERGE`"; none of it does today. Out of phase 4's task list
+  (which named only `daily_events_enriched.sql`), so left for a follow-up
+  correction rather than fixed here.

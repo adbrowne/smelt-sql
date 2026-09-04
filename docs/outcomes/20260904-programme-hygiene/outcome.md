@@ -52,7 +52,7 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | done |
 | 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | done |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | done |
-| 4 | Correct the `daily_events_enriched.sql` fixture comment and the docs-site transcript that repeats its claim; remove the TODO note | planned |
+| 4 | Correct the `daily_events_enriched.sql` fixture comment and the docs-site transcript that repeats its claim; remove the TODO note | done |
 | 5 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
 
 ## Decision log
@@ -114,6 +114,11 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 - 2026-09-04 (implement 03): phase 3 done — all three owner-spec sentences landed verbatim as
   the plan specified, the `state.md` divergence bullet deleted, all five `rg` checks green,
   `verify-phase.sh` green. No new gaps surfaced.
+- 2026-09-04 (implement 04): phase 4 done — fixture and docs-site comments corrected to the
+  derived `DeleteInsert` technique, TODO note removed, `verify-phase.sh` green. Found (not
+  fixed, out of this phase's task list) that `daily_events_status.sql` and `user_status.yml`
+  carry the identical overclaim for a different model; recorded as a fresh `docs/TODO.md`
+  bullet for a future phase or outcome.
 
 ## Blocked
 
