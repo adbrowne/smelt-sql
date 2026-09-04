@@ -108,7 +108,7 @@ When a model is materialized by `smelt run` or `smelt build`, smelt writes the d
 - `model_hash`: SHA-256 of the model SQL at deploy time
 - `columns`: Array of `{name, data_type, nullable}` objects
 
-If `.smelt/schemas/` does not exist, `smelt diff` reports all models as `new`.
+If `.smelt/schemas/` does not exist — `state.mode: stateless`, or the directory deleted — `smelt diff` reports every model as `new` and no `AlterTable` migration is planned: the model goes through its ordinary create/replace materialization instead. This is the optionality rule's degrade-and-say-so shape (`state.md` §"The optionality rule"): the absent snapshot is visible in the diff output, and smelt never reads a missing snapshot as `NoChange`.
 
 ### Stale schema cleanup
 

@@ -815,7 +815,13 @@ of the default point for every model that opts in. The first run has nothing to 
 against, so it only establishes the baseline. Count comparison is sound only where the source
 is `append_only` (row counts non-decreasing); declaring `frozen_horizon` on a model whose
 driving source has any other declared mutation profile is refused at declaration time
-(`ContractFrozenHorizonInvalid`, naming the posture) rather than probed blind.
+(`ContractFrozenHorizonInvalid`, naming the posture) rather than probed blind. Because the probe
+is baseline-comparative across runs, declaring `frozen_horizon` under a posture that does not
+persist probe baselines is refused the same way, by name: `DeclaredContractRequiresState`
+(`state.md` §"Declarations stay fail-loud"), the same call made for `contract.deferral` and for
+the same reason — silently skipping the comparison would turn the declared guarantee into an
+unverified hope. The first-run baseline-establishment case above is unaffected, since it makes
+no comparison to skip.
 
 **Deferral (`D`).** The oracle bounds the lag between the landed and processed sets (§"The
 equivalence invariant", landed vs processed): at every scheduled evaluation, every input in

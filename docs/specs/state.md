@@ -294,11 +294,6 @@ lands.
   a backend without a ledger builder fails loudly (the ledger's warehouse substrate is
   DuckDB-only, `incremental_models.md` §Known Divergences) instead of downgrading with
   `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented.
-- **Structure-level degradation behaviours are unevenly specified.** `--resume` (refuses) and
-  forward propagation (falls back to full dirty set, `run_state.md` §Known Divergences) have
-  named behaviours; schema snapshots, source postures, and probe baselines do not yet have
-  their absent-state behaviour specified by their owning specs, as the optionality rule
-  requires. Each owner spec needs one sentence.
 - **`state.warehouse_tables` is unimplemented.** The key (§"Opting out of warehouse
   bookkeeping") is not parsed, and availability resolution — which it feeds — does not exist
   (previous bullet). Decision record:
