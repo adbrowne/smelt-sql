@@ -271,7 +271,7 @@ fn build_physical_section(
     use smelt_planner::Transformation;
     use std::collections::BTreeMap;
 
-    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    let default_target = resolve_default_target(config);
 
     // Parse transformations into lookup maps for physical section rendering.
     let mut incremental_overrides: HashMap<String, (String, String)> = HashMap::new();
@@ -429,7 +429,7 @@ async fn explain_maintenance_plan(
         .source_file(&model.path)
         .expect("model file not registered");
 
-    let Some(result) = smelt_db::maintenance_plan_report(&db, ws, file) else {
+    let Some(mut result) = smelt_db::maintenance_plan_report(&db, ws, file) else {
         println!(
             "no maintenance plan: `{}` is not an incremental model with a declared grain",
             canonical
@@ -499,19 +499,34 @@ async fn explain_maintenance_plan(
     // §"`smelt explain <model>` maintenance-plan report") — so it is safe
     // to compute up front and reuse for both the probe plan below and
     // `--show-sql`'s statement rendering further down.
-    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    let default_target = resolve_default_target(&config);
     let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
     let schema = config
         .targets
         .get(&target)
         .map(|t| t.schema.clone())
         .unwrap_or_else(|| "main".to_string());
-    let dialect = config
+    let sql_dialect = config
         .targets
         .get(&target)
         .and_then(|t| t.backend_type().ok())
-        .map(backend_type_to_maintenance_dialect)
-        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+        .map(backend_type_to_sql_dialect)
+        .unwrap_or(smelt_backend::SqlDialect::DuckDB);
+    let dialect = smelt_backend::maintenance_dialect(sql_dialect);
+
+    // Availability resolution (`state.md` §"The degradation contract" step
+    // 2, `docs/outcomes/20260904-state-residency/outcome.md` phase 6):
+    // applied once, here, before any of the report/JSON/`--show-sql` paths
+    // below consume `result.plan.cells`, so all three agree on which cells
+    // carry a recorded `state_downgrade`. Resolved offline from the
+    // model's declared target dialect and `state.warehouse_tables` — never
+    // a live connection, matching this command's offline posture.
+    let availability =
+        smelt_runtime::maintenance_availability::availability_for_run(sql_dialect, &config);
+    smelt_logical::maintenance::availability::resolve_availability(
+        &mut result.plan.cells,
+        &availability,
+    );
 
     // Definition-delta status (`docs/specs/definition_deltas.md`
     // §"Detection"): read from the same single-owner derivation the run
@@ -792,19 +807,38 @@ async fn explain_maintenance_plan(
     Ok(())
 }
 
+/// The project's default active target (`config.target`) when declared;
+/// otherwise the lexicographically-first target name. A project declaring
+/// 2+ targets and no `target:` default has no canonical "the" target, so
+/// falling back to `config.targets.keys().next()` (`HashMap` iteration,
+/// randomized per process) previously made `smelt explain`'s per-model
+/// dialect derivation — and, since availability resolution was wired in
+/// (`docs/outcomes/20260904-state-residency/outcome.md` phase 6), a
+/// ledger-requiring cell's admitted-vs-downgraded verdict — nondeterministic
+/// across runs of the same command against the same project. Sorting is a
+/// stopgap for a real "no target declared" diagnostic; it only needs to be
+/// deterministic, not any particular target.
+fn resolve_default_target(config: &Config) -> String {
+    if let Some(target) = &config.target {
+        return target.clone();
+    }
+    let mut names: Vec<&String> = config.targets.keys().collect();
+    names.sort();
+    names.first().map(|s| s.to_string()).unwrap_or_default()
+}
+
 /// `BackendType` has only two variants today (`DuckDB`, `Spark`) —
-/// `smelt_backend::maintenance_dialect` takes the richer `SqlDialect`
-/// (which also has `PostgreSQL`); this is the narrow bridge from a target's
-/// declared backend to the maintenance-statement dialect tag.
-fn backend_type_to_maintenance_dialect(
+/// `smelt_backend::maintenance_dialect` and availability resolution both
+/// take the richer `SqlDialect` (which also has `PostgreSQL`); this is the
+/// narrow bridge from a target's declared backend to it.
+fn backend_type_to_sql_dialect(
     backend_type: smelt_core::config::BackendType,
-) -> smelt_logical::maintenance::emit::MaintenanceDialect {
-    let dialect = match backend_type {
+) -> smelt_backend::SqlDialect {
+    match backend_type {
         smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
         smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
         smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
-    };
-    smelt_backend::maintenance_dialect(dialect)
+    }
 }
 
 /// Derive the `--period`-relative output window + per-source scan margin a

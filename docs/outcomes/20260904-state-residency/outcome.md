@@ -69,7 +69,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | done |
 | 4 | Availability resolution as a pure `smelt-logical` step: `StateStructure` inventory, per-technique requirement, recompute-family downgrade recorded on the cell; `state.warehouse_tables` parsed (`smelt_yml.md` row) and expressible as an availability input | done |
 | 5 | Wire resolution into the plan-derivation seam: every runtime consumer reads a resolved plan; the non-DuckDB ledger skip becomes a recorded downgrade instead of a `state_structure_unavailable` reporter call | done |
-| 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | planned |
+| 6 | Run/explain surface: `smelt explain` prints the recorded downgrade (text + `--json`); the keyed-grain merge-ledger skip becomes the recorded downgrade and `RunReporter::state_structure_unavailable` is retired | done |
 | 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | pending |
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | pending |
@@ -229,6 +229,23 @@ the invariant by deleting `.smelt/` between run steps.
   at the cell's recorded `state_downgrade`, which is now genuinely user-visible via `smelt
   explain`. With both callers gone, `RunReporter::state_structure_unavailable` and its buffered
   `ReporterEvent` variant are deleted rather than left dead.
+
+- 2026-09-05 (phase 6 implement): landed the explain surface (text row, `--json` field) and
+  retired `RunReporter::state_structure_unavailable` entirely (trait, `CliReporter` impl, buffered
+  `ReporterEvent` variant + replay + test, three test-local capturing-reporter impls). Also fixed
+  a phase-6-exposed pre-existing bug: `smelt explain`'s default-target fallback used
+  `HashMap::keys().next()` (randomized per process), which was harmless before this phase but,
+  once dialect started feeding availability resolution, made a two-target project's
+  ledger-requiring cell nondeterministically Admitted/downgraded across runs — caught as a flaky
+  `crates/smelt-cli/tests/explain.rs::technique_flag_renders_named_technique`. New
+  `resolve_default_target` (prefers `config.target`, else sorted-first) fixes it; the real fix
+  (a "no target declared, 2+ targets" diagnostic, or an ordered `Config.targets` map) is a
+  follow-up. See `phases/06-summary.md` for the full account, including a plan deviation (the
+  "records no reporter event" test landed as an internal `maintenance_driver.rs` unit test rather
+  than in `keyed_frontier_bookkeeping.rs`, which has no dialect-override seam) and a real fix to
+  `explain_show_sql.rs`'s BigQuery-median test (scoped its assertions to the `DeleteInsert` cell,
+  since a `ColumnScopedMerge` repair cell now correctly downgrades and its `s.*` copy statement
+  was never the thing under test).
 
 ## Blocked
 

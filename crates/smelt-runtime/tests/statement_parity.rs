@@ -6070,10 +6070,12 @@ async fn ledger_reset_rolls_back_with_a_failed_write() {
 /// A non-DuckDB dialect's DeleteInsert batch write emits no `_smelt_ledger`
 /// SQL at all — the skip is now driven by the run's resolved
 /// `StateAvailability` (`docs/outcomes/20260904-state-residency/
-/// outcome.md` phase 5), not a raw `backend.dialect() == DuckDB` check, and
-/// no longer calls `RunReporter::state_structure_unavailable` — the
-/// affected cell's own recorded `MaintenanceStateDowngraded` is the
-/// user-visible channel now (phase 6 surfaces it via `smelt explain`).
+/// outcome.md` phase 5), not a raw `backend.dialect() == DuckDB` check.
+/// The old `RunReporter` stand-in method for this skip is retired entirely
+/// (phase 6): the affected cell's own recorded `MaintenanceStateDowngraded` is the
+/// user-visible channel now, surfaced by `smelt explain`
+/// (`crates/smelt-cli/tests/explain_maintenance.rs`) — this test asserts
+/// only the emitted-statement set, which is the half this crate owns.
 /// Uses a fully mocked `Backend` (never a real connection) so the dialect
 /// mismatch between the claimed `SqlDialect::SparkSQL` and no real Spark
 /// engine can never itself cause a spurious failure — this test is about
@@ -6081,7 +6083,7 @@ async fn ledger_reset_rolls_back_with_a_failed_write() {
 #[tokio::test]
 async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
     struct NonDuckDbBackend {
-        calls: Mutex<Vec<String>>,
+        calls: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait]
@@ -6180,7 +6182,9 @@ async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
         }
     }
 
-    struct NonDuckDbFactory;
+    struct NonDuckDbFactory {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
     impl BackendFactory for NonDuckDbFactory {
         fn create<'a>(
             &'a self,
@@ -6188,31 +6192,8 @@ async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
             _target_config: &'a Target,
             _project_dir: &'a Path,
         ) -> BackendFuture<'a> {
-            Box::pin(async move {
-                Ok(Box::new(NonDuckDbBackend {
-                    calls: Mutex::new(Vec::new()),
-                }) as Box<dyn Backend>)
-            })
-        }
-    }
-
-    struct CapturingReporter {
-        calls: Mutex<Vec<(String, String, String)>>,
-    }
-    impl smelt_runtime::RunReporter for CapturingReporter {
-        fn state_structure_unavailable(
-            &self,
-            _run_id: &str,
-            model: &str,
-            structure: &str,
-            dialect: &str,
-            _consequence: &str,
-        ) {
-            self.calls.lock().unwrap().push((
-                model.to_string(),
-                structure.to_string(),
-                dialect.to_string(),
-            ));
+            let calls = Arc::clone(&self.calls);
+            Box::pin(async move { Ok(Box::new(NonDuckDbBackend { calls }) as Box<dyn Backend>) })
         }
     }
 
@@ -6233,17 +6214,25 @@ async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
          ---\n\
          SELECT * FROM (VALUES (DATE '2024-01-01', 10)) AS t(event_date, amount)",
     );
+    // `type: spark` (`docs/outcomes/20260904-state-residency/outcome.md`
+    // phase 5): the run's availability resolution reads the target's
+    // *declared* dialect from `smelt.yml`
+    // (`sql_dialect_for_target`/`availability_for_run`), never the mocked
+    // backend's own `dialect()` claim — so this fixture's target type must
+    // itself say `spark` for the ledger-less skip this test exercises to
+    // actually be reached.
     let smelt_yml = "name: ledger_skip_test\nversion: 1\npaths:\n  - models\ntargets:\n  \
-                      dev:\n    type: duckdb\n    database: unused.duckdb\n    schema: main\n\
+                      dev:\n    type: spark\n    schema: main\n\
                       default_materialization: table\ntarget: dev\n";
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
 
     let config = Arc::new(Config::load(project_dir).expect("load config"));
     let (db, graph) = build_db_and_graph(project_dir, &config);
 
-    let reporter = CapturingReporter {
-        calls: Mutex::new(Vec::new()),
+    let factory = NonDuckDbFactory {
+        calls: Arc::new(Mutex::new(Vec::new())),
     };
+    let calls_handle = Arc::clone(&factory.calls);
     execute_project(
         "ledger-skip-run".to_string(),
         make_request("dev", "2024-01-01", "2024-01-02"),
@@ -6251,18 +6240,16 @@ async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
         graph,
         db,
         project_dir,
-        &NonDuckDbFactory,
-        &reporter,
+        &factory,
+        &NO_OP_REPORTER,
         CancellationToken::new(),
     )
     .await
     .expect("a run over a non-DuckDB backend must still succeed");
 
-    let calls = reporter.calls.lock().unwrap();
+    let calls = calls_handle.lock().unwrap();
     assert!(
-        calls.is_empty(),
-        "a non-DuckDB dialect's ledger-reset skip must no longer call \
-         state_structure_unavailable — the recorded state_downgrade on the affected cell is \
-         the user-visible channel now: {calls:?}"
+        !calls.iter().any(|c| c.contains("_smelt_ledger")),
+        "a non-DuckDB dialect must emit no ledger-reset SQL at all: {calls:?}"
     );
 }

@@ -1247,11 +1247,12 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB window-forward keyed
   model writes no frontier record at all today. §"The transactional frontier write (merge
   ledger)" now specifies the end-state (a recorded `MaintenanceStateDowngraded` downgrade for
-  both grades); today's implementation instead reports the omission on the run's reporter
-  channel for the re-run-tolerant grade (`RunReporter::state_structure_unavailable`, a stand-in
-  for the recorded downgrade, not the specified behaviour) and refuses the run outright for the
-  additive grade. Tracking: `docs/outcomes/20260904-state-residency/outcome.md`
-  (criterion 3).
+  both grades). The re-run-tolerant grade now matches: availability resolution downgrades a
+  ledger-requiring cell to its recompute-family equivalent before this driver ever runs, and the
+  downgrade is the affected cell's own recorded `state_downgrade`, surfaced by `smelt explain`
+  (`cli.md` §"`smelt explain <model>` maintenance-plan report") — not a reporter event. The
+  additive grade still refuses the run outright on a non-DuckDB target rather than downgrading.
+  Tracking: `docs/outcomes/20260904-state-residency/outcome.md` (criterion 3).
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.
@@ -1392,10 +1393,9 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   `WindowedKeyedRule`); `crates/smelt-runtime/src/cumulative.rs` (per-window merge execution);
   `crates/smelt-backend/src/lib.rs` (`merge_into`, `Backend::execute_write_with_bookkeeping` —
   the transactional-write seam), impls in `crates/smelt-backend-duckdb` (the transactional
-  override) `/-spark`; `crates/smelt-runtime/src/reporter.rs`
-  (`RunReporter::state_structure_unavailable` — today's stand-in for the recorded
-  `MaintenanceStateDowngraded` downgrade when a non-DuckDB backend skips the idempotent-grade
-  ledger record; see §Known Divergences).
+  override) `/-spark`; `crates/smelt-logical/src/maintenance/availability.rs`
+  (`resolve_availability` — the recorded `MaintenanceStateDowngraded` downgrade a non-DuckDB
+  target's ledger-requiring cell carries, surfaced by `smelt explain`; see §Known Divergences).
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`);
   `crates/smelt-logical/tests/execution_postures.rs`; the keyed end-state-equivalence harness;
   `crates/smelt-runtime/tests/keyed_frontier_bookkeeping.rs`; `smelt-backend-duckdb` `merge_into`

@@ -158,11 +158,6 @@ enum ReporterEvent {
         retry_max: u32,
         error: String,
     },
-    StateStructureUnavailable {
-        structure: String,
-        dialect: String,
-        consequence: String,
-    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -243,17 +238,6 @@ impl EventSink {
                     retry_max,
                     error,
                 } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
-                ReporterEvent::StateStructureUnavailable {
-                    structure,
-                    dialect,
-                    consequence,
-                } => reporter.state_structure_unavailable(
-                    run_id,
-                    model,
-                    structure,
-                    dialect,
-                    consequence,
-                ),
             }
         }
     }
@@ -336,21 +320,6 @@ impl RunReporter for EventSink {
             attempt,
             retry_max,
             error: error.to_string(),
-        });
-    }
-
-    fn state_structure_unavailable(
-        &self,
-        _run_id: &str,
-        _model: &str,
-        structure: &str,
-        dialect: &str,
-        consequence: &str,
-    ) {
-        self.push(ReporterEvent::StateStructureUnavailable {
-            structure: structure.to_string(),
-            dialect: dialect.to_string(),
-            consequence: consequence.to_string(),
         });
     }
 }
@@ -3991,8 +3960,9 @@ pub async fn execute_project(
                     // per-cell technique already carries a recorded
                     // `state_downgrade` (`smelt-logical`'s
                     // `resolve_availability`), which `smelt explain` and the
-                    // warning diagnostic surface (phase 6). No
-                    // `state_structure_unavailable` reporter call here anymore.
+                    // warning diagnostic surface (phase 6). No reporter
+                    // event is emitted for the skip anymore — that stand-in
+                    // channel is retired.
                     let ledger_reset_sqls = if column_merge_dispatch.is_none()
                         && availability.contains(
                             smelt_logical::maintenance::availability::StateStructure::ReconciliationLedger,
@@ -6582,8 +6552,6 @@ pub fn build_source_key_recurrence_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reporter::RunReporter;
-    use std::sync::Mutex;
 
     /// `docs/outcomes/20260815-partition-grain-residue/phases/05a-plan.md`
     /// §Tests — `parse_run_window_in_axis` (the generalization of
@@ -6652,70 +6620,6 @@ mod tests {
         assert!(
             err.to_string().contains("bare integer"),
             "error must explain the axis mismatch, got: {err}"
-        );
-    }
-
-    /// `(run_id, model, structure, dialect, consequence)` — one captured
-    /// `state_structure_unavailable` call.
-    type CapturedEvent = (String, String, String, String, String);
-
-    /// Captures `RunReporter::state_structure_unavailable` calls so the
-    /// replay test can assert exactly what reached the downstream reporter.
-    #[derive(Default)]
-    struct CapturingReporter {
-        events: Mutex<Vec<CapturedEvent>>,
-    }
-
-    impl RunReporter for CapturingReporter {
-        fn state_structure_unavailable(
-            &self,
-            run_id: &str,
-            model: &str,
-            structure: &str,
-            dialect: &str,
-            consequence: &str,
-        ) {
-            self.events.lock().unwrap().push((
-                run_id.to_string(),
-                model.to_string(),
-                structure.to_string(),
-                dialect.to_string(),
-                consequence.to_string(),
-            ));
-        }
-    }
-
-    /// `EventSink` buffers per-model reporter callbacks under a `--jobs > 1`
-    /// wavefront run and replays them onto the real reporter in
-    /// `execution_order` sequence — `state_structure_unavailable` must
-    /// survive that buffer/replay round-trip like every other event, so a
-    /// concurrent run does not silently lose the fact that a state
-    /// structure was skipped.
-    #[test]
-    fn buffered_state_structure_unavailable_replays_to_reporter() {
-        let sink = EventSink::default();
-        sink.state_structure_unavailable(
-            "run-1",
-            "model-a",
-            "merge ledger",
-            "Spark SQL",
-            "re-run-tolerant keyed model merge-ledger bookkeeping record skipped",
-        );
-
-        let reporter = CapturingReporter::default();
-        sink.replay(&reporter, "run-1", "model-a");
-
-        let events = reporter.events.lock().unwrap();
-        assert_eq!(events.len(), 1, "exactly one replayed event: {:?}", events);
-        assert_eq!(
-            events[0],
-            (
-                "run-1".to_string(),
-                "model-a".to_string(),
-                "merge ledger".to_string(),
-                "Spark SQL".to_string(),
-                "re-run-tolerant keyed model merge-ledger bookkeeping record skipped".to_string(),
-            )
         );
     }
 }

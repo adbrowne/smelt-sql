@@ -343,6 +343,20 @@ pub fn build_maintenance_plan_report(
             );
             let _ = writeln!(out, "      corner:    {:?}", cell.corner);
             let _ = writeln!(out, "      technique: {:?}", cell.technique);
+            // Recorded availability downgrade (`state.md` §"The degradation
+            // contract" step 2, `docs/outcomes/20260904-state-residency/
+            // outcome.md` phase 6): omitted entirely when the cell was not
+            // downgraded, matching the existing `contract_point` posture.
+            if let Some(downgrade) = &cell.state_downgrade {
+                let _ = writeln!(
+                    out,
+                    "      state downgrade: {:?} → {:?} (missing: {}) — {}",
+                    downgrade.original,
+                    cell.technique,
+                    downgrade.missing.as_str(),
+                    downgrade.reason
+                );
+            }
             let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
             // Effective contract (`docs/specs/incremental_models.md` §"The
             // contract lattice"): default or a relaxed point, with its
@@ -1391,6 +1405,23 @@ pub struct ExplainCellJson {
     /// effective_contract`. An append-stable addition to this JSON shape
     /// (`docs/specs/cli.md` §Constraints item 5).
     pub contract_point: ExplainContractPointJson,
+    /// This cell's recorded availability downgrade (`state.md` §"The
+    /// degradation contract" step 2), absent when the cell was not
+    /// downgraded — an append-stable addition to this JSON shape
+    /// (`docs/specs/cli.md` §Constraints item 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_downgrade: Option<ExplainStateDowngradeJson>,
+}
+
+/// JSON shape of one cell's recorded state downgrade (`smelt explain
+/// --json`): the technique ideal derivation chose, the structure that was
+/// missing, and the rendered reason (`docs/specs/state.md` §"The
+/// degradation contract").
+#[derive(Debug, Serialize)]
+pub struct ExplainStateDowngradeJson {
+    pub original: String,
+    pub missing: String,
+    pub reason: String,
 }
 
 /// JSON shape of one cell's effective contract (`smelt explain --json`):
@@ -1597,6 +1628,14 @@ pub fn build_maintenance_plan_json(
                 statements,
                 technique_previews: diag_cell.technique_previews.clone(),
                 contract_point: effective_contract.into(),
+                state_downgrade: cell
+                    .state_downgrade
+                    .as_ref()
+                    .map(|d| ExplainStateDowngradeJson {
+                        original: format!("{:?}", d.original),
+                        missing: d.missing.as_str().to_string(),
+                        reason: d.reason.clone(),
+                    }),
             }
         })
         .collect();

@@ -583,6 +583,20 @@ fn json_show_sql_reports_source_derived_columns_for_a_bigquery_median_model() {
 
     let mut found_insert = false;
     for cell in cells {
+        // Scoped to the `DeleteInsert`-technique (region-recompute) cell —
+        // this test's own doc comment names
+        // `build_delete_insert_period_statement_group` as the path under
+        // test. A `ColumnScopedMerge` cell derives `ColumnMerge`/dimension
+        // repair statements on this project's other cell; on a BigQuery
+        // target (no merge ledger) that cell downgrades to
+        // `PerGroupRecompute`'s repair family
+        // (`docs/outcomes/20260904-state-residency/outcome.md` phase 6),
+        // whose final copy statement is a legitimate `s.*` wildcard over an
+        // already-typed temp table, not a re-authored projection — asserting
+        // `med_val` against it would be checking the wrong statement.
+        if cell.get("technique").and_then(|t| t.as_str()) != Some("DeleteInsert") {
+            continue;
+        }
         let Some(statements) = cell.get("statements").and_then(|s| s.as_array()) else {
             continue;
         };

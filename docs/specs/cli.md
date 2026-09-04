@@ -230,6 +230,18 @@ yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each
 `deferral` (plus `deferral_origin`: `"model"` or `"cell"`) when a relaxation applies; a default
 cell's `contract_point` is an empty object — absent relaxations are omitted, never rendered `null`.
 
+**State downgrade.** Availability resolution (`state.md` §"The degradation contract" step 2) is
+resolved offline, from the model's declared target dialect and `state.warehouse_tables`, before
+any of the report/JSON/`--show-sql` paths below run — never a live connection. A cell whose ideal
+technique needed a state structure the target cannot realise prints an additional
+`state downgrade: <original> → <technique> (missing: <structure>) — <reason>` row directly under
+its `technique:` row, naming the technique ideal derivation chose, the technique that actually
+ran, the missing structure, and the rendered reason; a cell that was not downgraded prints no such
+row. With `--json`, a downgraded cell's entry in `cells[]` carries a `state_downgrade` object
+(`{"original": "<technique>", "missing": "<structure>", "reason": "<text>"}`); an entry for a cell
+that was not downgraded omits the key entirely, never `null` — the same append-stable posture
+(§Constraints item 5) as `contract_point`.
+
 ### `smelt bakeoff <model>` flags
 
 | Flag | Default | Description |
