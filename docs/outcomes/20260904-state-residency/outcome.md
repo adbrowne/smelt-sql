@@ -80,7 +80,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | done |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | done |
 | 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | done |
-| 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
+| 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | planned |
 
 ## Decision log
 
@@ -380,3 +380,10 @@ the invariant by deleting `.smelt/` between run steps.
 ## Blocked
 
 <!-- Dated entries; each names the phase, what blocked it, and what a human must decide. -->
+
+- 2026-09-05 (plan 11): no reshape — phase 10's summary reports no new gaps, and phase 11 is the
+  final row. Plan narrowed on one discovery from that summary: `state.md` §Known Divergences is
+  already "none currently open", so phase 11 does not redo it. The residual bookkeeping drift is
+  in `state.md` §References, which still reads `User docs: none yet` / `Plans (history): none yet`
+  and omits `smelt-logical/src/maintenance/availability.rs`; a new `spec_references_are_live` test
+  locks that shut. The drift report persists to `docs/validations/2026-09-05-state.md`.
