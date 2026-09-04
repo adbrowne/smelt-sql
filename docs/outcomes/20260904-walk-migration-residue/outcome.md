@@ -45,7 +45,7 @@ says the rule holds.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | done |
-| 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | planned |
+| 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | done |
 | 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | pending |
 | 4 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
 | 5 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
@@ -81,6 +81,16 @@ says the rule holds.
   ("the walk is the sole source of every property") is unmet while their bound stands on a
   "not yet" comment. Rather than leave them as a silent deferral they get their own row (new
   phase 3); later phases renumbered 4-6. Nothing left the outcome.
+
+- 2026-09-05 (implement, phase 2): shipped — `ReachTransfer` and `PropertyTransfer` consume the
+  `expr_scopes` tail; `own_region_text` now excludes every `SUBQUERY` subtree (not just
+  FROM-position ones) to stop double-counting once expr scopes became real walk nodes. Deviated
+  from the plan's "participates in the sibling-slack computation identically" clause: expr-scope
+  children merge into the per-source read map but are excluded from the join-sibling slack
+  loop, which models chained bands across *this scope's own FROM join graph* — a real fixture
+  (`tracer_propagation.rs`) showed literal inclusion spreading an unrelated subquery's reach onto
+  an unconnected FROM input. Spec text updated to match the narrower, verified rule. See
+  `phases/02-summary.md`.
 
 ## Blocked
 

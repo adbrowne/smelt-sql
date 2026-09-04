@@ -94,11 +94,16 @@ pub struct SelectNode {
     /// (`footprint.rs`, `monotonicity.rs`, `source_bounds.rs`,
     /// `fingerprint.rs`, `affected_keys.rs`, `output_delta.rs`, and this
     /// module's `ScopeEnum`, `PartitionGrainAdmission`, `SkewTransfer`,
-    /// `PropertyTransfer`, `Discard`) is audited to either slice this tail
-    /// off explicitly or already index `inputs` by a `.zip()` that
-    /// truncates to it, so this phase's addition is behaviour-preserving:
-    /// no verdict changes until a later phase makes a transfer actually
-    /// consume the tail.
+    /// `PropertyTransfer`, `Discard`) was audited (phase 1) to either slice
+    /// this tail off explicitly or already index `inputs` by a `.zip()` that
+    /// truncates to it, so its addition was behaviour-preserving on its own.
+    /// Phase 2 made `source_bounds.rs`'s `ReachTransfer` and this module's
+    /// `PropertyTransfer` actually consume the tail (bound/reach folds an
+    /// expr scope as a read; grain/determinism/comparability take the
+    /// per-column verdict and the set-op barrier — `model_properties.md`
+    /// §"The composition walk"). `footprint.rs`'s `TrajectoryTransfer` and
+    /// this module's `SkewTransfer` remain explicitly bounded to `ctes ++
+    /// inputs` pending phase 3.
     pub expr_scopes: Vec<ExprScope>,
 }
 
@@ -108,6 +113,11 @@ pub struct SelectNode {
 pub struct ExprScope {
     pub kind: ExprScopeKind,
     pub body: QueryNode,
+    /// The `SUBQUERY` syntax node's own text range in the source — the
+    /// select item that owns this scope is found by range containment
+    /// (`PropertyTransfer::scope_determinism`/`scope_comparability` match a
+    /// select item's expression range against this).
+    pub range: smelt_parser::TextRange,
 }
 
 /// One CTE definition.
@@ -603,6 +613,7 @@ fn normalize_expr_scopes(select: &SelectStmt, scope: &CteScope) -> Vec<ExprScope
     nodes
         .into_iter()
         .map(|(kind, subquery_node)| {
+            let range = subquery_node.text_range();
             let body =
                 match smelt_parser::Subquery::cast(subquery_node).and_then(|sq| sq.select_stmt()) {
                     Some(inner) => normalize(&inner, scope),
@@ -612,7 +623,7 @@ fn normalize_expr_scopes(select: &SelectStmt, scope: &CteScope) -> Vec<ExprScope
                             .to_string(),
                     },
                 };
-            ExprScope { kind, body }
+            ExprScope { kind, body, range }
         })
         .collect()
 }
@@ -1660,7 +1671,7 @@ fn collect_scope_region(
 /// `TABLE_REF` are pruned).
 pub(crate) fn own_region_text(select: &SelectStmt) -> String {
     use smelt_parser::syntax_kind::SyntaxNode;
-    use smelt_parser::SyntaxKind::{SELECT_STMT, SUBQUERY, TABLE_REF, WITH_CLAUSE};
+    use smelt_parser::SyntaxKind::{SELECT_STMT, SUBQUERY, WITH_CLAUSE};
 
     fn collect(node: &SyntaxNode, root: &SyntaxNode, out: &mut String) {
         for element in node.children_with_tokens() {
@@ -1670,7 +1681,13 @@ pub(crate) fn own_region_text(select: &SelectStmt) -> String {
                 match child.kind() {
                     WITH_CLAUSE => {}
                     SELECT_STMT if node == root => {}
-                    SUBQUERY if node.kind() == TABLE_REF => {}
+                    // Every `SUBQUERY` — a FROM-position derived table's own
+                    // (nested in `TABLE_REF`) or an expression-position
+                    // scope's (`SelectNode::expr_scopes`) — is a walk node
+                    // of its own; including its text here would double-count
+                    // whatever it contributes once it is folded through its
+                    // own child verdict.
+                    SUBQUERY => {}
                     _ => collect(child, root, out),
                 }
             }
@@ -1706,6 +1723,15 @@ use crate::analysis::source_bounds::{derive_partition_skew, Skew};
 /// subtrees that are walk nodes of their own); verdicts compose by
 /// [`Skew::union`] (max before, max after), since a Form B relation in any
 /// scope can push rows into a neighbouring partition.
+///
+/// This transfer is still bounded to `ctes ++ inputs` (`SkewTransfer::operator`'s
+/// own comment) and does not yet fold the `expr_scopes` children tail — since
+/// [`own_region_text`] now excludes every `SUBQUERY` subtree unconditionally
+/// (phase 2 correctness fix for [`ReachTransfer`]'s double-counting), a
+/// skew-relevant Form B relation living only inside an expression-position
+/// subquery is temporarily invisible to this transfer, not merely uncounted
+/// twice as before. Retiring this bound is phase 3's job
+/// (`docs/outcomes/20260904-walk-migration-residue/outcome.md`).
 ///
 /// `exclude_source` names the model's own source path (dotted, as it appears
 /// in a `smelt.<path>` self-reference) for a self-referential model
@@ -2179,12 +2205,18 @@ impl PropertyTransfer<'_> {
     }
 
     /// Per-column determinism of one SELECT scope, reducing plain column refs
-    /// through CTE/derived inputs where the input's own determinism is known.
+    /// through CTE/derived inputs where the input's own determinism is known,
+    /// and folding in the worst column verdict of any `ExprScope` a select
+    /// item embeds (`model_properties.md` §"The composition walk": a select
+    /// item containing an expression-position subquery takes the max of its
+    /// own syntactic verdict, excluding the subquery subtree, and that
+    /// scope's own worst column verdict).
     fn scope_determinism(
         &self,
         sn: &SelectNode,
         cx: &NodeCx,
         input_props: &BTreeMap<String, &PropertyVector>,
+        expr_scopes: &[(&ExprScope, &PropertyVector)],
     ) -> Vec<ColumnDeterminism> {
         let Some(select_list) = sn.select.select_list() else {
             return Vec::new();
@@ -2215,6 +2247,19 @@ impl PropertyTransfer<'_> {
                     }
                 }
             }
+            let item_range = expr.syntax().text_range();
+            for (es, verdict) in expr_scopes {
+                if !item_range.contains_range(es.range) {
+                    continue;
+                }
+                let worst = verdict
+                    .determinism
+                    .iter()
+                    .map(|d| d.level)
+                    .max()
+                    .unwrap_or(Determinism::Clean);
+                level = level.max(worst);
+            }
             out.push(ColumnDeterminism { output, level });
         }
         out
@@ -2223,12 +2268,15 @@ impl PropertyTransfer<'_> {
     /// Per-column change-comparability of one SELECT scope, reducing plain
     /// column refs through CTE/derived inputs where the input's own
     /// comparability is known (`model_properties.md` §"Change
-    /// comparability").
+    /// comparability"), and folding in the worst column verdict of any
+    /// `ExprScope` a select item embeds — same rule as
+    /// [`Self::scope_determinism`].
     fn scope_comparability(
         &self,
         sn: &SelectNode,
         cx: &NodeCx,
         input_props: &BTreeMap<String, &PropertyVector>,
+        expr_scopes: &[(&ExprScope, &PropertyVector)],
     ) -> Vec<ColumnComparability> {
         let Some(select_list) = sn.select.select_list() else {
             return Vec::new();
@@ -2258,6 +2306,19 @@ impl PropertyTransfer<'_> {
                         }
                     }
                 }
+            }
+            let item_range = expr.syntax().text_range();
+            for (es, verdict) in expr_scopes {
+                if !item_range.contains_range(es.range) {
+                    continue;
+                }
+                let worst = verdict
+                    .comparability
+                    .iter()
+                    .map(|c| c.comparability)
+                    .max()
+                    .unwrap_or(Comparability::Comparable);
+                comparability = comparability.max(worst);
             }
             out.push(ColumnComparability {
                 output,
@@ -2377,6 +2438,20 @@ impl Transfer for PropertyTransfer<'_> {
                     }
                 }
 
+                // Expr-scope children, zipped to their own `ExprScope`
+                // definitions for range-containment matching — a select item
+                // takes no key/output/fan-out from a scope it embeds, but
+                // does take its set-op barrier
+                // (`model_properties.md` §"The composition walk").
+                let expr_scope_children: Vec<(&ExprScope, &PropertyVector)> = sn
+                    .expr_scopes
+                    .iter()
+                    .zip(&children[sn.ctes.len() + sn.inputs.len()..])
+                    .collect();
+                for (_, child) in &expr_scope_children {
+                    input_barrier |= child.has_set_op_barrier;
+                }
+
                 let has_fan_out_join = self.scope_has_fan_out(sn);
                 let literal_columns = self.scope_literals(sn);
 
@@ -2393,8 +2468,10 @@ impl Transfer for PropertyTransfer<'_> {
                     Grain::unkeyed()
                 };
 
-                let determinism = self.scope_determinism(sn, cx, &input_props);
-                let comparability = self.scope_comparability(sn, cx, &input_props);
+                let determinism =
+                    self.scope_determinism(sn, cx, &input_props, &expr_scope_children);
+                let comparability =
+                    self.scope_comparability(sn, cx, &input_props, &expr_scope_children);
                 let discriminants = self.scope_discriminants(sn);
 
                 let mut vector = PropertyVector {
@@ -2600,19 +2677,42 @@ fn union_discriminated_grain(branches: &[PropertyVector]) -> Grain {
     Grain { keys }
 }
 
+/// Function-call names in `expr`'s own text, not descending into a nested
+/// `SUBQUERY` node — that subtree is a walk node of its own
+/// (`SelectNode::expr_scopes`), and descending into it would be exactly the
+/// cross-node ad-hoc scan `model_properties.md` §"The composition walk"
+/// forbids. Shared by [`expr_determinism`] and [`expr_comparability`], whose
+/// per-column verdicts are folded with the matching `ExprScope` child's own
+/// verdict by [`PropertyTransfer::scope_determinism`]/`scope_comparability`
+/// instead.
+fn own_function_call_names(expr: &smelt_parser::Expr) -> Vec<String> {
+    fn collect(node: &smelt_parser::syntax_kind::SyntaxNode, out: &mut Vec<String>) {
+        if node.kind() == smelt_parser::SyntaxKind::SUBQUERY {
+            return;
+        }
+        if node.kind() == smelt_parser::SyntaxKind::FUNCTION_CALL {
+            if let Some(func) = smelt_parser::FunctionCall::cast(node.clone()) {
+                if let Some(name) = func.name() {
+                    out.push(name);
+                }
+            }
+        }
+        for child in node.children() {
+            collect(&child, out);
+        }
+    }
+    let mut out = Vec::new();
+    collect(expr.syntax(), &mut out);
+    out
+}
+
 /// The determinism of an expression from the nondeterminism predicate over
-/// every function call it contains — the fail-closed leaf classifier
+/// every function call it contains, excluding any nested expression-position
+/// subquery — the fail-closed leaf classifier
 /// (`monotonicity::classify_function_determinism`).
 fn expr_determinism(expr: &smelt_parser::Expr) -> Determinism {
     let mut level = Determinism::Clean;
-    for node in expr.syntax().descendants() {
-        if node.kind() != smelt_parser::SyntaxKind::FUNCTION_CALL {
-            continue;
-        }
-        let Some(func) = smelt_parser::FunctionCall::cast(node) else {
-            continue;
-        };
-        let Some(name) = func.name() else { continue };
+    for name in own_function_call_names(expr) {
         let contrib = match classify_function_determinism(&name) {
             FunctionDeterminism::RowNondeterministic => Determinism::Row,
             FunctionDeterminism::RunDeterministic => Determinism::Run,
@@ -2625,7 +2725,8 @@ fn expr_determinism(expr: &smelt_parser::Expr) -> Determinism {
 
 /// The change-comparability of an expression (`model_properties.md`
 /// §"Change comparability") — fail-closed leaf classifier over every
-/// function call it contains. A known run-/row-nondeterministic function
+/// function call it contains, excluding any nested expression-position
+/// subquery. A known run-/row-nondeterministic function
 /// (`NOW`/`RANDOM`/…) is `Incomparable` (comparable only *within* one run,
 /// per the determinism predicate). A recognised function outside that set
 /// (registry-backed, `smelt_types::SqlFunction`) is treated as a pure
@@ -2636,14 +2737,7 @@ fn expr_determinism(expr: &smelt_parser::Expr) -> Determinism {
 /// bare column reference or literal (no function calls) is `Comparable`.
 fn expr_comparability(expr: &smelt_parser::Expr) -> Comparability {
     let mut result = Comparability::Comparable;
-    for node in expr.syntax().descendants() {
-        if node.kind() != smelt_parser::SyntaxKind::FUNCTION_CALL {
-            continue;
-        }
-        let Some(func) = smelt_parser::FunctionCall::cast(node) else {
-            continue;
-        };
-        let Some(name) = func.name() else { continue };
+    for name in own_function_call_names(expr) {
         let contrib = match classify_function_determinism(&name) {
             FunctionDeterminism::RowNondeterministic | FunctionDeterminism::RunDeterministic => {
                 Comparability::Incomparable

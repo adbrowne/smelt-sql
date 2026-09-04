@@ -609,14 +609,29 @@ impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
                 // Skip the CTE-definition children — each reference site's
                 // child already carries the definition's verdict, so repeated
                 // references merge in parallel like any other pair of inputs.
-                // Also bounded above at `sn.inputs.len()`: an expr_scopes
-                // tail is not yet a reach contributor (`model_properties.md`
-                // §"The composition walk"'s children convention) — this
-                // loop iterates the whole slice it's given, unlike a
-                // `.zip()`, so it must be told where `inputs` ends.
-                let input_children = &children[sn.ctes.len()..sn.ctes.len() + sn.inputs.len()];
+                // An expr_scopes tail is a read too (`model_properties.md`
+                // §"The composition walk": an expression-position scope's
+                // verdict merges into the enclosing node exactly like an
+                // input's), so `read_children` runs to the end of the slice
+                // rather than stopping at `sn.inputs.len()` — this is what
+                // makes a source read only via a scalar/EXISTS/IN subquery
+                // visible in the map at all (criterion 1's headline claim).
+                let read_children = &children[sn.ctes.len()..];
+                // `join_siblings`, by contrast, stays bounded to the actual
+                // FROM inputs. The sibling-slack loop below models a chained
+                // *join* band — two relations tied by this scope's own join
+                // graph, where a frame/filter on one column can carry into a
+                // co-joined row of the other. An expr-scope subquery is not
+                // joined into that graph at this node (a correlated one is a
+                // per-outer-row computation, not a join partner sharing row
+                // cardinality with the FROM inputs), so folding it into the
+                // sibling scan would spread its own reach onto an unrelated
+                // FROM input's margin — the tracer-propagation integration
+                // fixtures caught exactly this cross-contamination when
+                // `join_siblings` was first widened to `read_children`.
+                let join_siblings = &children[sn.ctes.len()..sn.ctes.len() + sn.inputs.len()];
                 let mut out = HashMap::new();
-                for child in input_children {
+                for child in read_children {
                     Self::merge_child(&mut out, child);
                 }
                 if out.is_empty() {
@@ -669,12 +684,12 @@ impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
                         BoundResult::Bounded { before, after, .. }
                             if before == Seconds::ZERO && after == Seconds::ZERO
                     );
-                    let sibling = if is_zero || input_children.len() < 2 {
+                    let sibling = if is_zero || join_siblings.len() < 2 {
                         (Seconds::ZERO, Seconds::ZERO)
                     } else {
                         let mut max_before = Seconds::ZERO;
                         let mut max_after = Seconds::ZERO;
-                        for child in input_children {
+                        for child in join_siblings {
                             if child.contains_key(source) {
                                 continue;
                             }

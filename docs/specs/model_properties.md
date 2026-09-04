@@ -318,6 +318,32 @@ A property implementation must not re-derive composition by scanning the query t
 
 A node of the operator tree is: a CTE body, a set-operation arm, a derived table (including a redundantly-parenthesized one, `FROM ((SELECT …)) AS t`), the members of a parenthesised join group (`FROM (a JOIN b ON …)`, flattened into the enclosing scope's join inputs), and the body of an expression-position subquery — a scalar subquery, an `EXISTS (…)`, an `IN (…)`, or a quantified `ANY`/`ALL`/`SOME (…)` — appearing in the enclosing scope's own select list, `WHERE`, `HAVING`, `QUALIFY`, or `ORDER BY`. An expression-position scope composes as a scope of its own: its verdict is folded and made available to every transfer function like any other child, with the per-property consumption rule (what a property does with that verdict) specified in that property's own section.
 
+Two properties' consumption rules are stated here since they share the same shape rather than
+belonging to either property's own section:
+
+- **Bound/reach.** An expression-position scope is a *read* of its sources: its verdict merges into
+  the enclosing node's per-source map exactly like an input's (parallel max-merge), so a source
+  read only through a scalar subquery or an `EXISTS`/`IN`/quantified filter is reachable, and a
+  window frame inside the subquery body contributes reach the same way a frame in the outer scope
+  would. It does **not**, however, participate in the enclosing node's join-sibling slack
+  computation (the chained-band carry between two relations tied by *this scope's own FROM join
+  graph*): an expression-position scope is not joined into that graph at this node — a correlated
+  one is a per-outer-row computation, not a join partner sharing row cardinality with the FROM
+  inputs — so folding it in would spread its own reach onto an unrelated FROM input's margin. This
+  makes the verdict equal by construction to the same subquery rewritten as an *uncorrelated*
+  cross-joined derived table (the shape criterion 1's oracle test uses); a correlated subquery's
+  only valid literal rewrite is a `LATERAL` join, which the walk does not model as a distinct
+  input shape, so equality with that form is not claimed.
+- **Grain (key set, per-column determinism, per-column change-comparability).** An expression-position
+  scope contributes **no key, no output columns, and no fan-out** to the enclosing scope — a filter
+  subquery cannot establish a key, and a scalar subquery yields one value, not a joined row. It
+  contributes two things: its `has_set_op_barrier` bit (a `UNION`-bodied subquery body propagates
+  the barrier, matching the inlined derived-table form), and, for the select item whose expression
+  embeds it, per-column determinism/comparability: that item's verdict is the max of its own
+  syntactic verdict — computed excluding the subquery's own subtree, since that subtree is a walk
+  node judged on its own — and the worst per-column verdict of the matching expression scope's own
+  property vector.
+
 ## Design
 
 **Properties are named for what they are, not for maintenance.** A monotonicity trace, an algebraic discriminant, a partition-alignment signal, an additive-only diff are each useful well beyond the refresh modes — backfills, schema evolution, query optimisation — so they live in a capability spec keyed on the SQL property, not filed under any one consumer. This is what lets a single proof serve several consumers without a private copy per mode.
@@ -359,12 +385,15 @@ recorded here — history lives in git and §References → Plans.
   (`model_property_vector`) has no consumer. Tracked: `docs/plans/20260704-model-updates-l3-declarations.md`,
   `docs/plans/20260707-property-composition-walk.md`.
 - **The composition walk is not yet the sole source of every property.** Expression-position
-  subquery bodies are enumerated as walk nodes (§"The composition walk"), but bound/reach and
-  grain do not yet consume their verdicts, so their window/`LIMIT`/reach/`DISTINCT`/`HAVING`
-  content is still judged only in the owning scope's region; the `temporal` proof and the
-  driving-fact/anchor join resolution still run their own traversal rather than the shared walk;
-  same-scope chained bands still max-merge, and an absorbing verdict rejects every context source.
-  Tracked: `docs/plans/20260707-property-composition-walk.md`.
+  subquery bodies are enumerated as walk nodes and bound/reach and grain (key set,
+  determinism, comparability) consume their verdicts (§"The composition walk"), but partition
+  skew and footprint-trajectory still bound the walk's children tail to `ctes ++ inputs`, so an
+  expression-position scope's window/`DISTINCT`/`HAVING` content is invisible to those two
+  properties; the `temporal` proof and the driving-fact/anchor join resolution still run their own
+  traversal rather than the shared walk; same-scope chained bands still max-merge, and an absorbing
+  verdict rejects every context source.
+  Tracked: `docs/plans/20260707-property-composition-walk.md`,
+  `docs/outcomes/20260904-walk-migration-residue/outcome.md`.
 - **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints
   "Declared lateness is orchestration-only" forbids any proof from reading it; the summation
   survives (its output feeds batch fields no execute path consumes, so it is inert today) and
