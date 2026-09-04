@@ -53,7 +53,8 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 | 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | done |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | done |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment and the docs-site transcript that repeats its claim; remove the TODO note | done |
-| 5 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
+| 5 | Correct `daily_events_status.sql` + `user_status.yml`'s `ColumnScopedMerge` overclaim to the derived `DeleteInsert`; remove that TODO bullet | planned |
+| 6 | Validate: `/smelt:validate state` + `model_properties` clean, verify-phase green | pending |
 
 ## Decision log
 
@@ -119,6 +120,19 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   fixed, out of this phase's task list) that `daily_events_status.sql` and `user_status.yml`
   carry the identical overclaim for a different model; recorded as a fresh `docs/TODO.md`
   bullet for a future phase or outcome.
+- 2026-09-04 (plan 05): phase table reshaped — a new phase 5 added for the sibling overclaim the
+  phase-04 summary surfaced (`daily_events_status.sql`, `models/sources/raw/user_status.yml`),
+  validation moved to phase 6. It is the identical false technique claim in the identical example
+  workspace as criterion 5's fixture, and the outcome's own statement is "one consistent record":
+  leaving a known-false `ColumnScopedMerge` claim next to the one just corrected satisfies
+  criterion 5's letter while defeating its point. Same reasoning plan 04 used to widen into
+  docs-site. Docs-only, and the correct technique is already established empirically.
+- 2026-09-04 (plan 05): confirmed at plan time via
+  `smelt explain daily_events_status --project-dir examples/timeseries` — both `UpstreamMutation`
+  cells derive `RecomputeRegion`/`DeleteInsert`, but their `partition_local` locality and the
+  `raw.user_status`/`changed_at` `ScanClamp` **are** real. Only the MP11/F15 column-scoped-`MERGE`
+  sentences are false; the clocked-dimension / `PartitionLocal::Yes` contrast with
+  `daily_events_enriched.sql` must be preserved, since it is the reason this fixture exists.
 
 ## Blocked
 
