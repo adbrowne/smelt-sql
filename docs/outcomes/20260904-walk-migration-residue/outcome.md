@@ -46,7 +46,7 @@ says the rule holds.
 |---|-------|--------|
 | 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | done |
 | 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | done |
-| 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | pending |
+| 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | planned |
 | 4 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
 | 5 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
 | 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
@@ -91,6 +91,14 @@ says the rule holds.
   (`tracer_propagation.rs`) showed literal inclusion spreading an unrelated subquery's reach onto
   an unconnected FROM input. Spec text updated to match the narrower, verified rule. See
   `phases/02-summary.md`.
+
+- 2026-09-05 (plan, phase 3): no reshape — phase 2's summary confirmed the remaining work is
+  exactly the two bounded transfers, and its `own_region_text` fix turned skew's gap from
+  double-counting into blindness, so phase 3 closes a live regression rather than a TODO. Judged
+  the phase-2 read-vs-join-sibling split inapplicable here: neither `SkewTransfer` nor
+  `TrajectoryTransfer` has a sibling-slack computation, and both folds (`Skew::union`, parallel
+  OR) widen conservatively, so the plan folds the whole children slice and keeps
+  `tracer_propagation`/`footprint_reflection`/`since_upstream` as regression fences.
 
 ## Blocked
 
