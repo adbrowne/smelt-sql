@@ -4254,6 +4254,19 @@ pub enum RestrictionDeltaSource<'a> {
 /// ([`RestrictionDeltaSource`]) — the acquisition step is the only part of
 /// this function that varies by source; the probe dispatch and emitter path
 /// below are shared unconditionally.
+///
+/// `ensure_sqls`/`pre_write_sqls` are the same reconciliation-ledger
+/// bookkeeping `execute.rs`'s plain DeleteInsert branch attaches
+/// (`docs/specs/incremental_models.md` §"The reconciliation ledger";
+/// `docs/outcomes/20260904-state-residency/outcome.md`) — empty by default
+/// for callers with no ledger reset to attach (e.g. the probe-driven tests
+/// in `statement_parity.rs` that call this function directly). When either
+/// is non-empty the terminal write routes through
+/// [`Backend::execute_write_with_bookkeeping`] so the reset and the write
+/// share one backend transaction where the backend can provide one (DuckDB
+/// does); when both are empty the call is byte-identical to the pre-phase-3
+/// `execute_statement_group` path, so every existing direct caller is
+/// unaffected.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_delete_insert_with_delta_restriction(
     backend: &dyn Backend,
@@ -4270,6 +4283,8 @@ pub async fn execute_delete_insert_with_delta_restriction(
     dialect: MaintenanceDialect,
     retry: &crate::execute::RetryPolicy<'_>,
     probe_policy: &crate::probes::ProbePolicy,
+    ensure_sqls: &[String],
+    pre_write_sqls: &[String],
 ) -> std::result::Result<StatementGroup, BackendError> {
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
@@ -4441,7 +4456,15 @@ pub async fn execute_delete_insert_with_delta_restriction(
         region_write,
         dialect,
     );
-    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group)).await?;
+    if ensure_sqls.is_empty() && pre_write_sqls.is_empty() {
+        crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+            .await?;
+    } else {
+        crate::execute::retry_backend_call(retry, || {
+            backend.execute_write_with_bookkeeping(ensure_sqls, pre_write_sqls, &group)
+        })
+        .await?;
+    }
     Ok(group)
 }
 

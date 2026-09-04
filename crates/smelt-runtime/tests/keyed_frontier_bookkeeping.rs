@@ -19,9 +19,12 @@
 //!   writes no frontier record at all.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use smelt_backend::Backend;
+use arrow::array::RecordBatch;
+use arrow::datatypes::SchemaRef;
+use async_trait::async_trait;
+use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::{Config, Target};
 use smelt_core::graph::DependencyGraph;
@@ -49,6 +52,266 @@ impl BackendFactory for PlainDuckDbFactory {
                 .map_err(|e| anyhow::anyhow!("DuckDB init failed: {}", e))?;
             Ok(Box::new(inner) as Box<dyn Backend>)
         })
+    }
+}
+
+/// Wraps a real [`DuckDbBackend`], recording every raw SQL string handed to
+/// `execute_sql` — the route `Backend::execute_write_with_bookkeeping`'s
+/// default implementation sends `ensure_sqls`/`pre_write_sqls` through — so
+/// test 4 can assert the merge ledger's ensure DDL and upsert are sent
+/// byte-identical to `smelt_state::ddl_duckdb`'s own builders (the same
+/// proof shape as `statement_parity.rs`'s `RecordingBackend`).
+struct RecordingBackend {
+    inner: DuckDbBackend,
+    sql_log: Mutex<Vec<String>>,
+}
+
+impl RecordingBackend {
+    fn new(inner: DuckDbBackend) -> Self {
+        Self {
+            inner,
+            sql_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn recorded_sql(&self) -> Vec<String> {
+        self.sql_log.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Backend for RecordingBackend {
+    async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        self.sql_log.lock().unwrap().push(sql.to_string());
+        self.inner.execute_sql(sql).await
+    }
+
+    async fn create_table_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.inner.create_table_as(schema, name, sql).await
+    }
+
+    async fn create_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.inner.create_view_as(schema, name, sql).await
+    }
+
+    async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.inner.drop_table_if_exists(schema, name).await
+    }
+
+    async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.inner.drop_view_if_exists(schema, name).await
+    }
+
+    async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
+        self.inner.get_row_count(schema, name).await
+    }
+
+    async fn get_preview(
+        &self,
+        schema: &str,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<RecordBatch>, BackendError> {
+        self.inner.get_preview(schema, name, limit).await
+    }
+
+    async fn table_exists(&self, schema: &str, name: &str) -> Result<bool, BackendError> {
+        self.inner.table_exists(schema, name).await
+    }
+
+    async fn ensure_schema(&self, schema: &str) -> Result<(), BackendError> {
+        self.inner.ensure_schema(schema).await
+    }
+
+    fn dialect(&self) -> SqlDialect {
+        self.inner.dialect()
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn load_table(
+        &self,
+        schema: &str,
+        name: &str,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), BackendError> {
+        self.inner
+            .load_table(schema, name, arrow_schema, batches)
+            .await
+    }
+
+    async fn delete_partitions(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.inner.delete_partitions(schema, name, partition).await
+    }
+
+    async fn insert_into_from_query(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.inner.insert_into_from_query(schema, name, sql).await
+    }
+
+    async fn insert_overwrite(
+        &self,
+        schema: &str,
+        table: &str,
+        sql: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.inner
+            .insert_overwrite(schema, table, sql, partition)
+            .await
+    }
+}
+
+struct RecordingBackendFactory {
+    db_path: std::path::PathBuf,
+    backend: Arc<Mutex<Option<Arc<RecordingBackend>>>>,
+}
+
+impl BackendFactory for RecordingBackendFactory {
+    fn create<'a>(
+        &'a self,
+        _target_name: &'a str,
+        target_config: &'a Target,
+        _project_dir: &'a Path,
+    ) -> BackendFuture<'a> {
+        let path = self.db_path.clone();
+        let schema = target_config.schema.clone();
+        let slot = Arc::clone(&self.backend);
+        Box::pin(async move {
+            let inner = DuckDbBackend::new(&path, &schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("DuckDB init failed: {}", e))?;
+            let recording = Arc::new(RecordingBackend::new(inner));
+            *slot.lock().unwrap() = Some(Arc::clone(&recording));
+            Ok(Box::new(ArcBackend(recording)) as Box<dyn Backend>)
+        })
+    }
+}
+
+/// Thin `Backend` forwarder over an `Arc<RecordingBackend>` so the same
+/// recording instance can be read back after `execute_project` returns
+/// (mirrors `statement_parity.rs`'s `ArcBackend`).
+struct ArcBackend(Arc<RecordingBackend>);
+
+#[async_trait]
+impl Backend for ArcBackend {
+    async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        self.0.execute_sql(sql).await
+    }
+
+    async fn create_table_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.0.create_table_as(schema, name, sql).await
+    }
+
+    async fn create_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.0.create_view_as(schema, name, sql).await
+    }
+
+    async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.0.drop_table_if_exists(schema, name).await
+    }
+
+    async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.0.drop_view_if_exists(schema, name).await
+    }
+
+    async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
+        self.0.get_row_count(schema, name).await
+    }
+
+    async fn get_preview(
+        &self,
+        schema: &str,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<RecordBatch>, BackendError> {
+        self.0.get_preview(schema, name, limit).await
+    }
+
+    async fn table_exists(&self, schema: &str, name: &str) -> Result<bool, BackendError> {
+        self.0.table_exists(schema, name).await
+    }
+
+    async fn ensure_schema(&self, schema: &str) -> Result<(), BackendError> {
+        self.0.ensure_schema(schema).await
+    }
+
+    fn dialect(&self) -> SqlDialect {
+        self.0.dialect()
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        self.0.capabilities()
+    }
+
+    async fn load_table(
+        &self,
+        schema: &str,
+        name: &str,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), BackendError> {
+        self.0.load_table(schema, name, arrow_schema, batches).await
+    }
+
+    async fn delete_partitions(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.0.delete_partitions(schema, name, partition).await
+    }
+
+    async fn insert_into_from_query(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.0.insert_into_from_query(schema, name, sql).await
+    }
+
+    async fn insert_overwrite(
+        &self,
+        schema: &str,
+        table: &str,
+        sql: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.0.insert_overwrite(schema, table, sql, partition).await
     }
 }
 
@@ -388,4 +651,96 @@ async fn snapshot_reconcile_model_writes_no_frontier_record() {
         !ledger_exists,
         "a snapshot-reconcile keyed model must never create the merge ledger table"
     );
+}
+
+/// State residency (`docs/outcomes/20260904-state-residency/outcome.md`
+/// criterion 1): the idempotent window-forward keyed merge's own
+/// re-run-tolerance bookkeeping record — already engine-resident from the
+/// keyed-grain-residue outcome — is sent to the connection byte-identical
+/// to `smelt_state::ddl_duckdb::generate_ledger_table_ddl`/
+/// `generate_ledger_upsert_sql`'s own output, not merely emitter-shaped
+/// text.
+#[tokio::test]
+async fn merged_window_ledger_upsert_matches_the_state_builder() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_idempotent_project(&project_dir, &db_path);
+    seed_events(&db_path).expect("seed events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    execute_project(
+        "ledger-upsert-parity".to_string(),
+        run_request(Some("2026-01-01"), Some("2026-01-03")),
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("two-day run over an idempotent keyed model succeeds");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let sql_log = backend.recorded_sql();
+
+    let ensure_ddl = smelt_state::ddl_duckdb::generate_ledger_table_ddl("main");
+    assert!(
+        sql_log.contains(&ensure_ddl),
+        "the merge ledger's ensure DDL must be sent as raw SQL byte-identical to \
+         `generate_ledger_table_ddl`: {sql_log:?}"
+    );
+
+    // Read back the ledger rows this run actually recorded, then rebuild the
+    // expected upsert for each from the SAME state builder — proving the
+    // executed text, not just the row content, matches.
+    let conn = duckdb::Connection::open(&db_path).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT input_name, delta_id, region_start, region_end FROM main._smelt_ledger \
+             WHERE model_name = 'device_daily' AND grp = '{*}' ORDER BY delta_id",
+        )
+        .unwrap();
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<duckdb::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "two merged day partitions must each leave a ledger row"
+    );
+
+    for (input, delta_id, region_start, region_end) in &rows {
+        let expected_upsert = smelt_state::ddl_duckdb::generate_ledger_upsert_sql(
+            "main",
+            "device_daily",
+            "{*}",
+            input,
+            delta_id,
+            region_start,
+            region_end,
+        );
+        assert!(
+            sql_log.contains(&expected_upsert),
+            "the merged window's ledger upsert must be byte-identical to \
+             `generate_ledger_upsert_sql`: {expected_upsert}\nrecorded: {sql_log:?}"
+        );
+    }
 }

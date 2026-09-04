@@ -6227,6 +6227,8 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await
         .unwrap_or_else(|e| panic!("case {i}: restricted recompute failed: {e}"));
@@ -6253,6 +6255,8 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await
         .unwrap_or_else(|e| panic!("case {i}: widened recompute failed: {e}"));

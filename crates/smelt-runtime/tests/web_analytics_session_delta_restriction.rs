@@ -184,6 +184,8 @@ async fn a_single_redelivered_then_changed_event_recomputes_only_its_own_row() {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("delta-restricted recompute executes");

@@ -815,6 +815,8 @@ async fn count_preservation_conforming() -> anyhow::Result<()> {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -879,6 +881,8 @@ async fn count_preservation_conforming_with_a_cast_wrapped_body_still_restricts(
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -940,6 +944,8 @@ async fn count_preservation_violated() -> anyhow::Result<()> {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect_err("a broken referential_integrity must refuse the delta-restricted recompute");
@@ -980,6 +986,8 @@ async fn count_preservation_violated_probes_off() -> anyhow::Result<()> {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &ProbePolicy::new(ProbeCadence::Off, 0),
+        &[],
+        &[],
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))

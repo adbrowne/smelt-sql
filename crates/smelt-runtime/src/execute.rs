@@ -3921,6 +3921,64 @@ pub async fn execute_project(
                         axis: batch.partition_start.axis(),
                     };
 
+                    // Reconciliation ledger (`docs/specs/incremental_models.md`
+                    // §"The reconciliation ledger"): every DuckDB DeleteInsert-family
+                    // write for this batch — the plain widened-scan recompute, the
+                    // model-edge-restricted recompute, or the external-sidecar-
+                    // restricted recompute — resets this batch's own
+                    // `[partition.start, partition.end)` slice in `_smelt_ledger`
+                    // (whole-row group `{*}`, nominal input `self`, watermarked to
+                    // the region's own end), run in the SAME backend transaction as
+                    // the write it protects via `Backend::execute_write_with_
+                    // bookkeeping` (state-residency: `.smelt/reconciliation.json`
+                    // no longer exists — this table IS the ledger). Hoisted above
+                    // the three DeleteInsert dispatch arms below (model-edge
+                    // restricted, external-sidecar restricted, plain) so all three
+                    // build the SAME reset from `generate_ledger_recompute_reset_
+                    // sqls`, instead of each constructing (or omitting) its own.
+                    // Not built when a live `ColumnScopedMerge` cell dispatches
+                    // (`column_merge_dispatch.is_some()`) — that technique is not a
+                    // region DeleteInsert and its own MP12 ledger interaction is
+                    // unrelated to this reset. The ledger substrate is DuckDB-only
+                    // today (same posture as `maintenance_driver`'s MP12 callers);
+                    // on any other dialect the reset is skipped with no silent file
+                    // fallback — `docs/outcomes/20260904-state-residency/
+                    // outcome.md` phase 4 owns replacing this gap with a recorded
+                    // `MaintenanceStateDowngraded` downgrade.
+                    let ledger_reset_sqls = if column_merge_dispatch.is_none()
+                        && backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                    {
+                        Some(smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
+                            schema,
+                            &plan.name,
+                            "{*}",
+                            &partition.start,
+                            &partition.end,
+                            "self",
+                            &partition.end,
+                        ))
+                    } else {
+                        if column_merge_dispatch.is_none() {
+                            reporter.state_structure_unavailable(
+                                run_id,
+                                &plan.name,
+                                "reconciliation ledger",
+                                backend.dialect().name(),
+                                "region-recompute reset skipped: the ledger substrate is \
+                                 DuckDB-only today (docs/specs/incremental_models.md §\"The \
+                                 reconciliation ledger\")",
+                            );
+                        }
+                        None
+                    };
+                    let ledger_ensure_sqls: Vec<String> = if ledger_reset_sqls.is_some() {
+                        vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema)]
+                    } else {
+                        Vec::new()
+                    };
+                    let ledger_pre_write_sqls: Vec<String> =
+                        ledger_reset_sqls.clone().unwrap_or_default();
+
                     // T3: re-checked per batch (not hoisted with
                     // `use_delta_restricted_dispatch` above) because
                     // `table_exists` genuinely varies across batches of the
@@ -4095,6 +4153,8 @@ pub async fn execute_project(
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &ledger_ensure_sqls,
+                                &ledger_pre_write_sqls,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -4187,6 +4247,8 @@ pub async fn execute_project(
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &ledger_ensure_sqls,
+                                &ledger_pre_write_sqls,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -4281,48 +4343,11 @@ pub async fn execute_project(
                             );
                         }
 
-                        // Reconciliation ledger (`docs/specs/incremental_models.md`
-                        // §"The reconciliation ledger"): this batch is about to
-                        // region-recompute `[partition.start, partition.end)` — DELETE
-                        // the write window, INSERT its recompute. The reset resets
-                        // every intersecting ledger entry to exactly the input this
-                        // batch read (whole-row group `{*}`, nominal input `self`,
-                        // watermarked to the region's own end), run in the SAME
-                        // backend transaction as the write via
-                        // `Backend::execute_model_incremental_with_bookkeeping`
-                        // (state-residency: `.smelt/reconciliation.json` no longer
-                        // exists — this table IS the ledger). The ledger substrate is
-                        // DuckDB-only today (same posture as `maintenance_driver`'s
-                        // MP12 callers); on any other dialect the reset is skipped
-                        // with no silent file fallback —
-                        // `docs/outcomes/20260904-state-residency/outcome.md` phase 4
-                        // owns replacing this gap with a recorded
-                        // `MaintenanceStateDowngraded` downgrade.
-                        let ledger_reset_sqls = if backend.dialect()
-                            == smelt_backend::SqlDialect::DuckDB
-                        {
-                            Some(smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
-                                schema,
-                                &plan.name,
-                                "{*}",
-                                &partition.start,
-                                &partition.end,
-                                "self",
-                                &partition.end,
-                            ))
-                        } else {
-                            reporter.state_structure_unavailable(
-                                run_id,
-                                &plan.name,
-                                "reconciliation ledger",
-                                backend.dialect().name(),
-                                "region-recompute reset skipped: the ledger substrate is \
-                                 DuckDB-only today (docs/specs/incremental_models.md §\"The \
-                                 reconciliation ledger\")",
-                            );
-                            None
-                        };
-
+                        // Reconciliation ledger: this batch's own
+                        // `ledger_ensure_sqls`/`ledger_pre_write_sqls`, hoisted above
+                        // the T3/27e dispatch fork (see the comment there), record
+                        // the SAME region-recompute reset this plain widened-scan
+                        // branch used to build itself.
                         let strategy = MaterializationStrategy::Incremental {
                             partition,
                             strategy: resolved_strategy.clone(),
@@ -4330,12 +4355,6 @@ pub async fn execute_project(
                         };
 
                         let db_name = plan.model_file.db_name_owned();
-                        let ensure_sqls: Vec<String> = if ledger_reset_sqls.is_some() {
-                            vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema)]
-                        } else {
-                            Vec::new()
-                        };
-                        let pre_write_sqls: Vec<String> = ledger_reset_sqls.unwrap_or_default();
                         retry_statement_group(request, run_id, &plan.name, reporter, || {
                             backend.execute_model_incremental_with_bookkeeping(
                                 schema,
@@ -4344,8 +4363,8 @@ pub async fn execute_project(
                                 Materialization::Table,
                                 strategy.clone(),
                                 false,
-                                &ensure_sqls,
-                                &pre_write_sqls,
+                                &ledger_ensure_sqls,
+                                &ledger_pre_write_sqls,
                             )
                         })
                         .await

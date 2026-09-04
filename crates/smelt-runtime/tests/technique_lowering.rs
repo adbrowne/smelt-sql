@@ -4159,6 +4159,8 @@ mod external_source_point_lookup_recompute {
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await;
 
@@ -4246,6 +4248,8 @@ mod external_source_point_lookup_recompute {
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await
         .expect("conforming data must not fail the tripwire");
@@ -4328,6 +4332,8 @@ mod external_source_point_lookup_recompute {
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await
         .expect("an unbuildable probe must fall back, never fail the run");

@@ -66,7 +66,7 @@ the invariant by deleting `.smelt/` between run steps.
 |---|-------|--------|
 | 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | done |
 | 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | done |
-| 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | planned |
+| 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | done |
 | 4 | Availability resolution as a pure derivation step: `MaintenanceStateDowngraded` record on the cell, recompute-family downgrade, `state.warehouse_tables` parsed and fed in | pending |
 | 5 | Surface: `smelt explain` prints downgrades; LSP/CLI warning; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
 | 6 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
@@ -142,6 +142,17 @@ the invariant by deleting `.smelt/` between run steps.
   recorded `execute_sql`/`execute_statement_group` — the statement-parity leg needs no new
   recording seam. The "same transaction" half of criterion 1 is therefore proven separately, by a
   rollback test driving `DuckDbBackend::execute_write_with_bookkeeping` with a failing write group.
+
+- 2026-09-04 (phase 3 implement): landed — `execute_delete_insert_with_delta_restriction` gained
+  `ensure_sqls`/`pre_write_sqls` params routing through `execute_write_with_bookkeeping`; the
+  ledger reset construction in `execute.rs` is hoisted once per batch above all three DuckDB
+  DeleteInsert dispatch arms (model-edge restricted, external-sidecar restricted, plain), closing
+  phase 2's surfaced gap where the two restricted branches recorded no reset at all. Six new/
+  extended tests lock byte-parity, the rollback-under-failure guarantee, and the documented
+  non-DuckDB skip (a red test for phase 4's `MaintenanceStateDowngraded` to turn green). All
+  gates green (`verify-phase.sh`, `statement_parity`, `execute_parity`, `keyed_frontier_
+  bookkeeping`, `maintenance_conformance`); `rg` confirms no production `reconciliation.json`
+  reader/writer remains. See `phases/03-summary.md`.
 
 ## Blocked
 

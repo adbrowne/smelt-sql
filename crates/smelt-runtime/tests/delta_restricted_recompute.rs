@@ -171,6 +171,8 @@ async fn closed_with_exact_delta_touches_only_the_delta_keys() {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("restricted recompute executes");
@@ -240,6 +242,8 @@ async fn open_closure_falls_back_to_the_widened_scan() {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("unrestricted recompute executes");
@@ -282,6 +286,8 @@ async fn absent_observed_delta_runs_the_ordinary_widened_scan() {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("unrestricted recompute executes");
@@ -324,6 +330,8 @@ async fn empty_observed_delta_falls_back_to_the_widened_scan() {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("unrestricted recompute executes");
