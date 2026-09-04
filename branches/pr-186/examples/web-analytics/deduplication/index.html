@@ -2971,80 +2971,82 @@ happens to see. There's nothing left to order.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>silver.events_deduped
 </code></pre></div>
 <!-- smelt-generate: @cwd=tutorial_stages/06_composed_dedupe @render=text explain silver.events_deduped -->
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>Maintenance plan: silver.events_deduped
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>model silver.events_deduped  (emits: keyed upsert over [event_id], key-addressed, slice-bounded by first_seen_date under key temporal locality (settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }); grain: key)
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>Cells (3):
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>  - group {device_id, user_id, amplitude_id, event_ts, first_seen_date, utm_campaign, event_name, platform, url} on trigger NewData { source: &quot;raw.events&quot; }
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>      corner:    FoldDelta
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>      technique: KeyedFold
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>      ledger_catch_up: false
-<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>      contract:  default
-<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>      region key: Key([&quot;event_id&quot;])
-<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>      locality:  partition_local
-<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>      scan clamps: (none)
-<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
-<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>      write pin: (none)
-<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>      write variant: unconditional (not admitted — the cell&#39;s column group is empty — there is nothing to compare)
-<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>  - group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign} on trigger UpstreamMutation { source: &quot;raw.events&quot; }
-<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>      corner:    ColumnMerge
-<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>      technique: ColumnScopedMerge
-<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>      ledger_catch_up: false
-<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>      contract:  default
-<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>      region key: Key([&quot;event_id&quot;])
-<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>      locality:  partition_local
-<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>      scan clamps:
-<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>        - source=raw.events column=event_date before=Seconds(0) after=Seconds(0)
-<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
-<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>      write pin: (none)
-<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>      observed-delta recording: yes (change-suppressed column-scoped MERGE)
-<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>      write variant: suppressed (preference — steady-state trigger over prior state)
-<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>  - group {*} on trigger Backfill
-<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>      corner:    RecomputeRegion
-<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>      technique: DeleteInsert
-<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>      ledger_catch_up: false
-<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>      contract:  default
-<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>      region key: Key([&quot;event_id&quot;])
-<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>      locality:  partition_local
-<a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>      scan clamps: (none)
-<a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
-<a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a>      write pin: (none)
-<a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a>
-<a id="__codelineno-3-39" name="__codelineno-3-39" href="#__codelineno-3-39"></a>Execution postures:
-<a id="__codelineno-3-40" name="__codelineno-3-40" href="#__codelineno-3-40"></a>  run shape: window-forward
-<a id="__codelineno-3-41" name="__codelineno-3-41" href="#__codelineno-3-41"></a>  re-run tolerance: yes (no column folds through an additive combiner)
-<a id="__codelineno-3-42" name="__codelineno-3-42" href="#__codelineno-3-42"></a>  order-independence: yes (every combiner is order-independent)
-<a id="__codelineno-3-43" name="__codelineno-3-43" href="#__codelineno-3-43"></a>  reprocessing: refused (a window whose input changed since merging must not be re-merged, for every family)
-<a id="__codelineno-3-44" name="__codelineno-3-44" href="#__codelineno-3-44"></a>
-<a id="__codelineno-3-45" name="__codelineno-3-45" href="#__codelineno-3-45"></a>Key temporal locality:
-<a id="__codelineno-3-46" name="__codelineno-3-46" href="#__codelineno-3-46"></a>  route: route 3 (recurrence-bounded, declared key_recurrence)
-<a id="__codelineno-3-47" name="__codelineno-3-47" href="#__codelineno-3-47"></a>  slice: RecurrenceBounded { partition_column: &quot;first_seen_date&quot;, margin_before: Seconds(259200), margin_after: Seconds(0), r: Seconds(259200) }
-<a id="__codelineno-3-48" name="__codelineno-3-48" href="#__codelineno-3-48"></a>  settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }
-<a id="__codelineno-3-49" name="__codelineno-3-49" href="#__codelineno-3-49"></a>  observed-delta projection: widened by `r` + margins
-<a id="__codelineno-3-50" name="__codelineno-3-50" href="#__codelineno-3-50"></a>
-<a id="__codelineno-3-51" name="__codelineno-3-51" href="#__codelineno-3-51"></a>Refusals: (none)
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>Maintenance plan: silver.events_deduped
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>Cells (3):
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>  - group {device_id, user_id, amplitude_id, event_ts, first_seen_date, utm_campaign, event_name, platform, url} on trigger NewData { source: &quot;raw.events&quot; }
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>      corner:    FoldDelta
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>      technique: KeyedFold
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>      ledger_catch_up: false
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>      contract:  default
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>      region key: Key([&quot;event_id&quot;])
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>      locality:  partition_local
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>      scan clamps: (none)
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>      write pin: (none)
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>      write variant: unconditional (not admitted — the cell&#39;s column group is empty — there is nothing to compare)
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>  - group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign} on trigger UpstreamMutation { source: &quot;raw.events&quot; }
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>      corner:    ColumnMerge
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>      technique: ColumnScopedMerge
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>      ledger_catch_up: false
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>      contract:  default
+<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>      region key: Key([&quot;event_id&quot;])
+<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>      locality:  partition_local
+<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>      scan clamps:
+<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>        - source=raw.events column=event_date before=Seconds(0) after=Seconds(0)
+<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>      write pin: (none)
+<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>      observed-delta recording: yes (change-suppressed column-scoped MERGE)
+<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>      write variant: suppressed (preference — steady-state trigger over prior state)
+<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>  - group {*} on trigger Backfill
+<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>      corner:    RecomputeRegion
+<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>      technique: DeleteInsert
+<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>      ledger_catch_up: false
+<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>      contract:  default
+<a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>      region key: Key([&quot;event_id&quot;])
+<a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>      locality:  partition_local
+<a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a>      scan clamps: (none)
+<a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+<a id="__codelineno-3-39" name="__codelineno-3-39" href="#__codelineno-3-39"></a>      write pin: (none)
+<a id="__codelineno-3-40" name="__codelineno-3-40" href="#__codelineno-3-40"></a>
+<a id="__codelineno-3-41" name="__codelineno-3-41" href="#__codelineno-3-41"></a>Execution postures:
+<a id="__codelineno-3-42" name="__codelineno-3-42" href="#__codelineno-3-42"></a>  run shape: window-forward
+<a id="__codelineno-3-43" name="__codelineno-3-43" href="#__codelineno-3-43"></a>  re-run tolerance: yes (no column folds through an additive combiner)
+<a id="__codelineno-3-44" name="__codelineno-3-44" href="#__codelineno-3-44"></a>  order-independence: yes (every combiner is order-independent)
+<a id="__codelineno-3-45" name="__codelineno-3-45" href="#__codelineno-3-45"></a>  reprocessing: refused (a window whose input changed since merging must not be re-merged, for every family)
+<a id="__codelineno-3-46" name="__codelineno-3-46" href="#__codelineno-3-46"></a>
+<a id="__codelineno-3-47" name="__codelineno-3-47" href="#__codelineno-3-47"></a>Key temporal locality:
+<a id="__codelineno-3-48" name="__codelineno-3-48" href="#__codelineno-3-48"></a>  route: route 3 (recurrence-bounded, declared key_recurrence)
+<a id="__codelineno-3-49" name="__codelineno-3-49" href="#__codelineno-3-49"></a>  slice: RecurrenceBounded { partition_column: &quot;first_seen_date&quot;, margin_before: Seconds(259200), margin_after: Seconds(0), r: Seconds(259200) }
+<a id="__codelineno-3-50" name="__codelineno-3-50" href="#__codelineno-3-50"></a>  settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }
+<a id="__codelineno-3-51" name="__codelineno-3-51" href="#__codelineno-3-51"></a>  observed-delta projection: widened by `r` + margins
 <a id="__codelineno-3-52" name="__codelineno-3-52" href="#__codelineno-3-52"></a>
-<a id="__codelineno-3-53" name="__codelineno-3-53" href="#__codelineno-3-53"></a>Relation contract:
-<a id="__codelineno-3-54" name="__codelineno-3-54" href="#__codelineno-3-54"></a>  clock:    event_time_column=first_seen_date partition_column=first_seen_date granularity=Day
-<a id="__codelineno-3-55" name="__codelineno-3-55" href="#__codelineno-3-55"></a>  identity: event_id
-<a id="__codelineno-3-56" name="__codelineno-3-56" href="#__codelineno-3-56"></a>  derived grain: key
-<a id="__codelineno-3-57" name="__codelineno-3-57" href="#__codelineno-3-57"></a>
-<a id="__codelineno-3-58" name="__codelineno-3-58" href="#__codelineno-3-58"></a>Inbound edges: sources.raw.events
-<a id="__codelineno-3-59" name="__codelineno-3-59" href="#__codelineno-3-59"></a>  - sources.raw.events (source)
-<a id="__codelineno-3-60" name="__codelineno-3-60" href="#__codelineno-3-60"></a>      clock:    event_time_column=event_date partition_column=event_date granularity=Day
-<a id="__codelineno-3-61" name="__codelineno-3-61" href="#__codelineno-3-61"></a>      identity: (none)
-<a id="__codelineno-3-62" name="__codelineno-3-62" href="#__codelineno-3-62"></a>      derived grain: partition
-<a id="__codelineno-3-63" name="__codelineno-3-63" href="#__codelineno-3-63"></a>      delta type: append-only within window
-<a id="__codelineno-3-64" name="__codelineno-3-64" href="#__codelineno-3-64"></a>
-<a id="__codelineno-3-65" name="__codelineno-3-65" href="#__codelineno-3-65"></a>Probes (2):
-<a id="__codelineno-3-66" name="__codelineno-3-66" href="#__codelineno-3-66"></a>  cadence: per_run
-<a id="__codelineno-3-67" name="__codelineno-3-67" href="#__codelineno-3-67"></a>  - fact: mutation_profile.kind: append_only
-<a id="__codelineno-3-68" name="__codelineno-3-68" href="#__codelineno-3-68"></a>      probe: SourceMutationProfileViolated
-<a id="__codelineno-3-69" name="__codelineno-3-69" href="#__codelineno-3-69"></a>      licensed cell: main.silver_events_deduped (declared)
-<a id="__codelineno-3-70" name="__codelineno-3-70" href="#__codelineno-3-70"></a>      cost: +1 query per consuming run
-<a id="__codelineno-3-71" name="__codelineno-3-71" href="#__codelineno-3-71"></a>  - fact: key_recurrence
-<a id="__codelineno-3-72" name="__codelineno-3-72" href="#__codelineno-3-72"></a>      probe: KeyedRecurrenceBoundViolated
-<a id="__codelineno-3-73" name="__codelineno-3-73" href="#__codelineno-3-73"></a>      licensed cell: main.silver_events_deduped keyed merge
-<a id="__codelineno-3-74" name="__codelineno-3-74" href="#__codelineno-3-74"></a>      cost: +1 query per consuming run
+<a id="__codelineno-3-53" name="__codelineno-3-53" href="#__codelineno-3-53"></a>Refusals: (none)
+<a id="__codelineno-3-54" name="__codelineno-3-54" href="#__codelineno-3-54"></a>
+<a id="__codelineno-3-55" name="__codelineno-3-55" href="#__codelineno-3-55"></a>Relation contract:
+<a id="__codelineno-3-56" name="__codelineno-3-56" href="#__codelineno-3-56"></a>  clock:    event_time_column=first_seen_date partition_column=first_seen_date granularity=Day
+<a id="__codelineno-3-57" name="__codelineno-3-57" href="#__codelineno-3-57"></a>  identity: event_id
+<a id="__codelineno-3-58" name="__codelineno-3-58" href="#__codelineno-3-58"></a>  derived grain: key
+<a id="__codelineno-3-59" name="__codelineno-3-59" href="#__codelineno-3-59"></a>
+<a id="__codelineno-3-60" name="__codelineno-3-60" href="#__codelineno-3-60"></a>Inbound edges: sources.raw.events
+<a id="__codelineno-3-61" name="__codelineno-3-61" href="#__codelineno-3-61"></a>  - sources.raw.events (source)
+<a id="__codelineno-3-62" name="__codelineno-3-62" href="#__codelineno-3-62"></a>      clock:    event_time_column=event_date partition_column=event_date granularity=Day
+<a id="__codelineno-3-63" name="__codelineno-3-63" href="#__codelineno-3-63"></a>      identity: (none)
+<a id="__codelineno-3-64" name="__codelineno-3-64" href="#__codelineno-3-64"></a>      derived grain: partition
+<a id="__codelineno-3-65" name="__codelineno-3-65" href="#__codelineno-3-65"></a>      delta type: append-only within window
+<a id="__codelineno-3-66" name="__codelineno-3-66" href="#__codelineno-3-66"></a>
+<a id="__codelineno-3-67" name="__codelineno-3-67" href="#__codelineno-3-67"></a>Probes (2):
+<a id="__codelineno-3-68" name="__codelineno-3-68" href="#__codelineno-3-68"></a>  cadence: per_run
+<a id="__codelineno-3-69" name="__codelineno-3-69" href="#__codelineno-3-69"></a>  - fact: mutation_profile.kind: append_only
+<a id="__codelineno-3-70" name="__codelineno-3-70" href="#__codelineno-3-70"></a>      probe: SourceMutationProfileViolated
+<a id="__codelineno-3-71" name="__codelineno-3-71" href="#__codelineno-3-71"></a>      licensed cell: main.silver_events_deduped (declared)
+<a id="__codelineno-3-72" name="__codelineno-3-72" href="#__codelineno-3-72"></a>      cost: +1 query per consuming run
+<a id="__codelineno-3-73" name="__codelineno-3-73" href="#__codelineno-3-73"></a>  - fact: key_recurrence
+<a id="__codelineno-3-74" name="__codelineno-3-74" href="#__codelineno-3-74"></a>      probe: KeyedRecurrenceBoundViolated
+<a id="__codelineno-3-75" name="__codelineno-3-75" href="#__codelineno-3-75"></a>      licensed cell: main.silver_events_deduped keyed merge
+<a id="__codelineno-3-76" name="__codelineno-3-76" href="#__codelineno-3-76"></a>      cost: +1 query per consuming run
 </code></pre></div>
 <p>Two things the previous page's refusal didn't have:</p>
 <ul>

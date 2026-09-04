@@ -5442,13 +5442,24 @@ a pipeline blocks on exit <code>3</code> until a human has reviewed and re-run t
 </tbody>
 </table>
 <p>Without a <code>MODEL_NAME</code>, the output includes both the <strong>logical graph</strong> (models as written) and the <strong>physical graph</strong> (execution plan with ephemeral models inlined, strategies resolved). See <a href="../../developing/architecture/#two-graph-architecture">Two-Graph Architecture</a> for details.</p>
-<p>With a <code>MODEL_NAME</code>, <code>smelt explain</code> instead prints that model's <strong>maintenance plan</strong>: every
-cell (trigger, corner, technique), the <code>ledger_catch_up</code> flag (whether the cell routes through
-the <a href="../../guide/incremental-models/#the-reconciliation-ledger">reconciliation ledger</a>), the
-derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-the model's own <strong>Relation Contract</strong> (its clock, identity, and derived <code>grain</code> label), and one
-contract block per <strong>inbound edge</strong>. This only applies to incremental models (<code>refresh:
+<p>With a <code>MODEL_NAME</code>, <code>smelt explain</code> instead prints that model's <strong>maintenance plan</strong>: the
+model's own <strong>delta signature</strong> as the report's first line (an <code>emits:</code> headline — see below),
+every cell (trigger, corner, technique), the <code>ledger_catch_up</code> flag (whether the cell routes
+through the <a href="../../guide/incremental-models/#the-reconciliation-ledger">reconciliation ledger</a>),
+the derived per-source scan clamps, each source's partition-locality verdict, any admission
+refusals, the model's own <strong>Relation Contract</strong> (its clock, identity, and derived <code>grain</code> label),
+and one contract block per <strong>inbound edge</strong>. This only applies to incremental models (<code>refresh:
 incremental</code> with a <code>grain:</code> declared) — other models print a one-line notice instead.</p>
+<p>The headline reads <code>model &lt;name&gt;  (emits: &lt;shape&gt;; grain: &lt;label&gt;)</code>: <code>keyed upsert over
+[&lt;keys&gt;], key-addressed</code> for a bare keyed model, the same with <code>, slice-bounded by &lt;axis&gt; under
+key temporal locality (settle bound: &lt;bound&gt;)</code> appended for a composed (key + time) model,
+<code>append-only within a window, window-addressed by &lt;axis&gt;</code> for a partition-grain model, or
+<code>general (degraded by: &lt;reason&gt;), not delta-addressable</code> when the model's own SQL degrades —
+naming the construct or world-fact responsible, never a silent fallback. The <code>grain:</code> clause is
+the same label the report's own <code>derived grain:</code> row prints. <code>--json</code> carries the identical
+fields as a top-level <code>delta_signature</code> object: <code>shape</code> (<code>keyed_upsert</code> | <code>append_only_window</code> |
+<code>general</code>), <code>addressing</code> (<code>key</code> | <code>window</code> | <code>none</code>), <code>keys</code>/<code>axis</code>/<code>degraded_by</code> (present per
+shape), and <code>slice_bound</code>/<code>settle_bound</code> (present when key temporal locality is admitted).</p>
 <p>Each cell also prints a <code>contract:</code> row — its effective <a href="../../guide/incremental-models/#contract-relaxations">contract relaxation</a>
 (<code>default</code>, or <code>frozen_horizon</code>/<code>deferral</code> with their declared intervals); <code>--json</code> carries the
 same information per cell as a <code>contract_point</code> object.</p>
