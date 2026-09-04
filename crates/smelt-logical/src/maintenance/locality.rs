@@ -683,6 +683,12 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
     // model still gets route 2's more specific diagnosis rather than the
     // generic three-route message.
     let mut route2_local_refusal: Option<LocalityRefusal> = None;
+    // join-context: excluded (key-temporal-locality route 2's own FD-backed
+    // check, not a model-edge/repair admission route in criterion 3's sense
+    // — out of scope for `docs/outcomes/20260904-walk-migration-residue/
+    // outcome.md` phase 5, though `functional_dependency_verdict_over_
+    // vector` below does read `vector.has_fan_out_join`; this caller holds
+    // no declared source facts to build a real context from today)
     if let Some(vector) = model_property_vector(inputs.sql, &JoinContext::new()) {
         let extremal = vector
             .discriminants

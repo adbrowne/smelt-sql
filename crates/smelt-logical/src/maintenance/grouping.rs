@@ -662,6 +662,10 @@ fn membership_sensitivity_sources(
 /// (`Open`, never pruned) exactly as it would with no `JoinContext` entry at
 /// all.
 fn top_level_join_context(sql: &str, source_by_name: &BTreeMap<&str, &SourceFacts>) -> JoinContext {
+    // join-context: builder (closure-pruning's own context — deliberately
+    // excluded from the declared-RI route by model_properties.md
+    // §Semantics; `docs/outcomes/20260904-walk-migration-residue/
+    // outcome.md`'s Out of scope)
     let mut ctx = JoinContext::new();
     for facts in source_by_name.values() {
         let Some(alias) = enrichment_join_alias(sql, &facts.name) else {

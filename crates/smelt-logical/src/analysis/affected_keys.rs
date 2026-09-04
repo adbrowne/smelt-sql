@@ -288,6 +288,9 @@ fn resolve_target_columns(
 /// convenience sugar mirroring `JoinContext::new()`'s always-empty default.
 impl AffectedKeyContext {
     pub fn with_unique_key(columns: Vec<String>) -> Self {
+        // join-context: builder (declared-`unique_key`-only convenience
+        // constructor; a caller with join facts uses the `AffectedKeyContext`
+        // struct literal directly, as `repair.rs`'s two admission routes do)
         AffectedKeyContext {
             unique_key: columns,
             join: JoinContext::new(),

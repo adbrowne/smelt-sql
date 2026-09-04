@@ -733,6 +733,8 @@ pub fn derive_model_maintenance_plan_with_edges(
         output_partition_col,
         model_edges,
         metadata.unique_key.as_deref().unwrap_or(&[]),
+        sources,
+        source_referential_integrity,
     );
     Some(result)
 }

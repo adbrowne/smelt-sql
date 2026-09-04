@@ -86,6 +86,8 @@ async fn a_single_redelivered_then_changed_event_recomputes_only_its_own_row() {
         Some("event_date"),
         &model_edges(),
         &[],
+        &[],
+        &Default::default(),
     );
     let cell = plan
         .cell_for(&Trigger::NewData {

@@ -53,7 +53,7 @@ says the rule holds.
 | 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | done |
 | 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | done |
 | 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | done |
-| 5 | Declared-RI closure **and** declared unique-key facts reach every `JoinContext`-taking maintenance-cell route (model-edge cells, per-group repair admission); per-route fixtures + a structural empty-context check | planned |
+| 5 | Declared-RI closure **and** declared unique-key facts reach every `JoinContext`-taking maintenance-cell route (model-edge cells, per-group repair admission); per-route fixtures + a structural empty-context check | done |
 | 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
 
 ## Decision log
@@ -161,6 +161,19 @@ says the rule holds.
   over every enrichment relation in the scope, each judged with its own declared facts. Adding a
   model-level `referential_integrity:` surface was rejected as a product decision outside this
   outcome's migration-backlog mandate.
+
+- 2026-09-05 (implement, phase 5): shipped — `append_model_edge_cells`'s shared P1 AND now
+  folds every external source actually joined in the scope (not only model edges), each judged
+  with its own declared `unique_key`/`referential_integrity` via a unioned `JoinContext`
+  (`JoinContext::union`, new); `repair::admit_per_group_recompute` takes a real `join: &JoinContext`
+  instead of a literal empty one, wired from its production caller's `inputs.sources`. New
+  structural gate `join_context_reach.rs` requires every production `JoinContext::new()` in
+  `src/maintenance`/`src/analysis` to carry an inline classification tag — zero unclassified
+  survivors. Two pre-existing sites (`rules/cumulative.rs`'s once-write route,
+  `locality.rs`'s route-2 FD check) were found to read `has_fan_out_join` off an always-empty
+  context but have no declared facts to widen with today — recorded as follow-up, not fixed
+  (neither is a model-edge/repair admission route in criterion 3's sense). See
+  `phases/05-summary.md`.
 
 ## Blocked
 

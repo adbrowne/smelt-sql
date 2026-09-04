@@ -3430,6 +3430,8 @@ fn admit_added_left_join(
             )
         })?;
     let unique_key_refs: Vec<&str> = unique_key.iter().map(String::as_str).collect();
+    // join-context: builder (single-alias context for this added join's own
+    // cardinality proof, not a shared route context)
     let join_ctx = crate::analysis::join_shape::JoinContext::new()
         .with_composite_unique_key(&alias, &unique_key_refs);
     let cardinality = crate::analysis::join_shape::fan_out(join, &join_ctx);

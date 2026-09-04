@@ -56,6 +56,10 @@ use crate::maintenance::skeleton::skeleton_roles;
 /// carried in [`RowIdentityVerdict::proven_mismatch`] rather than silently
 /// dropped.
 pub fn row_identity(declared_unique_key: &[String], sql: &str) -> RowIdentityVerdict {
+    // join-context: excluded (the general per-cell row-identity proof, not a
+    // model-edge/repair admission route — out of scope for
+    // `docs/outcomes/20260904-walk-migration-residue/outcome.md` phase 5,
+    // which only reaches `JoinContext`-taking maintenance-cell routes)
     row_identity_with_context(declared_unique_key, sql, &JoinContext::new())
 }
 
@@ -419,29 +423,46 @@ pub struct ModelEdge {
 /// [`row_identity`] derivation `derive_maintenance_plan` uses for this
 /// model's other cells, so a model-edge creation cell carries the identical
 /// row-identity verdict as every other cell of the same output.
+///
+/// `sources` and `source_referential_integrity` are the SAME external-source
+/// facts `derive_maintenance_plan_with_referential_integrity` threads into
+/// `mutation_enrichment_closure` — folded here too so a model-edge cell's P1
+/// AND covers every enrichment relation actually joined in the scope, not
+/// only its upstream model edges (`model_properties.md` §"Skeleton-source
+/// closure").
 pub fn append_model_edge_cells(
     plan: &mut MaintenancePlan,
     sql: &str,
     output_partition_col: Option<&str>,
     model_edges: &[ModelEdge],
     declared_unique_key: &[String],
+    sources: &[SourceFacts],
+    source_referential_integrity: &SourceReferentialIntegrity,
 ) {
     if model_edges.is_empty() {
         return;
     }
     // The `JoinContext` built from every joined edge's own declared
-    // `unique_key` (see `model_edges_join_context`'s doc comment) — shared
-    // by the row-identity proof below AND `model_edge_enrichment_closure`'s
-    // P1 proof, so both properties of this SAME model-edge cell see the
-    // SAME declared facts rather than the row-identity proof working from a
-    // second, independent (and always-empty) context.
-    let join_ctx = model_edges_join_context(sql, model_edges);
+    // `unique_key` (see `model_edges_join_context`'s doc comment), unioned
+    // with the same declared-`unique_key` facts `source_facts_join_context`
+    // builds for external sources — shared by the row-identity proof below
+    // AND `model_edge_enrichment_closure`'s P1 proof, so both properties of
+    // this SAME model-edge cell see the SAME declared facts rather than the
+    // row-identity proof working from a second, independent context.
+    let join_ctx =
+        model_edges_join_context(sql, model_edges).union(source_facts_join_context(sql, sources));
     let identity = row_identity_with_context(declared_unique_key, sql, &join_ctx);
     // P1 skeleton-source closure — a property of the model's own query
     // shape (`model_edge_enrichment_closure`'s doc comment below), so it is
     // shared by both the key-addressed loop right below and the
     // partition-addressed loop further down, computed once.
-    let enrichment_closure = model_edge_enrichment_closure(sql, model_edges, &join_ctx);
+    let enrichment_closure = model_edge_enrichment_closure(
+        sql,
+        model_edges,
+        sources,
+        source_referential_integrity,
+        &join_ctx,
+    );
 
     // Key-addressed edges (`incremental_models.md` §"Upstream model edges"):
     // an upstream whose own derived output-delta shape is `KeyedUpsert`
@@ -641,7 +662,7 @@ pub fn append_model_edge_cells(
 fn model_edges_join_context(sql: &str, model_edges: &[ModelEdge]) -> JoinContext {
     use crate::analysis::skeleton_closure::enrichment_join_alias;
 
-    let mut ctx = JoinContext::new();
+    let mut ctx = JoinContext::new(); // join-context: builder
     for edge in model_edges {
         let Some(alias) = enrichment_join_alias(sql, &edge.name) else {
             continue;
@@ -654,15 +675,28 @@ fn model_edges_join_context(sql: &str, model_edges: &[ModelEdge]) -> JoinContext
     ctx
 }
 
-/// Derive the shared P1 skeleton-source-closure verdict for a model's
-/// upstream model edges (see [`append_model_edge_cells`]'s call site doc
-/// comment for why this is one derivation shared across every edge's cell,
-/// not a per-edge one). `join_ctx` is [`model_edges_join_context`]'s output
-/// — the same one the caller also feeds to the row-identity proof, never a
+/// Derive the shared P1 skeleton-source-closure verdict for a model-edge
+/// cell — an AND over every enrichment relation actually joined in the
+/// scope: each of `model_edges` judged with no declared referential-
+/// integrity fact of its own (a model edge licenses row preservation only
+/// via join shape, never a declaration), and each of `sources` actually
+/// joined in the same scope judged with `source_referential_integrity`'s
+/// declared fact for it, mirroring [`mutation_enrichment_closure`]'s own
+/// per-source `skeleton_source_closure` call exactly — the SAME proof, the
+/// SAME declared facts, just folded into one shared verdict instead of one
+/// per `UpstreamMutation` cell (`model_properties.md` §"Skeleton-source
+/// closure"). `join_ctx` is [`append_model_edge_cells`]'s unioned context —
+/// the same one the caller also feeds to the row-identity proof, never a
 /// second, independently-built context.
+///
+/// `None` when neither a model edge nor an external source is actually
+/// joined in this scope — no enrichment relation to close over at all,
+/// matching [`PlanCell::skeleton_source_closure`]'s documented empty case.
 fn model_edge_enrichment_closure(
     sql: &str,
     model_edges: &[ModelEdge],
+    sources: &[SourceFacts],
+    source_referential_integrity: &SourceReferentialIntegrity,
     join_ctx: &JoinContext,
 ) -> Option<crate::analysis::skeleton_closure::SkeletonSourceClosure> {
     use crate::analysis::skeleton_closure::{enrichment_join_alias, skeleton_source_closure};
@@ -671,7 +705,11 @@ fn model_edge_enrichment_closure(
         .iter()
         .filter(|edge| enrichment_join_alias(sql, &edge.name).is_some())
         .collect();
-    if joined_edges.is_empty() {
+    let joined_sources: Vec<&SourceFacts> = sources
+        .iter()
+        .filter(|facts| enrichment_join_alias(sql, &facts.name).is_some())
+        .collect();
+    if joined_edges.is_empty() && joined_sources.is_empty() {
         return None;
     }
     let mut verdict = crate::analysis::skeleton_closure::SkeletonSourceClosure::Closed {
@@ -682,6 +720,18 @@ fn model_edge_enrichment_closure(
         if !v.is_closed() {
             verdict = v;
             break;
+        }
+    }
+    if verdict.is_closed() {
+        for facts in joined_sources {
+            let ri = source_referential_integrity
+                .get(&facts.name)
+                .map(Vec::as_slice);
+            let v = skeleton_source_closure(sql, &facts.name, ri, join_ctx);
+            if !v.is_closed() {
+                verdict = v;
+                break;
+            }
         }
     }
     Some(verdict)
@@ -712,7 +762,7 @@ pub type SourceReferentialIntegrity = BTreeMap<String, Vec<String>>;
 fn source_facts_join_context(sql: &str, sources: &[SourceFacts]) -> JoinContext {
     use crate::analysis::skeleton_closure::enrichment_join_alias;
 
-    let mut ctx = JoinContext::new();
+    let mut ctx = JoinContext::new(); // join-context: builder
     for facts in sources {
         let Some(alias) = enrichment_join_alias(sql, &facts.name) else {
             continue;
@@ -1347,6 +1397,12 @@ fn derive_new_data(
                     return;
                 }
                 let delta = repair::delta_shape_for_source(inputs.sql, facts);
+                // The SAME declared-`unique_key` facts `append_model_edge_cells`
+                // folds into its own `join_ctx` (`source_facts_join_context`),
+                // built here for the repair route's affected-key discovery
+                // rather than an always-empty context (`docs/outcomes/
+                // 20260904-walk-migration-residue/outcome.md` phase 5).
+                let repair_join_ctx = source_facts_join_context(inputs.sql, &inputs.sources);
                 match repair::admit_per_group_recompute(
                     inputs.sql,
                     unique_key,
@@ -1355,6 +1411,7 @@ fn derive_new_data(
                     inputs.keyed_time_axis,
                     loc,
                     &delta,
+                    &repair_join_ctx,
                 ) {
                     Ok(admitted) => {
                         // Alphabetically sorted, matching
@@ -1422,6 +1479,7 @@ fn derive_new_data(
                         // fail-closed `OneToMany` (never an optimistic
                         // empty-key-set match).
                         if let Some(alias) = join_shape::join_alias_for_source(inputs.sql, source) {
+                            // join-context: builder (single-source context for this column's own fold-contribution check, not a shared route context)
                             let mut join_ctx = JoinContext::new();
                             if !facts.unique_key.is_empty() {
                                 let key_cols: Vec<&str> =

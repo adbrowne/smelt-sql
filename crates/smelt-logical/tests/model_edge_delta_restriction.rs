@@ -73,6 +73,8 @@ fn left_join_with_declared_unique_key_closes_every_edge_cell() {
         Some("event_date"),
         &[fact_edge(), dim_edge_with_key()],
         &[],
+        &[],
+        &Default::default(),
     );
     assert_eq!(plan.cells.len(), 2, "{plan:?}");
     for cell in &plan.cells {
@@ -95,6 +97,8 @@ fn inner_join_without_unique_key_stays_open_on_every_edge_cell() {
         Some("event_date"),
         &[fact_edge(), dim_edge_without_key()],
         &[],
+        &[],
+        &Default::default(),
     );
     assert_eq!(plan.cells.len(), 2, "{plan:?}");
     for cell in &plan.cells {
@@ -115,7 +119,15 @@ fn single_model_edge_with_no_enrichment_join_carries_no_closure_verdict() {
     // (`PlanCell::skeleton_source_closure`'s documented "common case").
     let sql = "SELECT fact.event_id, fact.event_date FROM smelt.silver.fact fact";
     let mut plan = MaintenancePlan::default();
-    append_model_edge_cells(&mut plan, sql, Some("event_date"), &[fact_edge()], &[]);
+    append_model_edge_cells(
+        &mut plan,
+        sql,
+        Some("event_date"),
+        &[fact_edge()],
+        &[],
+        &[],
+        &Default::default(),
+    );
     assert_eq!(plan.cells.len(), 1);
     assert_eq!(plan.cells[0].skeleton_source_closure, None);
 }
@@ -129,6 +141,8 @@ fn closed_cell_with_an_exact_delta_restricts_the_emitted_statement() {
         Some("event_date"),
         &[fact_edge(), dim_edge_with_key()],
         &[],
+        &[],
+        &Default::default(),
     );
     let cell = plan
         .cell_for(&Trigger::NewData {
@@ -187,6 +201,8 @@ fn open_cell_never_restricts_even_with_an_exact_delta_present() {
         Some("event_date"),
         &[fact_edge(), dim_edge_without_key()],
         &[],
+        &[],
+        &Default::default(),
     );
     let cell = plan
         .cell_for(&Trigger::NewData {
@@ -241,6 +257,8 @@ fn absent_observed_delta_falls_back_to_the_widened_scan() {
         Some("event_date"),
         &[fact_edge(), dim_edge_with_key()],
         &[],
+        &[],
+        &Default::default(),
     );
     let cell = plan
         .cell_for(&Trigger::NewData {

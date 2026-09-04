@@ -33,6 +33,8 @@ fn clockless_keyed_upstream_yields_a_key_addressed_cell() {
         Some("d"),
         &edges,
         &["user_id".to_string()],
+        &[],
+        &Default::default(),
     );
 
     assert!(
@@ -69,6 +71,8 @@ fn keyed_consumer_of_keyed_upstream_yields_a_cell() {
         None,
         &edges,
         &["user_id".to_string()],
+        &[],
+        &Default::default(),
     );
 
     assert!(
@@ -103,6 +107,8 @@ fn clockless_non_keyed_upstream_still_refuses() {
         Some("d"),
         &edges,
         &["user_id".to_string()],
+        &[],
+        &Default::default(),
     );
 
     assert!(
@@ -127,6 +133,8 @@ fn key_addressed_cell_claims_no_interval_scan() {
         Some("d"),
         &edges,
         &["user_id".to_string()],
+        &[],
+        &Default::default(),
     );
 
     let cell = &plan.cells[0];
@@ -157,6 +165,8 @@ fn consumer_not_carrying_upstream_keys_is_refused() {
         Some("d"),
         &edges,
         &["order_id".to_string()],
+        &[],
+        &Default::default(),
     );
 
     assert!(
@@ -191,6 +201,8 @@ fn grain_over_upstream_columns_is_admitted() {
         Some("d"),
         &edges,
         &[],
+        &[],
+        &Default::default(),
     );
 
     assert!(
@@ -243,6 +255,8 @@ fn grain_from_another_relation_is_still_refused() {
         Some("d"),
         &edges,
         &["order_id".to_string()],
+        &[],
+        &Default::default(),
     );
 
     assert!(
@@ -280,6 +294,8 @@ fn fan_out_join_blocks_the_grain_route() {
         Some("d"),
         &edges,
         &[],
+        &[],
+        &Default::default(),
     );
 
     assert!(

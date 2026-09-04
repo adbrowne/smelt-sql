@@ -14,11 +14,13 @@
 use std::collections::BTreeSet;
 
 use smelt_logical::maintenance::derive::{
-    derive_maintenance_plan, derive_maintenance_plan_with_referential_integrity, ModelInputs,
+    append_model_edge_cells, derive_maintenance_plan,
+    derive_maintenance_plan_with_referential_integrity, ModelEdge, ModelInputs,
     SourceReferentialIntegrity,
 };
 use smelt_logical::maintenance::{
-    ColumnGroup, Grain, MutationProfile, OutputSpec, SourceFacts, Trigger,
+    ColumnGroup, Grain, MaintenancePlan, MutationProfile, OutputSpec, RowIdentity, SourceFacts,
+    Trigger,
 };
 
 /// A fact + dimension enrichment, LEFT JOIN, payload-only projection, the
@@ -162,4 +164,177 @@ fn fingerprint_projections_are_populated_per_source_on_every_cell() {
     );
     assert!(projections.contains_key("fact"));
     assert!(projections.contains_key("dim"));
+}
+
+// --- Phase 5: model-edge cells consult declared-RI/unique-key facts for
+// their own external-source enrichment joins too, not only their upstream
+// model edges (`docs/outcomes/20260904-walk-migration-residue/outcome.md`
+// phase 5, `model_properties.md` §"Skeleton-source closure").
+
+fn silver_fact_edge() -> ModelEdge {
+    ModelEdge {
+        name: "silver.fact".to_string(),
+        clock_col: Some("event_date".to_string()),
+        clock_col_aliases: vec![],
+        unique_key: vec![],
+        output_shape: None,
+    }
+}
+
+/// A downstream over a model edge (the driving `FROM`) plus an inner-joined
+/// external dimension source declaring both `unique_key` and
+/// `referential_integrity`.
+const EDGE_PLUS_INNER_JOINED_DIM_SQL: &str = "SELECT fact.event_id, fact.event_date, dim.tier \
+     FROM smelt.silver.fact fact \
+     JOIN smelt.sources.dim dim ON fact.dim_id = dim.id";
+
+fn dim_source_with_unique_key() -> SourceFacts {
+    SourceFacts {
+        name: "dim".to_string(),
+        mutation: MutationProfile::MutableSnapshot,
+        partition_col: None,
+        unique_key: vec!["id".to_string()],
+        allow_full_scan: true,
+    }
+}
+
+#[test]
+fn model_edge_cell_closure_consults_declared_source_ri() {
+    let mut plan_without_ri = MaintenancePlan::default();
+    append_model_edge_cells(
+        &mut plan_without_ri,
+        EDGE_PLUS_INNER_JOINED_DIM_SQL,
+        Some("event_date"),
+        &[silver_fact_edge()],
+        &[],
+        &[dim_source_with_unique_key()],
+        &SourceReferentialIntegrity::new(),
+    );
+    assert_eq!(
+        plan_without_ri.cells[0]
+            .skeleton_source_closure
+            .as_ref()
+            .map(|c| c.is_closed()),
+        Some(false),
+        "an inner-joined external source with no declared referential_integrity must stay Open, \
+         got {:?}",
+        plan_without_ri.cells[0].skeleton_source_closure
+    );
+
+    let mut ri = SourceReferentialIntegrity::new();
+    ri.insert("dim".to_string(), vec!["id".to_string()]);
+    let mut plan_with_ri = MaintenancePlan::default();
+    append_model_edge_cells(
+        &mut plan_with_ri,
+        EDGE_PLUS_INNER_JOINED_DIM_SQL,
+        Some("event_date"),
+        &[silver_fact_edge()],
+        &[],
+        &[dim_source_with_unique_key()],
+        &ri,
+    );
+    assert_eq!(
+        plan_with_ri.cells[0]
+            .skeleton_source_closure
+            .as_ref()
+            .map(|c| c.is_closed()),
+        Some(true),
+        "a declared referential_integrity plus a declared unique_key on the inner-joined \
+         dimension must close, got {:?}",
+        plan_with_ri.cells[0].skeleton_source_closure
+    );
+}
+
+#[test]
+fn model_edge_closure_open_when_external_inner_join_unproven() {
+    // Two model edges: the driving `fact` (no enrichment join of its own)
+    // and a LEFT JOIN edge `edge2` that trivially closes via join shape —
+    // "every model edge is closed" — plus an inner-joined external `dim`
+    // source with NO referential_integrity entry at all.
+    let sql = "SELECT fact.event_id, fact.event_date, edge2.val, dim.tier \
+        FROM smelt.silver.fact fact \
+        LEFT JOIN smelt.silver.edge2 edge2 ON fact.id = edge2.fact_id \
+        JOIN smelt.sources.dim dim ON fact.dim_id = dim.id";
+    let edge2 = ModelEdge {
+        name: "silver.edge2".to_string(),
+        clock_col: Some("event_date".to_string()),
+        clock_col_aliases: vec![],
+        unique_key: vec!["id".to_string()],
+        output_shape: None,
+    };
+    let mut plan = MaintenancePlan::default();
+    append_model_edge_cells(
+        &mut plan,
+        sql,
+        Some("event_date"),
+        &[silver_fact_edge(), edge2],
+        &[],
+        &[dim_source_with_unique_key()],
+        &SourceReferentialIntegrity::new(),
+    );
+    for cell in &plan.cells {
+        assert_eq!(
+            cell.skeleton_source_closure.as_ref().map(|c| c.is_closed()),
+            Some(false),
+            "every model edge is closed, but the unproven external inner join against 'dim' \
+             must fail the shared AND to Open on cell {:?}, got {:?}",
+            cell.trigger,
+            cell.skeleton_source_closure
+        );
+    }
+}
+
+#[test]
+fn model_edge_join_context_carries_source_unique_keys() {
+    // No declared `unique_key` on the output; the proven grain
+    // (`fact.customer_id`) is only trusted when the walk's fan-out check
+    // sees the joined `dim` source's own declared unique key — otherwise
+    // the join against `dim` is untrusted (fail-closed `OneToMany`) and no
+    // grain is proven at all.
+    let sql = "SELECT fact.customer_id, SUM(dim.amount) AS total \
+        FROM smelt.silver.fact fact \
+        JOIN smelt.sources.dim dim ON fact.dim_id = dim.id \
+        GROUP BY fact.customer_id";
+
+    let mut plan_without_key = MaintenancePlan::default();
+    append_model_edge_cells(
+        &mut plan_without_key,
+        sql,
+        Some("event_date"),
+        &[silver_fact_edge()],
+        &[],
+        &[SourceFacts {
+            name: "dim".to_string(),
+            mutation: MutationProfile::MutableSnapshot,
+            partition_col: None,
+            unique_key: vec![],
+            allow_full_scan: true,
+        }],
+        &SourceReferentialIntegrity::new(),
+    );
+    assert_eq!(
+        plan_without_key.cells[0].row_identity.identity,
+        RowIdentity::WholeRow,
+        "with no declared unique_key on 'dim', the join must stay untrusted and no grain key \
+         proven, got {:?}",
+        plan_without_key.cells[0].row_identity
+    );
+
+    let mut plan_with_key = MaintenancePlan::default();
+    append_model_edge_cells(
+        &mut plan_with_key,
+        sql,
+        Some("event_date"),
+        &[silver_fact_edge()],
+        &[],
+        &[dim_source_with_unique_key()],
+        &SourceReferentialIntegrity::new(),
+    );
+    assert_eq!(
+        plan_with_key.cells[0].row_identity.identity,
+        RowIdentity::Key(vec!["customer_id".to_string()]),
+        "with 'dim's declared unique_key in the shared JoinContext, the join must be provably \
+         one-to-one and the GROUP BY key trusted, got {:?}",
+        plan_with_key.cells[0].row_identity
+    );
 }

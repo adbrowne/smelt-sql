@@ -6034,6 +6034,8 @@ fn enrichment_edge_closed(join_kind: EnrichmentJoinKind) -> bool {
         Some("event_date"),
         &recipe.model_edges(),
         &[],
+        &[],
+        &Default::default(),
     );
     let cell = plan
         .cell_for(&Trigger::NewData {

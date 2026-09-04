@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use smelt_logical::analysis::affected_keys::DeltaShape;
 use smelt_logical::analysis::footprint::FootprintResult;
+use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::source_bounds::{BoundResult, CrossAxisLink, Seconds};
 use smelt_logical::maintenance::derive::LocalityInputs;
 use smelt_logical::maintenance::repair::{
@@ -78,6 +79,7 @@ fn repair_admits_keyed_non_invertible_mutation() {
         None,
         &loc,
         &delta,
+        &JoinContext::new(),
     )
     .expect("expected admission");
     assert_eq!(admitted.key, vec!["customer_id".to_string()]);
@@ -106,6 +108,7 @@ fn repair_cell_lands_in_column_merge_corner() {
         None,
         &loc,
         &delta,
+        &JoinContext::new(),
     )
     .expect("expected admission");
     let cell = derive_repair_cell(
@@ -147,6 +150,7 @@ fn repair_refuses_when_affected_keys_not_discoverable() {
         None,
         &loc,
         &delta,
+        &JoinContext::new(),
     )
     .expect_err("expected refusal");
     match err {
@@ -168,8 +172,17 @@ fn repair_refuses_when_grain_not_derivable() {
         links: &links,
     };
     let delta = keyed_delta(&["customer_id", "amount"]);
-    let err = admit_per_group_recompute(sql, &[], &orders_source(), None, None, &loc, &delta)
-        .expect_err("expected refusal");
+    let err = admit_per_group_recompute(
+        sql,
+        &[],
+        &orders_source(),
+        None,
+        None,
+        &loc,
+        &delta,
+        &JoinContext::new(),
+    )
+    .expect_err("expected refusal");
     match err {
         RepairRefusal::KeysNotDiscoverable { why, .. } => {
             assert!(why.contains("no proven grain"), "{why}");
@@ -200,6 +213,7 @@ fn repair_refuses_when_slice_unbounded() {
         None,
         &loc,
         &delta,
+        &JoinContext::new(),
     )
     .expect_err("expected refusal");
     assert!(matches!(err, RepairRefusal::SliceUnbounded { .. }));
@@ -224,6 +238,7 @@ fn repair_refuses_when_every_grain_column_independent_of_delta_source() {
         None,
         &loc,
         &delta,
+        &JoinContext::new(),
     )
     .expect_err("expected refusal");
     match err {
@@ -253,7 +268,59 @@ fn repair_over_approximated_keys_are_admitted() {
         None,
         &loc,
         &delta,
+        &JoinContext::new(),
     )
     .expect("a key superset in the delta's own row shape must still admit");
     assert!(admitted.over_approximated);
+}
+
+/// `docs/outcomes/20260904-walk-migration-residue/outcome.md` phase 5: the
+/// per-group repair route's affected-key discovery must chase through a
+/// joined dimension whose declared `unique_key` is only visible via the
+/// caller-supplied `JoinContext` — an empty context leaves the join
+/// untrusted (fail-closed `OneToMany`), so no grain is proven and no
+/// declared `unique_key` was given either; the real context (the SAME one
+/// `append_model_edge_cells`/`source_facts_join_context` would build) proves
+/// the join `OneToOne` and admits.
+#[test]
+fn per_group_recompute_admits_only_with_declared_join_context() {
+    let sql = "SELECT o.customer_id, SUM(o.amount) AS total FROM smelt.sources.orders o \
+                JOIN smelt.sources.dim d ON o.dim_id = d.id GROUP BY o.customer_id";
+    let (bounds, footprints, links) = bounded_loc(Seconds::hours(1), Seconds::ZERO);
+    let loc = LocalityInputs {
+        bounds: &bounds,
+        footprints: &footprints,
+        links: &links,
+    };
+    let delta = keyed_delta(&["customer_id", "amount", "dim_id"]);
+
+    let err = admit_per_group_recompute(
+        sql,
+        &[],
+        &orders_source(),
+        None,
+        None,
+        &loc,
+        &delta,
+        &JoinContext::new(),
+    )
+    .expect_err("an empty JoinContext must leave the join against 'dim' untrusted");
+    assert!(
+        matches!(err, RepairRefusal::KeysNotDiscoverable { .. }),
+        "expected KeysNotDiscoverable, got {err:?}"
+    );
+
+    let real_join_ctx = JoinContext::new().with_unique_key("d", "id");
+    let admitted = admit_per_group_recompute(
+        sql,
+        &[],
+        &orders_source(),
+        None,
+        None,
+        &loc,
+        &delta,
+        &real_join_ctx,
+    )
+    .expect("the declared unique_key on 'd' must prove the join OneToOne and admit");
+    assert_eq!(admitted.key, vec!["customer_id".to_string()]);
 }

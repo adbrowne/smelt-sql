@@ -1095,6 +1095,12 @@ pub fn classify_cumulative(
     // itself can't classify this SQL shape; the once-write route then fails
     // closed rather than guess (`analysis::functional_dependency`'s
     // documented consumer seam).
+    // join-context: excluded (the once-write FD-backed route's own
+    // `has_fan_out_join` read is a real fail-closed default here, not a
+    // model-edge/repair admission route in criterion 3's sense — out of
+    // scope for `docs/outcomes/20260904-walk-migration-residue/outcome.md`
+    // phase 5; a future widening would need this classifier's own caller to
+    // hold declared source facts, which it does not today)
     let property_vector = model_property_vector(sql, &JoinContext::new());
 
     // Rule: GROUP BY required.

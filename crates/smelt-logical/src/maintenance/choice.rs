@@ -881,6 +881,8 @@ pub fn resolve_cell_write_suppression(
     cell: &PlanCell,
     overrides: &EffectiveOverride,
 ) -> Result<WriteSuppression, ChoiceRefusal> {
+    // join-context: no-context-field (reads only `.comparability` below, no
+    // context-dependent field of the vector)
     let comparability = crate::analysis::walk::model_property_vector(
         sql,
         &crate::analysis::join_shape::JoinContext::new(),
