@@ -1,7 +1,7 @@
 # Outcome: Walk-migration residue — the composition walk is the sole source of every property
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows MP-03, MP-05, MP-11, MP-13 (each classified "migration backlog, not a design question"); `docs/specs/model_properties.md` §Known Divergences
 **Spec anchors:** `docs/specs/model_properties.md` §Constraints "Composition happens in the walk, not in scans", `docs/specs/architecture.md` §"Property composition walk rule"
 
@@ -44,14 +44,27 @@ says the rule holds.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Expression-position subqueries and parenthesised derived tables as walk nodes; inline-equivalence property test | pending |
-| 2 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
-| 3 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
-| 4 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
+| 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | planned |
+| 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | pending |
+| 3 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
+| 4 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
+| 5 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
 
 ## Decision log
 
-<!-- Dated one-liners appended by plan/implement steps. -->
+- 2026-09-05 (plan, phase 1): probed the normalizer directly — `FROM ((SELECT …)) AS t` **already**
+  nests as a `Derived` node (the parser's `Subquery::select_stmt` unwraps redundant parens since
+  the divergence bullet was written), so criterion 1's "parenthesised derived table" half is
+  already met. The live `Unsupported` in that family is a parenthesised **join group**
+  (`FROM (a JOIN b ON …)`), which is what phase 1 now covers; the stale
+  `FROM ((SELECT …))` clause in `model_properties.md` §Known Divergences and in
+  `walk.rs`'s `has_unsupported` doc comment is corrected as part of it.
+- 2026-09-05 (plan, phase 1): split the original phase 1 in two. Expression-position subqueries
+  are invisible to the walk today (`SELECT (SELECT max(b) FROM u) FROM t` yields exactly one leaf,
+  `t`), and wiring them in touches all 11 `Transfer` impls' children-slice convention. Phase 1 is
+  the behaviour-preserving structural half (normalize + fold + per-transfer audit); phase 2 is the
+  verdict-affecting half (bound/reach/grain consume the new verdicts) plus criterion 1's
+  inline-equivalence property test. Nothing left the outcome; later phases renumbered 3–5.
 
 ## Blocked
 
