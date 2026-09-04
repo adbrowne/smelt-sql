@@ -6,7 +6,6 @@
 use smelt_state::ddl_duckdb::{
     generate_ledger_exists_sql, generate_ledger_insert_sql, generate_ledger_table_ddl,
 };
-use smelt_state::file_store::FileStore;
 use smelt_state::reconciliation::{Grade, Processed, ReconciliationLedger, Region};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -170,36 +169,6 @@ fn entries_keyed_region_by_group() {
     );
 }
 
-/// The ledger persists through the `.smelt/` file store, one
-/// `ReconciliationLedger` per model, following the same round-trip pattern
-/// `intervals.rs`'s `IntervalStore` already uses.
-#[test]
-fn reconciliation_store_roundtrips_through_file_store() {
-    let dir = TempDir::new().unwrap();
-    let store = FileStore::new(dir.path(), "dev");
-
-    let mut reconciliation = store.load_reconciliation_store().unwrap();
-    let region = Region::new("2026-01-01", "2026-01-10");
-    reconciliation
-        .get_or_create("daily_revenue")
-        .fold(&region, "{revenue}", Grade::Additive, "orders", "d1")
-        .unwrap();
-    store.save_reconciliation_store(&reconciliation).unwrap();
-
-    let loaded = store.load_reconciliation_store().unwrap();
-    let entry = loaded
-        .get("daily_revenue")
-        .and_then(|l| l.get(&region, "{revenue}"))
-        .expect("round-tripped ledger keeps the folded entry");
-    assert_eq!(
-        entry.processed,
-        Processed::DeltaIdentities(BTreeMap::from([(
-            "orders".to_string(),
-            BTreeSet::from(["d1".to_string()])
-        )]))
-    );
-}
-
 /// MP12 — additive-graded storage for the keyed `merge_into` fold path is
 /// **warehouse-resident**, not the `.smelt/` JSON file the rest of this
 /// suite exercises, specifically because it must be transactional with the
@@ -295,16 +264,15 @@ fn per_delta_grade_lives_in_warehouse() {
 /// harness — dev-only dependency, see `Cargo.toml`). Two disjoint
 /// window-advance runs of an additive `SUM` batched model each perform a
 /// real region recompute (DELETE the write window + INSERT its recompute);
-/// `crates/smelt-runtime/src/execute.rs` writes each one through this
-/// crate's `recompute_reset` at the same call site it already writes
-/// `IntervalStore`. This test asserts three things hold together over the
-/// same real run:
+/// `crates/smelt-runtime/src/execute.rs` records each one's reset directly
+/// into the engine-resident `_smelt_ledger` table, in the same transaction
+/// as the write (`docs/outcomes/20260904-state-residency/outcome.md`). This
+/// test asserts three things hold together over the same real run:
 ///
 /// 1. the maintained table matches an independent full-refresh oracle for
 ///    every windowed day (the run schedule reproduces a full refresh);
-/// 2. the `.smelt/reconciliation.json` ledger the runtime wrote records a
-///    recompute-reset entry per window, keyed by the region the runtime
-///    actually recomputed;
+/// 2. `_smelt_ledger` records a recompute-reset entry per window, keyed by
+///    the region the runtime actually recomputed;
 /// 3. folding a delta the recompute already covered is refused by the
 ///    ledger's own fold-precondition check — never-fold-twice holds against
 ///    the state a real run produced, not just a hand-built fixture.
@@ -443,8 +411,10 @@ SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
         // Two disjoint one-day windows, each seeded before it is run — the
         // disjoint-delta shape the safe direction of the interchangeability
         // theorem covers.
-        let windows: [(chrono::NaiveDate, &[f64]); 2] =
-            [(base, &[1.5, 2.5]), (base + chrono::Duration::days(1), &[10.0])];
+        let windows: [(chrono::NaiveDate, &[f64]); 2] = [
+            (base, &[1.5, 2.5]),
+            (base + chrono::Duration::days(1), &[10.0]),
+        ];
 
         let mut next_id = 1_i64;
         for (i, (day, vals)) in windows.iter().enumerate() {
@@ -485,32 +455,34 @@ SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
             );
         }
 
-        // (2) The runtime wrote a reconciliation-ledger entry per window at
-        // the same call site it writes `IntervalStore` — real wiring, not a
-        // hand-built ledger.
-        let file_store = FileStore::new(&project_dir, "dev");
-        let reconciliation = file_store
-            .load_reconciliation_store()
-            .expect("load reconciliation store written by execute_project");
-        let ledger = reconciliation
-            .get(shape.name)
-            .expect("execute_project recorded a ledger for the model it ran");
-
+        // (2) The runtime recorded a reconciliation-ledger entry per window,
+        // directly in `_smelt_ledger`, at the same call site it writes
+        // `IntervalStore` — real wiring, not a hand-built ledger.
+        let ledger_conn = project.connect().expect("connect to read _smelt_ledger");
         let mut recorded_regions = Vec::new();
         for (day, _) in &windows {
             let next_day = *day + chrono::Duration::days(1);
-            let region = Region::new(
-                day.format("%Y-%m-%d").to_string(),
-                next_day.format("%Y-%m-%d").to_string(),
-            );
-            let entry = ledger
-                .get(&region, "{*}")
-                .unwrap_or_else(|| panic!("no ledger entry for real run's own region {region:?}"));
-            assert!(
-                matches!(&entry.processed, Processed::Frontier(w) if w.get("self") == Some(&next_day.format("%Y-%m-%d").to_string())),
+            let start_str = day.format("%Y-%m-%d").to_string();
+            let end_str = next_day.format("%Y-%m-%d").to_string();
+            let input_name: String = ledger_conn
+                .query_row(
+                    &format!(
+                        "SELECT input_name FROM main._smelt_ledger WHERE model_name = '{}' \
+                         AND grp = '{{*}}' AND region_start = '{}' AND region_end = '{}' \
+                         AND delta_id = '{}'",
+                        shape.name, start_str, end_str, end_str
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| {
+                    panic!("no ledger entry for real run's own region [{start_str}, {end_str})")
+                });
+            assert_eq!(
+                input_name, "self",
                 "recompute-reset entry should record exactly the input the real run read"
             );
-            recorded_regions.push(region);
+            recorded_regions.push(Region::new(start_str, end_str));
         }
 
         // (3) Never-fold-twice against a real run's own recorded state: a

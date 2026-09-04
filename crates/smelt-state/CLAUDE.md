@@ -13,7 +13,6 @@ cargo test -p smelt-state
 - **`.smelt/` directory layout is fixed, and partitioned per target.** `FileStore::new(project_dir, target)` writes every run-scoped artifact under `.smelt/targets/<target>/`, so `dev` state and `prod` state never share a file:
   - `.smelt/targets/<target>/runs/{run_id}.json` — one manifest per run
   - `.smelt/targets/<target>/intervals.json` — cumulative interval coverage
-  - `.smelt/targets/<target>/reconciliation.json` — reconciliation ledger
   - `.smelt/targets/<target>/landed_deltas.json` — per-source landed-delta intervals
   - `.smelt/targets/<target>/snapshots.json` — fingerprint/environment snapshots
   - `.smelt/targets/<target>/source_postures.json` — per-source append-only posture baselines
@@ -21,6 +20,7 @@ cargo test -p smelt-state
   - `.smelt/targets/<target>/frozen_band_baselines.json` — per-source `contract.frozen_horizon` frozen-band row-count baselines
   - `.smelt/targets/<target>/schemas/{model}.json` — deployed schema snapshots (schema tracking)
   Only `.smelt/meta.json` (layout-version marker) and `.smelt/lock` (the project-wide advisory lock — deliberately *not* per-target; see the doc comment on `FileStore` for why) live at the `.smelt/` root, shared across every target. A missing `meta.json` denotes the legacy pre-partitioning layout (root-level `runs/`, `intervals.json`, etc., no `targets/<target>/` nesting); `FileStore::lock()` migrates it in place, once, under the lock. Never create state files outside `.smelt/`; the `.smelt/` root is gitignored in example workspaces.
+- **The reconciliation ledger is engine-resident, not a `.smelt/` file.** `_smelt_ledger` (`src/ddl_duckdb.rs`) lives in the warehouse, transactional with the write it protects (`docs/outcomes/20260904-state-residency/outcome.md`). `src/reconciliation.rs`'s `ReconciliationLedger` is the algebra's pure in-memory reference model that this crate's own tests pin against — no production code persists one. A legacy root-level `reconciliation.json` from a pre-residency `.smelt/` is left untouched by `FileStore`'s legacy-layout migration (inert dead weight, not read).
 - **`RunManifest` is serialized to JSON.** Adding required fields (no `Option<>`, no `#[serde(default)]`) is a breaking change for anyone reading historical manifest files. Prefer `Option` or `#[serde(default)]` for new fields.
 - **`IntervalStore` uses string date keys** (`"2024-01-01"`), not `NaiveDate`, in its JSON representation. Interval arithmetic (`merge_intervals`, `find_gaps`) operates on `NaiveDate` internally.
 - **`ddl_duckdb.rs`, `ddl_spark.rs` and `ddl_bigquery.rs`** generate DDL strings for `CREATE TABLE AS` and schema-migration statements. They are not execution backends — they produce SQL strings that the relevant backend then runs.

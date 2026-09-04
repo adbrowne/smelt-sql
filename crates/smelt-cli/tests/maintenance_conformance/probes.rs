@@ -292,13 +292,17 @@ async fn redelivered_window_refuses_for_additive_keyed() {
     );
 }
 
-/// `persisted_reconciliation_store_reflects_recompute_reset` (plan Phase 5
-/// TDD list): after two `execute_project` runs of a partition-grain recipe,
-/// `.smelt/reconciliation.json` contains recompute-reset entries for
-/// exactly the recomputed regions (closes design §2 gap 6 — zero
-/// integration coverage of reconciliation-ledger persistence).
+/// `engine_ledger_reflects_recompute_reset` (state-residency phase 2 TDD
+/// list, superseding the file-store-era `persisted_reconciliation_store_
+/// reflects_recompute_reset`): after two `execute_project` runs of a
+/// partition-grain recipe, the engine-resident `_smelt_ledger` table
+/// contains recompute-reset entries for exactly the recomputed regions
+/// (closes design §2 gap 6 — zero integration coverage of
+/// reconciliation-ledger persistence; `docs/outcomes/20260904-state-
+/// residency/outcome.md` criterion 1 — the ledger is a backend table, not
+/// `.smelt/reconciliation.json`).
 #[tokio::test]
-async fn persisted_reconciliation_store_reflects_recompute_reset() {
+async fn engine_ledger_reflects_recompute_reset() {
     let mut runner = TestRunner::deterministic();
     let pool = RecipePool {
         constructs: vec![ConstructKind::AdditiveAgg],
@@ -346,35 +350,35 @@ async fn persisted_reconciliation_store_reflects_recompute_reset() {
     r2.end = Some("2024-01-03".to_string());
     project.run_quiet("recon-run-2", r2).await.expect("run 2");
 
-    let store = smelt_state::file_store::FileStore::new(&project.project_dir, "dev")
-        .load_reconciliation_store()
-        .expect("load persisted reconciliation store");
-    let ledger = store.get(&recipe.model_name).unwrap_or_else(|| {
-        panic!(
-            "no reconciliation ledger persisted for model {:?}: store={store:?}",
-            recipe.model_name
+    let conn = project.connect().expect("connect to read _smelt_ledger");
+    let mut stmt = conn
+        .prepare(
+            "SELECT region_start, region_end FROM main._smelt_ledger \
+             WHERE model_name = ? AND grp = '{*}' ORDER BY region_start",
         )
-    });
+        .expect("prepare ledger query");
+    let regions: Vec<(String, String)> = stmt
+        .query_map([&recipe.model_name], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query ledger rows")
+        .collect::<duckdb::Result<Vec<_>>>()
+        .expect("read ledger rows");
 
     let region1 = Region::new("2024-01-01", "2024-01-02");
     let region2 = Region::new("2024-01-02", "2024-01-03");
     assert!(
-        ledger.get(&region1, "{*}").is_some(),
+        regions.contains(&(region1.start.clone(), region1.end.clone())),
         "expected a recompute-reset entry for the first recomputed region {region1:?}, \
-         got records={:#?}",
-        ledger.records
+         got regions={regions:#?}",
     );
     assert!(
-        ledger.get(&region2, "{*}").is_some(),
+        regions.contains(&(region2.start.clone(), region2.end.clone())),
         "expected a recompute-reset entry for the second recomputed region {region2:?}, \
-         got records={:#?}",
-        ledger.records
+         got regions={regions:#?}",
     );
     assert_eq!(
-        ledger.records.len(),
+        regions.len(),
         2,
-        "expected exactly the two recomputed regions' entries, got {:#?}",
-        ledger.records
+        "expected exactly the two recomputed regions' entries, got regions={regions:#?}",
     );
 }
 

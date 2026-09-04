@@ -1,7 +1,6 @@
 use crate::frozen_band_baselines::FrozenBandBaselineStore;
 use crate::intervals::IntervalStore;
 use crate::landed_deltas::LandedDeltaStore;
-use crate::reconciliation::ReconciliationStore;
 use crate::schema_tracking::DeployedSchema;
 use crate::snapshot_store::SnapshotStore;
 use crate::source_mutations::SourceMutationStore;
@@ -153,10 +152,6 @@ impl FileStore {
         self.target_dir.join("intervals.json")
     }
 
-    fn reconciliation_path(&self) -> PathBuf {
-        self.target_dir.join("reconciliation.json")
-    }
-
     fn landed_deltas_path(&self) -> PathBuf {
         self.target_dir.join("landed_deltas.json")
     }
@@ -255,12 +250,16 @@ impl FileStore {
     /// move and is a no-op.
     ///
     /// The spec's legacy-layout list names `runs/`, `intervals.json`,
-    /// `reconciliation.json`, `landed_deltas.json`, `schemas/`; this also
-    /// moves `snapshots.json` even though the spec prose omits it, since it
-    /// is a current per-target artifact kind that predates this migration
-    /// and leaving it stranded at the project root would silently orphan
-    /// it — failing loud here would mean silently *not* migrating it, which
-    /// is the wrong kind of fail-loud.
+    /// `landed_deltas.json`, `schemas/`; this also moves `snapshots.json`
+    /// even though the spec prose omits it, since it is a current per-target
+    /// artifact kind that predates this migration and leaving it stranded
+    /// at the project root would silently orphan it — failing loud here
+    /// would mean silently *not* migrating it, which is the wrong kind of
+    /// fail-loud. `reconciliation.json` is deliberately absent: the
+    /// reconciliation ledger is engine-resident now (`_smelt_ledger`,
+    /// `docs/outcomes/20260904-state-residency/outcome.md`), so a legacy
+    /// root-level `reconciliation.json` from a pre-residency `.smelt/` is
+    /// inert dead weight — left in place, not migrated.
     fn migrate_legacy_layout_locked(&self) -> Result<()> {
         std::fs::create_dir_all(&self.target_dir).with_context(|| {
             format!(
@@ -271,7 +270,6 @@ impl FileStore {
         for name in [
             "runs",
             "intervals.json",
-            "reconciliation.json",
             "landed_deltas.json",
             "snapshots.json",
             "schemas",
@@ -461,32 +459,6 @@ impl FileStore {
         let path = self.intervals_path();
         write_json_atomic(&path, store)
             .with_context(|| format!("Failed to write intervals: {:?}", path))
-    }
-
-    // --- Reconciliation Ledger ---
-
-    /// Load the reconciliation ledger store from disk (one ledger per
-    /// model). Returns default if the file doesn't exist — a model with no
-    /// ledger has never had a plan-managed fold/recompute recorded.
-    pub fn load_reconciliation_store(&self) -> Result<ReconciliationStore> {
-        self.check_version()?;
-        let path = self.reconciliation_path();
-        if !path.exists() {
-            return Ok(ReconciliationStore::default());
-        }
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read reconciliation ledger: {:?}", path))?;
-        let store = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse reconciliation ledger: {:?}", path))?;
-        Ok(store)
-    }
-
-    /// Save the reconciliation ledger store to disk.
-    pub fn save_reconciliation_store(&self, store: &ReconciliationStore) -> Result<()> {
-        self.init()?;
-        let path = self.reconciliation_path();
-        write_json_atomic(&path, store)
-            .with_context(|| format!("Failed to write reconciliation ledger: {:?}", path))
     }
 
     // --- Landed-delta store ---
@@ -1223,7 +1195,10 @@ mod tests {
     /// `docs/specs/run_state.md` §"`meta.json` and layout versioning": the
     /// first locked open under a version-aware binary migrates a legacy
     /// root-level layout into `targets/<target>/` for the
-    /// target of the run doing the migration.
+    /// target of the run doing the migration. A legacy root-level
+    /// `reconciliation.json` — from a pre-residency `.smelt/` — is left in
+    /// place: the reconciliation ledger is engine-resident now, so that
+    /// name is not a recognised legacy-layout artifact.
     #[test]
     fn legacy_root_state_migrates_to_first_run_target() {
         let dir = TempDir::new().unwrap();
@@ -1243,7 +1218,6 @@ mod tests {
         let target_dir = smelt_dir.join("targets").join("prod");
         assert!(target_dir.join("runs").join("run1.json").exists());
         assert!(target_dir.join("intervals.json").exists());
-        assert!(target_dir.join("reconciliation.json").exists());
         assert!(target_dir.join("landed_deltas.json").exists());
         assert!(target_dir
             .join("schemas")
@@ -1251,9 +1225,12 @@ mod tests {
             .exists());
         assert!(!smelt_dir.join("runs").exists());
         assert!(!smelt_dir.join("intervals.json").exists());
-        assert!(!smelt_dir.join("reconciliation.json").exists());
         assert!(!smelt_dir.join("landed_deltas.json").exists());
         assert!(!smelt_dir.join("schemas").exists());
+
+        // `reconciliation.json` is not migrated — left in place at the
+        // legacy root location, inert.
+        assert!(smelt_dir.join("reconciliation.json").exists());
 
         drop(_guard);
 

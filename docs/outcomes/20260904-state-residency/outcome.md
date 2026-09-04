@@ -65,7 +65,7 @@ the invariant by deleting `.smelt/` between run steps.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | done |
-| 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | planned |
+| 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | done |
 | 3 | Statement-parity and keyed-frontier tests cover the ledger statements; conformance gate green with the file ledger gone | pending |
 | 4 | Availability resolution as a pure derivation step: `MaintenanceStateDowngraded` record on the cell, recompute-family downgrade, `state.warehouse_tables` parsed and fed in | pending |
 | 5 | Surface: `smelt explain` prints downgrades; LSP/CLI warning; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
@@ -119,6 +119,15 @@ the invariant by deleting `.smelt/` between run steps.
   `Backend::execute_write_with_bookkeeping` seam (DuckDB overrides it with a real transaction) via
   a new `execute_model_incremental_with_bookkeeping` default, rather than a second write path —
   the run-pipeline-parity rule keeps the write in one place.
+
+- 2026-09-04 (phase 2 implement): landed the engine-resident region-recompute reset —
+  `generate_ledger_recompute_reset_sqls` (smelt-state), `execute_model_incremental_with_bookkeeping`
+  (smelt-backend), and the DuckDB DeleteInsert batch-write call site in `execute.rs`;
+  `.smelt/reconciliation.json` and its file-store API deleted. Scoped to the plain (non-delta-restricted)
+  DeleteInsert branch only, per the plan; the delta-restricted/column-scoped-merge write path
+  (`execute_delete_insert_with_delta_restriction`) now has no reconciliation-reset at all, a gap
+  surfaced (not fixed) for phase 3 or later to resolve — see `phases/02-summary.md`. All gates
+  green (`verify-phase.sh`, `statement_parity`, `execute_parity`, `maintenance_conformance`).
 
 ## Blocked
 

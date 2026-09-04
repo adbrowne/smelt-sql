@@ -31,7 +31,6 @@ use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
-use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, RunReport, TimeRangeRecord};
 
 use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
@@ -4282,6 +4281,48 @@ pub async fn execute_project(
                             );
                         }
 
+                        // Reconciliation ledger (`docs/specs/incremental_models.md`
+                        // §"The reconciliation ledger"): this batch is about to
+                        // region-recompute `[partition.start, partition.end)` — DELETE
+                        // the write window, INSERT its recompute. The reset resets
+                        // every intersecting ledger entry to exactly the input this
+                        // batch read (whole-row group `{*}`, nominal input `self`,
+                        // watermarked to the region's own end), run in the SAME
+                        // backend transaction as the write via
+                        // `Backend::execute_model_incremental_with_bookkeeping`
+                        // (state-residency: `.smelt/reconciliation.json` no longer
+                        // exists — this table IS the ledger). The ledger substrate is
+                        // DuckDB-only today (same posture as `maintenance_driver`'s
+                        // MP12 callers); on any other dialect the reset is skipped
+                        // with no silent file fallback —
+                        // `docs/outcomes/20260904-state-residency/outcome.md` phase 4
+                        // owns replacing this gap with a recorded
+                        // `MaintenanceStateDowngraded` downgrade.
+                        let ledger_reset_sqls = if backend.dialect()
+                            == smelt_backend::SqlDialect::DuckDB
+                        {
+                            Some(smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
+                                schema,
+                                &plan.name,
+                                "{*}",
+                                &partition.start,
+                                &partition.end,
+                                "self",
+                                &partition.end,
+                            ))
+                        } else {
+                            reporter.state_structure_unavailable(
+                                run_id,
+                                &plan.name,
+                                "reconciliation ledger",
+                                backend.dialect().name(),
+                                "region-recompute reset skipped: the ledger substrate is \
+                                 DuckDB-only today (docs/specs/incremental_models.md §\"The \
+                                 reconciliation ledger\")",
+                            );
+                            None
+                        };
+
                         let strategy = MaterializationStrategy::Incremental {
                             partition,
                             strategy: resolved_strategy.clone(),
@@ -4289,14 +4330,22 @@ pub async fn execute_project(
                         };
 
                         let db_name = plan.model_file.db_name_owned();
+                        let ensure_sqls: Vec<String> = if ledger_reset_sqls.is_some() {
+                            vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema)]
+                        } else {
+                            Vec::new()
+                        };
+                        let pre_write_sqls: Vec<String> = ledger_reset_sqls.unwrap_or_default();
                         retry_statement_group(request, run_id, &plan.name, reporter, || {
-                            backend.execute_model_incremental(
+                            backend.execute_model_incremental_with_bookkeeping(
                                 schema,
                                 &db_name,
                                 &compiled.sql,
                                 Materialization::Table,
                                 strategy.clone(),
                                 false,
+                                &ensure_sqls,
+                                &pre_write_sqls,
                             )
                         })
                         .await
@@ -4493,41 +4542,15 @@ pub async fn execute_project(
                     }
                 }
 
-                // Reconciliation ledger: this batch loop performed a region
-                // recompute of `[start_str, end_str)` (DELETE the write
-                // window, INSERT its recompute — write window = output
-                // window; or, for a column-scoped MERGE cell, MERGE that
-                // SAME window's freshly-recomputed rows in by `unique_key` —
-                // the row VALUES are still a from-scratch recompute of the
-                // window, only the physical write op differs).
-                // `docs/specs/incremental_models.md` §"The reconciliation
-                // ledger": a region recompute resets every intersecting
-                // entry to exactly the input it read. This records the
-                // whole-row group `{*}` (matching
-                // `smelt_logical::maintenance::PlanCell::group`'s
-                // whole-row-trigger convention) read from a single nominal
-                // `self` input, watermarked to the region's own end. This
-                // subsumes `IntervalStore`'s role for the region-recompute
-                // shape without regressing it — both stores are written
-                // side by side. Per-cell (not whole-row) ledger grading for
-                // the column-scoped-merge technique is MP12's job
-                // (`incremental_models.md` §"The reconciliation ledger").
-                if !start_str.is_empty() && !end_str.is_empty() {
-                    // Same whole-store critical section rationale as the
-                    // interval store above — `reconciliation.json`.
-                    let _io_guard = state_io_lock.lock().await;
-                    if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
-                        let region = Region::new(start_str.clone(), end_str.clone());
-                        let mut read = std::collections::BTreeMap::new();
-                        read.insert("self".to_string(), end_str.clone());
-                        reconciliation.get_or_create(&plan.name).recompute_reset(
-                            &region,
-                            "{*}",
-                            Processed::Frontier(read),
-                        );
-                        let _ = file_store.save_reconciliation_store(&reconciliation);
-                    }
-                }
+                // Reconciliation ledger: engine-resident now
+                // (`docs/specs/incremental_models.md` §"The reconciliation
+                // ledger"; `docs/outcomes/20260904-state-residency/
+                // outcome.md`). Each DuckDB DeleteInsert batch's own region
+                // recompute records its recompute-reset in `_smelt_ledger`,
+                // in the SAME transaction as its write — see the
+                // `ledger_reset_sqls`/`execute_model_incremental_with_bookkeeping`
+                // call inside the batch loop above. `.smelt/reconciliation.json`
+                // no longer exists.
                 } // 'run_dispatch_or_batches
 
                 Ok(())

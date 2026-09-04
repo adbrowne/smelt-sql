@@ -494,6 +494,52 @@ pub fn generate_ledger_exists_sql(
     )
 }
 
+/// `DELETE` + `INSERT` implementing the ledger's region-recompute reset
+/// (`docs/specs/incremental_models.md` §"The reconciliation ledger": "a
+/// region recompute resets every intersecting entry to exactly the input it
+/// read"). This is the region-recompute half of the ledger, kept beside the
+/// fold-side builders above under the same bookkeeping exclusion from the
+/// maintenance-plan-purity invariant (`CLAUDE.md` §"Maintenance-plan
+/// purity" — "ledger DDL/DML in `smelt-state` excluded as bookkeeping"),
+/// same precedent as [`generate_ledger_insert_sql`]. The `DELETE` removes
+/// every existing `(model_name, grp)` row whose stored `[region_start,
+/// region_end)` intersects the caller's `[region_start, region_end)` as
+/// half-open intervals; the paired `INSERT` then records exactly the input
+/// state this recompute read. Run together (in this order) inside one
+/// backend transaction alongside the recompute's own write — see
+/// `smelt_backend::Backend::execute_write_with_bookkeeping`.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_ledger_recompute_reset_sqls(
+    schema: &str,
+    model: &str,
+    group: &str,
+    region_start: &str,
+    region_end: &str,
+    input: &str,
+    delta_id: &str,
+) -> Vec<String> {
+    let delete_sql = format!(
+        "DELETE FROM {}.{} WHERE model_name = '{}' AND grp = '{}' \
+         AND region_start < '{}' AND region_end > '{}'",
+        quote_identifier(schema),
+        LEDGER_TABLE_NAME,
+        escape_sql_literal(model),
+        escape_sql_literal(group),
+        escape_sql_literal(region_end),
+        escape_sql_literal(region_start),
+    );
+    let insert_sql = generate_ledger_insert_sql(
+        schema,
+        model,
+        group,
+        input,
+        delta_id,
+        region_start,
+        region_end,
+    );
+    vec![delete_sql, insert_sql]
+}
+
 fn escape_sql_literal(s: &str) -> String {
     s.replace('\'', "''")
 }
@@ -1427,6 +1473,55 @@ mod tests {
         assert!(sql.contains("grp = '{*}'"));
         assert!(sql.contains("input_name = 'smelt.events'"));
         assert!(sql.contains("delta_id = '2026-01-01'"));
+    }
+
+    #[test]
+    fn ledger_recompute_reset_deletes_intersecting_and_records_read() {
+        let sqls = generate_ledger_recompute_reset_sqls(
+            "main",
+            "device_stats",
+            "{*}",
+            "2026-01-01",
+            "2026-01-02",
+            "self",
+            "2026-01-02",
+        );
+        assert_eq!(sqls.len(), 2);
+        let delete_sql = &sqls[0];
+        assert!(delete_sql.starts_with("DELETE FROM main._smelt_ledger"));
+        assert!(delete_sql.contains("model_name = 'device_stats'"));
+        assert!(delete_sql.contains("grp = '{*}'"));
+        assert!(delete_sql.contains("region_start < '2026-01-02'"));
+        assert!(delete_sql.contains("region_end > '2026-01-01'"));
+
+        let insert_sql = &sqls[1];
+        assert_eq!(
+            insert_sql,
+            &generate_ledger_insert_sql(
+                "main",
+                "device_stats",
+                "{*}",
+                "self",
+                "2026-01-02",
+                "2026-01-01",
+                "2026-01-02",
+            )
+        );
+    }
+
+    #[test]
+    fn ledger_recompute_reset_escapes_literals() {
+        let sqls = generate_ledger_recompute_reset_sqls(
+            "main",
+            "model's_name",
+            "{*}",
+            "2026-01-01",
+            "2026-01-02",
+            "self",
+            "2026-01-02",
+        );
+        assert!(sqls[0].contains("model_name = 'model''s_name'"));
+        assert!(sqls[1].contains("'model''s_name'"));
     }
 
     // ── warehouse-resident observed-output-delta DDL/DML (T5) ──────────

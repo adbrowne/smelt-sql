@@ -30,9 +30,23 @@
 //! with exactly the input state that recompute read — never emptied (the
 //! recompute consumed real input), never left stale/accumulated on top of
 //! whatever was there before.
+//!
+//! **The ledger itself is engine-resident, not this module's storage.**
+//! Both operations' real, production-executed form is SQL text —
+//! `ddl_duckdb::generate_ledger_insert_sql`/`generate_ledger_upsert_sql`
+//! (fold) and `ddl_duckdb::generate_ledger_recompute_reset_sqls`
+//! (recompute-reset) — against the warehouse-resident `_smelt_ledger`
+//! table, run transactionally with the write it protects
+//! (`smelt_backend::Backend::fold_ledger_delta`/
+//! `execute_write_with_bookkeeping`;
+//! `docs/outcomes/20260904-state-residency/outcome.md`). `ReconciliationLedger`
+//! below is the algebra's pure in-memory reference model — no production
+//! code persists one — kept as the oracle this crate's own tests fold and
+//! recompute-reset against to pin the semantics the SQL builders must
+//! match.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// An output region the ledger tracks: a half-open interval `[start, end)`
 /// on the model's own output axis. String-encoded like
@@ -258,27 +272,6 @@ impl ReconciliationLedger {
             group: group.to_string(),
             entry: LedgerEntry { processed },
         });
-    }
-}
-
-/// The full reconciliation ledger store, one `ReconciliationLedger` per
-/// model — the persisted shape `FileStore` round-trips to `.smelt/`,
-/// mirroring `intervals.rs::IntervalStore`'s per-model flattened map.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ReconciliationStore {
-    #[serde(flatten)]
-    pub models: HashMap<String, ReconciliationLedger>,
-}
-
-impl ReconciliationStore {
-    /// Get or create the ledger for `model_name`.
-    pub fn get_or_create(&mut self, model_name: &str) -> &mut ReconciliationLedger {
-        self.models.entry(model_name.to_string()).or_default()
-    }
-
-    /// Get the ledger for `model_name`, read-only.
-    pub fn get(&self, model_name: &str) -> Option<&ReconciliationLedger> {
-        self.models.get(model_name)
     }
 }
 
