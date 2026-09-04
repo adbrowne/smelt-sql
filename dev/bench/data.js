@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788524514034,
+  "lastUpdate": 1788524517039,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 10.074029,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "47a63bf265d55a13cdf29500e62666c406b53228",
+          "message": "outcome(20260904-dialect-emission-vocabulary): scaffold\n\nTemplates and operand-conditional verdicts per the multi_backend spec\ndiff (03828a14), paying down the DuckDB and Spark dialect-gap ratchets\nand retiring the unverified PostgreSQL emission column (#181).\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
+          "timestamp": "2026-09-04T22:17:30+10:00",
+          "tree_id": "bfa3ad91060975fdf8287b0e1b8f5cfea2b82d8b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/47a63bf265d55a13cdf29500e62666c406b53228"
+        },
+        "date": 1788524516059,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 34.21927810610829,
+            "unit": "MB/s"
           }
         ]
       }
