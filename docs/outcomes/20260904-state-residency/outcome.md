@@ -65,7 +65,7 @@ the invariant by deleting `.smelt/` between run steps.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | done |
-| 2 | Engine-resident reconciliation ledger on DuckDB: table DDL/DML emitted from `smelt-logical`'s maintenance layer, fold + never-fold-twice check transactional with the write; delete `.smelt/reconciliation.json` | pending |
+| 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | planned |
 | 3 | Statement-parity and keyed-frontier tests cover the ledger statements; conformance gate green with the file ledger gone | pending |
 | 4 | Availability resolution as a pure derivation step: `MaintenanceStateDowngraded` record on the cell, recompute-family downgrade, `state.warehouse_tables` parsed and fed in | pending |
 | 5 | Surface: `smelt explain` prints downgrades; LSP/CLI warning; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
@@ -103,6 +103,22 @@ the invariant by deleting `.smelt/` between run steps.
   `diagnostics.md` §"State residency" catalogue section. Both `rg` sweeps and
   `verify-phase.sh`/`diagnostics_catalogue` gates confirmed clean; see
   `phases/01-summary.md`.
+
+- 2026-09-04 (plan 02): phase 2's row said the ledger DDL/DML would be emitted from
+  `smelt-logical`'s maintenance layer. That contradicts the standing maintenance-plan-purity
+  invariant, which explicitly excludes "ledger DDL/DML in `smelt-state`" as bookkeeping, and the
+  existing `_smelt_ledger` builders already live in `smelt-state/src/ddl_duckdb.rs`. Row reworded
+  to keep the ledger builders in `smelt-state`; no new emitter is added to `smelt-logical`.
+- 2026-09-04 (plan 02): reading the code showed the ledger's **fold** half is already
+  engine-resident (MP12 `_smelt_ledger` + `Backend::fold_ledger_delta`). The only remaining
+  production writer of `.smelt/reconciliation.json` is the post-batch-loop region-recompute reset
+  in `execute.rs`, so phase 2 is scoped to that one move plus deleting the file-store API. No
+  phase added or removed — criterion 1's remaining surface is smaller than the row implied, not
+  different.
+- 2026-09-04 (plan 02): transactional coupling reuses the existing
+  `Backend::execute_write_with_bookkeeping` seam (DuckDB overrides it with a real transaction) via
+  a new `execute_model_incremental_with_bookkeeping` default, rather than a second write path —
+  the run-pipeline-parity rule keeps the write in one place.
 
 ## Blocked
 
