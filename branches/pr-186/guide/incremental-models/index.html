@@ -4628,12 +4628,16 @@ double-count), and recomputing a region — a full <code>DELETE</code>+<code>INS
 <code>--full-refresh</code>, a fallback to region-recompute, or an explicit rebuild — resets the region's
 ledger entry, since the recompute already incorporates everything up to that point.</p>
 <p>This project-wide bookkeeping is the frontier's <strong>reconciliation ledger</strong> realization (see
-<a href="../../reference/state/#the-reconciliation-ledger">State — The reconciliation ledger</a>). A
-window-forward keyed model's own <code>MERGE</code> writes a second realization, the <strong>transactional
-frontier write</strong>, directly into the target table alongside the row data it accompanies, in the
-same transaction: it lives backend-resident, not in a separate smelt-managed store. You don't
-declare or configure either realization directly; <code>smelt explain &lt;model&gt;</code> shows whether a given
-cell routes through the reconciliation ledger via the <code>ledger_catch_up</code> flag on that cell.</p>
+<a href="../../reference/state/#the-reconciliation-ledger">State — The reconciliation ledger</a>) — itself
+backend-resident (a per-model table in the target backend, folded in the same transaction as the
+write it protects), not <code>.smelt/</code>-resident. A window-forward keyed model's own <code>MERGE</code> writes a
+second realization, the <strong>transactional frontier write</strong>, directly into the target table
+alongside the row data it accompanies, in the same transaction: it too lives backend-resident,
+not in a separate smelt-managed store. You don't declare or configure either realization
+directly; <code>smelt explain &lt;model&gt;</code> shows whether a given cell routes through the reconciliation
+ledger via the <code>ledger_catch_up</code> flag on that cell, and prints a recorded <code>MaintenanceStateDowngraded</code>
+downgrade for any cell whose ideal technique needed a ledger realisation the target backend or
+<code>state.warehouse_tables: none</code> doesn't supply.</p>
 <h2 id="grain-partition-vs-grain-key">grain: partition vs grain: key<a class="headerlink" href="#grain-partition-vs-grain-key" title="Permanent link">&para;</a></h2>
 <p><code>grain: partition</code> produces a partitioned output where each partition's rows survive a <code>DELETE+INSERT</code> cycle without changing. <code>grain: key</code> collapses partitions into one row per <code>GROUP BY</code> key whose value reflects the combined state across history.</p>
 <ul>

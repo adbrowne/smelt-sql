@@ -3729,7 +3729,7 @@
 <p>See <code>docs/specs/run_state.md</code> §"Locking" for the full semantics.</p>
 <hr />
 <h2 id="state-isolation-per-target">State isolation per target<a class="headerlink" href="#state-isolation-per-target" title="Permanent link">&para;</a></h2>
-<p>Run state lives under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the <code>--target</code> a command ran against (default <code>dev</code>). A run against <code>dev</code> and a run against <code>prod</code> never share interval coverage, reconciliation ledgers, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. This means:</p>
+<p>Run state lives under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the <code>--target</code> a command ran against (default <code>dev</code>). A run against <code>dev</code> and a run against <code>prod</code> never share interval coverage, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. (The reconciliation ledger is separately isolated per target by virtue of living in that target's own backend schema, not <code>.smelt/</code>.) This means:</p>
 <ul>
 <li><code>smelt run --target prod</code> and <code>smelt run --target dev</code> can each be resumed, inspected, and reasoned about independently; a <code>dev</code> backfill can never mask a coverage gap in <code>prod</code>.</li>
 <li><code>smelt status</code>, <code>smelt history</code>, and <code>smelt diff</code> accept <code>--target</code> (default <code>dev</code>) and report on that target's state only — pass the target you actually care about, especially in CI where the default <code>dev</code> is rarely the one that matters.</li>

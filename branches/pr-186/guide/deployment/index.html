@@ -2943,13 +2943,12 @@
 <a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>  targets/&lt;target&gt;/
 <a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    runs/&lt;run_id&gt;.json              # one run manifest per execution
 <a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    intervals.json                  # cumulative interval coverage across runs
-<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    reconciliation.json             # reconciliation ledger for grain: key models
-<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    landed_deltas.json              # per-source landed-delta intervals
-<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    snapshots.json                  # fingerprint snapshots (state.mode: environments)
-<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    schemas/&lt;model&gt;.json            # deployed schema snapshot per model
-<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    reports/&lt;run_id&gt;.json           # run-report artifact for the run
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    landed_deltas.json              # per-source landed-delta intervals
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    snapshots.json                  # fingerprint snapshots (state.mode: environments)
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    schemas/&lt;model&gt;.json            # deployed schema snapshot per model
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    reports/&lt;run_id&gt;.json           # run-report artifact for the run
 </code></pre></div>
-<p>Every run-scoped artifact is nested under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the target the run executed against -- a <code>dev</code> run's interval ledger or reconciliation state never answers a question about <code>prod</code>, and vice versa. Only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target.</p>
+<p>Every run-scoped artifact is nested under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the target the run executed against -- a <code>dev</code> run's interval ledger never answers a question about <code>prod</code>, and vice versa. Only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target. The reconciliation ledger is not part of this tree: it is engine-resident (a table in the target backend, transactional with the fold it protects), independent of <code>state.mode</code> -- see <a href="../../reference/state/#the-reconciliation-ledger">State -- The reconciliation ledger</a>.</p>
 <p>Set <code>state.mode</code> in <code>smelt.yml</code> to opt into persistence -- <code>stateless</code> (the default) writes nothing and requires no <code>.smelt/</code> directory at all:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nt">state</span><span class="p">:</span>
 <a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">intervals</span><span class="w">   </span><span class="c1"># stateless | intervals | environments</span>
