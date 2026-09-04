@@ -48,6 +48,7 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-25}"
 PERMISSION_MODE="${PERMISSION_MODE:-bypassPermissions}"
 MODEL_PLAN="${MODEL_PLAN:-opus}"
 MODEL_IMPL="${MODEL_IMPL:-sonnet}"
+
 ITER_COST_WARN="${ITER_COST_WARN:-15}"
 
 # Same build-parallelism + per-iteration memory hardening as the autonomy loop
@@ -55,6 +56,22 @@ ITER_COST_WARN="${ITER_COST_WARN:-15}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
 ITER_MEMORY_MAX="${ITER_MEMORY_MAX:-32G}"
 ITER_MEMORY_HIGH="${ITER_MEMORY_HIGH:-28G}"
+
+# Readable live display of each step's stream-json output (see
+# .claude/tools/stream-view). Rebuilt at the start of each run (a no-op sub-
+# second `cargo build` when the binary is already current, so a source edit
+# is never left stale); falls back to raw JSONL (cat) if the build fails so
+# the loop never blocks on it. TOOL_VIS_STATE persists the ctrl+o
+# compact/full toggle across the fresh process each iteration spawns, keyed
+# per repo checkout.
+STREAM_VIEW_DIR="${SCRIPT_DIR}/../tools/stream-view"
+STREAM_VIEW_BIN="${STREAM_VIEW_DIR}/target/release/stream-view"
+echo "===== building .claude/tools/stream-view ====="
+if ! cargo build --release --manifest-path "${STREAM_VIEW_DIR}/Cargo.toml" --quiet; then
+  echo "===== stream-view build failed — falling back to raw JSONL output ====="
+  STREAM_VIEW_BIN=""
+fi
+TOOL_VIS_STATE="${LOG_DIR}/tool-visibility.$(printf '%s' "${REPO_ROOT}" | md5sum | cut -c1-8)"
 
 S_PLAN_READY="<<PLAN_READY>>"
 S_PHASE_COMPLETE="<<PHASE_COMPLETE>>"
@@ -110,6 +127,9 @@ echo "Outcome:         ${ACTIVE}"
 echo "Logs:            ${LOG_DIR}"
 echo "Max iterations:  ${MAX_ITERATIONS}"
 echo "Models:          plan=${MODEL_PLAN} implement=${MODEL_IMPL}"
+if [ -n "${STREAM_VIEW_BIN}" ]; then
+  echo "Tool-call detail: compact by default — ctrl+o in this pane toggles full args/results"
+fi
 
 # Per-iteration memory scope (degrades gracefully without systemd-run).
 ITER_SCOPE_BASE=()
@@ -202,6 +222,9 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
     iter_scope=("${ITER_SCOPE_BASE[@]}" --unit="outcome-iter-${ts}-$(printf '%02d' "${iteration}")" --)
   fi
 
+  formatter=(cat)
+  [ -n "${STREAM_VIEW_BIN}" ] && formatter=("${STREAM_VIEW_BIN}" --state "${TOOL_VIS_STATE}")
+
   "${iter_scope[@]}" claude --print \
     --permission-mode "${PERMISSION_MODE}" \
     --disallowedTools "ScheduleWakeup,Monitor" \
@@ -211,7 +234,7 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
     --verbose \
     "$(cat "${prompt_file}")
 
-${hint}" 2>&1 | tee "${log}" | "${SCRIPT_DIR}/format-stream-json.sh"
+${hint}" 2>&1 | tee "${log}" | "${formatter[@]}"
   rc="${PIPESTATUS[0]}"
 
   # Usage accounting (same shape as the autonomy loop, event tagged per step).

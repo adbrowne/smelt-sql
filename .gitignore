@@ -21,6 +21,9 @@ target/
 !.claude/registry-migration-baseline.txt
 !.claude/unknown-census.toml
 !.claude/property-loop-prompt.txt
+!.claude/tools/
+!.claude/tools/**
+.claude/tools/*/target/
 /.vscode/
 datagen.duckdb
 output/

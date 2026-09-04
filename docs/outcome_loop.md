@@ -89,10 +89,22 @@ and commits; exit 3). Tunables mirror the autonomy loop: `MAX_ITERATIONS`
 
 Each step runs with `--output-format stream-json --verbose`; the wrapper
 tees the raw JSONL to the iteration log (still what the sentinel/usage-log
-parsing reads) and also pipes it through
-`.claude/scripts/format-stream-json.sh`, which renders assistant text, tool
-calls, and truncated tool results as readable lines on stdout — so a
-`tmux attach` to a running loop shows live progress instead of raw JSON.
+parsing reads) and also pipes it through `.claude/tools/stream-view`, a
+small standalone Rust binary (rebuilt — a sub-second no-op once current — at
+the start of each run; see its `Cargo.toml`, deliberately outside the main
+workspace so it carries none of its clippy/hardening-budget gates; a build
+failure falls back to raw JSONL via `cat` so the loop is never blocked on
+it) that renders assistant text, tool calls, and tool results as readable
+lines on stdout — so attaching to a running loop's pane shows live progress
+instead of raw JSON.
+
+Tool-call detail (args + results) defaults to compact (tool name only,
+matching Claude Code's own collapsed default); pressing **ctrl+o** in the
+loop's pane toggles full detail, read live from `/dev/tty` by a background
+thread in `stream-view` (stdin there is the piped JSONL stream, not free for
+interactive reads). The toggle state is written to a small file under
+`LOG_DIR` keyed by the repo checkout, so it survives outcome-loop.sh spawning
+a fresh `stream-view` process each iteration.
 
 Exit codes: 0 = backlog complete; 2 = backlog exhausted with blocked
 outcomes (needs a human); 3 = graceful stop; 4 = session/usage limit
