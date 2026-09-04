@@ -47,7 +47,7 @@ says the rule holds.
 | 1 | Expression-position subqueries and parenthesised join groups normalized as walk nodes; children convention extended with a behaviour-preserving expression-scope tail; every `Transfer` impl audited | done |
 | 2 | Bound/reach and grain transfers consume expression-scope verdicts; inline-equivalence property test | done |
 | 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | done |
-| 4 | Cumulative classifier: `OVER(` check onto the walk as a leaf classifier or deleted; `walk_coverage` asserts it | pending |
+| 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | planned |
 | 5 | Declared-RI closure reaches every `JoinContext`-taking maintenance-cell route; per-route fixtures | pending |
 | 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
 
@@ -108,6 +108,26 @@ says the rule holds.
   (`footprint_reflection.rs`) — a running fold inside a `WHERE`-clause scalar subquery is never a
   stored column, so per task 6 the widening was judged unsound at that node and narrowed, with the
   narrowing written into the spec delta. See `phases/03-summary.md`.
+
+- 2026-09-05 (plan, phase 4): no phase added or removed. Widened phase 4's row to name the
+  **second** whole-SQL scan in `classify_cumulative` — the `NONDETERMINISTIC_FUNCTIONS`
+  `upper_sql.contains(&pattern)` loop. Criterion 2's headline names only the `OVER(` check, but
+  its trailing clause ("no whole-SQL scan remains in `rules/cumulative.rs`") covers this one too,
+  and it is the reason the file cannot simply leave `walk_coverage`'s skip-list: the gate's
+  `is_raw_scan_line` only matches `.contains("` with a string literal, so removing the skip-list
+  entry while that loop stands would make the gate pass over a live violation. Both migrations
+  share one mechanism (a walk-composed scope-presence fold + a per-scope leaf classifier over the
+  node's own region), so they belong in one phase.
+- 2026-09-05 (plan, phase 4): the gate widening is cheap and precise, not a sweep. Probed the
+  whole `smelt-logical` admission/proof surface for `<ident>.contains(` where `<ident>` is bound to
+  a `.to_uppercase()`/`.to_lowercase()` result: exactly one site crate-wide, the very line task 5
+  deletes. Every other `.contains(&x)` in those directories is collection membership, which the
+  widened rule deliberately does not touch.
+- 2026-09-05 (plan, phase 4): spec-first correction found while reading the anchors —
+  `incremental_shapes.md` describes `KeyedForbidsWindowFunctions` as firing on "the outer SELECT",
+  but the implementation has always refused on an `OVER` anywhere in the model text. The wider rule
+  is the sound one (a window over a delta-filtered CTE scope is not the window over history), so
+  the spec row is corrected to match rather than the refusal narrowed.
 
 ## Blocked
 
