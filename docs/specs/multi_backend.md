@@ -1,7 +1,7 @@
 ---
 feature: multi_backend
 status: experimental
-last_reviewed: 2026-06-30
+last_reviewed: 2026-09-04
 owners: [andrew]
 ---
 
@@ -228,14 +228,21 @@ emitting `^` verbatim against either backend silently returns a different number
 semantics say. Both GoogleSQL and Spark therefore lower `^` (and `**`) to `POWER(a, b)`.
 
 `%` (modulo) has no infix form in GoogleSQL at all, so an unlowered `a % b` is a syntax error
-there; it lowers to `MOD(a, b)`.
+there. Its lowering is **operand-conditional** (§"Operand-conditional verdicts"): GoogleSQL's `MOD`
+accepts only `INT64` and `NUMERIC`, so `%` lowers to `MOD(a, b)` for integral and decimal operands
+and to a truncated-remainder template for floating-point ones (DuckDB's float `%` keeps the sign of
+the dividend, so the template is the truncating form, not a floor-based one). An operand whose type
+inference cannot resolve takes the `MOD` arm, which is admissible because a misclassified
+floating-point operand fails loudly at the warehouse rather than returning a different number.
 
-`//` (floor division) is not lowered anywhere. DuckDB's `//` truncates toward zero when both
-operands are integers but degrades to plain division the moment either is floating point, and the
-printer carries no operand types with which to tell those cases apart. GoogleSQL has no infix `//`
-and no safe universal substitute, so `//` is declared `Unsupported` on Spark, PostgreSQL, and
-BigQuery — the compiler refuses it rather than emitting SQL the engine will reject or
-misinterpret at runtime.
+`//` (floor division) is the sharper case of the same axis. DuckDB's `//` truncates toward zero when
+both operands are integral but degrades to plain division the moment either is floating point, so
+no single spelling on another engine is correct for both. It is therefore stated per operand class:
+integral operands lower to the target's integer-division form (`DIV(a, b)` on GoogleSQL and Spark
+SQL), floating-point operands lower to plain `/`, and an operand whose class cannot be resolved is
+refused with `UnsupportedOnBackend` — here a wrong guess would be a silently wrong number, so the
+unresolved arm must refuse. Each arm is verified by the audit's value leg against DuckDB's own `//`
+before it is claimed.
 
 The `POWER` lowerings are exact: DuckDB's power operator returns a double for every operand type,
 negative base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They
@@ -295,6 +302,109 @@ Two spellings make this decision impossible to take at the call site, and both a
   inheritance such as `OVER (w ORDER BY t)` whose base is unresolved) is treated as running, never as
   whole-partition. Refusing is the safe direction: it costs a diagnostic, where guessing costs a
   wrong number.
+
+### Template emission
+Most of a dialect's differences from smelt SQL are neither a bare rename nor a structural rewrite:
+the target has the operation, but spells it around the same arguments differently — `DAY(d)` is
+`EXTRACT(DAY FROM d)` on GoogleSQL, `POSITION(needle, hay)` is `STRPOS(hay, needle)`,
+`DATE_TRUNC(part, d)` takes its arguments in the other order, `LOG2(x)` is `LOG(x, 2)`,
+`GROUP_CONCAT(x, sep)` on Spark SQL is `CONCAT_WS(sep, COLLECT_LIST(x))`, and DuckDB's missing
+`DATE_SUB(d, i)` is the infix `d - i`. Such a difference is stated as a **template verdict**: registry
+data holding the target spelling with positional placeholders, interpreted by exactly one generic
+printer routine. The registry owns *what* the target spells; the printer owns only the mechanics of
+substitution, and knows no function names.
+
+**Template form.** A template is a string of target-dialect text in which `{n}` names the call's
+`n`-th positional argument (zero-based). It may reference any argument any number of times and may
+carry arbitrary literal text around them. Every argument the call supplies must be referenced at
+least once; a template that would silently drop an argument is malformed. Templates are static
+registry data and are validated when the registry is built — every placeholder index within the
+entry's declared arity, balanced parentheses, and no argument unreferenced — so a malformed
+template is a build-time failure, never a runtime one.
+
+**Substitution preserves precedence.** A placeholder is replaced by the argument's *printed* text —
+lowered for the same dialect, recursively, so nested calls and operators inside an argument receive
+their own verdicts. An argument that is a compound expression (any operator, `CASE`, `CAST`,
+comparison, …) is parenthesised on substitution; an atom (a literal, an identifier, a call) is
+not. A template whose outermost form is not itself a single call — `DAYOFWEEK({0}) - 1`,
+`{0} - {1}` — is emitted wrapped in parentheses, so its result composes correctly wherever the
+original call stood. Both rules are decided from structure, never from the template's text, so a
+template author need not reason about the precedence of the context a call appears in.
+
+**A template applies to a plain positional call, and refuses everything else.** A call carrying a
+modifier the template cannot carry — `DISTINCT`, `FILTER (WHERE …)`, `WITHIN GROUP (ORDER BY …)`,
+an `ORDER BY` inside the argument list, `IGNORE NULLS`/`RESPECT NULLS`, a named (`=>`) argument,
+or a `*` argument — is refused at compile time with `UnsupportedOnBackend`, naming the modifier,
+before the printer runs. Dropping a modifier would change the answer (a dropped `DISTINCT` counts
+duplicates; a dropped `FILTER` aggregates rows the author excluded), so refusal is the only safe
+outcome. A call's own `OVER` clause is not a modifier of the call: it prints unchanged after the
+template's output, exactly as it does for an in-place rewrite. Because `(expr) OVER (…)` is not
+valid SQL, a template stated at a window position (or at `Any` for an entry that can occupy one)
+must be a single call form; the registry validation enforces that too.
+
+**Templates replace bespoke rewrites, not the other way round.** A rewrite whose output is a fixed
+shape over the call's own positional arguments is stated as a template. `RewriteId` is reserved for
+lowerings that must read call structure a placeholder cannot name — a `WITHIN GROUP` sort key, a
+position-dependent shape, an argument that must be inspected rather than copied. Adding a
+`RewriteId` variant where a template suffices is a review error: it moves per-function knowledge
+back into the printer, which is what single ownership forbids.
+
+A template is subject to the same position scoping as every other verdict (§"Emission is scoped to
+call position"), is probed by the audit like any rewrite (§"Cross-engine emission audit"), and is
+rendered as `template` in the coverage table. On DuckDB, print-level identity holds because a
+template is never the verdict for a `Native` entry.
+
+### Operand-conditional verdicts
+Some verdicts depend on how a call is made, not only on where it sits. GoogleSQL's `MOD` takes
+`INT64` or `NUMERIC` and refuses `FLOAT64`. `LOG(x)` is base-10 on DuckDB and natural on Spark SQL
+and GoogleSQL, so its one-argument form lowers to `LOG10(x)` — but the two-argument
+`LOG(base, x)` is native on Spark and argument-reversed on GoogleSQL. Spark's `TRUNC` is temporal
+only, so a numeric operand needs a different answer from a date. Spark's `TO_JSON` takes a struct or
+array, not a scalar. `//` is correct on no other engine without knowing whether its operands are
+integral. None of these is expressible as one verdict per `(dialect, position)`.
+
+**An entry may state its verdict as an ordered list of arms.** Each arm is guarded by a call
+**arity** and/or a per-argument **operand class**, and carries an ordinary verdict — `Native`,
+`Rename`, `Template`, `Rewrite`, `Restructure`, or `Unsupported`. The first arm whose guard the call
+satisfies is the verdict. A conditional entry must end in an explicit `otherwise` arm; a conditional
+with no `otherwise` is malformed and fails registry validation. The registry's own signature must
+admit every arity a guard names, so an arity arm cannot claim a call shape the entry does not
+otherwise recognise.
+
+**Operand classes.** An argument's class is a pure, total function of its inferred `DataType`,
+single-owned beside the registry: `Integral` (the integer widths), `Decimal`, `Floating` (`Float`,
+`Double`), `String`, `Boolean`, `Temporal` (`Date`, `Time`, and the timestamps), `Interval`,
+`Composite` (`Array`, `Struct`, `Map`), `Json`, and `Unresolved` for an argument whose type
+inference reports `Unknown`. A guard names classes, never concrete types, because the engine
+behaviours this axis exists for split along exactly these lines and a finer key would multiply
+arms without buying a different answer.
+
+**Resolution happens on the compile path, never in the printer.** Arity is read from the source
+CST. Operand class is read from the same type inference that derives the model's projection
+(§"Output-schema type conformance"), over the same source CST. The compile path resolves every
+conditional entry at every call site to one settled verdict *before* printing, and hands the
+settled verdicts to the printer alongside the restructure plans. The printer holds no type context
+and cannot ask for one: a conditional verdict that reaches the printer unresolved is a bug in the
+compile path, not something the printer works around. This is the same discipline as position —
+decided once, from the source, handed to the registry lookup — extended to the two further inputs
+the lookup now takes.
+
+**The `otherwise` arm is where an unresolved operand lands, and it is constrained by what a wrong
+guess costs.** If the arm's lowering, applied to an operand of the wrong class, fails loudly on the
+engine (a type error at prepare or execution), the `otherwise` arm may be that lowering — `%` on
+GoogleSQL takes `MOD`, because `MOD` on a `FLOAT64` is refused by the warehouse. If a wrong guess
+would instead return a different number and succeed, the `otherwise` arm **must** be `Unsupported`
+with a reason that names the argument whose type could not be resolved — `//` on any non-DuckDB
+target is the standing example, because integer division applied to a floating-point operand
+computes silently. This rule is what keeps the fail-loud discipline intact across the axis: an
+unresolved type can cost a diagnostic or a loud engine error, never a quiet wrong answer.
+
+**The audit probes every arm.** The fixture carries one typed column per class, so an arm guarded
+on a class is probed with that class's column, an arm guarded on an arity with a call of that
+arity, and the `otherwise` arm with whichever class no earlier arm names. Coverage totality counts
+arms, not entries: an arm no probe reaches is named by the gate, never skipped. The ledger keys a row
+on the arm it describes, and the coverage table renders a conditional cell as the set of its arms'
+verdicts, as it already does for a cell whose positions differ.
 
 ### Statement-level lowering
 Some built-ins cannot be lowered by substituting one expression for another, because the backend
@@ -472,10 +582,11 @@ ordered-set percentiles, the in-place analytic rewrite) in place they pass it in
 existing rows narrow to the running-window case rather than being deleted.
 
 **Coverage table** — the suite emits a standing table to `docs/reference/dialect-coverage.md`:
-entry × dialect → native / rename / rewrite / restructure / unsupported / divergent / gap. A cell
-holds one verdict per position where an entry's positions differ, rendered as the set rather than
-collapsed to a single value, because collapsing would hide exactly the aggregate/window asymmetry
-the position axis exists to record. The table is derived
+entry × dialect → native / rename / template / rewrite / restructure / unsupported / divergent /
+gap. A cell holds one verdict per position where an entry's positions differ — and one per arm
+where an entry's verdict is operand-conditional — rendered as the set rather than collapsed to a
+single value, because collapsing would hide exactly the aggregate/window (or integral/floating)
+asymmetry the position and operand axes exist to record. The table is derived
 from registry data and ledger verdicts alone, so it is deterministic and gateable per-PR. The legs
 *test the claims the table makes* rather than producing it — a mismatch between a registry verdict
 and what the oracle observes fails the suite. A doc-sync gate fails when the generated table
@@ -789,6 +900,24 @@ resolves nested widening to a table rewrite.
   itself. There is deliberately no position-blind lookup: a caller that could ask for a dialect's
   verdict without naming a position could silently get the wrong one for the position it is in.
   Gate: `cargo test -p smelt-dialect --test emission_ownership`.
+- **Template interpretation is generic; per-function spelling is registry data.** The printer's
+  template routine substitutes printed argument text into placeholders and applies the structural
+  parenthesisation rules of §"Template emission"; it matches no function name and reads no template
+  text to decide behaviour. Every `RewriteId` variant's doc comment states which call structure a
+  placeholder could not name — the reason it is not a template. Malformed templates (an index
+  beyond the arity, an unreferenced argument, a non-call form at a window position) fail registry
+  construction, so the printer never sees one. Gate: `cargo test -p smelt-dialect --test
+  emission_ownership` (no name-matched arm in the interpreter; every `RewriteId` justified) plus a
+  registry-validation test that builds the full registry.
+- **Operand-conditional verdicts are settled on the compile path; the printer receives no
+  conditional and holds no type context.** Arity and operand class are resolved from the source CST
+  and the projection's own type inference before printing, and the printer is handed one verdict
+  per call site. Every conditional entry ends in an `otherwise` arm, and that arm is `Unsupported`
+  wherever a misclassified operand would compute a different number rather than fail loudly on the
+  engine (§"Operand-conditional verdicts"). Gates: `cargo test -p smelt-runtime --test dialect_seam`
+  pins that an unresolved operand on a wrong-number entry is refused at compile time and that no
+  compile entry point reaches the printer with a conditional unsettled; the audit's coverage
+  totality counts arms, so an arm no probe reaches fails per-PR.
 - **A statement-level lowering is planned before printing and never re-parses printed SQL.**
   The restructure plan is a pure function of the source CST and the registry; the printer consumes
   it. Recovering the plan — or a model's projection — from the dialect-printed string is forbidden,
@@ -815,6 +944,24 @@ resolves nested widening to a table rewrite.
   regress into a silent wrong answer, so the suite carries one case per rule.
 
 ## Known Divergences / Open Questions
+
+- **No template verdict exists yet; the fixed-shape rewrites live as `RewriteId` variants.** The
+  registry's `Emission` has `Native`, `Rename`, `Rewrite`, `Restructure`, and `Unsupported` only.
+  `%` → `MOD(a, b)` and `^`/`**` → `POWER(a, b)` are hand-written printer functions behind
+  `RewriteId::ModuloCall` and `RewriteId::PowerCall`; under §"Template emission" both are templates
+  and the variants retire. The audit's coverage table has no `template` column. Tracked by the plan
+  derived from this spec diff (the tracking issues for the outstanding lowerings are #177, #178,
+  #179).
+- **No operand-conditional verdict exists; the lookup key is `(dialect, position)` alone.** In
+  consequence `%` on BigQuery lowers to `MOD` for every operand and fails at the warehouse on a
+  floating-point one (#173); `//` is refused wholesale on Spark, PostgreSQL and BigQuery rather than
+  lowered per operand class; `LOG` is registered at one arity only, so the two-argument form is not
+  recognised and its per-engine base and argument order (#174) are unaddressed; Spark's `TRUNC` and
+  `TO_JSON` carry no class-scoped arm (#178). The compile path today runs the refusal pre-pass
+  over the bare CST with no type context threaded in, so the resolution step §"Operand-conditional
+  verdicts" describes does not yet exist.
+- **`DAYOFWEEK` differs by one on Spark SQL (#174).** Spark numbers the week from Sunday = 1, DuckDB
+  from Sunday = 0. This is a template (`DAYOFWEEK({0}) - 1`), and lands with the template verdict.
 
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,
