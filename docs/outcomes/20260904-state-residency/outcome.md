@@ -1,7 +1,7 @@
 # Outcome: State residency — no correctness state outside the engine
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** done
 **Source:** `docs/specs/state.md` §Known Divergences (all five bullets); `docs/research/20260904-incremental-state-review.md` §"Recommended next sequence" items 2 and 3; `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (the `state-residency` outcome it put first); `docs/outcomes/20260815-keyed-grain-residue/outcome.md` §Blocked (phase 3)
 **Spec anchors:** `docs/specs/state.md`, `docs/specs/run_state.md` §"Relationship to the reconciliation ledger", `docs/specs/incremental_models.md` §Known Divergences (ledger residency), `docs/specs/incremental_shapes.md` §"The transactional frontier write (merge ledger)"
 
@@ -399,3 +399,21 @@ the invariant by deleting `.smelt/` between run steps.
   in `state.md` §References, which still reads `User docs: none yet` / `Plans (history): none yet`
   and omits `smelt-logical/src/maintenance/availability.rs`; a new `spec_references_are_live` test
   locks that shut. The drift report persists to `docs/validations/2026-09-05-state.md`.
+
+- 2026-09-05 (close-out): all 11 phase rows `done`; the 8 success criteria judged met against
+  the phase summaries and re-verified independently at this commit. Criterion 1: no production
+  reader/writer of `.smelt/reconciliation.json` remains (`rg` finds only doc comments and the
+  legacy-layout migration test asserting the stale file is left inert); the fold and its reset
+  run against `_smelt_ledger` via `execute_write_with_bookkeeping`. Criterion 2:
+  `crates/smelt-runtime/tests/state_posture_seam.rs` pins the per-posture on-disk write set.
+  Criterion 3: `crates/smelt-logical/src/maintenance/availability.rs` owns the pure resolution
+  and `rg state_structure_unavailable crates/` is empty — the reporter event is retired in favour
+  of the recorded downgrade. Criteria 4-5: `MaintenanceStateDowngraded` /
+  `DeclaredContractRequiresState` are live across `smelt-db`, `smelt-lsp` and `statement_parity`,
+  and `state.warehouse_tables` parses in `smelt-core/src/config.rs`. Criterion 6:
+  `crates/smelt-cli/tests/maintenance_conformance/state_deletion.rs`. Criterion 7: the keyed-grain
+  residue outcome reads `**Status:** done` with its criterion 3 amended to the recorded,
+  explain-visible downgrade. Criterion 8: `state.md` §Known Divergences reads "None currently
+  open", `/smelt:validate state` is clean (`docs/validations/2026-09-05-state.md`), and phase 11
+  recorded all standing gates green (`verify-phase.sh`, `statement_parity`, `execute_parity`,
+  `maintenance_conformance`, `walk_coverage`) at this commit. Outcome `**Status:**` set to `done`.
