@@ -1,7 +1,7 @@
 # Outcome: State residency — no correctness state outside the engine
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/specs/state.md` §Known Divergences (all five bullets); `docs/research/20260904-incremental-state-review.md` §"Recommended next sequence" items 2 and 3; `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (the `state-residency` outcome it put first); `docs/outcomes/20260815-keyed-grain-residue/outcome.md` §Blocked (phase 3)
 **Spec anchors:** `docs/specs/state.md`, `docs/specs/run_state.md` §"Relationship to the reconciliation ledger", `docs/specs/incremental_models.md` §Known Divergences (ledger residency), `docs/specs/incremental_shapes.md` §"The transactional frontier write (merge ledger)"
 
@@ -64,7 +64,7 @@ the invariant by deleting `.smelt/` between run steps.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | pending |
+| 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | planned |
 | 2 | Engine-resident reconciliation ledger on DuckDB: table DDL/DML emitted from `smelt-logical`'s maintenance layer, fold + never-fold-twice check transactional with the write; delete `.smelt/reconciliation.json` | pending |
 | 3 | Statement-parity and keyed-frontier tests cover the ledger statements; conformance gate green with the file ledger gone | pending |
 | 4 | Availability resolution as a pure derivation step: `MaintenanceStateDowngraded` record on the cell, recompute-family downgrade, `state.warehouse_tables` parsed and fed in | pending |
@@ -79,6 +79,23 @@ the invariant by deleting `.smelt/` between run steps.
 - 2026-09-04 (scaffold): Andrew accepted the review's option 1 for the keyed-grain residue
   outcome's blocked phase 3 — a ledger-less backend takes a recorded, explain-visible downgrade
   rather than gaining a ledger builder. This outcome owns that closure (criterion 7).
+
+- 2026-09-04 (plan 01): outcome set `active`; no phase reshape — this is the outcome's first
+  phase, there is no prior summary, and reading the five spec anchors confirmed the table's
+  shape still holds.
+- 2026-09-04 (plan 01): the spec anchors are further along than the outcome assumed —
+  `state.md` §Surface, §Semantics and §Diagnostics already state residency, the degradation
+  contract and both codes normatively, and `incremental_models.md` line 1389 already defers to
+  them. Phase 1 is therefore mostly *de-restatement* in the three consuming specs plus the
+  `diagnostics.md` catalogue rows, not a fresh normative draft.
+- 2026-09-04 (plan 01): phase 1 widened to strike `reconciliation.json` from `run_state.md`'s
+  §Layout tree, locking sentence, atomic-write sentence and **Fixed layout** invariant. Those
+  four sites assert `.smelt/` residency as normative layout, which is exactly what criterion 1
+  reverses; leaving them would make phase 2's implementation contradict a spec body.
+- 2026-09-04 (plan 01): the `diagnostics.md` coverage gate asserts enum → catalogue only, so
+  catalogue rows may precede their `DiagnosticCode` variants (the posture already used by the
+  `Maintenance*` and contract-lattice rows). Phase 1 adds the two rows now and records the
+  catalogue-ahead-of-variant gap; phases 4-5 land the variants.
 
 ## Blocked
 
