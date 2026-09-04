@@ -79,7 +79,7 @@ the invariant by deleting `.smelt/` between run steps.
 | 7 | Analysis surface: `MaintenanceStateDowngraded` warning diagnostic and `DeclaredContractRequiresState` validation refusal as `DiagnosticCode` variants emitted from the pure `maintenance_plan_diagnostics` owner (LSP + CLI) | done |
 | 8 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | done |
 | 9 | Conformance-gate leg: `.smelt/` deletion interleaved between run steps for every maintained recipe | done |
-| 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | pending |
+| 10 | Close the keyed-grain residue outcome (amend criterion 3, mark phase 3 and the outcome done); docs-site state pages | planned |
 | 11 | Validate + close out: `/smelt:validate state` clean, `state.md` divergences rewritten, all gates green | pending |
 
 ## Decision log
@@ -346,6 +346,22 @@ the invariant by deleting `.smelt/` between run steps.
   entry was needed. All gates green (`verify-phase.sh`, `maintenance_conformance` full run,
   `execute_parity`/`statement_parity`, `smelt-maintenance-testkit`, and a
   `SMELT_STATE_DELETION_CASES=8` deep sweep). See `phases/09-summary.md`.
+
+- 2026-09-05 (plan 10): no phase reshape. Phase 9's summary reports nothing outstanding, and
+  rows 10-11 still map onto criteria 7 and 8. Reading the docs-site pages did widen phase 10's
+  *scope* within its own row, without adding work that belongs elsewhere: `docs-site`'s
+  `smelt.yml` reference has no `state` top-level key documented at all (so criterion 5's
+  user-visible `warehouse_tables` surface has nowhere to live), and `guide/targets.md`'s Spark
+  coverage table still asserts a fail-loud refusal for `Additive` keyed folds where phases 4-7
+  made it a recorded downgrade. Both are criterion-serving user-doc drift and stay in this row.
+- 2026-09-05 (plan 10): the docs-site edits get a real red-green gate
+  (`crates/smelt-cli/tests/state_docs_freshness.rs`) rather than being verified by eye — the
+  three facts this outcome changed (no `reconciliation.json` file, a documented `state` block,
+  a stated deletion invariant) are exactly the kind of user-doc claim that silently rots, and the
+  repo's precedent (`cli_docs_coverage`, `tutorial_freshness`) is a standing test.
+- 2026-09-05 (plan 10): `state.md` §Known Divergences is deliberately left to phase 11. Phase 10
+  propagates already-normative spec statements outward; rewriting the divergence bullets is
+  close-out work that should follow `/smelt:validate state`, not precede it.
 
 ## Blocked
 
