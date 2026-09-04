@@ -1,7 +1,7 @@
 # Outcome: Programme hygiene — one consistent record of the incremental programme
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260904-incremental-state-review.md` §"Recommended next sequence" items 5 and 6 (record half); `docs/TODO.md` §"Follow-ups from the 2026-08-12 incremental spec re-architecture"; `docs/specs/state.md` §Known Divergences bullet 4
 **Spec anchors:** `docs/specs/state.md`, `docs/specs/run_state.md`, `docs/specs/sources.md`, `docs/specs/schema_evolution.md` (or whichever spec owns schema snapshots), `docs/specs/model_properties.md`
 
@@ -40,12 +40,16 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
   `docs/TODO.md` and move on.
 - The docs-site delta-signature pass (`docs/outcomes/20260904-delta-signature-front-door`).
 - Reopening any decision recorded in `docs/research/20260816-open-questions-triage.md`.
+- `.claude/active-plan` (still names the production-readiness programme). It is the *autonomy*
+  loop's pointer and is branch-scoped by its own header; editing it from this worktree invites a
+  cross-worktree conflict with `worktree-production`, and the handoff's own §Pointers already
+  flags it as stale for any reader who arrives there.
 
 ## Phases
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Supersede the 2026-08-16 handoff with a banner + pointer; reorder `.claude/outcome-backlog` per the review | pending |
+| 1 | Supersede the 2026-08-16 handoff with a banner + pointer; confirm `.claude/outcome-backlog` order against the review; re-point the one dangling citation to a never-scaffolded outcome directory | planned |
 | 2 | Re-point or delete every stale citation listed in `docs/TODO.md`; remove that TODO bullet | pending |
 | 3 | Add absent-state sentences for schema snapshots, source postures, probe baselines in their owner specs; delete the `state.md` bullet | pending |
 | 4 | Correct the `daily_events_enriched.sql` fixture comment; remove the TODO note | pending |
@@ -54,6 +58,18 @@ technique the fixture actually derives. This is a docs-only outcome: no crate ch
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-09-04 (plan 01): `.claude/outcome-backlog` already carries the review-sourced ordering
+  comment and lists every `done`/`blocked` outcome after every queued one (added when the
+  2026-09-04 outcomes were scaffolded), so criterion 2 becomes a *verification* task in phase 1
+  rather than a rewrite.
+- 2026-09-04 (plan 01): phase 1 widened to re-point `docs/specs/run_state.md` line 175, the only
+  citation anywhere to a never-scaffolded outcome directory
+  (`docs/outcomes/20260816-scheduler-delta-signatures/`). It is the handoff's queue restated as
+  current inside a spec, so success criterion 1 owns it; it is not on `docs/TODO.md`'s
+  stale-citation list, so phase 2 would not have caught it.
+- 2026-09-04 (plan 01): `.claude/active-plan` staleness recorded under Out of scope rather than
+  given a phase row — see the rationale there.
 
 ## Blocked
 
