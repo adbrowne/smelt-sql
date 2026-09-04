@@ -54,7 +54,8 @@ says the rule holds.
 | 3 | Skew and trajectory transfers consume the expression-scope tail (phase 1's three explicit bounds retired) | done |
 | 4 | Cumulative classifier: both whole-SQL scans (`OVER(` and the nondeterministic-function loop) onto the walk as leaf classifiers; `walk_coverage` covers the file and catches the case-folded-variable scan form | done |
 | 5 | Declared-RI closure **and** declared unique-key facts reach every `JoinContext`-taking maintenance-cell route (model-edge cells, per-group repair admission); per-route fixtures + a structural empty-context check | done |
-| 6 | Delete the four divergence bullets; `/smelt:validate model_properties`; all gates green | pending |
+| 6 | Retire the whole-SQL flat-scan bound floor in `derive_model_bounds` (its recorded justification — expression subqueries are not walk nodes — died in phase 1); correct the stale `has_unsupported` fallback comment | planned |
+| 7 | Delete the divergence bullets this outcome closed; `/smelt:validate model_properties`; all gates green | pending |
 
 ## Decision log
 
@@ -174,6 +175,31 @@ says the rule holds.
   context but have no declared facts to widen with today — recorded as follow-up, not fixed
   (neither is a model-edge/repair admission route in criterion 3's sense). See
   `phases/05-summary.md`.
+
+- 2026-09-05 (plan, phase 6): reshape — inserted a phase ahead of the doc cleanup. Reading the
+  MP-03 bullet's residue against the code turned up a live whole-SQL scan the outcome's own work
+  invalidated: `derive_model_bounds`'s **flat-scan floor** merges `derive_bound_for_source(sql, ..)`
+  — a scan over the entire model text — into every source's walk verdict, and commit `20e74879`
+  ("reach keeps the flat-scan floor — expression-subquery reference sites stay covered",
+  2026-07-08) records its sole justification as "a source referenced inside an expression-position
+  subquery (which is not a walk node) would carry only its leaf-path reach". Phase 1 made those
+  scopes walk nodes, so the justification is void, yet a composition-relevant verdict (a bound)
+  is still floored by a whole-SQL scan. `walk_coverage` cannot see it — the gate matches
+  `.contains("` string-literal scans, not a call taking the whole `sql`. Deleting the MP-03 bullet
+  (criterion 4) while that floor stands would assert something false, so the work gets a row
+  rather than a "for the next planner" note. Nothing left the outcome; the doc-cleanup row
+  renumbered 6 → 7.
+- 2026-09-05 (plan, phase 6): scoped as *retire or narrow*, not "delete and hope". The floor's
+  `merge` takes max, so removing it can only narrow bounds — every narrowing the corpus exposes is
+  either a real walk gap (fixed in the walk) or one named, verified shape that keeps a narrow,
+  classified floor. Judged the temporal-proof clause of the MP-03 bullet to be MP-02, already
+  under Out of scope, and left it there.
+- 2026-09-05 (plan, phase 6): note for phase 7 — MP-13's bullet must **not** simply be deleted.
+  Its original claim (the probe does not consult declared lateness) was retired by the
+  2026-09-04 lateness decision; the bullet standing in §Known Divergences today is a *different*,
+  live gap (late append vs violation) already scheduled onto
+  `docs/outcomes/20260904-decision-residue/outcome.md`. Phase 7 verifies each bullet against the
+  code and deletes only what is false.
 
 ## Blocked
 
