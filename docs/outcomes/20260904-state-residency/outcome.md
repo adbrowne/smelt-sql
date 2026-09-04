@@ -66,7 +66,7 @@ the invariant by deleting `.smelt/` between run steps.
 |---|-------|--------|
 | 1 | Spec delta: make `state.md` §Surface/§Semantics the sole normative statement of ledger residency and availability resolution; align `run_state.md`/`incremental_models.md`/`incremental_shapes.md` cross-references; add both codes to `diagnostics.md` | done |
 | 2 | Engine-resident reconciliation ledger on DuckDB: the region-recompute reset joins the already-engine-resident fold on `_smelt_ledger`, transactional with the batch write; delete `.smelt/reconciliation.json` and its `smelt-state` file-store API | done |
-| 3 | Statement-parity and keyed-frontier tests cover the ledger statements; conformance gate green with the file ledger gone | pending |
+| 3 | Wire the ledger reset into the delta-restricted write path; statement-parity and keyed-frontier tests cover the ledger statements (incl. transactional rollback); conformance gate green with the file ledger gone | planned |
 | 4 | Availability resolution as a pure derivation step: `MaintenanceStateDowngraded` record on the cell, recompute-family downgrade, `state.warehouse_tables` parsed and fed in | pending |
 | 5 | Surface: `smelt explain` prints downgrades; LSP/CLI warning; `DeclaredContractRequiresState` validation refusal; replace the keyed-grain `state_structure_unavailable` skip with the recorded downgrade | pending |
 | 6 | `state.mode` honoured in `execute_project`: per-posture write set, `stateless` writes nothing, `--resume`/propagation degrade per spec; per-posture tests | pending |
@@ -128,6 +128,20 @@ the invariant by deleting `.smelt/` between run steps.
   (`execute_delete_insert_with_delta_restriction`) now has no reconciliation-reset at all, a gap
   surfaced (not fixed) for phase 3 or later to resolve — see `phases/02-summary.md`. All gates
   green (`verify-phase.sh`, `statement_parity`, `execute_parity`, `maintenance_conformance`).
+
+- 2026-09-04 (plan 03): phase 3's row widened to include wiring the `_smelt_ledger` recompute
+  reset into the delta-restricted / column-scoped-merge write path
+  (`execute_delete_insert_with_delta_restriction`), the gap phase 2 surfaced. That path currently
+  records no reconciliation entry at all — a regression against criterion 1's "the ledger's fold
+  and its never-fold-twice check execute against an engine-resident table in the same transaction
+  as the maintained write" — so it is criterion-serving work and cannot be deferred out. No new
+  phase: the fix is two call sites plus two parameters, and the phase's own parity tests are its
+  natural coverage.
+- 2026-09-04 (plan 03): reading `RecordingBackend` confirmed it does not override
+  `execute_write_with_bookkeeping`, so the trait default routes ledger DDL/DML through the
+  recorded `execute_sql`/`execute_statement_group` — the statement-parity leg needs no new
+  recording seam. The "same transaction" half of criterion 1 is therefore proven separately, by a
+  rollback test driving `DuckDbBackend::execute_write_with_bookkeeping` with a failing write group.
 
 ## Blocked
 
