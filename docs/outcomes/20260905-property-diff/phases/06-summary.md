@@ -8,13 +8,18 @@ Spec deltas Δ4-Δ6 + D2's Known Divergences bullet landed first in
 `crates/smelt-cli/src/commands/explain_diff.rs`'s render branch, placed
 before the `--fail-on` early return.
 
-**D1 — `examples/huge` timing.** 1000 models (not 2000 — the workspace was
-resized since the CLAUDE.md description was written), both sides derived,
-no edits: **~2.4–2.8s wall clock**, three repeated runs. **Verdict:
-acceptable, not pathological.** This is a one-shot cost per workspace load
-(re-resolved only on `HEAD`/ref changes per the spec), not a per-keystroke
-cost, so Phase 7's editor integration is not blocked by this number. Worth
-watching if the example grows further, but no action needed now.
+**D1 — `examples/huge` timing.** 2000 models (1000 `.sql` + 1000 `.py`, as
+`CLAUDE.md` states — my first pass counted only `*.sql` and wrongly
+concluded the doc was stale; it is not), both sides derived, no edits:
+**~2.4–3.0s wall clock** across five runs total (three in the original
+pass, two re-confirmed after the count correction). Each run pointed
+`--project-dir` at the whole `examples/huge` project, so both SQL and
+Python models were derived in every timing; re-timing after the correction
+changed nothing, as expected. **Verdict: acceptable, not pathological**
+for 2000 models. This is a one-shot cost per workspace load (re-resolved
+only on `HEAD`/ref changes per the spec), not a per-keystroke cost, so
+Phase 7's editor integration is not blocked by this number. Worth watching
+if the example grows further, but no action needed now.
 
 **Tests and what they'd catch.** All 6 unit tests in `diff_render.rs` and 5
 CLI tests (7–11) can each say how they fail against a broken impl — stated
@@ -59,5 +64,5 @@ diagnostics, and per the spec's Surface-parity constraint must reuse
 never re-deriving a spelling. The standing gate
 `cargo test -p smelt-lsp --test property_diff_parity` should assert the
 lens counts and `PropertyDowngrade` set equal the CLI JSON for the same
-workspace/ref. D1's number (~2.4s/1000 models) is not a blocker but should
+workspace/ref. D1's number (~2.4-3.0s for 2000 models) is not a blocker but should
 inform how the editor caches the derivation across a workspace session.
