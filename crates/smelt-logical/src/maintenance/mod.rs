@@ -453,6 +453,14 @@ pub enum Refusal {
     /// diagnostic (`locality::LocalityRefusal::message`): it names all
     /// three routes and the nearest missing fact.
     LocalityNotEstablished { message: String },
+    /// A `grain: key` model's route-3 statically-derived recurrence bound
+    /// disagrees with a declared `key_recurrence` over the same key
+    /// (key-grain rule 16, `docs/specs/incremental_shapes.md` §"Key
+    /// temporal locality"). Maps onto the `KeyedRecurrenceDeclarationMismatch`
+    /// diagnostic. `message` is the rendered
+    /// `locality::LocalityRefusal::RecurrenceDeclarationMismatch` text —
+    /// names both values and the driving source.
+    KeyedRecurrenceDeclarationMismatch { message: String },
     /// A `grain: key` model declares no top-level `unique_key:` and its own
     /// outermost SELECT's `GROUP BY` derives no key either (empty or
     /// absent) — there is no identity to maintain against. Maps onto the
@@ -607,6 +615,22 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
     MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::LocalityNotEstablished { message }],
+        key_locality: None,
+    }
+}
+
+/// The plan derived when a declared `key_recurrence` disagrees with route
+/// 3's statically-derived recurrence bound
+/// ([`locality::LocalityRefusal::RecurrenceDeclarationMismatch`],
+/// key-grain rule 16): no cells, a single
+/// [`Refusal::KeyedRecurrenceDeclarationMismatch`] carrying the rendered
+/// message. Bypasses [`derive::derive_maintenance_plan`] entirely — the
+/// derived bound is authoritative, so a disagreeing declaration blocks the
+/// plan the same way any other locality refusal does.
+pub fn recurrence_mismatch_plan(message: String) -> MaintenancePlan {
+    MaintenancePlan {
+        cells: Vec::new(),
+        refusals: vec![Refusal::KeyedRecurrenceDeclarationMismatch { message }],
         key_locality: None,
     }
 }

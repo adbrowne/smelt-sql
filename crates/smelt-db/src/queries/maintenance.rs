@@ -31,8 +31,9 @@ use smelt_logical::maintenance::locality::{
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
-    identity_not_derivable_plan, locality_refused_plan, ColumnGroup, Grain as PlanGrain,
-    MaintenancePlan, MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
+    identity_not_derivable_plan, locality_refused_plan, recurrence_mismatch_plan, ColumnGroup,
+    Grain as PlanGrain, MaintenancePlan, MutationProfile as PlanMutationProfile, OutputSpec,
+    SourceFacts, Trigger,
 };
 use smelt_logical::rules::cumulative::{
     declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
@@ -554,6 +555,21 @@ pub fn derive_model_maintenance_plan(
                     sql,
                 };
                 match establish_locality(&inputs) {
+                    Err(
+                        refusal @ smelt_logical::maintenance::locality::LocalityRefusal::RecurrenceDeclarationMismatch {
+                            ..
+                        },
+                    ) => {
+                        return Some(MaintenancePlanResult {
+                            plan: recurrence_mismatch_plan(refusal.message(table)),
+                            column_groups: Vec::new(),
+                            degenerate: Vec::new(),
+                            state_columns: Vec::new(),
+                            execution_postures: None,
+                            is_snapshot_reconcile: None,
+                            comparability: Vec::new(),
+                        });
+                    }
                     Err(refusal) => {
                         return Some(MaintenancePlanResult {
                             plan: locality_refused_plan(refusal.message(table)),
@@ -904,6 +920,12 @@ pub enum MaintenanceRefusal {
         tracking_plan: String,
     },
     LocalityNotEstablished {
+        message: String,
+    },
+    /// `KeyedRecurrenceDeclarationMismatch` — a declared `key_recurrence`
+    /// disagrees with route 3's statically-derived recurrence bound over
+    /// the same key (key-grain rule 16).
+    KeyedRecurrenceDeclarationMismatch {
         message: String,
     },
     /// `GrainAssertionMismatch` — a `grain: key` model with no declared
@@ -1501,6 +1523,11 @@ pub fn maintenance_plan_diagnostics(
             }),
             smelt_logical::maintenance::Refusal::LocalityNotEstablished { message } => {
                 Some(MaintenanceRefusal::LocalityNotEstablished {
+                    message: message.clone(),
+                })
+            }
+            smelt_logical::maintenance::Refusal::KeyedRecurrenceDeclarationMismatch { message } => {
+                Some(MaintenanceRefusal::KeyedRecurrenceDeclarationMismatch {
                     message: message.clone(),
                 })
             }

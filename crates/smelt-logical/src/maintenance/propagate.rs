@@ -1061,16 +1061,58 @@ fn merge_edge_groups(
     }
 }
 
-/// Push a [`KeyedDirt`] record onto `list` unless an identical `(keys,
+/// Push a [`KeyedDirt`] record onto `list` unless an equivalent `(keys,
 /// from)` record is already present — a diamond over keyed nodes must not
 /// accumulate duplicate entries (`propagate`'s own "no exponential
 /// fan-out" property; each node is still visited exactly once by the
 /// topological walk, so this only guards against the same edge's record
 /// being pushed onto the SAME list twice, not a distinct up/downstream
-/// pair).
+/// pair). `keys` is compared as a **set**, not an ordered list (key-grain
+/// rule 16's order-independence clause,
+/// `docs/specs/incremental_shapes.md` key-grain rule 16): two records
+/// naming the same key columns in a different order are the same
+/// key-addressed dirt and must collapse to one entry, not two.
 fn push_keyed_dirt(list: &mut Vec<KeyedDirt>, kd: KeyedDirt) {
-    if !list.contains(&kd) {
+    let matches_existing = list.iter().any(|existing| {
+        existing.from == kd.from
+            && existing.keys.len() == kd.keys.len()
+            && existing
+                .keys
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                == kd.keys.iter().collect::<std::collections::BTreeSet<_>>()
+    });
+    if !matches_existing {
         list.push(kd);
+    }
+}
+
+#[cfg(test)]
+mod push_keyed_dirt_tests {
+    use super::*;
+
+    /// Key-grain rule 16's order-independence clause: two `KeyedDirt`
+    /// records from the same `from` whose `keys` differ only in column
+    /// order are the same key-addressed dirt and must collapse to one
+    /// entry, not two.
+    #[test]
+    fn push_keyed_dirt_is_key_order_independent() {
+        let mut list = Vec::new();
+        push_keyed_dirt(
+            &mut list,
+            KeyedDirt {
+                keys: vec!["a".to_string(), "b".to_string()],
+                from: "upstream".to_string(),
+            },
+        );
+        push_keyed_dirt(
+            &mut list,
+            KeyedDirt {
+                keys: vec!["b".to_string(), "a".to_string()],
+                from: "upstream".to_string(),
+            },
+        );
+        assert_eq!(list.len(), 1, "reordered keys must collapse to one entry");
     }
 }
 

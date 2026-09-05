@@ -396,6 +396,25 @@ pub enum LocalityRefusal {
     /// message names the three routes and the nearest missing fact"
     /// (`incremental_models.md` §Diagnostics, `KeyedForbidsTimeseries`).
     NoRouteEstablished { nearest_missing_fact: String },
+    /// Route 3's statically-derived recurrence bound `r` disagrees with a
+    /// declared `key_recurrence` over the same key (key-grain rule 16,
+    /// `incremental_shapes.md` §"Key temporal locality"). The derived bound
+    /// is authoritative — a declaration is a check, never the route — so
+    /// this refuses at plan time rather than silently preferring either
+    /// value. Fires only when the declared `key_recurrence.key` set-equals
+    /// the model's own `unique_key`; a declaration over a different key
+    /// asserts nothing about this key and never mismatches.
+    RecurrenceDeclarationMismatch {
+        /// The driving source's name, for the message.
+        source: String,
+        /// The (model's own) key the bound applies to.
+        key: Vec<String>,
+        /// The bound statically derived from the model's own SQL —
+        /// authoritative.
+        derived: Seconds,
+        /// The disagreeing declared `key_recurrence.window`.
+        declared: Seconds,
+    },
 }
 
 impl LocalityRefusal {
@@ -418,6 +437,23 @@ impl LocalityRefusal {
                  sharing a key lies within `r` of each other on the event-time axis. \
                  Nearest missing fact: {nearest_missing_fact}."
             ),
+            LocalityRefusal::RecurrenceDeclarationMismatch {
+                source,
+                key,
+                derived,
+                declared,
+            } => {
+                let declared_text = format_seconds(*declared);
+                let derived_text = format_seconds(*derived);
+                format!(
+                    "KeyedRecurrenceDeclarationMismatch: model '{model_name}' declares \
+                     `key_recurrence` on driving source '{source}' with window {declared_text} \
+                     over key {key:?}, but the model's own SQL statically proves a recurrence \
+                     bound of {derived_text} for that same key. The derived bound is \
+                     authoritative (key-grain rule 16) — correct or remove the declared \
+                     `key_recurrence` so it matches {derived_text}."
+                )
+            }
         }
     }
 }
@@ -432,6 +468,35 @@ fn refuse(nearest_missing_fact: impl Into<String>) -> LocalityRefusal {
     LocalityRefusal::NoRouteEstablished {
         nearest_missing_fact: nearest_missing_fact.into(),
     }
+}
+
+/// Render a [`Seconds`] duration in the largest whole unit that divides it
+/// exactly (days, then hours), falling back to seconds — human-readable
+/// diagnostic text (`KeyedRecurrenceDeclarationMismatch`'s "names both
+/// values") rather than a raw seconds count.
+fn format_seconds(s: Seconds) -> String {
+    if s.0 != 0 && s.0.is_multiple_of(86400) {
+        let days = s.0 / 86400;
+        format!("{days} day{}", if days == 1 { "" } else { "s" })
+    } else if s.0 != 0 && s.0.is_multiple_of(3600) {
+        let hours = s.0 / 3600;
+        format!("{hours} hour{}", if hours == 1 { "" } else { "s" })
+    } else {
+        format!("{} seconds", s.0)
+    }
+}
+
+/// Case-insensitive, order-independent key-set equality — key-grain rule
+/// 16's second clause (`docs/specs/incremental_shapes.md` §"Key temporal
+/// locality"): a declared `key_recurrence.key` naming the same columns as
+/// the model's own `unique_key` in a different order, or a different case,
+/// is the same key. The single comparison both route 3 sub-routes (the
+/// derived-vs-declared check and the declared-fallback admission) use,
+/// rather than each re-implementing "same set" independently.
+fn key_sets_match(a: &[String], b: &[String]) -> bool {
+    let a: std::collections::BTreeSet<String> = a.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let b: std::collections::BTreeSet<String> = b.iter().map(|s| s.to_ascii_lowercase()).collect();
+    a == b
 }
 
 /// The single "exactly one clocked candidate, else undecided" rule for
@@ -817,6 +882,28 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
             bounds.get(&inputs.driving_source_name)
         {
             if *before > Seconds::ZERO {
+                // Key-grain rule 16: a statically-derived bound is
+                // authoritative; a declared `key_recurrence` over the SAME
+                // key is only ever a check against it, never a
+                // route-selecting input. Order-independent set comparison —
+                // a declaration naming this model's own key in a different
+                // column order still matches.
+                if let Some(kr) = inputs.driving_source_key_recurrence {
+                    if key_sets_match(&kr.key, &inputs.unique_key) {
+                        let declared = Seconds(kr.window.seconds);
+                        if declared != *before {
+                            return Err(LocalityRefusal::RecurrenceDeclarationMismatch {
+                                source: inputs.driving_source_name.clone(),
+                                key: inputs.unique_key.clone(),
+                                derived: *before,
+                                declared,
+                            });
+                        }
+                    }
+                    // A declaration over a different key asserts nothing
+                    // about this key — falls through to admit the derived
+                    // slice unchanged.
+                }
                 return Ok(LocalitySlice::Window {
                     partition_column: inputs.partition_column.clone(),
                     margin_before: *before,
@@ -828,11 +915,7 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
     }
 
     if let Some(kr) = inputs.driving_source_key_recurrence {
-        let declared_key: std::collections::BTreeSet<&str> =
-            kr.key.iter().map(String::as_str).collect();
-        let model_key: std::collections::BTreeSet<&str> =
-            inputs.unique_key.iter().map(String::as_str).collect();
-        if declared_key == model_key {
+        if key_sets_match(&kr.key, &inputs.unique_key) {
             let r = Seconds(kr.window.seconds);
             let margin_after = driving_bounds
                 .as_ref()
@@ -1614,6 +1697,255 @@ mod tests {
             message.to_lowercase().contains("extremal-fold"),
             "message must surface route 2's more specific reason: {message}"
         );
+    }
+
+    // ---- Route 3: KeyedRecurrenceDeclarationMismatch (key-grain rule 16) ---
+
+    /// A derivable lookback bound of 3 days, with a declared `key_recurrence`
+    /// window of 7 days over the SAME key: the derived bound is
+    /// authoritative (key-grain rule 16), so the disagreeing declaration
+    /// refuses at plan time rather than silently preferring either value.
+    /// The message names both values and the driving source.
+    #[test]
+    fn route3_declared_recurrence_disagreeing_with_derived_is_refused() {
+        let sql = "SELECT event_id, MAX(event_date) AS last_seen_date, COUNT(*) AS event_count \
+                   FROM smelt.sources.raw.events \
+                   WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '3 days' \
+                   GROUP BY event_id";
+        let mut inputs = route3_inputs(sql);
+        let kr = KeyRecurrence {
+            key: vec!["event_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("7 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let err = establish_locality(&inputs)
+            .expect_err("a declared key_recurrence disagreeing with the derived bound must refuse");
+        match &err {
+            LocalityRefusal::RecurrenceDeclarationMismatch {
+                derived, declared, ..
+            } => {
+                assert_eq!(*derived, Seconds::days(3));
+                assert_eq!(*declared, Seconds::days(7));
+            }
+            other => panic!("expected RecurrenceDeclarationMismatch, got {other:?}"),
+        }
+        let message = err.message("events_last_seen");
+        assert!(
+            message.contains("3days") || message.contains("3 days") || message.contains("259200"),
+            "message must name the derived value: {message}"
+        );
+        assert!(
+            message.contains("7days") || message.contains("7 days") || message.contains("604800"),
+            "message must name the declared value: {message}"
+        );
+        assert!(
+            message.contains("smelt.sources.raw.events"),
+            "message must name the driving source: {message}"
+        );
+    }
+
+    /// The same derivable 3-day bound, with a declared `key_recurrence`
+    /// window that AGREES (also 3 days): admits the derived, proof-backed
+    /// slice (`Window { recurrence_bounded: true }`), not the checked
+    /// `RecurrenceBounded` — the declaration is a check, not the route
+    /// (key-grain rule 16).
+    #[test]
+    fn route3_declared_recurrence_agreeing_with_derived_admits_the_derived_slice() {
+        let sql = "SELECT event_id, MAX(event_date) AS last_seen_date, COUNT(*) AS event_count \
+                   FROM smelt.sources.raw.events \
+                   WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '3 days' \
+                   GROUP BY event_id";
+        let mut inputs = route3_inputs(sql);
+        let kr = KeyRecurrence {
+            key: vec!["event_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("3 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let slice = establish_locality(&inputs)
+            .expect("an agreeing declared key_recurrence must still admit");
+        match slice {
+            LocalitySlice::Window {
+                margin_before,
+                recurrence_bounded,
+                ..
+            } => {
+                assert_eq!(margin_before, Seconds::days(3));
+                assert!(
+                    recurrence_bounded,
+                    "an agreeing declaration must still admit the derived, unchecked slice"
+                );
+            }
+            other => {
+                panic!("an agreeing declaration must admit the derived Window shape, got {other:?}")
+            }
+        }
+    }
+
+    /// A derivable bound, with a declared `key_recurrence` over a KEY
+    /// COLUMN SET THAT IS NOT the model's own `unique_key`: the declaration
+    /// asserts nothing about this key, so it never mismatches — the derived
+    /// slice admits unaffected.
+    #[test]
+    fn route3_declared_recurrence_over_a_different_key_does_not_mismatch() {
+        let sql = "SELECT event_id, MAX(event_date) AS last_seen_date, COUNT(*) AS event_count \
+                   FROM smelt.sources.raw.events \
+                   WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '3 days' \
+                   GROUP BY event_id";
+        let mut inputs = route3_inputs(sql);
+        let kr = KeyRecurrence {
+            key: vec!["session_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("99 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let slice = establish_locality(&inputs)
+            .expect("a declaration over a different key must not block admission");
+        match slice {
+            LocalitySlice::Window {
+                margin_before,
+                recurrence_bounded,
+                ..
+            } => {
+                assert_eq!(margin_before, Seconds::days(3));
+                assert!(recurrence_bounded);
+            }
+            other => panic!("expected the derived Window shape, got {other:?}"),
+        }
+    }
+
+    /// With no derivable static bound at all, a declared `key_recurrence`
+    /// over the matching key still takes the declared, checked route
+    /// unchanged — key-grain rule 16 only makes the declaration a check
+    /// where a derived bound EXISTS to check it against.
+    #[test]
+    fn route3_declared_recurrence_on_an_underivable_model_still_takes_the_declared_route() {
+        let mut inputs = route3_inputs(ROUTE3_SQL_NO_LOOKBACK);
+        let kr = KeyRecurrence {
+            key: vec!["event_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("3 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let slice =
+            establish_locality(&inputs).expect("declared key_recurrence must admit route 3");
+        assert!(
+            matches!(slice, LocalitySlice::RecurrenceBounded { .. }),
+            "an underivable model must still admit via the declared, checked route, got {slice:?}"
+        );
+    }
+
+    /// Key-grain rule 16's order-independence clause: permuting the column
+    /// order of `unique_key` and `key_recurrence.key` (independently) must
+    /// never change the verdict — for the declared-route admit, the FD
+    /// route-2 admit, and the key-set-mismatch refusal alike.
+    #[test]
+    fn key_set_comparisons_are_order_independent() {
+        let orderings: [[&str; 2]; 2] = [["customer_id", "org_id"], ["org_id", "customer_id"]];
+
+        // ---- Declared-route admit (route 3, no static bound) -----------
+        let sql_no_static = "SELECT customer_id, org_id, MAX(event_date) AS last_seen_date, \
+                              COUNT(*) AS event_count FROM smelt.sources.raw.events \
+                              GROUP BY customer_id, org_id";
+        for uk in &orderings {
+            for kr_key in &orderings {
+                let mut inputs = LocalityInputs {
+                    model_name: "composite_events".to_string(),
+                    unique_key: uk.iter().map(|s| s.to_string()).collect(),
+                    partition_column: "last_seen_date".to_string(),
+                    granularity: Granularity::Day,
+                    partition_column_not_null: true,
+                    driving_source_name: "smelt.sources.raw.events".to_string(),
+                    driving_source_has_clock: true,
+                    driving_source_granularity: Some(Granularity::Day),
+                    driving_source_partition_column: Some("event_date".to_string()),
+                    declared_functional_dependencies: &[],
+                    driving_source_key_recurrence: None,
+                    sql: sql_no_static,
+                };
+                let kr = KeyRecurrence {
+                    key: kr_key.iter().map(|s| s.to_string()).collect(),
+                    window: smelt_core::config::DataLatency::parse("3 days")
+                        .expect("valid interval"),
+                };
+                inputs.driving_source_key_recurrence = Some(&kr);
+                let slice = establish_locality(&inputs).unwrap_or_else(|e| {
+                    panic!("declared-route admit must succeed regardless of key order: {e:?}")
+                });
+                match slice {
+                    LocalitySlice::RecurrenceBounded { r, .. } => {
+                        assert_eq!(r, Seconds::days(3));
+                    }
+                    other => panic!("expected RecurrenceBounded, got {other:?}"),
+                }
+            }
+        }
+
+        // ---- FD route-2 admit --------------------------------------------
+        let sql_fd = "SELECT customer_id, org_id, region FROM smelt.sources.raw.crm";
+        for uk in &orderings {
+            for fd_key in &orderings {
+                let inputs = LocalityInputs {
+                    model_name: "crm_region".to_string(),
+                    unique_key: uk.iter().map(|s| s.to_string()).collect(),
+                    partition_column: "region".to_string(),
+                    granularity: Granularity::Day,
+                    partition_column_not_null: true,
+                    driving_source_name: "smelt.sources.raw.crm".to_string(),
+                    driving_source_has_clock: true,
+                    driving_source_granularity: Some(Granularity::Day),
+                    driving_source_partition_column: Some("event_date".to_string()),
+                    declared_functional_dependencies: &[FunctionalDependency {
+                        key: fd_key.iter().map(|s| s.to_string()).collect(),
+                        determines: "region".to_string(),
+                    }],
+                    driving_source_key_recurrence: None,
+                    sql: sql_fd,
+                };
+                let slice = establish_locality(&inputs).unwrap_or_else(|e| {
+                    panic!("FD route-2 admit must succeed regardless of key order: {e:?}")
+                });
+                assert!(matches!(slice, LocalitySlice::DeltaValues { .. }));
+            }
+        }
+
+        // ---- Key-set-mismatch refusal ------------------------------------
+        let sql_static = "SELECT customer_id, org_id, MAX(event_date) AS last_seen_date, \
+                           COUNT(*) AS event_count FROM smelt.sources.raw.events \
+                           WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '3 days' \
+                           GROUP BY customer_id, org_id";
+        for uk in &orderings {
+            for kr_key in &orderings {
+                let mut inputs = LocalityInputs {
+                    model_name: "composite_events".to_string(),
+                    unique_key: uk.iter().map(|s| s.to_string()).collect(),
+                    partition_column: "last_seen_date".to_string(),
+                    granularity: Granularity::Day,
+                    partition_column_not_null: true,
+                    driving_source_name: "smelt.sources.raw.events".to_string(),
+                    driving_source_has_clock: true,
+                    driving_source_granularity: Some(Granularity::Day),
+                    driving_source_partition_column: Some("event_date".to_string()),
+                    declared_functional_dependencies: &[],
+                    driving_source_key_recurrence: None,
+                    sql: sql_static,
+                };
+                let kr = KeyRecurrence {
+                    key: kr_key.iter().map(|s| s.to_string()).collect(),
+                    window: smelt_core::config::DataLatency::parse("7 days")
+                        .expect("valid interval"),
+                };
+                inputs.driving_source_key_recurrence = Some(&kr);
+                let err = establish_locality(&inputs)
+                    .expect_err("mismatch must refuse regardless of key order");
+                match err {
+                    LocalityRefusal::RecurrenceDeclarationMismatch {
+                        derived, declared, ..
+                    } => {
+                        assert_eq!(derived, Seconds::days(3));
+                        assert_eq!(declared, Seconds::days(7));
+                    }
+                    other => panic!("expected RecurrenceDeclarationMismatch, got {other:?}"),
+                }
+            }
+        }
     }
 
     // ---- Settle bound (Phase A5) ---------------------------------------

@@ -2995,6 +2995,13 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     DiagnosticCode::KeyedForbidsTimeseries,
                     message.clone(),
                 ),
+                crate::queries::maintenance::MaintenanceRefusal::KeyedRecurrenceDeclarationMismatch {
+                    message,
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::KeyedRecurrenceDeclarationMismatch,
+                    message.clone(),
+                ),
                 crate::queries::maintenance::MaintenanceRefusal::IdentityNotDerivable {
                     message,
                 } => (

@@ -76,7 +76,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | done |
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | done |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | done |
-| 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | planned |
+| 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | done |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
 | 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
@@ -141,5 +141,21 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   declared-key match (already set-based, made explicit) and `propagate.rs`'s
   `push_keyed_dirt`, whose duplicate check compares `keys` as an ordered `Vec` and is the one
   order-sensitive comparison found.
+
+- 2026-09-05 — Phase 4 done: `LocalityRefusal::RecurrenceDeclarationMismatch` lands in
+  `locality.rs`, consulted in route 3's statically-derived branch before admission — a matching
+  declared `key_recurrence` that agrees is a no-op (admits the derived, unchecked `Window`
+  slice), a disagreeing one refuses, and a non-matching key falls through unaffected. Routed via
+  a new `Refusal::KeyedRecurrenceDeclarationMismatch` / `recurrence_mismatch_plan` (distinct from
+  `locality_refused_plan`, since this is a value check, not a "no route applies" refusal) through
+  a new `DiagnosticCode::KeyedRecurrenceDeclarationMismatch` (Error) with LSP slug
+  `keyed-recurrence-declaration-mismatch`. Added a shared `key_sets_match` (case-insensitive,
+  order-independent) helper used by both route-3 sub-routes, and fixed `propagate.rs`'s
+  `push_keyed_dirt` (previously ordered-`Vec` equality) to compare `keys` as a set — the one
+  real order-sensitive site the audit found. Spec bullets deleted from `diagnostics.md` and
+  `incremental_shapes.md`. `verify-phase.sh` ALL GREEN (fmt, clippy both feature sets, full
+  workspace `cargo test`, `example_diagnostics`); `partition_residue_probes` ratchet unchanged
+  (2, as expected — this phase touches a key-grain bullet, not a partition-grain one);
+  `maintenance_conformance --features duckdb composed` green.
 
 ## Blocked

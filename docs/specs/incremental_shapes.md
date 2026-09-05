@@ -1289,10 +1289,7 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   unbuilt; Route 2's `IN (SELECT DISTINCT …)` slice
   predicate is unexercised against a real backend due to a DuckDB MERGE binder limitation
   (confirmed v1.4.4/v1.5.4); plan derivation admits routes only where it can determine the
-  driving source's granularity. Key-grain rule 16 (derived recurrence authoritative, declared
-  is a check, order-independent key sets) is decided but unimplemented: no
-  `KeyedRecurrenceDeclarationMismatch` is emitted today. Scheduled:
-  `docs/outcomes/20260904-decision-residue/outcome.md`.
+  driving source's granularity.
 - **Order-independence is not yet acted on** — every window-forward run applies its windows
   sequentially regardless of family, forgoing the parallel/out-of-order application
   §"Derived execution postures" admits when order-independence holds. The verdict itself, and
