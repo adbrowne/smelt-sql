@@ -60,7 +60,7 @@ than the current residue.
 | 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | done |
-| 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | planned |
+| 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | done |
 
 ## Decision log
 
@@ -129,6 +129,17 @@ than the current residue.
   each edge's changed-key set survives interleaved runs independently, and a sibling's refresh
   never mutates this edge's own stored rows. `sources.md` updated per the spec delta; the
   `docs/TODO.md` bullet removed. See `phases/04-summary.md`.
+
+- 2026-09-05: Phase 6 implemented and closed — rewrote `incremental_models.md` §Known
+  Divergences "Conditional-maintenance gaps" and the `docs-site` guide's fingerprint-sidecar
+  paragraph to the capability-flag, two-leg framing phase 5 shipped. `residue_grep` sweep found
+  no remaining `SqlDialect::DuckDB`-gated sidecar site outside the already-excluded ledger/
+  observed-delta bookkeeping gates. `docs/TODO.md`'s three owned bullets were already absent
+  (removed by phases 1/2/4). A targeted drift check scoped to the five closed bullets found no
+  drift. All gates green (`verify-phase.sh`'s four legs run separately since the bundled script
+  again exceeded the foreground timeout, plus `maintenance_conformance` and
+  `statement_parity`/`fingerprint_sidecar`). See `phases/06-summary.md`. The outcome cannot yet
+  flip to `done`: phase 3's blocked generative-pool clause still needs a human decision.
 
 - 2026-09-05: Phase 5 planned with no phase-table reshape. Located the residue precisely: the
   spec makes `BackendCapabilities::supports_fingerprint_sidecar` the decider and says it is

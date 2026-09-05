@@ -2127,11 +2127,18 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   mutation cell"), but the cell never reads the feed's own delta rows; live fold machinery over
   a change feed's delta shape (retractions, `delta_identity`) remains §Future Extensions, blocked
   on the retention point.
-- **Conditional-maintenance gaps**: a target whose `BackendCapabilities::supports_fingerprint_sidecar`
-  is `false` keeps the widened-scan recompute for a mutation-sensitive cell driven by an external
-  `mutable_snapshot` source (`multi_backend.md` §"The fingerprint sidecar capability" — DuckDB
-  alone sets it today). Refs: `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
-  `docs/outcomes/20260815-definition-delta-migrate/phases/27b-plan.md`.
+- **Conditional-maintenance gaps**: every fingerprint-sidecar consumer — never just one leg —
+  decides on `BackendCapabilities::supports_fingerprint_sidecar`, and never re-derives the
+  question from the target's dialect. A flagless target's consequence differs by leg: the
+  external-delta-restriction cell (a mutation-sensitive cell driven by an external
+  `mutable_snapshot` source) keeps the widened-scan recompute, while the repair-family /
+  key-addressed-model-edge group-grain cell refuses with `UnsupportedOnBackend` — a clamped
+  current-source scan over a `mutable_snapshot` would be unsound there, not merely wider. The
+  residual divergence is only that DuckDB alone declares the flag today, because the sidecar's
+  own DDL owner (`smelt-state`) is DuckDB-shaped (`multi_backend.md` §"The fingerprint sidecar
+  capability"). Refs: `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
+  `docs/outcomes/20260815-definition-delta-migrate/phases/27b-plan.md`,
+  `docs/outcomes/20260904-decided-gap-residue/`.
 
 ## Future Extensions
 
