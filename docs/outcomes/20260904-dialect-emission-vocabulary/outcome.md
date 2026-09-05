@@ -75,7 +75,7 @@ audit before it is claimed — never from documentation.
 | 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
-| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | pending |
+| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | planned |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
 | 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
@@ -154,6 +154,19 @@ audit before it is claimed — never from documentation.
   arbitrary depth. `verify-phase.sh` ALL GREEN after updating 5 line-number-keyed
   `.claude/unknown-census.toml` entries shifted by the `signatures.rs` doc-comment edit. See
   `phases/03-summary.md`.
+
+- 2026-09-06 (plan 04) — **No reshape.** Phase 3's summary surfaced nothing outside its task
+  list. Planning measured the seven DuckDB emission rows against a live DuckDB: four names
+  (`INITCAP`, `TO_CHAR`, `QUOTE_IDENT`, `QUOTE_LITERAL`) do not exist on the engine at all and
+  get `Unsupported`; `DATE_SUB` is a template (`{0} - {1}`) and becomes the first *function-call*
+  template row, so it carries criterion 3's end-to-end refusal test; the two `PERCENTILE_*`
+  `Position::Window` ledger rows are already `Emission::Unsupported` in the registry and are
+  simply redundant. Open risk recorded in the plan rather than deferred: templating `DATE_SUB`
+  makes its type leg run for the first time, and `DATE_ADD`'s existing row suggests the
+  unquoted `INTERVAL 1 DAY` argument infers `Unknown`. The plan carries a bounded contingency
+  (infer the unquoted interval literal; correct `DATE_ADD`/`DATE_SUB`'s return type to
+  `Timestamp`, matching `binary.rs` and the engine) so criterion 5's `≤ 5` stays reachable
+  without touching the `#175`/`#176` rows it deliberately leaves standing.
 
 ## Blocked
 
