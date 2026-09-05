@@ -1,7 +1,7 @@
 # Outcome: Ratchet paydown — reverse the burst's unreviewed hardening creep
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260904-incremental-state-review.md` §"What went wrong" ("Ratchets crept without sign-off"); `.claude/hardening-baseline.txt`; CLAUDE.md §"Fail-loud discipline"
 **Spec anchors:** `docs/specs/architecture.md` §"Fail-loud discipline"
 
@@ -42,14 +42,26 @@ implementer, not this loop.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Establish the pre-burst baseline values from git; list every added `unwrap`/`expect`/`println!` site in the burst range | pending |
+| 1 | Establish the pre-burst baseline values from git; census every added `unwrap`/`expect`/`println!` site in `39228307..HEAD`, with a per-site verdict | planned |
 | 2 | `smelt-db`: classify or convert the added `unwrap` sites | pending |
-| 3 | `smelt-cli`: mark legitimate stdout, route the rest through the reporter/`tracing` | pending |
+| 3 | `smelt-cli`: mark legitimate stdout, route the rest through the reporter/`tracing`, and classify or convert the added `expect` sites | pending |
 | 4 | Regenerate the baseline with sign-off; record the file-split deferral in `docs/TODO.md`; gates green | pending |
 
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-09-06 (plan 01): census range widened from `39228307..994e6f3f` to `39228307..HEAD` — two of
+  the added `smelt-cli` printlns landed after `994e6f3f`, and criterion 1 constrains the whole-tree
+  count, so the burst-range-only reading would leave it unachievable by construction.
+- 2026-09-06 (plan 01): phase 3 extended to own the added `smelt-cli` `expect` sites
+  (`commands/migrate.rs` +1, `commands/rebuild.rs` +2). Criterion 2 covers every added
+  `unwrap`/`expect`, but phase 2 was scoped to `smelt-db` and phase 3 to `println!` only, so these
+  three sites had no phase row.
+- 2026-09-06 (plan 01): criterion 1's `smelt-cli println ≤ 161` is at risk — the +10 in
+  `commands/migrate.rs` is a new command's user-facing plan output, which criterion 3 explicitly
+  keeps. Phase 1 must return a Criterion-1 verdict; if ≤ 161 is unachievable by honest means, the
+  phase-4 plan step restates the criterion rather than deleting user-visible output.
 
 ## Blocked
 
