@@ -83,7 +83,7 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
 |---|-------|--------|
 | 1 | Diagnostics catalogue + spec cross-refs: add `PropertyDowngrade` and `PropertyDiffBaselineUnavailable` to `DiagnosticCode`, `diagnostics.md`, `map_metadata_error_to_diagnostic` exhaustiveness untouched; `cli.md`/`lsp.md` pointers to `property_diff.md` | done |
 | 2 | `PropertyProfile` in `smelt-logical` derived by the same pure functions the report uses; `ModelDiagnostics` and the CLI report render from it; `property_profile_parity` gate over both example workspaces | done |
-| 3 | `diff_profiles`: dimensions, the exhaustive direction table, matching rules, added/removed/unshifted, attribution over the dependency graph; unit tests per §"Direction" row | pending |
+| 3 | `diff_profiles`: dimensions, the exhaustive direction table, matching rules, added/removed/unshifted, attribution over the dependency graph; unit tests per §"Direction" row | done |
 | 4 | Baseline materialisation in `smelt-core`: ref/merge-base resolution, `git archive` into scratch, `load_workspace`, cleanup guarantee, `PropertyDiffBaselineUnavailable`; thin `smelt-db` profile query | pending |
 | 5 | `smelt explain --diff` text + JSON + `--fail-on` + `--select` + flag exclusivity; temp-git-repo fixture test over `examples/timeseries`; `smelt-explain.md` reference page | pending |
 | 6 | `--markdown` renderer with marker and `<details>`; `docs-site/docs/guide/ci.md`; dogfood job in `.github/workflows` posting/updating one comment over `examples/` | pending |
