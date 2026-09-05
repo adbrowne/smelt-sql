@@ -40,13 +40,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use smelt_cli::argument_resolution::{compute_scope, resolve_argument};
 use smelt_cli::{discover_python_models, init_db, Config, ModelDiscovery};
-use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelFile;
-use smelt_logical::analysis::profile::PropertySet;
-use smelt_logical::maintenance::emit::MaintenanceDialect;
-use smelt_runtime::diagnostics::ModelDiagnostics;
+use smelt_logical::analysis::profile::{PropertyProfile, PropertySet};
 
 /// Discover every genuine **model** in `project_dir`, mirroring
 /// `explain_maintenance.rs::build_report_for`'s own discovery prefix.
@@ -86,118 +82,19 @@ fn discover_all(project_dir: &Path) -> (Config, Vec<ModelFile>) {
     (config, models)
 }
 
-/// Build `model_name`'s [`ModelDiagnostics`] in-process — the profile
-/// side of the comparison — using the exact same public building blocks
-/// `commands::explain::explain_maintenance_plan` uses, mirroring
-/// `explain_maintenance.rs::build_report_for`'s resolution sequence and
-/// extending it through `build_model_diagnostics`. Returns `None` when the
-/// model has no maintenance plan (`smelt_db::maintenance_plan_report` is
-/// `None`) — the same condition under which the real CLI never reaches its
-/// `--json` maintenance-report branch at all.
-fn build_diagnostics_for(
-    project_dir: &Path,
-    model_name: &str,
-) -> Option<(ModelDiagnostics, usize)> {
-    let (config, models) = discover_all(project_dir);
-    let sources = smelt_cli::SourcesConfig::load(project_dir).ok();
-
-    let db = init_db(project_dir, &models);
-    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
-    let project = db
-        .project_input(project_dir)
-        .expect("project not initialized");
-
-    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.to_path_buf());
-    let active_scope = compute_scope(project_dir, &cwd, &config.paths, None);
-    let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), model_name)
-        .unwrap_or_else(|e| panic!("resolve_argument({model_name}): {e}"));
-
-    let model = models
-        .iter()
-        .find(|m| m.canonical_path() == canonical)
-        .unwrap_or_else(|| panic!("model '{canonical}' not found among discovered models"));
-    let file = db
-        .source_file(&model.path)
-        .expect("model file not registered");
-
-    let result = smelt_db::maintenance_plan_report(&db, ws, file)?;
-
-    let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
-    let upstream = graph.get_upstream(&canonical);
-    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
-    let bound_ctx = smelt_cli::explain::build_bound_context(&canonical, &graph, &config);
-
-    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
-    let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
-    let schema = config
-        .targets
-        .get(&target)
-        .map(|t| t.schema.clone())
-        .unwrap_or_else(|| "main".to_string());
-    // Every fixture workspace this gate runs over targets DuckDB.
-    let dialect = MaintenanceDialect::DuckDb;
-
-    let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
-    let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
-    registry.set_function_bodies_all(fn_bodies);
-
-    let ephemeral_models: Vec<(String, String)> = models
-        .iter()
-        .filter(|m| {
-            config.get_materialization_with_metadata(&m.canonical_path(), m.metadata.as_deref())
-                == smelt_core::config::Materialization::Ephemeral
-        })
-        .map(|m| (m.db_name_owned(), m.content.clone()))
-        .collect();
-    let resolver = registry
-        .get(&target)
-        .build_ephemeral_resolver(&ephemeral_models, &schema)
-        .expect("build ephemeral resolver");
-
-    let unique_key: Vec<String> = config
-        .get_incremental_with_metadata(&canonical, model.metadata.as_deref())
-        .map(|b| b.unique_key)
-        .unwrap_or_default();
-
-    let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph, &source_infos);
-    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
-
-    let probe_entries = smelt_runtime::probe_plan::probe_plan_for_model(
-        &canonical,
-        &schema,
-        &model.db_name_owned(),
-        model.metadata.as_deref(),
-        model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()),
-        model,
-        &source_infos,
-        &target,
-        &result.plan.cells,
-        result.plan.key_locality.as_ref(),
-        dialect,
-    );
-
-    let refusals_ground_truth = result.plan.refusals.len();
-    let diagnostics = smelt_runtime::diagnostics::build_model_diagnostics(
-        model,
-        &models,
-        &upstream,
-        &source_infos,
-        &bound_ctx,
-        &result.plan.cells,
-        &schema,
-        &target,
-        &registry,
-        &resolver,
-        dialect,
-        &source_timeseries,
-        &unique_key,
-        &result.column_groups,
-        &result.plan.refusals,
-        &probe_entries,
-        contract_cfg,
-    )
-    .expect("build_model_diagnostics");
-    Some((diagnostics, refusals_ground_truth))
+/// Build every model's [`smelt_logical::analysis::profile::PropertyProfile`]
+/// in `project_dir` via the shared whole-workspace builder
+/// (`smelt_runtime::profile::profiles_for_workspace`,
+/// `docs/outcomes/20260905-property-diff/phases/04-plan.md` D9) — the
+/// profile side of the comparison. This is the regression proof that lifting
+/// the per-model pipeline (dependency graph, compiler registry, ephemeral
+/// resolver, probe plan, `build_model_diagnostics`) out of this test file
+/// and into `smelt-runtime` preserved behaviour: this gate is byte-exact
+/// against the real `smelt explain --json` binary, unchanged from before the
+/// lift.
+fn profiles_for(project_dir: &Path) -> std::collections::BTreeMap<String, PropertyProfile> {
+    let loaded = smelt_core::workspace::load_workspace(project_dir);
+    smelt_runtime::profile::profiles_for_workspace(&loaded)
 }
 
 /// Spawn the real `smelt` binary's `explain <model> --json` and parse its
@@ -240,6 +137,7 @@ struct WorkspaceCheck {
 /// each cell's scalar fields + `contract_point`, `refusals`, and `probes`.
 fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
     let (_, models) = discover_all(project_dir);
+    let profiles = profiles_for(project_dir);
     let mut checked = 0usize;
     let mut total_cell_verdicts = 0usize;
     let mut total_refusals_underlying = 0usize;
@@ -248,19 +146,23 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
 
     for model in &models {
         let canonical = model.canonical_path();
-        let Some((diagnostics, refusals_ground_truth)) =
-            build_diagnostics_for(project_dir, &canonical)
-        else {
+        let Some(profile) = profiles.get(&canonical) else {
             continue;
         };
         checked += 1;
+        // The profile's own refusals ARE the ground truth (it is built by
+        // mapping the derived plan's refusals 1:1 into `ProfileRefusal`s),
+        // so this is length-equal to `profile.refusals` by
+        // construction — kept as its own variable to preserve this test's
+        // original "only assert non-vacuously" structure.
+        let refusals_ground_truth = profile.refusals.len();
         total_refusals_underlying += refusals_ground_truth;
 
         let report = spawn_explain_json(project_dir, &canonical);
 
         // `properties` — byte-identical string encodings.
         let profile_properties =
-            serde_json::to_value(&diagnostics.profile.properties).expect("serialize PropertySet");
+            serde_json::to_value(&profile.properties).expect("serialize PropertySet");
         assert_eq!(
             profile_properties, report["properties"],
             "model '{canonical}': report `properties` diverges from the profile's own encoding"
@@ -273,12 +175,12 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         // fields are compared).
         let cells = report["cells"].as_array().cloned().unwrap_or_default();
         assert_eq!(
-            diagnostics.profile.cell_verdicts.len(),
+            profile.cell_verdicts.len(),
             cells.len(),
             "model '{canonical}': cell_verdicts count diverges from report cells count"
         );
-        total_cell_verdicts += diagnostics.profile.cell_verdicts.len();
-        for (verdict, cell_json) in diagnostics.profile.cell_verdicts.iter().zip(cells.iter()) {
+        total_cell_verdicts += profile.cell_verdicts.len();
+        for (verdict, cell_json) in profile.cell_verdicts.iter().zip(cells.iter()) {
             assert_eq!(
                 cell_json["group"],
                 serde_json::json!(verdict.group),
@@ -321,25 +223,24 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         }
 
         // `refusals` — byte-identical.
-        let profile_refusals =
-            serde_json::to_value(&diagnostics.profile.refusals).expect("serialize refusals");
+        let profile_refusals = serde_json::to_value(&profile.refusals).expect("serialize refusals");
         assert_eq!(
             profile_refusals, report["refusals"],
             "model '{canonical}': report `refusals` diverges from the profile's own encoding"
         );
-        total_refusals_profile += diagnostics.profile.refusals.len();
+        total_refusals_profile += profile.refusals.len();
 
         // `probes` — compare the shared fact/probe/cell fields (the report
         // additionally carries `cadence`/`cost`, presentation-only extras
         // the profile's `ProfileProbe` deliberately omits).
         let report_probes = report["probes"].as_array().cloned().unwrap_or_default();
         assert_eq!(
-            diagnostics.profile.probes.len(),
+            profile.probes.len(),
             report_probes.len(),
             "model '{canonical}': probes count diverges from the report's own probes array"
         );
-        total_probes += diagnostics.profile.probes.len();
-        for (probe, probe_json) in diagnostics.profile.probes.iter().zip(report_probes.iter()) {
+        total_probes += profile.probes.len();
+        for (probe, probe_json) in profile.probes.iter().zip(report_probes.iter()) {
             assert_eq!(
                 probe_json["fact"],
                 serde_json::json!(probe.fact),
