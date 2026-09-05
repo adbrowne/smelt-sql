@@ -1383,14 +1383,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/backbuild-synthesis/" class="md-nav__link">
+      <a href="../../guide/migrations/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Backbuild Synthesis
+    Migrations
   
 
     
@@ -3729,7 +3729,7 @@
 <p>See <code>docs/specs/run_state.md</code> §"Locking" for the full semantics.</p>
 <hr />
 <h2 id="state-isolation-per-target">State isolation per target<a class="headerlink" href="#state-isolation-per-target" title="Permanent link">&para;</a></h2>
-<p>Run state lives under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the <code>--target</code> a command ran against (default <code>dev</code>). A run against <code>dev</code> and a run against <code>prod</code> never share interval coverage, reconciliation ledgers, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. This means:</p>
+<p>Run state lives under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the <code>--target</code> a command ran against (default <code>dev</code>). A run against <code>dev</code> and a run against <code>prod</code> never share interval coverage, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. (The reconciliation ledger is separately isolated per target by virtue of living in that target's own backend schema, not <code>.smelt/</code>.) This means:</p>
 <ul>
 <li><code>smelt run --target prod</code> and <code>smelt run --target dev</code> can each be resumed, inspected, and reasoned about independently; a <code>dev</code> backfill can never mask a coverage gap in <code>prod</code>.</li>
 <li><code>smelt status</code>, <code>smelt history</code>, and <code>smelt diff</code> accept <code>--target</code> (default <code>dev</code>) and report on that target's state only — pass the target you actually care about, especially in CI where the default <code>dev</code> is rarely the one that matters.</li>
@@ -4018,7 +4018,7 @@ over a pending, non-eclipsed, unapproved definition delta — a redefined column
 <code>smelt migrate</code> hasn't reviewed yet — rather than silently maintaining a table whose definition
 no longer matches its contents. The run exits <code>3</code> naming <code>DefinitionDeltaPending</code> and the fix:
 <code>smelt migrate &lt;model&gt;</code> to review the plan, then <code>--apply</code>, or run with <code>--full-refresh</code>. See
-<a href="../../guide/backbuild-synthesis/">Backbuild synthesis</a>.</p>
+<a href="../../guide/migrations/">Migrations</a>.</p>
 <h3 id="parallel-execution-with-jobs">Parallel execution with <code>--jobs</code><a class="headerlink" href="#parallel-execution-with-jobs" title="Permanent link">&para;</a></h3>
 <p>The run engine (shared by <code>smelt run</code>, <code>smelt build</code>, and <code>smelt rebuild</code>) dispatches models as a topological <strong>wavefront</strong>: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. <code>smelt run --jobs</code> bounds how many models are in flight at once:</p>
 <ul>
@@ -4922,7 +4922,7 @@ no longer matches its contents. The run exits <code>3</code> naming <code>Defini
 <h2 id="smelt-migrate">smelt migrate<a class="headerlink" href="#smelt-migrate" title="Permanent link">&para;</a></h2>
 <p>Derive, approve, and apply a <strong>definition-delta</strong> migration plan: a targeted script that
 migrates a model's stored table in place after its SQL changed, instead of a full rebuild. See
-the <a href="../../guide/backbuild-synthesis/">migration guide</a> for the full walkthrough of when each
+the <a href="../../guide/migrations/">migration guide</a> for the full walkthrough of when each
 verdict (eclipsed, backfill in place, rederive, skeleton change) applies.</p>
 <p><strong>Usage:</strong></p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a>smelt migrate &lt;model&gt; [OPTIONS]
@@ -5442,13 +5442,24 @@ a pipeline blocks on exit <code>3</code> until a human has reviewed and re-run t
 </tbody>
 </table>
 <p>Without a <code>MODEL_NAME</code>, the output includes both the <strong>logical graph</strong> (models as written) and the <strong>physical graph</strong> (execution plan with ephemeral models inlined, strategies resolved). See <a href="../../developing/architecture/#two-graph-architecture">Two-Graph Architecture</a> for details.</p>
-<p>With a <code>MODEL_NAME</code>, <code>smelt explain</code> instead prints that model's <strong>maintenance plan</strong>: every
-cell (trigger, corner, technique), the <code>ledger_catch_up</code> flag (whether the cell routes through
-the <a href="../../guide/incremental-models/#the-reconciliation-ledger">reconciliation ledger</a>), the
-derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-the model's own <strong>Relation Contract</strong> (its clock, identity, and derived <code>grain</code> label), and one
-contract block per <strong>inbound edge</strong>. This only applies to incremental models (<code>refresh:
+<p>With a <code>MODEL_NAME</code>, <code>smelt explain</code> instead prints that model's <strong>maintenance plan</strong>: the
+model's own <strong>delta signature</strong> as the report's first line (an <code>emits:</code> headline — see below),
+every cell (trigger, corner, technique), the <code>ledger_catch_up</code> flag (whether the cell routes
+through the <a href="../../guide/incremental-models/#the-reconciliation-ledger">reconciliation ledger</a>),
+the derived per-source scan clamps, each source's partition-locality verdict, any admission
+refusals, the model's own <strong>Relation Contract</strong> (its clock, identity, and derived <code>grain</code> label),
+and one contract block per <strong>inbound edge</strong>. This only applies to incremental models (<code>refresh:
 incremental</code> with a <code>grain:</code> declared) — other models print a one-line notice instead.</p>
+<p>The headline reads <code>model &lt;name&gt;  (emits: &lt;shape&gt;; grain: &lt;label&gt;)</code>: <code>keyed upsert over
+[&lt;keys&gt;], key-addressed</code> for a bare keyed model, the same with <code>, slice-bounded by &lt;axis&gt; under
+key temporal locality (settle bound: &lt;bound&gt;)</code> appended for a composed (key + time) model,
+<code>append-only within a window, window-addressed by &lt;axis&gt;</code> for a partition-grain model, or
+<code>general (degraded by: &lt;reason&gt;), not delta-addressable</code> when the model's own SQL degrades —
+naming the construct or world-fact responsible, never a silent fallback. The <code>grain:</code> clause is
+the same label the report's own <code>derived grain:</code> row prints. <code>--json</code> carries the identical
+fields as a top-level <code>delta_signature</code> object: <code>shape</code> (<code>keyed_upsert</code> | <code>append_only_window</code> |
+<code>general</code>), <code>addressing</code> (<code>key</code> | <code>window</code> | <code>none</code>), <code>keys</code>/<code>axis</code>/<code>degraded_by</code> (present per
+shape), and <code>slice_bound</code>/<code>settle_bound</code> (present when key temporal locality is admitted).</p>
 <p>Each cell also prints a <code>contract:</code> row — its effective <a href="../../guide/incremental-models/#contract-relaxations">contract relaxation</a>
 (<code>default</code>, or <code>frozen_horizon</code>/<code>deferral</code> with their declared intervals); <code>--json</code> carries the
 same information per cell as a <code>contract_point</code> object.</p>
@@ -5565,35 +5576,47 @@ dependencies, per-column determinism/comparability/discriminants, row identity, 
 <a id="__codelineno-53-27" name="__codelineno-53-27" href="#__codelineno-53-27"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--technique<span class="w"> </span>keyed_fold
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-54-1" name="__codelineno-54-1" href="#__codelineno-54-1"></a>$ smelt explain daily_events
-<a id="__codelineno-54-2" name="__codelineno-54-2" href="#__codelineno-54-2"></a>Maintenance plan: daily_events
+<a id="__codelineno-54-2" name="__codelineno-54-2" href="#__codelineno-54-2"></a>model daily_events  (emits: general (degraded by: expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call)), not delta-addressable; grain: partition)
 <a id="__codelineno-54-3" name="__codelineno-54-3" href="#__codelineno-54-3"></a>
-<a id="__codelineno-54-4" name="__codelineno-54-4" href="#__codelineno-54-4"></a>Cells (2):
-<a id="__codelineno-54-5" name="__codelineno-54-5" href="#__codelineno-54-5"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
-<a id="__codelineno-54-6" name="__codelineno-54-6" href="#__codelineno-54-6"></a>      corner:    RecomputeRegion
-<a id="__codelineno-54-7" name="__codelineno-54-7" href="#__codelineno-54-7"></a>      technique: DeleteInsert
-<a id="__codelineno-54-8" name="__codelineno-54-8" href="#__codelineno-54-8"></a>      ledger_catch_up: false
-<a id="__codelineno-54-9" name="__codelineno-54-9" href="#__codelineno-54-9"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
-<a id="__codelineno-54-10" name="__codelineno-54-10" href="#__codelineno-54-10"></a>      scan clamps: (none)
-<a id="__codelineno-54-11" name="__codelineno-54-11" href="#__codelineno-54-11"></a>  - group {*} on trigger Backfill
-<a id="__codelineno-54-12" name="__codelineno-54-12" href="#__codelineno-54-12"></a>      corner:    RecomputeRegion
-<a id="__codelineno-54-13" name="__codelineno-54-13" href="#__codelineno-54-13"></a>      technique: DeleteInsert
-<a id="__codelineno-54-14" name="__codelineno-54-14" href="#__codelineno-54-14"></a>      ledger_catch_up: false
-<a id="__codelineno-54-15" name="__codelineno-54-15" href="#__codelineno-54-15"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
-<a id="__codelineno-54-16" name="__codelineno-54-16" href="#__codelineno-54-16"></a>      scan clamps: (none)
-<a id="__codelineno-54-17" name="__codelineno-54-17" href="#__codelineno-54-17"></a>
-<a id="__codelineno-54-18" name="__codelineno-54-18" href="#__codelineno-54-18"></a>Refusals: (none)
-<a id="__codelineno-54-19" name="__codelineno-54-19" href="#__codelineno-54-19"></a>
-<a id="__codelineno-54-20" name="__codelineno-54-20" href="#__codelineno-54-20"></a>Relation contract:
-<a id="__codelineno-54-21" name="__codelineno-54-21" href="#__codelineno-54-21"></a>  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
-<a id="__codelineno-54-22" name="__codelineno-54-22" href="#__codelineno-54-22"></a>  identity: (none)
-<a id="__codelineno-54-23" name="__codelineno-54-23" href="#__codelineno-54-23"></a>  derived grain: partition
-<a id="__codelineno-54-24" name="__codelineno-54-24" href="#__codelineno-54-24"></a>
-<a id="__codelineno-54-25" name="__codelineno-54-25" href="#__codelineno-54-25"></a>Inbound edges: sources.raw.events
-<a id="__codelineno-54-26" name="__codelineno-54-26" href="#__codelineno-54-26"></a>  - sources.raw.events (source)
-<a id="__codelineno-54-27" name="__codelineno-54-27" href="#__codelineno-54-27"></a>      clock:    (none)
-<a id="__codelineno-54-28" name="__codelineno-54-28" href="#__codelineno-54-28"></a>      identity: event_id
-<a id="__codelineno-54-29" name="__codelineno-54-29" href="#__codelineno-54-29"></a>      derived grain: key
-<a id="__codelineno-54-30" name="__codelineno-54-30" href="#__codelineno-54-30"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
+<a id="__codelineno-54-4" name="__codelineno-54-4" href="#__codelineno-54-4"></a>Maintenance plan: daily_events
+<a id="__codelineno-54-5" name="__codelineno-54-5" href="#__codelineno-54-5"></a>
+<a id="__codelineno-54-6" name="__codelineno-54-6" href="#__codelineno-54-6"></a>Cells (2):
+<a id="__codelineno-54-7" name="__codelineno-54-7" href="#__codelineno-54-7"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
+<a id="__codelineno-54-8" name="__codelineno-54-8" href="#__codelineno-54-8"></a>      corner:    RecomputeRegion
+<a id="__codelineno-54-9" name="__codelineno-54-9" href="#__codelineno-54-9"></a>      technique: DeleteInsert
+<a id="__codelineno-54-10" name="__codelineno-54-10" href="#__codelineno-54-10"></a>      ledger_catch_up: false
+<a id="__codelineno-54-11" name="__codelineno-54-11" href="#__codelineno-54-11"></a>      contract:  default
+<a id="__codelineno-54-12" name="__codelineno-54-12" href="#__codelineno-54-12"></a>      region key: Key([&quot;event_date&quot;, &quot;user_id&quot;])
+<a id="__codelineno-54-13" name="__codelineno-54-13" href="#__codelineno-54-13"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+<a id="__codelineno-54-14" name="__codelineno-54-14" href="#__codelineno-54-14"></a>      scan clamps: (none)
+<a id="__codelineno-54-15" name="__codelineno-54-15" href="#__codelineno-54-15"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+<a id="__codelineno-54-16" name="__codelineno-54-16" href="#__codelineno-54-16"></a>      write pin: (none)
+<a id="__codelineno-54-17" name="__codelineno-54-17" href="#__codelineno-54-17"></a>  - group {*} on trigger Backfill
+<a id="__codelineno-54-18" name="__codelineno-54-18" href="#__codelineno-54-18"></a>      corner:    RecomputeRegion
+<a id="__codelineno-54-19" name="__codelineno-54-19" href="#__codelineno-54-19"></a>      technique: DeleteInsert
+<a id="__codelineno-54-20" name="__codelineno-54-20" href="#__codelineno-54-20"></a>      ledger_catch_up: false
+<a id="__codelineno-54-21" name="__codelineno-54-21" href="#__codelineno-54-21"></a>      contract:  default
+<a id="__codelineno-54-22" name="__codelineno-54-22" href="#__codelineno-54-22"></a>      region key: Key([&quot;event_date&quot;, &quot;user_id&quot;])
+<a id="__codelineno-54-23" name="__codelineno-54-23" href="#__codelineno-54-23"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+<a id="__codelineno-54-24" name="__codelineno-54-24" href="#__codelineno-54-24"></a>      scan clamps: (none)
+<a id="__codelineno-54-25" name="__codelineno-54-25" href="#__codelineno-54-25"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+<a id="__codelineno-54-26" name="__codelineno-54-26" href="#__codelineno-54-26"></a>      write pin: (none)
+<a id="__codelineno-54-27" name="__codelineno-54-27" href="#__codelineno-54-27"></a>
+<a id="__codelineno-54-28" name="__codelineno-54-28" href="#__codelineno-54-28"></a>Refusals: (none)
+<a id="__codelineno-54-29" name="__codelineno-54-29" href="#__codelineno-54-29"></a>
+<a id="__codelineno-54-30" name="__codelineno-54-30" href="#__codelineno-54-30"></a>Relation contract:
+<a id="__codelineno-54-31" name="__codelineno-54-31" href="#__codelineno-54-31"></a>  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
+<a id="__codelineno-54-32" name="__codelineno-54-32" href="#__codelineno-54-32"></a>  identity: (none)
+<a id="__codelineno-54-33" name="__codelineno-54-33" href="#__codelineno-54-33"></a>  derived grain: partition
+<a id="__codelineno-54-34" name="__codelineno-54-34" href="#__codelineno-54-34"></a>
+<a id="__codelineno-54-35" name="__codelineno-54-35" href="#__codelineno-54-35"></a>Inbound edges: sources.raw.events
+<a id="__codelineno-54-36" name="__codelineno-54-36" href="#__codelineno-54-36"></a>  - sources.raw.events (source)
+<a id="__codelineno-54-37" name="__codelineno-54-37" href="#__codelineno-54-37"></a>      clock:    (none)
+<a id="__codelineno-54-38" name="__codelineno-54-38" href="#__codelineno-54-38"></a>      identity: event_id
+<a id="__codelineno-54-39" name="__codelineno-54-39" href="#__codelineno-54-39"></a>      derived grain: key
+<a id="__codelineno-54-40" name="__codelineno-54-40" href="#__codelineno-54-40"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
+<a id="__codelineno-54-41" name="__codelineno-54-41" href="#__codelineno-54-41"></a>
+<a id="__codelineno-54-42" name="__codelineno-54-42" href="#__codelineno-54-42"></a>Probes (0):
 </code></pre></div>
 <hr />
 <h2 id="smelt-bakeoff">smelt bakeoff<a class="headerlink" href="#smelt-bakeoff" title="Permanent link">&para;</a></h2>

@@ -1383,14 +1383,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/backbuild-synthesis/" class="md-nav__link">
+      <a href="../../guide/migrations/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Backbuild Synthesis
+    Migrations
   
 
     
@@ -2480,6 +2480,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#statemode-and-what-is-written" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        state.mode and what is written
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-reconciliation-ledger" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2811,6 +2822,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#statemode-and-what-is-written" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        state.mode and what is written
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-reconciliation-ledger" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2890,10 +2912,6 @@
 <td>Cumulative interval coverage per incremental model, keyed by calendar date (half-open <code>[start, end)</code>); read by <code>smelt status</code> for gap detection and by backfill planning.</td>
 </tr>
 <tr>
-<td><code>.smelt/targets/&lt;target&gt;/reconciliation.json</code></td>
-<td>The reconciliation ledger -- per <code>grain: key</code> (and <code>key_per_partition</code>) model, the processed-input vector for each <code>(output-region x column-group)</code> cell (see "The reconciliation ledger" below).</td>
-</tr>
-<tr>
 <td><code>.smelt/targets/&lt;target&gt;/landed_deltas.json</code></td>
 <td>Per-source landed-delta intervals -- which partition intervals of each source have landed, keyed by source address; consumed by <code>smelt run --since-upstream</code> forward propagation.</td>
 </tr>
@@ -2907,7 +2925,7 @@
 </tr>
 </tbody>
 </table>
-<p>Every run-scoped artifact nests under <code>.smelt/targets/&lt;target&gt;/</code>; only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target. A file is created lazily the first time something is recorded into it -- a project that has never run an incremental model has no <code>intervals.json</code>, and one with no <code>grain: key</code> models has no <code>reconciliation.json</code>.</p>
+<p>Every run-scoped artifact nests under <code>.smelt/targets/&lt;target&gt;/</code>; only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target. A file is created lazily the first time something is recorded into it -- a project that has never run an incremental model has no <code>intervals.json</code>, and <code>state.mode: stateless</code> (the default) writes nothing under <code>.smelt/</code> at all -- see "<code>state.mode</code> and what is written" below. The reconciliation ledger is not in this table: it lives in the target backend, not under <code>.smelt/</code> -- see "The reconciliation ledger" below.</p>
 <h2 id="run-manifest">Run manifest<a class="headerlink" href="#run-manifest" title="Permanent link">&para;</a></h2>
 <p><code>.smelt/targets/&lt;target&gt;/runs/&lt;run_id&gt;.json</code> records one entry per model that ran this run.
 Alongside outcome, strategy, row count, duration, <code>definition_hash</code>, and <code>retry_count</code> (see
@@ -2926,17 +2944,49 @@ backward-compatible.</p>
 <h2 id="state-schema-version-and-migration">State-schema version and migration<a class="headerlink" href="#state-schema-version-and-migration" title="Permanent link">&para;</a></h2>
 <p><code>.smelt/meta.json</code> records the layout version this store was written with. A version this smelt binary does not recognise (newer than the binary's own highest known version) is a hard error naming both versions -- smelt refuses to read or write rather than guess at an unfamiliar layout. A missing <code>meta.json</code> denotes the legacy pre-versioning layout (root-level <code>runs/</code>, <code>intervals.json</code>, etc. with no <code>targets/&lt;target&gt;/</code> nesting); the first locked open under a version-aware binary migrates it to the current layout and writes <code>meta.json</code>, under the advisory lock so a concurrent process can never observe a half-migrated store.</p>
 <h2 id="locking">Locking<a class="headerlink" href="#locking" title="Permanent link">&para;</a></h2>
-<p>A run acquires an exclusive advisory lock on <code>.smelt/lock</code> for its entire duration and releases it on completion or error. A second smelt process that tries to acquire the lock while it is held fails loudly -- the error names the PID recorded in the lock file -- rather than interleaving writes with the first process. The lock is project-wide, not per-target, and is held for the whole run regardless of how many models execute concurrently under <code>--jobs</code>; every write to a shared per-target file (the interval ledger, the landed-delta store, the reconciliation ledger) is additionally serialized within the locked run so two models finishing at the same moment cannot each drop the other's write. Every write under <code>.smelt/</code> goes through a temp-file-then-rename path, so a process killed mid-write leaves either the old file intact or the new one -- never a truncated one.</p>
+<p>A run acquires an exclusive advisory lock on <code>.smelt/lock</code> for its entire duration and releases it on completion or error. A second smelt process that tries to acquire the lock while it is held fails loudly -- the error names the PID recorded in the lock file -- rather than interleaving writes with the first process. The lock is project-wide, not per-target, and is held for the whole run regardless of how many models execute concurrently under <code>--jobs</code>; every write to a shared per-target file (the interval ledger, the landed-delta store) is additionally serialized within the locked run so two models finishing at the same moment cannot each drop the other's write. Every write under <code>.smelt/</code> goes through a temp-file-then-rename path, so a process killed mid-write leaves either the old file intact or the new one -- never a truncated one. The reconciliation ledger is not part of this serialization: it lives in the target backend, folded transactionally with the write it protects (see "The reconciliation ledger" below).</p>
 <h2 id="what-smelt-status-and-smelt-history-read">What <code>smelt status</code> and <code>smelt history</code> read<a class="headerlink" href="#what-smelt-status-and-smelt-history-read" title="Permanent link">&para;</a></h2>
 <p><code>smelt status [MODEL_NAME] --target &lt;target&gt;</code> reads that target's <code>intervals.json</code> and reports covered ranges plus any gap between the last covered date and today (or a <code>--since</code>/<code>--until</code> window). <code>smelt history [MODEL_NAME] --target &lt;target&gt; --limit &lt;n&gt;</code> reads that target's <code>runs/*.json</code> manifests, most recent first, showing per-model strategy, row counts, and duration for each run. Both are read-only -- neither command acquires the write lock or mutates <code>.smelt/</code>.</p>
 <h2 id="-resume-semantics"><code>--resume</code> semantics<a class="headerlink" href="#-resume-semantics" title="Permanent link">&para;</a></h2>
 <p><code>smelt run --resume</code> (or <code>smelt build --resume</code>) re-runs a previously interrupted or partially-failed selection while skipping models that do not need to run again. A model is skipped when <strong>both</strong> hold: its outcome in the most recent <em>incomplete</em> run (a manifest with <code>completed_at: null</code>, or one whose selection overlaps the current run and ended with at least one non-<code>success</code> outcome) was <code>success</code>, <strong>and</strong> its <code>definition_hash</code> in that manifest entry matches the model's current compiled-definition hash. A model that previously <code>failed</code> or was <code>skipped</code>, or whose definition changed since, always re-runs -- and so does every downstream dependent of any such model, since a dependent's prior <code>success</code> said nothing about inputs rebuilt out from under it. <code>--resume</code> refuses with a hard error (never a silent full run) when there is no incomplete run to resume from -- the most recent run completed successfully, or no run manifest exists at all -- so a stale or typo'd <code>--resume</code> invocation is never mistaken for "nothing needed doing."</p>
+<h2 id="statemode-and-what-is-written"><code>state.mode</code> and what is written<a class="headerlink" href="#statemode-and-what-is-written" title="Permanent link">&para;</a></h2>
+<p><code>state.mode</code> (<code>smelt.yml</code> top-level <code>state.mode</code>, default <code>stateless</code>) controls how much
+observability bookkeeping a run writes under <code>.smelt/</code>. Correctness structures -- the
+reconciliation ledger above and the transactional merge ledger -- are exempt from this posture:
+they live in the target backend and exist under every posture, whenever the plan derives them.</p>
+<table>
+<thead>
+<tr>
+<th>Posture</th>
+<th>Written under <code>.smelt/</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>stateless</code> (default)</td>
+<td>Nothing. <code>.smelt/</code> need not exist; <code>smelt run</code> neither creates it nor acquires its lock.</td>
+</tr>
+<tr>
+<td><code>intervals</code></td>
+<td>Run manifests, run reports, the interval ledger, landed deltas, deployed-schema snapshots, source postures, probe baselines, source-mutation baselines, migration approvals.</td>
+</tr>
+<tr>
+<td><code>environments</code></td>
+<td>Everything in <code>intervals</code>, plus the snapshot/environment store (<code>snapshots.json</code>).</td>
+</tr>
+</tbody>
+</table>
+<p><code>--resume</code> is a consumer of the <code>intervals</code>/<code>environments</code> structures (the run manifest) and is
+therefore always in the refuse-by-name case under <code>state.mode: stateless</code>: there is no manifest
+to resume from <em>by posture</em>, so the error names the posture rather than reading as an ordinary
+"no partially-failed run found."</p>
 <h2 id="the-reconciliation-ledger">The reconciliation ledger<a class="headerlink" href="#the-reconciliation-ledger" title="Permanent link">&para;</a></h2>
 <p>A <strong>frontier</strong> is the record of which typed deltas a cell has absorbed. The reconciliation ledger
-is the frontier's warehouse-independent realization: <code>grain: key</code> (and <code>key_per_partition</code>)
-models are maintained through a merge into an existing table rather than a full recompute, and
-the reconciliation ledger is the correctness structure that makes repeated, possibly-overlapping
-runs safe. (A window-forward keyed model's own merge writes a second realization, the
+is one realization of the frontier, engine-resident in the target backend: <code>grain: key</code> (and
+<code>key_per_partition</code>) models are maintained through a merge into an existing table rather than a
+full recompute, and the reconciliation ledger is the correctness structure that makes repeated,
+possibly-overlapping runs safe. (A window-forward keyed model's own merge writes a second
+realization, the
 transactional frontier write, directly into the target table -- see
 <a href="../../guide/incremental-models/#the-reconciliation-ledger">Incremental models -- The reconciliation ledger</a>.)
 Each ledger entry keys a <code>(output-region x column-group)</code> cell to the processed-input vector that
@@ -2945,10 +2995,11 @@ has already been folded into it. Storage is graded by the column-group's algebra
 <li><strong>Additive</strong> groups (a running sum, a count) record the <strong>delta identities</strong> already folded in -- re-folding the same delta a second time would double-count, so the ledger's job is to refuse a repeat.</li>
 <li><strong>Idempotent</strong> groups (a last-write-wins column, a MAX aggregate) record only a <strong>frontier</strong> watermark -- re-applying an already-seen delta is harmless, so the ledger only needs to know how far processing has reached.</li>
 </ul>
-<p>Two operations act on the ledger: <strong>fold</strong> (extend an entry with a new delta, refusing if that delta is already in the entry's processed set) and <strong>recompute-reset</strong> (a region recompute resets every intersecting entry to exactly the input it read). For an additive-graded cell, the fold is transactional with the write it accompanies -- on DuckDB targets, the delta identity is folded into a warehouse-resident ledger table in the same transaction as the merge, so a repeat delta violates a primary key and refuses the run before the merge executes a second time, rather than after. On a backend with no ledger substrate, an idempotent-graded model's bookkeeping record is skipped -- the run still succeeds, and it says so on the run's progress output rather than skipping silently.</p>
-<p>This ledger is distinct from the interval ledger (<code>intervals.json</code>) above: intervals are project-wide observability ("what has this project run, and where are the gaps") that a <code>state.mode: stateless</code> project can forgo entirely; the reconciliation ledger is required correctness structure for every plan-managed <code>grain: key</code> model, present whenever the plan is, independent of <code>state.mode</code>.</p>
+<p>Storage is engine-resident, not <code>.smelt/</code>-resident: on DuckDB targets the ledger is a per-model table in the target backend, and every fold is folded into it in the same transaction as the merge it protects -- a repeat delta violates a primary key and refuses the run before the merge executes a second time, rather than after. Deleting <code>.smelt/</code> never touches this table, so it never affects what a maintained model computes.</p>
+<p>Two operations act on the ledger: <strong>fold</strong> (extend an entry with a new delta, refusing if that delta is already in the entry's processed set) and <strong>recompute-reset</strong> (a region recompute resets every intersecting entry to exactly the input it read). On a backend with no ledger realisation (<code>state.warehouse_tables: none</code>, or a backend with no ledger builder yet), a cell whose technique requires the ledger is downgraded instead of failing: it takes the cheapest recompute-family technique that preserves the same result, and the downgrade is recorded on the cell (<code>MaintenanceStateDowngraded</code>) and printed by <code>smelt explain</code> -- never a silent substitution, and never a fail-loud refusal for a derived (as opposed to declared) technique.</p>
+<p>This ledger is distinct from the interval ledger (<code>intervals.json</code>) above: intervals are project-wide observability ("what has this project run, and where are the gaps") that a <code>state.mode: stateless</code> project can forgo entirely; the reconciliation ledger is required correctness structure for every plan-managed <code>grain: key</code> model whenever its technique is available, independent of <code>state.mode</code>.</p>
 <h2 id="recovery-playbook">Recovery playbook<a class="headerlink" href="#recovery-playbook" title="Permanent link">&para;</a></h2>
-<p><strong><code>.smelt/</code> is lost (deleted, never backed up, new environment).</strong> State is regenerable: an incremental model's interval ledger and reconciliation ledger rebuild from a full re-run over the model's complete history; there is no data loss to the warehouse tables themselves, only a loss of the bookkeeping that lets <em>future</em> runs skip already-covered work. Re-run the affected selection with a full time range (or the whole project) to rebuild coverage from scratch.</p>
+<p><strong><code>.smelt/</code> is lost (deleted, never backed up, new environment).</strong> Deleting <code>.smelt/</code> never changes what a maintained model computes -- the reconciliation ledger and the transactional merge ledger are engine-resident, not <code>.smelt/</code>-resident, so no correctness state is lost. What <em>is</em> lost is observability bookkeeping: an incremental model's interval ledger rebuilds from a full re-run over the model's complete history, and there is no data loss to the warehouse tables themselves, only a loss of the record that lets <em>future</em> runs skip already-covered work. Re-run the affected selection with a full time range (or the whole project) to rebuild coverage from scratch.</p>
 <p><strong><code>.smelt/</code> is corrupt (malformed JSON, truncated file, manually edited).</strong> Because every write is atomic (temp file + rename), a file smelt itself wrote cannot be left truncated by a crash -- a corrupt file is evidence of something else (disk-level corruption, an out-of-band edit, a copy taken mid-write by a tool that doesn't respect the rename). smelt fails loudly with a parse or read error naming the file rather than silently discarding the record; there is no automatic quarantine-and-continue. Treat a corrupt <code>.smelt/</code> the same as a lost one: remove the affected file (or the whole directory) and let the next run regenerate it. Restore from a known-good backup first if one exists, to avoid losing more coverage history than necessary.</p>
 <p><strong>A run was interrupted mid-flight (process killed, machine restarted).</strong> The run's manifest is left with <code>completed_at: null</code>; a matching partial run report is available immediately (see "Inventory" above). Nothing needs manual cleanup: <code>.smelt/lock</code> is an OS-level advisory lock (<code>flock</code>-style), which the operating system releases automatically when the holding process exits or is killed -- there is no stale-lock file to remove by hand, even after a crash. Re-run with <code>--resume</code> to pick up exactly the models that did not reach <code>success</code>, or omit <code>--resume</code> for an unconditional full re-run of the selection.</p>
 <p><strong>Backup and restore.</strong> See <a href="../../guide/deployment/#backup-and-restore">Production Deployment -- Backup and restore</a> -- <code>.smelt/</code> is plain JSON, safe to copy with any file-level backup tool between runs (or under the same lock your other maintenance tooling uses for a live backup).</p>

@@ -1386,14 +1386,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../backbuild-synthesis/" class="md-nav__link">
+      <a href="../migrations/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Backbuild Synthesis
+    Migrations
   
 
     
@@ -3567,7 +3567,7 @@ multiset-equivalence oracle as the DuckDB leg. What is <strong>not</strong> cove
 <tbody>
 <tr>
 <td><code>Additive</code>-combiner keyed/composed folds (e.g. <code>SUM</code> across a keyed or composed cumulative fold)</td>
-<td>No Spark ledger dialect yet for the never-fold-twice reconciliation ledger; the runtime fails loud rather than silently mishandling it</td>
+<td>No Spark ledger dialect yet for the never-fold-twice reconciliation ledger; the cell takes a recorded, explain-visible downgrade (<code>MaintenanceStateDowngraded</code>) to its recompute-family equivalent rather than failing loud</td>
 </tr>
 <tr>
 <td>Feed-declared source recompute, replayed against a change-log oracle (admission is covered)</td>
