@@ -75,7 +75,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 |---|-------|--------|
 | 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | done |
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | done |
-| 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | pending |
+| 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | planned |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | pending |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
@@ -106,5 +106,13 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   now name the coarsened/covering pair. The window-vs-`g_part`-grid residue (monthly `g_run`
   over weekly `g_part`) is now caught, not just `g_run < g_part`. Spec bullet deleted;
   `partition_residue_probes.rs` ratchet 3 → 2.
+
+- 2026-09-05 — Phase 3 planned with no table reshape (phase 2 surfaced no residue). Two
+  planning calls recorded: (a) the derived sub-route is consulted *before* route 2's
+  extremal-fold refusal, because a `MAX`/`MIN` over a `unique_key` column is the key itself —
+  the same argument commit `293eb5ce` used for `classify_once_write`'s candidate loop — while an
+  extremal fold over a non-key column stays refused and remains route 3's shape; (b) the derived
+  proof is a CST-based leaf classifier over the model's own select list (no raw-text scan), so
+  the property-composition-walk gate stays green without an exception entry.
 
 ## Blocked
