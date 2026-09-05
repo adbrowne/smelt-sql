@@ -1,7 +1,7 @@
 # Outcome: Dialect emission vocabulary — templates and operand-conditional verdicts
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/specs/multi_backend.md` §"Template emission", §"Operand-conditional verdicts" (spec commit `03828a14`); GitHub issues #173, #174, #177, #178, #179, #181
 **Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Emission is scoped to call position", §"Template emission", §"Operand-conditional verdicts", §"Cross-engine emission audit", §Constraints ("Template interpretation is generic", "Operand-conditional verdicts are settled on the compile path"); `docs/specs/architecture.md` §Constraints item 14
 
@@ -72,7 +72,7 @@ audit before it is claimed — never from documentation.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | pending |
+| 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | planned |
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | pending |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | pending |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb` | pending |
@@ -93,6 +93,13 @@ audit before it is claimed — never from documentation.
   pg_query grammar anchor is a different thing and stays. When a PostgreSQL backend is built, the
   audit derives its column from probes; nothing authored today would survive that anyway.
   Recorded as the recommendation the user asked for; reverse by deleting phase 1 and criterion 8.
+
+- 2026-09-06 — **Phase 1 scope note (no reshape).** Planning found two string-keyed
+  PostgreSQL paths beyond the emission enums: `backend_dialect_for` /
+  `backend_write_capabilities_for` in `smelt-db/src/queries/maintenance.rs`, and the `"postgres"`
+  branch of `smelt-logical`'s `as_struct` lowering. Both are unreachable surface —
+  `Target::backend_type` already rejects `type: postgres` — so removing them is not a user-visible
+  behaviour change, and they are folded into phase 1 rather than becoming a phase of their own.
 
 ## Blocked
 
