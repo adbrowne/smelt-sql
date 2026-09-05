@@ -53,7 +53,7 @@ than the current residue.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
-| 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | planned |
+| 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
@@ -77,6 +77,15 @@ than the current residue.
   restatement is the spec's own two obligations — strict equality over the processed set plus a
   lag bound on `L \ S` — which additionally requires `STracker` to split *landed* from
   *processed* (the current fixture records a run for a window the deferred model never folded).
+
+- 2026-09-05: Phase 2 implemented and closed — `OracleObligation::Bracketed`
+  replaced by `ExactOverProcessedSWithLagBound` (strict equality over `S` plus
+  `deferral::settled_lag_bound` over landed-but-unprocessed event times);
+  `STracker` gained `record_landing`/`landed_at`/`landed_not_processed`; the
+  conformance fixture's run B is now recorded as a landing, not a run
+  (deferred_model never folded that window); a new metamorphic test proves
+  the restated comparator rejects a maintained state the superseded bracket
+  admitted. See `phases/02-summary.md`.
 
 ## Blocked
 

@@ -73,6 +73,47 @@ pub fn within_deferral(lag: DeferralLag, d: i64) -> bool {
     lag.lag <= d
 }
 
+/// A violation of the restated landed-vs-processed obligation
+/// (`incremental_models.md` §"The contract lattice", Deferral): a landed,
+/// unprocessed event time falls strictly before the settled cutoff — data
+/// old enough that `D` no longer licenses withholding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LagBoundViolation {
+    pub earliest_offending_event_time: i64,
+    pub cutoff: i64,
+    pub d: i64,
+}
+
+/// The restated deferral obligation's lag-bound leg
+/// (`incremental_models.md` §"The contract lattice"): every event time in
+/// `unprocessed_event_times` (rows that have landed — are visible in the
+/// source — but this cell has not yet folded) must be at or after
+/// [`settled_cutoff`]`(input_frontier, d)`. An event time strictly before the
+/// cutoff has aged past what `D` licenses withholding, disproving the
+/// oracle; this replaces the superseded bracket
+/// (`full_refresh(S_settled) ⊆ maintained ⊆ full_refresh(S)`), which held
+/// vacuously whenever the cutoff preceded all recorded event time. Reuses
+/// [`settled_cutoff`] — no second formula for the boundary.
+pub fn settled_lag_bound(
+    unprocessed_event_times: &[i64],
+    input_frontier: i64,
+    d: i64,
+) -> Result<(), LagBoundViolation> {
+    let cutoff = settled_cutoff(input_frontier, d);
+    if let Some(&earliest) = unprocessed_event_times
+        .iter()
+        .filter(|&&t| t < cutoff)
+        .min()
+    {
+        return Err(LagBoundViolation {
+            earliest_offending_event_time: earliest,
+            cutoff,
+            d,
+        });
+    }
+    Ok(())
+}
+
 /// A genuine deferral-exceeded violation: `cell`'s measured lag exceeds its
 /// declared `d`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,6 +405,29 @@ mod tests {
     #[test]
     fn deferral_violations_holds_within_the_window() {
         assert_eq!(deferral_violations("cell", Some(100), Some(106), 6), None);
+    }
+
+    #[test]
+    fn settled_landed_input_must_be_processed() {
+        // cutoff = settled_cutoff(110, 6) = 104. An unprocessed landed event
+        // time of 100 is strictly before the cutoff — the offender.
+        let violation = settled_lag_bound(&[106, 100, 108], 110, 6).unwrap_err();
+        assert_eq!(
+            violation,
+            LagBoundViolation {
+                earliest_offending_event_time: 100,
+                cutoff: 104,
+                d: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn unsettled_landed_input_is_admitted() {
+        // Every unprocessed event time is at or after the cutoff (104).
+        assert!(settled_lag_bound(&[104, 106, 109], 110, 6).is_ok());
+        // An empty unprocessed set is trivially admitted.
+        assert!(settled_lag_bound(&[], 110, 6).is_ok());
     }
 
     #[test]

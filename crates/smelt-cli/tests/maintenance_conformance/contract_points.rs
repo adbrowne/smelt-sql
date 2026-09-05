@@ -15,6 +15,7 @@ use proptest::test_runner::TestRunner;
 
 use smelt_logical::contract::ContractPoint;
 use smelt_maintenance_testkit::link_c_harness::base_request;
+use smelt_maintenance_testkit::oracle::except_all_row_count_via_backend;
 use smelt_maintenance_testkit::recipe::{
     arb_recipe, ConstructKind, ContractDecl, ModelRecipe, RecipePool,
 };
@@ -187,17 +188,23 @@ fn frozen_horizon_recipe_upholds_relaxed_oracle_and_not_the_default() {
     );
 }
 
-/// `deferral_recipe_upholds_bracketed_oracle_with_a_skipped_run` (phase 6
-/// TDD list, test 8): a two-model fixture (mirrors
+/// `deferral_recipe_upholds_restated_oracle_with_a_skipped_run`
+/// (`docs/outcomes/20260904-decided-gap-residue/phases/02-plan.md` test
+/// list; supersedes phase-6's `deferral_recipe_upholds_bracketed_oracle_with_a_skipped_run`):
+/// a two-model fixture (mirrors
 /// `crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs`'s own shape)
 /// opens a lag between a `contract.deferral`-declared model's own maintained
 /// frontier and the shared source's landed-delta frontier by advancing the
-/// latter through an undeclared sibling model alone. The declared model is
-/// then licensed to skip, and the bracketed oracle
-/// (`full_refresh(S_settled) ⊆ maintained ⊆ full_refresh(S)`) must hold
-/// throughout.
+/// latter through an undeclared sibling model alone. Run B and the licensed
+/// skip in run C are recorded as *landings* — `deferred_model` never folds
+/// either window, so the tracker's processed set `S` must not be inflated
+/// past what `deferred_model` actually processed (the bug the superseded
+/// bracket comparator masked). The restated oracle
+/// (`ExactOverProcessedSWithLagBound`: strict equality over `S` plus
+/// `deferral::settled_lag_bound` over what has landed but not been
+/// processed) must hold throughout.
 #[test]
-fn deferral_recipe_upholds_bracketed_oracle_with_a_skipped_run() {
+fn deferral_recipe_upholds_restated_oracle_with_a_skipped_run() {
     let mut recipe = pinned_additive_agg_recipe();
     recipe.model_name = "deferred_model".to_string();
     let d_days = 2;
@@ -269,25 +276,26 @@ fn deferral_recipe_upholds_bracketed_oracle_with_a_skipped_run() {
     request.end = Some(day(3).format("%Y-%m-%d").to_string());
     rt.block_on(project.run_quiet("run-b", request))
         .expect("run B must succeed");
-    // Recorded against the tracker regardless of which model executed it —
-    // the tracker tracks what became visible in the SOURCE over this
-    // window, which is what the oracle's `S` needs, not which model wrote
-    // it (`deferred_model` deliberately did not).
-    let k1 = tracker.record_run(
-        day(1),
-        day(3),
-        vec![row0.clone(), row1.clone(), row2.clone()],
-    );
+    // Recorded as a LANDING, not a run — `deferred_model` never folds this
+    // window (only `upstream_advancer` ran it), so recording it via
+    // `record_run` would inflate the tracker's processed set `S` past what
+    // `deferred_model` actually processed (the bug the superseded bracket
+    // comparator masked, since its lower leg held vacuously). `row1`/`row2`
+    // are simply visible in the source now — landed, not processed.
+    tracker.record_landing(vec![row1.clone(), row2.clone()]);
     let input_frontier_after_b = days_from_ce(day(3));
     rt.block_on(assert_equivalence_at_point_with_frontier(
         &project,
         &recipe,
         &tracker,
-        k1,
+        k0,
         &point,
         Some(input_frontier_after_b),
     ))
-    .expect("bracket must hold after run B — the pending days are beyond the settled cutoff");
+    .expect(
+        "restated oracle must hold after run B — the landed-but-unprocessed rows (row1, row2) \
+         are at/after the settled cutoff",
+    );
 
     // Run C: `deferred_model` is selected over [day3, day4) — the measured
     // lag (input frontier day3 minus maintained frontier day1 = 2 days) is
@@ -312,16 +320,117 @@ fn deferral_recipe_upholds_bracketed_oracle_with_a_skipped_run() {
     assert_eq!(record.outcome, RunOutcomeKind::Skipped);
     assert_eq!(record.row_count, 0);
 
-    // The skip advances neither the tracker (no new window was folded) nor
-    // the source's landed-delta frontier (upstream_advancer was not
-    // selected this run) — the bracket must still hold, unchanged.
+    // The skip advances neither the tracker (no new window was folded, and
+    // nothing new landed either) nor the source's landed-delta frontier
+    // (upstream_advancer was not selected this run) — the restated oracle
+    // must still hold, unchanged.
     rt.block_on(assert_equivalence_at_point_with_frontier(
         &project,
         &recipe,
         &tracker,
-        k1,
+        k0,
         &point,
         Some(input_frontier_after_b),
     ))
-    .expect("bracket must hold after the licensed skip");
+    .expect("restated oracle must hold after the licensed skip");
+}
+
+/// `deferral_comparator_rejects_a_state_the_bracket_admitted`
+/// (`docs/outcomes/20260904-decided-gap-residue/phases/02-plan.md` test
+/// list): METAMORPHIC — proves the restated comparator is no longer
+/// vacuous. After run A, every row is deleted from `main.deferred_model`
+/// (a deliberately wrong incremental state: the model silently forgot what
+/// it had already folded). Both legs of the SUPERSEDED bracket still hold
+/// inline (`maintained EXCEPT ALL full_refresh(S)` is 0 rows — trivially,
+/// since `maintained` is now empty — and `s_at_settled(...)` is empty
+/// because the settled cutoff precedes all recorded event time, so that leg
+/// was vacuous too), yet `assert_equivalence_at_point_with_frontier` must
+/// return `Err` under the restated `ExactOverProcessedSWithLagBound`
+/// comparator, which checks strict equality over `S` rather than a bracket
+/// with a vacuous lower leg.
+#[test]
+fn deferral_comparator_rejects_a_state_the_bracket_admitted() {
+    let mut recipe = pinned_additive_agg_recipe();
+    recipe.model_name = "deferred_model".to_string();
+    let d_days = 2;
+    recipe.contract = Some(ContractDecl::Deferral { days: d_days });
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut tracker = STracker::new(&recipe.source);
+    let point = ContractPoint::Deferral { d: d_days };
+
+    // Run A: establishes the model's own maintained frontier at day 1.
+    let row0 = GenRow {
+        d: day(0),
+        id: 1,
+        val: Some(10),
+    };
+    rt.block_on(insert_row(&project, &recipe, &row0))
+        .expect("insert row0");
+    let mut request = base_request("dev");
+    request.start = Some(day(0).format("%Y-%m-%d").to_string());
+    request.end = Some(day(1).format("%Y-%m-%d").to_string());
+    rt.block_on(project.run_quiet("run-a", request))
+        .expect("run A must succeed");
+    let k0 = tracker.record_run(day(0), day(1), vec![row0.clone()]);
+    let input_frontier = days_from_ce(day(1));
+
+    // Deliberately corrupt the maintained state: delete everything, as if
+    // the model forgot what it had already folded.
+    let backend = rt.block_on(project.backend()).expect("backend");
+    rt.block_on(smelt_backend::Backend::execute_sql(
+        backend.as_ref(),
+        &format!("DELETE FROM main.{}", recipe.model_name),
+    ))
+    .expect("delete every row from the maintained table");
+
+    // The SUPERSEDED bracket's leg 1 (`maintained EXCEPT ALL full_refresh(S)`)
+    // holds trivially — `maintained` is empty, so it cannot have rows the
+    // oracle lacks.
+    rt.block_on(tracker.materialize_s_for_point(backend.as_ref(), k0, &point))
+        .expect("materialize S");
+    let full_oracle_sql = tracker.s_restricted_oracle_sql(&recipe);
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let maintained_minus_full = rt
+        .block_on(except_all_row_count_via_backend(
+            backend.as_ref(),
+            &maintained_sql,
+            &full_oracle_sql,
+        ))
+        .expect("except all count");
+    assert_eq!(
+        maintained_minus_full, 0,
+        "the superseded bracket's leg 1 must hold vacuously against an empty maintained table"
+    );
+
+    // The SUPERSEDED bracket's leg 2 (`full_refresh(S_settled)`) is empty —
+    // the settled cutoff (day1 - 2 = day(-1)) precedes all recorded event
+    // time (day0), so there is nothing to require, i.e. this leg was
+    // vacuous too.
+    let settled = tracker.s_at_settled(k0, &point, input_frontier);
+    assert!(
+        settled.is_empty(),
+        "the superseded bracket's leg 2 must be vacuous here — the settled cutoff precedes \
+         all recorded event time, got: {settled:?}"
+    );
+
+    // The RESTATED comparator must catch what the bracket missed: strict
+    // equality over S fails, since row0 is in the oracle but not in the
+    // (now-empty) maintained table.
+    let result = rt.block_on(assert_equivalence_at_point_with_frontier(
+        &project,
+        &recipe,
+        &tracker,
+        k0,
+        &point,
+        Some(input_frontier),
+    ));
+    assert!(
+        result.is_err(),
+        "the restated comparator must reject a maintained state the superseded bracket \
+         admitted, but it returned Ok"
+    );
 }

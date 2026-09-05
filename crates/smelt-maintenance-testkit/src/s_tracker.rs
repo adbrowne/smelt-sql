@@ -48,6 +48,10 @@ pub struct STracker {
     source: SourceRecipe,
     runs: Vec<RunRecord>,
     outstanding_mutated_windows: HashSet<(NaiveDate, NaiveDate)>,
+    /// Rows recorded as visible-in-the-source without any model having
+    /// folded them (`docs/outcomes/20260904-decided-gap-residue/phases/02-plan.md`
+    /// task 3) — see [`Self::record_landing`].
+    landings: Vec<Vec<GenRow>>,
 }
 
 impl STracker {
@@ -56,6 +60,7 @@ impl STracker {
             source: source.clone(),
             runs: Vec::new(),
             outstanding_mutated_windows: HashSet::new(),
+            landings: Vec::new(),
         }
     }
 
@@ -118,6 +123,47 @@ impl STracker {
         self.s_at_for_point(k, &ContractPoint::Default)
     }
 
+    /// Record rows that became visible in the source without any model
+    /// folding them this cycle (`incremental_models.md` §"The contract
+    /// lattice", Deferral restatement): a plain landing, distinct from
+    /// [`Self::record_run`] (which folds a window). Landings accumulate in
+    /// their own list and never take a run index — [`Self::s_at`]/
+    /// [`Self::record_run`]'s existing semantics are untouched by this.
+    pub fn record_landing(&mut self, snapshot: Vec<GenRow>) {
+        self.landings.push(snapshot);
+    }
+
+    /// `L`: every row known to have landed as of run `k` — the union of
+    /// every recorded landing (landings carry no run index, so all of them
+    /// count) and every run's own snapshot up to and including `k` (a run's
+    /// snapshot is itself proof those rows were visible in the source when
+    /// it executed, regardless of whether the run's own window covered
+    /// them). See [`Self::landed_not_processed`] for `L \ S_k`.
+    pub fn landed_at(&self, k: usize) -> Vec<GenRow> {
+        let mut seen: HashSet<GenRow> = HashSet::new();
+        for landing in &self.landings {
+            seen.extend(landing.iter().cloned());
+        }
+        for run in self.runs.iter().take(k + 1) {
+            seen.extend(run.snapshot.iter().cloned());
+        }
+        let mut rows: Vec<GenRow> = seen.into_iter().collect();
+        rows.sort_by_key(|a| (a.d, a.id));
+        rows
+    }
+
+    /// `L \ S_k` — landed rows this model has not yet processed as of run
+    /// `k`. This is the restated deferral obligation's lag-bound leg's
+    /// input (`deferral::settled_lag_bound`): every event time here must be
+    /// at or after the settled cutoff.
+    pub fn landed_not_processed(&self, k: usize) -> Vec<GenRow> {
+        let processed: HashSet<GenRow> = self.s_at(k).into_iter().collect();
+        self.landed_at(k)
+            .into_iter()
+            .filter(|row| !processed.contains(row))
+            .collect()
+    }
+
     /// `S_k` generalised over a contract-lattice `point`
     /// (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`):
     /// identical to [`Self::s_at`] except each recorded run's own
@@ -154,9 +200,17 @@ impl STracker {
 
     /// [`Self::s_at_for_point`] further restricted to rows strictly before
     /// `point`'s settled cutoff (`smelt_logical::contract::settled_cutoff`) —
-    /// the deferral bracket's lower leg: `full_refresh(S_settled)`. Returns
-    /// `s_at_for_point(k, point)` unchanged when `point` has no settled
-    /// cutoff (every non-`Deferral` point).
+    /// the SUPERSEDED deferral bracket's lower leg: `full_refresh(S_settled)`
+    /// (`full_refresh(S_settled) ⊆ maintained ⊆ full_refresh(S)`). The gate
+    /// no longer asserts this bracket (`gate.rs`'s
+    /// `ExactOverProcessedSWithLagBound` arm asserts strict equality over `S`
+    /// plus `deferral::settled_lag_bound` instead) — it held vacuously
+    /// whenever the settled cutoff preceded all recorded event time. Retained
+    /// only as the vacuity witness the restated comparator's metamorphic test
+    /// demonstrates against
+    /// (`docs/outcomes/20260904-decided-gap-residue/phases/02-plan.md`).
+    /// Returns `s_at_for_point(k, point)` unchanged when `point` has no
+    /// settled cutoff (every non-`Deferral` point).
     pub fn s_at_settled(
         &self,
         k: usize,
@@ -586,6 +640,77 @@ mod tests {
             !restricted.contains(&a) && !restricted.contains(&late),
             "a frozen partition's rows must be dropped by \
              s_at_for_point(FrozenHorizon), got {restricted:?}"
+        );
+    }
+
+    /// `record_landing_does_not_advance_the_processed_set`
+    /// (`docs/outcomes/20260904-decided-gap-residue/phases/02-plan.md`
+    /// task 3): a landing leaves `s_at(k)` unchanged — only `record_run`
+    /// advances the processed set.
+    #[test]
+    fn record_landing_does_not_advance_the_processed_set() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+        let w1 = (date(2024, 1, 1), date(2024, 1, 2));
+        let a = GenRow {
+            d: w1.0,
+            id: 1,
+            val: Some(10),
+        };
+        let k0 = tracker.record_run(w1.0, w1.1, vec![a.clone()]);
+        let before = sorted(tracker.s_at(k0));
+
+        let landed_only = GenRow {
+            d: date(2024, 1, 5),
+            id: 2,
+            val: Some(20),
+        };
+        tracker.record_landing(vec![landed_only]);
+
+        assert_eq!(
+            sorted(tracker.s_at(k0)),
+            before,
+            "a landing must not advance the processed set S"
+        );
+    }
+
+    /// `landed_at_includes_rows_no_run_window_covered`
+    /// (`docs/outcomes/20260904-decided-gap-residue/phases/02-plan.md`
+    /// task 3): `L` contains landing-only rows AND every run snapshot's
+    /// rows; `landed_not_processed(k)` is exactly `L \ s_at(k)`.
+    #[test]
+    fn landed_at_includes_rows_no_run_window_covered() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+        let w1 = (date(2024, 1, 1), date(2024, 1, 2));
+
+        // Processed: covered by the run's own window and snapshot.
+        let processed = GenRow {
+            d: w1.0,
+            id: 1,
+            val: Some(10),
+        };
+        let k0 = tracker.record_run(w1.0, w1.1, vec![processed.clone()]);
+
+        // Landed but never folded by any run's own window.
+        let landed_only = GenRow {
+            d: date(2024, 1, 5),
+            id: 2,
+            val: Some(20),
+        };
+        tracker.record_landing(vec![landed_only.clone()]);
+
+        let l = sorted(tracker.landed_at(k0));
+        assert_eq!(
+            l,
+            sorted(vec![processed.clone(), landed_only.clone()]),
+            "L must contain both the landing-only row and every run snapshot's rows"
+        );
+
+        assert_eq!(
+            sorted(tracker.landed_not_processed(k0)),
+            vec![landed_only],
+            "landed_not_processed(k) must be exactly L \\ s_at(k)"
         );
     }
 

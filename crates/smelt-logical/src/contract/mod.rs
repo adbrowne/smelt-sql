@@ -284,17 +284,23 @@ pub enum ContractPoint {
 /// maintained output (`docs/specs/incremental_models.md` §"The contract
 /// lattice"): the default point and `frozen_horizon` both compare against a
 /// single restricted `S` in both directions ([`restrict_run_window`] is the
-/// identity for the default point); `deferral` compares against a bracket of
-/// two `S`s instead, one direction each.
+/// identity for the default point); `deferral` restates to strict equality
+/// over the processed set `S` PLUS a lag bound over what has landed but not
+/// yet been processed (`deferral::settled_lag_bound`) — the spec's own two
+/// obligations, not the superseded bracket
+/// (`full_refresh(S_settled) ⊆ maintained ⊆ full_refresh(S)`), which held
+/// vacuously whenever the settled cutoff preceded all recorded event time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OracleObligation {
     /// Both-directions equal to the default point's own (unrestricted) `S`.
     Exact,
     /// Both-directions equal to `S` restricted via [`restrict_run_window`].
     ExactOverRestrictedS,
-    /// `full_refresh(S_settled) ⊆ maintained ⊆ full_refresh(S)` — one
-    /// `EXCEPT ALL` direction per leg.
-    Bracketed,
+    /// Both-directions equal to `S` (identical to [`OracleObligation::Exact`]
+    /// on the equality leg — `deferral` does not restrict the run window),
+    /// PLUS every landed-but-unprocessed event time must be at or after the
+    /// settled cutoff (`deferral::settled_lag_bound`).
+    ExactOverProcessedSWithLagBound,
 }
 
 /// The oracle obligation [`point`] licenses. Pure dispatch, no I/O.
@@ -302,7 +308,7 @@ pub fn oracle_obligation(point: &ContractPoint) -> OracleObligation {
     match point {
         ContractPoint::Default => OracleObligation::Exact,
         ContractPoint::FrozenHorizon { .. } => OracleObligation::ExactOverRestrictedS,
-        ContractPoint::Deferral { .. } => OracleObligation::Bracketed,
+        ContractPoint::Deferral { .. } => OracleObligation::ExactOverProcessedSWithLagBound,
     }
 }
 
@@ -322,11 +328,15 @@ pub fn restrict_run_window(point: &ContractPoint, start: i64, end: i64) -> (i64,
     }
 }
 
-/// The settled cutoff `deferral` licenses being asserted exactly: event time
-/// strictly before this point must be fully reflected by the maintained
-/// state (`docs/outcomes/20260809-contract-lattice-v1/outcome.md`'s
-/// 2026-08-10 "asserted as a bracket" decision). `None` for every
-/// non-deferral point — there is nothing to settle.
+/// The settled cutoff below which `deferral::settled_lag_bound` demands every
+/// landed event time be processed (`incremental_models.md` §"The contract
+/// lattice"). Also retained as the superseded bracket's lower-leg boundary
+/// (`s_at_settled` in `smelt-maintenance-testkit`) purely as the vacuity
+/// witness the 2026-09-05 restatement acts on
+/// (`docs/outcomes/20260809-contract-lattice-v1/outcome.md`'s 2026-08-10
+/// "asserted as a bracket" decision is superseded —
+/// `docs/outcomes/20260904-decided-gap-residue/phases/02-plan.md`). `None`
+/// for every non-deferral point — there is nothing to settle.
 pub fn settled_cutoff(point: &ContractPoint, input_frontier: i64) -> Option<i64> {
     match point {
         ContractPoint::Deferral { d } => Some(deferral::settled_cutoff(input_frontier, *d)),
@@ -406,9 +416,13 @@ mod point_tests {
     }
 
     #[test]
-    fn deferral_point_is_bracketed_and_does_not_restrict_the_window() {
+    fn deferral_obligation_is_exact_over_processed_s_with_lag_bound() {
         let point = ContractPoint::Deferral { d: 6 };
-        assert_eq!(oracle_obligation(&point), OracleObligation::Bracketed);
+        assert_eq!(
+            oracle_obligation(&point),
+            OracleObligation::ExactOverProcessedSWithLagBound
+        );
+        // The equality leg does not restrict the run window either.
         assert_eq!(restrict_run_window(&point, 100, 400), (100, 400));
         assert_eq!(
             settled_cutoff(&point, 110),
