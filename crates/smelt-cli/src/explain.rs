@@ -1567,7 +1567,7 @@ pub fn build_maintenance_plan_json(
                 group: verdict.group.clone(),
                 trigger: verdict.trigger.clone(),
                 corner: verdict.corner.clone(),
-                technique: verdict.technique.clone(),
+                technique: format!("{:?}", verdict.technique),
                 row_identity: format!("{:?}", verdict.row_identity.identity),
                 row_identity_proven_mismatch: verdict.row_identity.proven_mismatch.clone(),
                 no_statements_reason,

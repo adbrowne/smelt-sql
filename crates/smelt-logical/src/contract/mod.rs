@@ -179,8 +179,18 @@ pub fn effective_contract(
 pub struct ContractPointView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frozen_horizon: Option<String>,
+    /// `frozen_horizon`'s interval in seconds — machine-comparable so a
+    /// `contract_point` diff can decide "widened" from the value rather than
+    /// re-parsing [`Self::frozen_horizon`]'s display string
+    /// (`docs/specs/property_diff.md` §"The property profile" item 2; the
+    /// re-parsing-our-own-output bug class, `CLAUDE.md`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen_horizon_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deferral: Option<String>,
+    /// `deferral`'s interval in seconds — see [`Self::frozen_horizon_seconds`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferral_seconds: Option<u64>,
     /// `"model"` or `"cell"` — which declaration `deferral` came from.
     /// Omitted along with `deferral` when no deferral applies.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,23 +216,29 @@ impl ContractPointView {
 
 impl From<EffectiveContract> for ContractPointView {
     fn from(effective: EffectiveContract) -> Self {
-        let (deferral, deferral_origin) = match effective.deferral {
+        let (deferral, deferral_seconds, deferral_origin) = match effective.deferral {
             Some(d) => {
                 let origin = match d.origin {
                     DeferralOrigin::Model => "model",
                     DeferralOrigin::Cell => "cell",
                 };
-                (Some(d.window.display), Some(origin.to_string()))
+                (
+                    Some(d.window.display),
+                    Some(d.window.seconds),
+                    Some(origin.to_string()),
+                )
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         let retain_departed = effective.retain_departed.map(|r| match r {
             RetainDeparted::Bool(_) => "true".to_string(),
             RetainDeparted::Tombstone { tombstone } => format!("tombstone: {tombstone}"),
         });
         ContractPointView {
+            frozen_horizon_seconds: effective.frozen_horizon.as_ref().map(|h| h.seconds),
             frozen_horizon: effective.frozen_horizon.map(|h| h.display),
             deferral,
+            deferral_seconds,
             deferral_origin,
             retain_departed,
         }

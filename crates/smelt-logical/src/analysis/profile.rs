@@ -28,7 +28,7 @@ use crate::analysis::walk::{
 };
 use crate::contract::ContractPointView;
 use crate::maintenance::derive::row_identity;
-use crate::maintenance::{refusal_code, PlanCell, Refusal, RowIdentityVerdict};
+use crate::maintenance::{refusal_code, PlanCell, Refusal, RowIdentityVerdict, Technique};
 
 /// Errors the property-profile derivation can surface. Fail-loud
 /// (`CLAUDE.md` §"Fail-loud discipline"): a model whose SQL cannot be
@@ -60,7 +60,7 @@ pub enum ProfileError {
 /// per-model call; extending it to the remaining catalogue rows needs new
 /// plumbing to locate their inputs (e.g. the event-time expression's AST
 /// node) and is left to a follow-up phase rather than invented here.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PropertySet {
     /// Output columns of the model, in projection order.
     pub columns: Vec<String>,
@@ -150,9 +150,14 @@ pub struct CellVerdict {
     pub trigger: String,
     /// `{:?}`-rendered `smelt_logical::maintenance::Corner`.
     pub corner: String,
-    /// `{:?}`-rendered `smelt_logical::maintenance::Technique` — the
-    /// technique the derived plan actually admitted for this cell.
-    pub technique: String,
+    /// The technique the derived plan actually admitted for this cell.
+    /// Compared as the enum, not its rendered string, so a diff never
+    /// re-parses the report's own output
+    /// (`docs/outcomes/20260905-property-diff/phases/03-plan.md` "Ladder:
+    /// enum, not string"); `Technique` is `Serialize` over unit variants, so
+    /// its serde name is byte-identical to the `{:?}` string this field used
+    /// to store, keeping `property_profile_parity` green.
+    pub technique: Technique,
     /// The cell's own region row identity (P2, `model_properties.md`
     /// §"Region row identity").
     pub row_identity: RowIdentityVerdict,
@@ -174,7 +179,7 @@ pub fn render_cell_verdict(cell: &PlanCell, contract_point: ContractPointView) -
         group: cell.group.clone(),
         trigger: format!("{:?}", cell.trigger),
         corner: format!("{:?}", cell.corner),
-        technique: format!("{:?}", cell.technique),
+        technique: cell.technique,
         row_identity: cell.row_identity.clone(),
         contract_point,
     }
@@ -247,7 +252,7 @@ pub struct ProbePlanEntry {
 /// (`docs/specs/property_diff.md` §Constraints item 1). Deliberately carries
 /// **no model name** — a diff keys a `BTreeMap<String, PropertyProfile>` by
 /// name at the caller.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PropertyProfile {
     pub properties: PropertySet,
     pub cell_verdicts: Vec<CellVerdict>,
@@ -388,7 +393,7 @@ mod tests {
         assert_eq!(profile.cell_verdicts.len(), 1);
         let verdict = &profile.cell_verdicts[0];
         assert_eq!(verdict.group, "{amount}");
-        assert_eq!(verdict.technique, "KeyedFold");
+        assert_eq!(verdict.technique, Technique::KeyedFold);
         assert!(verdict.contract_point.is_default());
 
         assert_eq!(profile.refusals.len(), 1);
