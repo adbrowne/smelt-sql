@@ -4590,17 +4590,19 @@ next run addresses the table under the new column and records a fresh snapshot.<
 <p>A <code>grain: partition</code> model that joins a fact source to a dimension table (a <code>smelt.ref()</code>/<code>smelt.sources.*</code> with no <code>timeseries:</code> block) is enrichment: every fact row carries a copy of whatever the dimension held at compute time. When a dimension row changes later — a user renamed, a product recategorized — the fact rows that joined against it are stale until that partition is recomputed.</p>
 <p>smelt derives a <strong>maintenance plan</strong> for every <code>refresh: incremental</code> model: a matrix of what to do for each group of output columns under each kind of change. For an enrichment join, the columns that came from the dimension form their own group, distinct from the columns that came from the fact table — because a dimension update only ever needs to touch the dimension-derived columns, never the fact-derived ones. Run <code>smelt explain &lt;model&gt;</code> to see the derived plan:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>$ smelt explain daily_events_enriched
-<a id="__codelineno-40-2" name="__codelineno-40-2" href="#__codelineno-40-2"></a>Maintenance plan: daily_events_enriched
+<a id="__codelineno-40-2" name="__codelineno-40-2" href="#__codelineno-40-2"></a>model daily_events_enriched  (emits: general (degraded by: join proven OneToMany (row-multiplying) degrades output-delta shape to General), not delta-addressable; grain: partition)
 <a id="__codelineno-40-3" name="__codelineno-40-3" href="#__codelineno-40-3"></a>
-<a id="__codelineno-40-4" name="__codelineno-40-4" href="#__codelineno-40-4"></a>Cells (4):
-<a id="__codelineno-40-5" name="__codelineno-40-5" href="#__codelineno-40-5"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
-<a id="__codelineno-40-6" name="__codelineno-40-6" href="#__codelineno-40-6"></a>      corner:    RecomputeRegion
-<a id="__codelineno-40-7" name="__codelineno-40-7" href="#__codelineno-40-7"></a>      technique: DeleteInsert
-<a id="__codelineno-40-8" name="__codelineno-40-8" href="#__codelineno-40-8"></a>      ...
-<a id="__codelineno-40-9" name="__codelineno-40-9" href="#__codelineno-40-9"></a>  - group {user_name} on trigger UpstreamMutation { source: &quot;raw.users&quot; }
-<a id="__codelineno-40-10" name="__codelineno-40-10" href="#__codelineno-40-10"></a>      corner:    RecomputeRegion
-<a id="__codelineno-40-11" name="__codelineno-40-11" href="#__codelineno-40-11"></a>      technique: DeleteInsert
-<a id="__codelineno-40-12" name="__codelineno-40-12" href="#__codelineno-40-12"></a>      ...
+<a id="__codelineno-40-4" name="__codelineno-40-4" href="#__codelineno-40-4"></a>Maintenance plan: daily_events_enriched
+<a id="__codelineno-40-5" name="__codelineno-40-5" href="#__codelineno-40-5"></a>
+<a id="__codelineno-40-6" name="__codelineno-40-6" href="#__codelineno-40-6"></a>Cells (5):
+<a id="__codelineno-40-7" name="__codelineno-40-7" href="#__codelineno-40-7"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
+<a id="__codelineno-40-8" name="__codelineno-40-8" href="#__codelineno-40-8"></a>      corner:    RecomputeRegion
+<a id="__codelineno-40-9" name="__codelineno-40-9" href="#__codelineno-40-9"></a>      technique: DeleteInsert
+<a id="__codelineno-40-10" name="__codelineno-40-10" href="#__codelineno-40-10"></a>      ...
+<a id="__codelineno-40-11" name="__codelineno-40-11" href="#__codelineno-40-11"></a>  - group {user_name} on trigger UpstreamMutation { source: &quot;raw.users&quot; }
+<a id="__codelineno-40-12" name="__codelineno-40-12" href="#__codelineno-40-12"></a>      corner:    RecomputeRegion
+<a id="__codelineno-40-13" name="__codelineno-40-13" href="#__codelineno-40-13"></a>      technique: DeleteInsert
+<a id="__codelineno-40-14" name="__codelineno-40-14" href="#__codelineno-40-14"></a>      ...
 </code></pre></div>
 <p>This model's plain inner <code>JOIN</code> is exactly the shape that <em>cannot</em> be proven row-preserving — its <code>ON</code> predicate makes row membership sensitive to the dimension, so no column group of the <code>SELECT</code> can be proven value-only — and the <code>{user_name}</code> cell falls back to the region <code>DELETE</code>+<code>INSERT</code> recompute rather than a <strong>column-scoped <code>MERGE</code></strong>. That targeted repair is only available when the join cannot change <em>which</em> fact rows exist: a <code>LEFT JOIN</code> against a dimension that declares its own <code>unique_key</code> proves this (the join can only ever change a value, never admit or drop a fact row), so only the dimension-derived column group repairs column-scoped while everything else the dimension's <code>ON</code> predicate might otherwise gate stays untouched. A plain (inner) <code>JOIN</code>, or a <code>LEFT JOIN</code> against a dimension with no declared <code>unique_key</code>, cannot be proven this way — every column group the join touches falls back to the region <code>DELETE</code>+<code>INSERT</code> recompute instead, since a row-admitting join can change which rows exist, not just their values. Declare the dimension's mutability explicitly on its source YAML so smelt derives a mutation cell at all instead of assuming worst-case immutability:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="c1"># models/sources/raw/users.yml</span>

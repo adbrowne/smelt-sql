@@ -5576,35 +5576,47 @@ dependencies, per-column determinism/comparability/discriminants, row identity, 
 <a id="__codelineno-53-27" name="__codelineno-53-27" href="#__codelineno-53-27"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--technique<span class="w"> </span>keyed_fold
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-54-1" name="__codelineno-54-1" href="#__codelineno-54-1"></a>$ smelt explain daily_events
-<a id="__codelineno-54-2" name="__codelineno-54-2" href="#__codelineno-54-2"></a>Maintenance plan: daily_events
+<a id="__codelineno-54-2" name="__codelineno-54-2" href="#__codelineno-54-2"></a>model daily_events  (emits: general (degraded by: expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call)), not delta-addressable; grain: partition)
 <a id="__codelineno-54-3" name="__codelineno-54-3" href="#__codelineno-54-3"></a>
-<a id="__codelineno-54-4" name="__codelineno-54-4" href="#__codelineno-54-4"></a>Cells (2):
-<a id="__codelineno-54-5" name="__codelineno-54-5" href="#__codelineno-54-5"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
-<a id="__codelineno-54-6" name="__codelineno-54-6" href="#__codelineno-54-6"></a>      corner:    RecomputeRegion
-<a id="__codelineno-54-7" name="__codelineno-54-7" href="#__codelineno-54-7"></a>      technique: DeleteInsert
-<a id="__codelineno-54-8" name="__codelineno-54-8" href="#__codelineno-54-8"></a>      ledger_catch_up: false
-<a id="__codelineno-54-9" name="__codelineno-54-9" href="#__codelineno-54-9"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
-<a id="__codelineno-54-10" name="__codelineno-54-10" href="#__codelineno-54-10"></a>      scan clamps: (none)
-<a id="__codelineno-54-11" name="__codelineno-54-11" href="#__codelineno-54-11"></a>  - group {*} on trigger Backfill
-<a id="__codelineno-54-12" name="__codelineno-54-12" href="#__codelineno-54-12"></a>      corner:    RecomputeRegion
-<a id="__codelineno-54-13" name="__codelineno-54-13" href="#__codelineno-54-13"></a>      technique: DeleteInsert
-<a id="__codelineno-54-14" name="__codelineno-54-14" href="#__codelineno-54-14"></a>      ledger_catch_up: false
-<a id="__codelineno-54-15" name="__codelineno-54-15" href="#__codelineno-54-15"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
-<a id="__codelineno-54-16" name="__codelineno-54-16" href="#__codelineno-54-16"></a>      scan clamps: (none)
-<a id="__codelineno-54-17" name="__codelineno-54-17" href="#__codelineno-54-17"></a>
-<a id="__codelineno-54-18" name="__codelineno-54-18" href="#__codelineno-54-18"></a>Refusals: (none)
-<a id="__codelineno-54-19" name="__codelineno-54-19" href="#__codelineno-54-19"></a>
-<a id="__codelineno-54-20" name="__codelineno-54-20" href="#__codelineno-54-20"></a>Relation contract:
-<a id="__codelineno-54-21" name="__codelineno-54-21" href="#__codelineno-54-21"></a>  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
-<a id="__codelineno-54-22" name="__codelineno-54-22" href="#__codelineno-54-22"></a>  identity: (none)
-<a id="__codelineno-54-23" name="__codelineno-54-23" href="#__codelineno-54-23"></a>  derived grain: partition
-<a id="__codelineno-54-24" name="__codelineno-54-24" href="#__codelineno-54-24"></a>
-<a id="__codelineno-54-25" name="__codelineno-54-25" href="#__codelineno-54-25"></a>Inbound edges: sources.raw.events
-<a id="__codelineno-54-26" name="__codelineno-54-26" href="#__codelineno-54-26"></a>  - sources.raw.events (source)
-<a id="__codelineno-54-27" name="__codelineno-54-27" href="#__codelineno-54-27"></a>      clock:    (none)
-<a id="__codelineno-54-28" name="__codelineno-54-28" href="#__codelineno-54-28"></a>      identity: event_id
-<a id="__codelineno-54-29" name="__codelineno-54-29" href="#__codelineno-54-29"></a>      derived grain: key
-<a id="__codelineno-54-30" name="__codelineno-54-30" href="#__codelineno-54-30"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
+<a id="__codelineno-54-4" name="__codelineno-54-4" href="#__codelineno-54-4"></a>Maintenance plan: daily_events
+<a id="__codelineno-54-5" name="__codelineno-54-5" href="#__codelineno-54-5"></a>
+<a id="__codelineno-54-6" name="__codelineno-54-6" href="#__codelineno-54-6"></a>Cells (2):
+<a id="__codelineno-54-7" name="__codelineno-54-7" href="#__codelineno-54-7"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
+<a id="__codelineno-54-8" name="__codelineno-54-8" href="#__codelineno-54-8"></a>      corner:    RecomputeRegion
+<a id="__codelineno-54-9" name="__codelineno-54-9" href="#__codelineno-54-9"></a>      technique: DeleteInsert
+<a id="__codelineno-54-10" name="__codelineno-54-10" href="#__codelineno-54-10"></a>      ledger_catch_up: false
+<a id="__codelineno-54-11" name="__codelineno-54-11" href="#__codelineno-54-11"></a>      contract:  default
+<a id="__codelineno-54-12" name="__codelineno-54-12" href="#__codelineno-54-12"></a>      region key: Key([&quot;event_date&quot;, &quot;user_id&quot;])
+<a id="__codelineno-54-13" name="__codelineno-54-13" href="#__codelineno-54-13"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+<a id="__codelineno-54-14" name="__codelineno-54-14" href="#__codelineno-54-14"></a>      scan clamps: (none)
+<a id="__codelineno-54-15" name="__codelineno-54-15" href="#__codelineno-54-15"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+<a id="__codelineno-54-16" name="__codelineno-54-16" href="#__codelineno-54-16"></a>      write pin: (none)
+<a id="__codelineno-54-17" name="__codelineno-54-17" href="#__codelineno-54-17"></a>  - group {*} on trigger Backfill
+<a id="__codelineno-54-18" name="__codelineno-54-18" href="#__codelineno-54-18"></a>      corner:    RecomputeRegion
+<a id="__codelineno-54-19" name="__codelineno-54-19" href="#__codelineno-54-19"></a>      technique: DeleteInsert
+<a id="__codelineno-54-20" name="__codelineno-54-20" href="#__codelineno-54-20"></a>      ledger_catch_up: false
+<a id="__codelineno-54-21" name="__codelineno-54-21" href="#__codelineno-54-21"></a>      contract:  default
+<a id="__codelineno-54-22" name="__codelineno-54-22" href="#__codelineno-54-22"></a>      region key: Key([&quot;event_date&quot;, &quot;user_id&quot;])
+<a id="__codelineno-54-23" name="__codelineno-54-23" href="#__codelineno-54-23"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+<a id="__codelineno-54-24" name="__codelineno-54-24" href="#__codelineno-54-24"></a>      scan clamps: (none)
+<a id="__codelineno-54-25" name="__codelineno-54-25" href="#__codelineno-54-25"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+<a id="__codelineno-54-26" name="__codelineno-54-26" href="#__codelineno-54-26"></a>      write pin: (none)
+<a id="__codelineno-54-27" name="__codelineno-54-27" href="#__codelineno-54-27"></a>
+<a id="__codelineno-54-28" name="__codelineno-54-28" href="#__codelineno-54-28"></a>Refusals: (none)
+<a id="__codelineno-54-29" name="__codelineno-54-29" href="#__codelineno-54-29"></a>
+<a id="__codelineno-54-30" name="__codelineno-54-30" href="#__codelineno-54-30"></a>Relation contract:
+<a id="__codelineno-54-31" name="__codelineno-54-31" href="#__codelineno-54-31"></a>  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
+<a id="__codelineno-54-32" name="__codelineno-54-32" href="#__codelineno-54-32"></a>  identity: (none)
+<a id="__codelineno-54-33" name="__codelineno-54-33" href="#__codelineno-54-33"></a>  derived grain: partition
+<a id="__codelineno-54-34" name="__codelineno-54-34" href="#__codelineno-54-34"></a>
+<a id="__codelineno-54-35" name="__codelineno-54-35" href="#__codelineno-54-35"></a>Inbound edges: sources.raw.events
+<a id="__codelineno-54-36" name="__codelineno-54-36" href="#__codelineno-54-36"></a>  - sources.raw.events (source)
+<a id="__codelineno-54-37" name="__codelineno-54-37" href="#__codelineno-54-37"></a>      clock:    (none)
+<a id="__codelineno-54-38" name="__codelineno-54-38" href="#__codelineno-54-38"></a>      identity: event_id
+<a id="__codelineno-54-39" name="__codelineno-54-39" href="#__codelineno-54-39"></a>      derived grain: key
+<a id="__codelineno-54-40" name="__codelineno-54-40" href="#__codelineno-54-40"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
+<a id="__codelineno-54-41" name="__codelineno-54-41" href="#__codelineno-54-41"></a>
+<a id="__codelineno-54-42" name="__codelineno-54-42" href="#__codelineno-54-42"></a>Probes (0):
 </code></pre></div>
 <hr />
 <h2 id="smelt-bakeoff">smelt bakeoff<a class="headerlink" href="#smelt-bakeoff" title="Permanent link">&para;</a></h2>
