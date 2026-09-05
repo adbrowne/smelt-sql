@@ -68,6 +68,7 @@ pub enum Dimension {
     FanOutJoin,
     MaintenanceLost,
     MaintenanceGained,
+    StateDowngrade,
 }
 
 /// Whether a change makes the model's maintenance proofs weaker, stronger,
@@ -216,6 +217,14 @@ pub enum ChangeKind {
     MaintenanceLost,
     /// The symmetric partner: a model went from no cells to at least one.
     MaintenanceGained,
+    /// A matched cell's [`crate::maintenance::availability::StateDowngrade`]
+    /// appeared, disappeared, or changed shape (`docs/specs/property_diff.md`
+    /// §"Direction" "state_downgrade" row).
+    StateDowngrade {
+        cell: String,
+        old: Option<crate::maintenance::availability::StateDowngrade>,
+        new: Option<crate::maintenance::availability::StateDowngrade>,
+    },
 }
 
 /// Whether `new`'s `retain_departed` relaxed relative to `old`'s: absent →
@@ -273,6 +282,7 @@ impl ChangeKind {
             ChangeKind::FanOutJoin { .. } => Dimension::FanOutJoin,
             ChangeKind::MaintenanceLost => Dimension::MaintenanceLost,
             ChangeKind::MaintenanceGained => Dimension::MaintenanceGained,
+            ChangeKind::StateDowngrade { .. } => Dimension::StateDowngrade,
         }
     }
 
@@ -416,6 +426,14 @@ impl ChangeKind {
             }
             ChangeKind::MaintenanceLost => Direction::Downgrade,
             ChangeKind::MaintenanceGained => Direction::Upgrade,
+            ChangeKind::StateDowngrade { old, new, .. } => match (old, new) {
+                (None, Some(_)) => Direction::Downgrade,
+                (Some(_), None) => Direction::Upgrade,
+                // Both present with a different shape (a different missing
+                // structure or `original` technique) — no interval to widen,
+                // same convention as `retain_departed`'s shape-only change.
+                _ => Direction::Neutral,
+            },
         }
     }
 
@@ -431,7 +449,8 @@ impl ChangeKind {
             | ChangeKind::CellRowIdentity { cell, .. }
             | ChangeKind::CellAdded { cell, .. }
             | ChangeKind::CellRemoved { cell, .. }
-            | ChangeKind::ContractPoint { cell, .. } => cell.clone(),
+            | ChangeKind::ContractPoint { cell, .. }
+            | ChangeKind::StateDowngrade { cell, .. } => cell.clone(),
             ChangeKind::RefusalAdded(r) | ChangeKind::RefusalRemoved(r) => r.text.clone(),
             ChangeKind::ProbeAdded(p) | ChangeKind::ProbeRemoved(p) => p.fact.clone(),
             ChangeKind::ColumnAdded(c) | ChangeKind::ColumnRemoved(c) => c.clone(),
@@ -479,6 +498,7 @@ impl ChangeKind {
             }
             ChangeKind::MaintenanceLost => Some(to_json(&true)),
             ChangeKind::MaintenanceGained => Some(to_json(&false)),
+            ChangeKind::StateDowngrade { old, .. } => Some(to_json(old)),
         }
     }
 
@@ -513,6 +533,7 @@ impl ChangeKind {
             }
             ChangeKind::MaintenanceLost => Some(to_json(&false)),
             ChangeKind::MaintenanceGained => Some(to_json(&true)),
+            ChangeKind::StateDowngrade { new, .. } => Some(to_json(new)),
         }
     }
 
@@ -522,6 +543,9 @@ impl ChangeKind {
     fn reason(&self) -> Option<String> {
         match self {
             ChangeKind::RefusalAdded(r) | ChangeKind::RefusalRemoved(r) => Some(r.text.clone()),
+            ChangeKind::StateDowngrade { old, new, .. } => {
+                new.as_ref().or(old.as_ref()).map(|sd| sd.reason.clone())
+            }
             _ => None,
         }
     }
@@ -985,6 +1009,7 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                     technique: old_technique,
                     row_identity: old_ri,
                     contract_point: old_cp,
+                    state_downgrade: old_sd,
                 } = *old_v;
                 let CellVerdict {
                     group: _,
@@ -993,6 +1018,7 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                     technique: new_technique,
                     row_identity: new_ri,
                     contract_point: new_cp,
+                    state_downgrade: new_sd,
                 } = *new_v;
                 if old_technique != new_technique {
                     changes.push(ChangeKind::CellTechnique {
@@ -1020,6 +1046,13 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                         cell: key.clone(),
                         old: old_cp.clone(),
                         new: new_cp.clone(),
+                    });
+                }
+                if old_sd != new_sd {
+                    changes.push(ChangeKind::StateDowngrade {
+                        cell: key.clone(),
+                        old: old_sd.clone(),
+                        new: new_sd.clone(),
                     });
                 }
             }
@@ -1391,6 +1424,7 @@ mod tests {
                 proven_mismatch: None,
             },
             contract_point: ContractPointView::default(),
+            state_downgrade: None,
         }
     }
 
@@ -1942,6 +1976,93 @@ mod tests {
         assert_eq!(
             ChangeKind::MaintenanceGained.dimension(),
             Dimension::MaintenanceGained
+        );
+    }
+
+    /// R8 (`docs/outcomes/20260905-property-diff/phases/04-plan.md`
+    /// addendum): a cell's `state_downgrade` appearing is a downgrade,
+    /// disappearing is an upgrade, and a shape-only change (different
+    /// missing structure, presence unchanged) is neutral.
+    #[test]
+    fn state_downgrade_appearing_is_a_downgrade_disappearing_is_an_upgrade() {
+        use crate::maintenance::availability::{StateDowngrade, StateStructure};
+
+        let sd = StateDowngrade {
+            original: Technique::KeyedFold,
+            missing: StateStructure::FingerprintSidecar,
+            reason: "no fingerprint sidecar on this target".to_string(),
+        };
+        assert_eq!(
+            ChangeKind::StateDowngrade {
+                cell: "c".to_string(),
+                old: None,
+                new: Some(sd.clone()),
+            }
+            .direction(),
+            Direction::Downgrade
+        );
+        assert_eq!(
+            ChangeKind::StateDowngrade {
+                cell: "c".to_string(),
+                old: Some(sd.clone()),
+                new: None,
+            }
+            .direction(),
+            Direction::Upgrade
+        );
+        let sd2 = StateDowngrade {
+            missing: StateStructure::MergeLedger,
+            ..sd.clone()
+        };
+        assert_eq!(
+            ChangeKind::StateDowngrade {
+                cell: "c".to_string(),
+                old: Some(sd),
+                new: Some(sd2),
+            }
+            .direction(),
+            Direction::Neutral
+        );
+        assert_eq!(
+            ChangeKind::StateDowngrade {
+                cell: "c".to_string(),
+                old: None,
+                new: None,
+            }
+            .dimension(),
+            Dimension::StateDowngrade
+        );
+    }
+
+    /// A matched cell whose `state_downgrade` differs must surface as a
+    /// `state_downgrade` change even when technique/corner/row-identity/
+    /// contract point are unchanged — the case a plain `cell_technique`
+    /// diff would miss if the ideal and degraded techniques happened to
+    /// coincide on both sides for an unrelated reason.
+    #[test]
+    fn diff_cell_verdicts_surfaces_a_state_downgrade_on_an_otherwise_unchanged_cell() {
+        use crate::maintenance::availability::{StateDowngrade, StateStructure};
+
+        let mut old_cell = cell(Technique::DeleteInsert, "{a}", "orders");
+        let mut new_cell = old_cell.clone();
+        new_cell.state_downgrade = Some(StateDowngrade {
+            original: Technique::KeyedFold,
+            missing: StateStructure::FingerprintSidecar,
+            reason: "no fingerprint sidecar on this target".to_string(),
+        });
+        old_cell.state_downgrade = None;
+
+        let changes = diff_cell_verdicts(&[old_cell], &[new_cell]);
+        assert!(
+            changes.iter().any(|c| matches!(
+                c,
+                ChangeKind::StateDowngrade {
+                    old: None,
+                    new: Some(_),
+                    ..
+                }
+            )),
+            "expected a state_downgrade change, got {changes:?}"
         );
     }
 

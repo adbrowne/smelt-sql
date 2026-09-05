@@ -27,6 +27,7 @@ use crate::analysis::walk::{
     Grain,
 };
 use crate::contract::ContractPointView;
+use crate::maintenance::availability::StateDowngrade;
 use crate::maintenance::derive::row_identity;
 use crate::maintenance::{refusal_code, PlanCell, Refusal, RowIdentityVerdict, Technique};
 
@@ -175,6 +176,16 @@ pub struct CellVerdict {
     /// [`crate::contract::effective_contract`], never re-resolved by a
     /// renderer.
     pub contract_point: ContractPointView,
+    /// Present when the plan's admitted [`Technique`] was forced down from a
+    /// cheaper one because a state structure the cheaper technique needs has
+    /// no realisation on the target (`state.md` §"The degradation
+    /// contract"). A state downgrade is by definition a downgrade
+    /// (`docs/specs/property_diff.md` §"Direction" "state_downgrade" row);
+    /// carried here so the diff can see it appear or disappear rather than
+    /// only seeing the resulting `cell_technique` change, which is silent
+    /// when the ideal and degraded techniques happen to match on both sides
+    /// of the diff for an unrelated reason.
+    pub state_downgrade: Option<StateDowngrade>,
 }
 
 /// Render one [`PlanCell`]'s [`CellVerdict`] — the single place a cell's
@@ -190,6 +201,7 @@ pub fn render_cell_verdict(cell: &PlanCell, contract_point: ContractPointView) -
         technique: cell.technique,
         row_identity: cell.row_identity.clone(),
         contract_point,
+        state_downgrade: cell.state_downgrade.clone(),
     }
 }
 
