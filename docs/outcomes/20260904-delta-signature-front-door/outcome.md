@@ -49,7 +49,7 @@ the tutorial pages in step.
 | 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | done |
 | 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | done |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | done |
-| 4 | Rename `guide/backbuild-synthesis.md` to the rebuild verb; nav + cross-links | pending |
+| 4 | Rename `guide/backbuild-synthesis.md` to `guide/migrations.md` (the `smelt migrate` verb); nav, cross-links, doc-sync gate path, retired-verb ratchet | planned |
 | 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | pending |
 
 ## Decision log
@@ -107,6 +107,29 @@ the tutorial pages in step.
   `### What a partition-shaped run does`; new gate `crates/smelt-cli/tests/docs_front_door.rs`
   (3 tests: first-section content, headline byte-pin, four-corners ratchet). All 11 inbound
   anchors preserved. `verify-phase.sh` ALL GREEN; see `phases/03-summary.md`.
+
+- 2026-09-05 (plan, phase 4): criterion 3's literal "renamed to the `rebuild` verb" is
+  **not** taken literally — `smelt rebuild` is a different shipped verb (reprocess a model
+  and its upstreams over a time range under an unchanged definition), and
+  `guide/incremental-models.md` already contrasts the two. Every worked example on the page
+  drives `smelt migrate`, and `reference/cli.md` already calls it "the migration guide", so
+  the rename target is `docs-site/docs/guide/migrations.md` / `# Migrations`. Naming it
+  `rebuild.md` would manufacture the exact collision the 2026-08-29 verb rename ended. The
+  outcome's prose intent ("the guide page that still carries the retired `backbuild` verb is
+  renamed") and criterion 3's checkable half are both satisfied.
+- 2026-09-05 (plan, phase 4): criterion 3's "`rg backbuild docs-site/docs` finds only a
+  historical note, if any" is enforced as a standing ratchet in `docs_front_door.rs` with two
+  documented exemptions — `__backbuild_diff`/`__backbuild_branch` are alias names *emitted by*
+  `smelt-logical/src/backbuild/emit.rs` into real SQL and pinned by the conformance suite, and
+  backticked code spans naming real symbols (`derive_backbuild_options`,
+  `tests/backbuild_docs.rs`). Renaming the `smelt_logical::backbuild` module or its emitted
+  aliases is a code rename this outcome does not call for; the 2026-08-29 decision explicitly
+  kept the mechanism name.
+- 2026-09-05 (plan, phase 4): no reshape of row 5 — the phase 3 summary reported rows 4 and 5
+  unaffected, and this phase's audit found nothing that changes the close-out row. One task is
+  *added inside* row 4 rather than deferred: a `docs_site_relative_links_resolve` gate, because
+  a rename with four inbound cross-links and no link check would put criteria 2-4 one typo away
+  from silent rot.
 
 ## Blocked
 
