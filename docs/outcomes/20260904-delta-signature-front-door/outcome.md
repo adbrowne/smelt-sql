@@ -47,7 +47,7 @@ the tutorial pages in step.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | done |
-| 2 | Regenerate tutorial pages; confirm every explain excerpt carries the headline; freshness gate green | pending |
+| 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | planned |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | pending |
 | 4 | Rename `guide/backbuild-synthesis.md` to the rebuild verb; nav + cross-links | pending |
 | 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | pending |
@@ -66,6 +66,16 @@ the tutorial pages in step.
   clauses describe IS-19 work this outcome lists under "Out of scope".
 - 2026-09-05 (plan, phase 1): no reshape of the phase table — phase 1 is the first row and
   no prior phase summary exists.
+- 2026-09-05 (plan, phase 2): criterion 4 is read as "no stale hand-pasted explain output
+  anywhere", not "the web-analytics tutorial pipeline is extended to reference/guide pages" —
+  `generate_tutorial.py` is scoped to `docs-site/docs/examples/web-analytics/` and widening it
+  is a pipeline rewrite this outcome does not call for. The two non-pipeline excerpts
+  (`reference/cli.md` `daily_events`, `guide/incremental-models.md` `daily_events_enriched`)
+  are instead re-derived from real `smelt explain` runs against `examples/timeseries` and
+  pinned by a new standing gate.
+- 2026-09-05 (plan, phase 2): phase 2's row is widened to name that excerpt work (the audit
+  found exactly three `Maintenance plan:` blocks in the docs-site, two of them stale); no rows
+  added, split, or removed — the widened work serves criterion 4 and stays inside this phase.
 - 2026-09-05 (implement, phase 1): shipped `smelt_db::model_output_delta_for`,
   `DeltaSignatureHeadline`, and both report/JSON builders wired to it; 7 new tests; spec/doc
   edits landed. A `None` own-shape (no derivable output-delta at all) renders as a degraded
