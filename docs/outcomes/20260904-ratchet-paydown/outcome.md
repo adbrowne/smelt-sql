@@ -44,7 +44,7 @@ implementer, not this loop.
 |---|-------|--------|
 | 1 | Establish the pre-burst baseline values from git; census every added `unwrap`/`expect`/`println!` site in `39228307..HEAD`, with a per-site verdict | done |
 | 2 | `smelt-db`: convert the added `unwrap` sites (shared poison-recovering registry accessors) | done |
-| 3 | `smelt-cli`: mark the 13 added `println!`/`eprintln!` sites `// stdout: <reason>` and justify `migrate.rs:403`'s `expect` (not `rebuild.rs`) | planned |
+| 3 | `smelt-cli`: mark the 13 added `println!`/`eprintln!` sites `// stdout: <reason>` and justify `migrate.rs:403`'s `expect` (not `rebuild.rs`) | done |
 | 4 | Regenerate the baseline with sign-off; record the file-split deferral in `docs/TODO.md`; gates green | pending |
 
 ## Decision log
@@ -99,6 +99,13 @@ implementer, not this loop.
   instead of asserted only in the census prose, and a future unmarked stdout site in `migrate.rs`
   fails a test. The `diff.rs:502` comment alignment rides along as free consistency work (that site
   predates the range and no criterion reaches it).
+
+- 2026-09-06 (implement 03): phase 3 done — all 10 added `println!` sites in `migrate.rs`, the 2
+  added stateless-mode sites (`history.rs`, `status.rs`), and the second `run.rs` selector-miss
+  site now carry `// stdout: <reason>` markers; `migrate.rs`'s added `.expect(...)` carries an
+  `// invariant:` justification, mirrored onto the pre-existing `diff.rs:502` twin for
+  consistency. New gate `crates/smelt-cli/tests/stdout_markers.rs` machine-checks this at the
+  call sites. Zero hardening-budget counts moved; `verify-phase.sh` all green.
 
 ## Blocked
 
