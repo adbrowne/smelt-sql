@@ -36,6 +36,7 @@ pub mod deferral;
 pub mod frozen_horizon;
 pub mod retain_departed;
 
+use serde::Serialize;
 use smelt_core::config::{ContractCellConfig, ContractConfig, DataLatency, RetainDeparted};
 
 /// Which declaration a cell's effective `deferral` window came from — the
@@ -152,6 +153,56 @@ pub fn effective_contract(
         frozen_horizon: cfg.frozen_horizon.clone(),
         deferral,
         retain_departed: cfg.retain_departed.clone(),
+    }
+}
+
+/// The JSON shape of one cell's effective contract lattice point
+/// (`docs/specs/incremental_models.md` §"The contract lattice"): absent
+/// relaxations are omitted, never rendered as `null`. Moved here, verbatim,
+/// from `smelt-cli`'s `ExplainContractPointJson`
+/// (`docs/outcomes/20260905-property-diff/phases/02-plan.md` task 5) so the
+/// property profile (`docs/specs/property_diff.md` §"The property profile")
+/// and the single-version report share one owner and one serde shape —
+/// `smelt-cli` keeps the old name as a type alias over this struct, sourced
+/// from [`effective_contract`], never re-resolved.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct ContractPointView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen_horizon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferral: Option<String>,
+    /// `"model"` or `"cell"` — which declaration `deferral` came from.
+    /// Omitted along with `deferral` when no deferral applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferral_origin: Option<String>,
+}
+
+impl ContractPointView {
+    /// True when no relaxation applies (an empty object once serialized) —
+    /// mirrors [`EffectiveContract::is_default`] for a caller that only has
+    /// the rendered [`ContractPointView`] in hand.
+    pub fn is_default(&self) -> bool {
+        self.frozen_horizon.is_none() && self.deferral.is_none()
+    }
+}
+
+impl From<EffectiveContract> for ContractPointView {
+    fn from(effective: EffectiveContract) -> Self {
+        let (deferral, deferral_origin) = match effective.deferral {
+            Some(d) => {
+                let origin = match d.origin {
+                    DeferralOrigin::Model => "model",
+                    DeferralOrigin::Cell => "cell",
+                };
+                (Some(d.window.display), Some(origin.to_string()))
+            }
+            None => (None, None),
+        };
+        ContractPointView {
+            frozen_horizon: effective.frozen_horizon.map(|h| h.display),
+            deferral,
+            deferral_origin,
+        }
     }
 }
 

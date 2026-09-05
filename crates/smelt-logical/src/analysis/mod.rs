@@ -18,6 +18,7 @@ pub mod not_null;
 pub mod output_delta;
 pub mod partition_axis;
 pub mod presentation;
+pub mod profile;
 pub mod skeleton_closure;
 pub mod source_bounds;
 pub mod temporal;
