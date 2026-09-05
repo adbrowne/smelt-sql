@@ -53,7 +53,7 @@ than the current residue.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
-| 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | pending |
+| 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | planned |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
@@ -71,6 +71,12 @@ than the current residue.
   `frozen_horizon` declaration on a model whose driving source declares a non-`append_only`
   mutation profile, surfaced through `check_file_diagnostics`, LSP-published, and covered by a
   new `examples/broken` fixture. See `phases/01-summary.md`.
+- 2026-09-05: Phase 2 planned with no reshape. Named the vacuity precisely: the gate's
+  `Bracketed` obligation holds vacuously on its lower leg whenever the settled cutoff precedes
+  all recorded event time, so the upper leg alone admits any subset of `full_refresh(S)`. The
+  restatement is the spec's own two obligations — strict equality over the processed set plus a
+  lag bound on `L \ S` — which additionally requires `STracker` to split *landed* from
+  *processed* (the current fixture records a run for a window the deferred model never folded).
 
 ## Blocked
 
