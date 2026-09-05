@@ -70,8 +70,11 @@
 - `cargo test -p smelt-ui --test api` — green.
 - `cargo test -p smelt-core --test hardening_budget` — green, baseline untouched (no new
   unwrap/expect/println in production code; moved code carried none).
-- `bash .claude/scripts/verify-phase.sh` — see final report line in the implementer's closing
-  message.
+- `bash .claude/scripts/verify-phase.sh` (full run): fmt-check FAILED on two mechanical
+  (whitespace-only) diffs in `diagnostics.rs`/`smelt-ui/tests/api.rs`; `cargo fmt --all` fixed
+  them, `cargo fmt --all -- --check` confirmed clean, and clippy (zero warnings, both feature
+  sets), the full workspace `cargo test`, and `example_diagnostics` (119/119) all PASSed in that
+  same run and were independently re-confirmed after the fmt fix.
 
 ## Deviations from the plan
 
