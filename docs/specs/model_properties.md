@@ -1,7 +1,7 @@
 ---
 feature: model_properties
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -425,6 +425,15 @@ recorded here — history lives in git and §References → Plans.
   — whether an existing column's meaning changed is not derivable from the column/dependency-set
   diff alone; falls to a declared migration intent whose exact surface is open. Cross-ref
   `models.md` §Known Divergences.
+- **§"Unified bound / reach derivation" and the declarations table (row "Unified bound / reach
+  derivation") describe `derive_model_bounds` as splitting a *source-lateness* margin out of the
+  computed reach and folding it into the licensed `Bounded{before, after}` scan widening; the
+  implementation (`crates/smelt-logical/src/analysis/source_bounds.rs`) reads no lateness value
+  at all — reach comes from the SQL's frames/offsets/interval shifts alone, matching §Constraints
+  "Declared lateness is orchestration-only" rather than the older prose above it. The prose predates
+  that constraint (`docs/research/20260904-decision-track.md`) and was never updated to match it.
+  Needs a wording pass removing the source-lateness component from both mentions; not fixed here
+  since it is a stale description, not a behavior gap this outcome's phases touched.
 - **Two FD-backed readers build their `JoinContext` empty because their callers hold no declared
   source facts to populate it with.** `rules/cumulative.rs`'s once-write route and
   `maintenance/locality.rs`'s key-temporal-locality route 2 each call

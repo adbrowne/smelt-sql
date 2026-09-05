@@ -1,7 +1,7 @@
 # Outcome: Decision residue — implement the 2026-09-04 decision-track calls
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260904-decision-track.md` (all eight decisions); `docs/research/20260816-open-questions-triage.md` items C (`PartitionGrainForbidsMetrics`, sub-`g_part` suggestion); `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows IS-08, IS-10, IS-20, IS-21, MP-04
 **Spec anchors:** `docs/specs/incremental_shapes.md` §"Functions inside partition-grain bodies", §"Run window vs partition granularity", §"Key temporal locality (the time-partitioned output)" route 2, key-grain rule 16; `docs/specs/model_properties.md` §Constraints "Declared lateness is orchestration-only"; `docs/specs/sources.md` §Semantics trust rule; `docs/specs/diagnostics.md` (`PartitionGrainForbidsMetrics`, `KeyedRecurrenceDeclarationMismatch`)
 
@@ -79,7 +79,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | done |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | done |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | done |
-| 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | planned |
+| 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | done |
 
 ## Decision log
 
@@ -230,5 +230,14 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   fenced by a new doc-sweep case on the existing `lateness_orchestration_only` grep gate.
   Drift the validate passes surface that phases 1–6 did not cause is classified, not fixed:
   recorded as a Known Divergence bullet if unrecorded, left alone if already recorded.
+
+- 2026-09-06 — Phase 7 done: `models.md`'s two live-looking `data_latency` mentions removed
+  (frontmatter table already said Retired); `sources.md`'s `mutation_profile` bullet stopped
+  listing `lateness` as awaiting per-cell admission and now notes `key_recurrence` is checked.
+  New doc-sweep grep test pins the `data_latency` retirement claim across specs/docs-site. Found
+  and recorded (not fixed — pre-existing, predates phase 1) a stale `model_properties.md`
+  description of `derive_model_bounds` folding declared source-lateness into scan widening,
+  which the code does not do; added as a Known Divergence bullet for a follow-up wording pass.
+  All nine success criteria judged met across phases 1-7; outcome Status flipped to `done`.
 
 ## Blocked

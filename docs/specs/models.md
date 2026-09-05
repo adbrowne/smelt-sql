@@ -1,7 +1,7 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-07-23
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -170,7 +170,7 @@ Both a **source** and a **model output** are *a relation a downstream consumer r
 | **completeness / settle** | `watermark:` / settle bound | declared | **derived** from the plan |
 | **replay bound** | replayability | `retention:` | always replayable (rebuildable) |
 | *source-only* | external-name `name:` routing | declared | — |
-| *model-only* | per-column `contract:`, `data_latency`, the definition-change trigger | — | declared / derived |
+| *model-only* | per-column `contract:`, the definition-change trigger | — | declared / derived |
 
 The **fill-modes** the table names:
 
@@ -307,7 +307,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 **The declaration law: declared, derived, implied.** Every fact about a model is sorted by *who fixes it*:
 
-- **Declared** — the `refresh:` trichotomy value and the **shape facts** (`timeseries:`, `unique_key:`) — the selectors of shape and ownership — plus a bounded set of *assertions* that constrain or widen what the machinery may do without ever picking a strategy or an addressing: the check-only `grain:` label, per-column `contract`, `data_latency`, a bounded-domain budget, `horizon_ceiling`, `maintenance.scan_bounds`, the per-cell `maintenance.cells[].write` addressing pin, `safety_overrides`, the declared-monotonicity escape hatch, and (where smelt cannot derive it) source world-facts, declared on the source (`sources.md`).
+- **Declared** — the `refresh:` trichotomy value and the **shape facts** (`timeseries:`, `unique_key:`) — the selectors of shape and ownership — plus a bounded set of *assertions* that constrain or widen what the machinery may do without ever picking a strategy or an addressing: the check-only `grain:` label, per-column `contract`, a bounded-domain budget, `horizon_ceiling`, `maintenance.scan_bounds`, the per-cell `maintenance.cells[].write` addressing pin, `safety_overrides`, the declared-monotonicity escape hatch, and (where smelt cannot derive it) source world-facts, declared on the source (`sources.md`).
 - **Derived** — read off the model's SQL, its sources, and the DAG, never declared per model: the maintenance plan itself (cells, techniques, **physical write addressing**, scan clamps, partition-locality), the `grain` label, the algebraic rung, lookback/horizon, ordering, input-delta discovery, cross-model dirty-set propagation, and monotonicity where statically decidable.
 - **Implied by the refresh value** — the freshness owner, and nothing else.
 

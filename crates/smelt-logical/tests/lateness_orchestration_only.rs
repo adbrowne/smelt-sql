@@ -110,3 +110,53 @@ fn compute_effective_window_signature_has_no_latency_parameter() {
         "compute_effective_window's signature must carry no latency input, got: {signature}"
     );
 }
+
+/// Doc-sweep: `docs/specs/*.md` and `docs-site/docs/**` must not present the
+/// retired per-column `data_latency` as a live declared fact. A surviving
+/// occurrence is only legitimate on a line that also names the retirement.
+#[test]
+fn specs_do_not_present_per_column_data_latency_as_live() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    collect_md_files(&root, &root.join("docs/specs"), &mut files);
+    collect_md_files(&root, &root.join("docs-site/docs"), &mut files);
+
+    let mut offenders = Vec::new();
+    for rel in &files {
+        let full = root.join(rel);
+        let Ok(text) = fs::read_to_string(&full) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            if line.contains("data_latency") && !line.to_lowercase().contains("retired") {
+                offenders.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "every surviving `data_latency` mention in specs/docs-site must name the retirement \
+         (the per-column key is a hard error, `docs/specs/models.md`), found:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+fn collect_md_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_md_files(root, &path, out);
+        } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+            out.push(
+                path.strip_prefix(root)
+                    .expect("scanned path is under repo root")
+                    .to_path_buf(),
+            );
+        }
+    }
+}
