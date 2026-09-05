@@ -1,7 +1,7 @@
 # Outcome: Delta-signature front door — explain prints it, the user docs describe it
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** done
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` row IM-02; `docs/TODO.md` §"docs-site sync"; `docs/research/20260904-incremental-state-review.md` §"What went wrong" (docs-site lag) and §"Recommended next sequence" item 6
 **Spec anchors:** `docs/specs/incremental_models.md` §Surface "CLI" and the delta-signature sections, `docs/specs/definition_deltas.md`, `docs/specs/incremental_shapes.md`
 
@@ -50,7 +50,7 @@ the tutorial pages in step.
 | 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | done |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | done |
 | 4 | Rename `guide/backbuild-synthesis.md` to `guide/migrations.md` (the `smelt migrate` verb); nav, cross-links, doc-sync gate path, retired-verb ratchet | done |
-| 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | planned |
+| 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | done |
 
 ## Decision log
 
@@ -153,6 +153,17 @@ the tutorial pages in step.
   *inside* row 5 rather than deferred: a `spec_user_docs_block_lists_existing_pages` gate,
   because phase 4's rename showed the spec's References block can point at a deleted docs-site
   path with no gate noticing.
+
+- 2026-09-05 (implement, phase 5): found and fixed a real spec bug —
+  `incremental_models.md` claimed `smelt rebuild --event-time-start/--event-time-end
+  [selectors]`; the actual CLI takes `<selector> --start --end` (docs-site was already
+  correct). The prior `2026-09-04-definition_deltas-closure.md` validation had asserted the
+  wrong flags as ✅ by trusting the spec's own text instead of `main.rs`. Also removed a
+  stale "not yet implemented" doc comment on `BakeoffArgs::pin` (it's shipped). Shipped
+  `docs_front_door::spec_user_docs_block_lists_existing_pages`, bumped `last_reviewed`, and
+  committed `docs/validations/2026-09-05-incremental_models-cli-surface.md`.
+  `verify-phase.sh` ALL GREEN; see `phases/05-summary.md`. All five outcome success criteria
+  are met — outcome closed as done.
 
 ## Blocked
 

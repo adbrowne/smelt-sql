@@ -264,3 +264,73 @@ fn no_four_corners_framing_under_docs_site() {
         "docs-site files with retired \"four corners\" framing: {offenders:#?}"
     );
 }
+
+/// Expand a `{a,b,c}` brace group in a backtick-quoted path fragment into the
+/// paths it denotes. A fragment with no brace group expands to itself.
+fn expand_brace_paths(fragment: &str) -> Vec<String> {
+    let Some(open) = fragment.find('{') else {
+        return vec![fragment.to_string()];
+    };
+    let Some(close) = fragment[open..].find('}') else {
+        return vec![fragment.to_string()];
+    };
+    let close = open + close;
+    let prefix = &fragment[..open];
+    let suffix = &fragment[close + 1..];
+    fragment[open + 1..close]
+        .split(',')
+        .map(|part| format!("{prefix}{part}{suffix}"))
+        .collect()
+}
+
+/// Every `docs-site/docs/...md` path named in `incremental_models.md`
+/// §References → User docs must resolve to a real file, so a docs-site page
+/// rename cannot silently leave the spec's References block pointing at a
+/// deleted path (the exact rot phase 4's rename would have caused had this
+/// gate not existed).
+#[test]
+fn spec_user_docs_block_lists_existing_pages() {
+    let spec_path = repo_root().join("docs/specs/incremental_models.md");
+    let text = fs::read_to_string(&spec_path).unwrap();
+
+    let start = text
+        .find("**User docs**:")
+        .expect("incremental_models.md must have a §References User docs bullet");
+    let rest = &text[start..];
+    let end = rest
+        .find("**Plans (history)**")
+        .expect("User docs bullet must be followed by the Plans (history) bullet");
+    let block = &rest[..end];
+
+    let mut paths = Vec::new();
+    let mut cursor = block;
+    while let Some(open) = cursor.find('`') {
+        let after = &cursor[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        let fragment = &after[..close];
+        cursor = &after[close + 1..];
+
+        if fragment.starts_with("docs-site/docs/") && fragment.ends_with(".md") {
+            paths.extend(expand_brace_paths(fragment));
+        }
+    }
+
+    assert!(
+        !paths.is_empty(),
+        "expected at least one docs-site path in the User docs bullet"
+    );
+
+    let mut offenders = Vec::new();
+    for path in &paths {
+        if !repo_root().join(path).exists() {
+            offenders.push(path.clone());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "incremental_models.md §References User docs names paths that don't resolve: {offenders:#?}"
+    );
+}

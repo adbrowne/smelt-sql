@@ -32,11 +32,6 @@ Spec: `docs/specs/multi_backend.md` §"Template emission", §"Operand-conditiona
 The spec set (`incremental_models.md` + `incremental_shapes.md` + `definition_deltas.md`) is
 committed; these are the loose ends the redraft deliberately left for follow-up work:
 
-- **docs-site sync**: user docs still describe the four-corners framing;
-  a docs-site pass should follow the new front door (delta signatures) once a wiring plan
-  exists. `docs-site` was deliberately untouched by the spec redraft. (The `smelt backbuild` →
-  `smelt rebuild` verb rename itself landed via
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 4.)
 - **`/smelt:validate` run** over the three new specs to baseline drift.
 - **`smelt migrate` / `smelt rebuild` wiring plan** (research §6 step 2): wire the backbuild
   layer behind plan-and-approve; extend the conformance harness with a definition-edit step

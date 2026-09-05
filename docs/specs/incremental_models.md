@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-09-03
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -482,7 +482,7 @@ contract:
 - `smelt build <model> --period <start>..<end> --include-upstreams` — **backward resolution**:
   print the per-ancestor required slices and build order; optionally execute the bounded build
   (§"The graph layer").
-- `smelt rebuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]` — a
+- `smelt rebuild <selector> --start <ISO-8601> --end <ISO-8601>` — a
   **ranged re-run**: rebuild a model (and, with selectors, its upstreams) over a time range
   using its ordinary maintenance plan, with batch-safety-aware chunking
   (`incremental_shapes.md` §"First-run and backfill"). A data-side verb, deliberately disjoint
@@ -516,7 +516,7 @@ follows from its derived run shape:
 
 ```
 smelt run     --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]   # partition grain; keyed window-forward
-smelt rebuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]   # same, batch-safety-aware chunking
+smelt rebuild <selector> --start <ISO-8601> --end <ISO-8601>                          # same, batch-safety-aware chunking
 smelt run     [selectors]                                                             # keyed snapshot-reconcile
 ```
 
