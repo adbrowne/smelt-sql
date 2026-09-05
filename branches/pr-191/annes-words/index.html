@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Anne's Words</title>
+<meta name="description" content="A daily five-letter word game.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Anne's Words</h1>
+  <div class="header-right">
+    <span id="mode-label"></span>
+    <button id="help-btn" type="button" aria-label="How to play">?</button>
+    <button id="stats-btn" type="button" aria-label="Statistics">&#128202;</button>
+  </div>
+</header>
+<main>
+  <div id="toaster" aria-live="polite"></div>
+  <div id="board" role="grid" aria-label="Guess board"></div>
+  <div id="keyboard" aria-label="Keyboard"></div>
+  <div id="footer">
+    <div id="countdown" hidden>Next word in <span id="countdown-clock">--:--:--</span></div>
+    <button id="practice-btn" type="button">Play a practice word</button>
+    <button id="daily-btn" type="button" hidden>Back to today's word</button>
+  </div>
+</main>
+<script type="module" src="ui.js"></script>
+<div id="modal-backdrop" hidden>
+  <div id="stats-modal" role="dialog" aria-modal="true" aria-label="Statistics">
+    <button id="modal-close" class="modal-close" type="button" aria-label="Close">&times;</button>
+    <h2>Statistics</h2>
+    <div id="stat-numbers"></div>
+    <h2>Guess Distribution</h2>
+    <div id="stat-dist"></div>
+    <div id="modal-footer">
+      <div id="modal-countdown" hidden>
+        <div class="label">Next Anne's Words</div>
+        <div id="modal-clock" class="clock">--:--:--</div>
+      </div>
+      <button id="share-btn" type="button" hidden>Share</button>
+    </div>
+  </div>
+  <div id="help-modal" role="dialog" aria-modal="true" aria-label="How to play" hidden>
+    <button class="modal-close" type="button" aria-label="Close">&times;</button>
+    <h2>How to play</h2>
+    <p>Guess the word in 6 tries. Each guess must be a valid 5-letter word.</p>
+    <p>The colour of the tiles will change to show how close your guess was.</p>
+    <div class="example"><div class="tile" data-state="correct">w</div><div class="tile">e</div><div class="tile">a</div><div class="tile">r</div><div class="tile">y</div></div>
+    <p><strong>W</strong> is in the word and in the right spot.</p>
+    <div class="example"><div class="tile">p</div><div class="tile" data-state="present">i</div><div class="tile">l</div><div class="tile">l</div><div class="tile">s</div></div>
+    <p><strong>I</strong> is in the word but in the wrong spot.</p>
+    <div class="example"><div class="tile">v</div><div class="tile">a</div><div class="tile">g</div><div class="tile" data-state="absent">u</div><div class="tile">e</div></div>
+    <p><strong>U</strong> is not in the word in any spot.</p>
+    <p class="fine">A new word is available each day.</p>
+  </div>
+</div>
+</body>
+</html>
