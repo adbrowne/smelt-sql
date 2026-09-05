@@ -78,8 +78,9 @@ audit before it is claimed — never from documentation.
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
-| 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
-| 8 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
+| 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | planned |
+| 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` to the four surviving `type_gap` rows with a sign-off line | pending |
+| 9 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
 ## Decision log
 
@@ -242,6 +243,28 @@ audit before it is claimed — never from documentation.
   `.claude/dialect-gaps-baseline.txt` unchanged. `verify-phase.sh` green except one pre-existing,
   unrelated flaky `smelt-runtime` test (`python::tests::non_convergent_set_errors`, a temp-file
   race under parallel execution; passes in isolation). See `phases/06-summary.md`.
+
+- 2026-09-06 (plan 07) — **Reshape: phase 7 splits in two; the old phase 8 becomes phase 9.**
+  Nothing leaves the outcome. Phase 7 as written bundled two unlike jobs: (a) the four rows that
+  need the *new* vocabulary — `LOG` (arity arm), `DAYOFWEEK` (template), `//` (per operand class),
+  `TRUNC`/`TO_JSON` (class arms) — which are the first production `Emission::Conditional` entries
+  and carry exactly the `.with_emission` wiring trap phase 6's summary flagged, and which turn
+  phase 6's arm-totality and arm-keyed-ledger gates from green-but-vacuous into real checks; and
+  (b) nineteen further `#178` rows (`AGE`, `GLOB`, five `JSON_*`, two `MAKE_*`, two `QUOTE_*`,
+  `TO_SECONDS`, `TRUNCATE`, `GROUP_CONCAT`, `DATE_ADD`/`DATE_SUB`, and the three
+  running-window `gap_at` rows) that are ordinary rename/template/`Unsupported` closures. Counted
+  against the ledger, phase 7 as written was 23 live-verified closures in one implement step. The
+  split puts the risky, mechanism-exercising rows first (ratchet 27 → 23) and the bulk paydown
+  second (23 → 4, satisfying criterion 5). Both halves still require a live Spark and both still
+  block rather than fake if it cannot start.
+
+- 2026-09-06 (plan 07, design) — Two points fixed inside phase 7's own scope. `ConditionalArm`
+  already carries an `arity: Option<usize>` guard, so `LOG` needs no new mechanism — arity 1 →
+  `Rename("LOG10")`, `otherwise` → `Native`. And an arm whose verdict is `Unsupported` is
+  *exempting*, not gap-preserving (phase 6 routed `is_declared_unsupported` through
+  `settle_at` with the probe's own facts), so a refused `TRUNC(numeric)` arm closes the ledger
+  row outright rather than leaving an arm-scoped `Gap` — which is why 27 → 23 is a firm target
+  rather than a range.
 
 ## Blocked
 
