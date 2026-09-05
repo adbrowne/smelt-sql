@@ -197,6 +197,11 @@ pub enum RewriteId {
     /// `MEDIAN(x)` → `PERCENTILE_CONT(x, 0.5)` in window position, an
     /// `ARRAY_AGG`-indexing `CASE` in aggregate position. Position-dependent;
     /// the registry says *that* it needs rewriting, the printer says *how*.
+    ///
+    /// Not a template: the output shape itself differs by call position (a
+    /// single substitution in window position, a multi-statement `CASE` over
+    /// an `ARRAY_AGG` in aggregate position) — a `{n}` placeholder names an
+    /// argument, not a choice of output shape.
     BigQueryMedian,
     /// `PERCENTILE_CONT(f) WITHIN GROUP (ORDER BY x)` → `PERCENTILE_CONT(x,
     /// f)` at a whole-partition window position — GoogleSQL's two-argument
@@ -208,6 +213,11 @@ pub enum RewriteId {
     /// `emission_check`, never reaching the printer
     /// (`restructure::within_group_sort_key` is the shared reader for both
     /// this rewrite and `RestructureId::AnalyticToCte`).
+    ///
+    /// Not a template: the sort key and its direction come from the call's
+    /// own `WITHIN GROUP (ORDER BY …)` clause, a construct a positional `{n}`
+    /// placeholder cannot address — the rewrite reads that clause with
+    /// `within_group_sort_key` rather than substituting a positional argument.
     WithinGroupToAnalytic,
 }
 

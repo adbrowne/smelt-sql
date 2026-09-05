@@ -145,6 +145,12 @@ pub fn render() -> String {
     out.push_str(
         "- `native` — same spelling, same semantics; smelt emits the name unchanged.\n\
          - `rename:X` — same call shape, emitted as `X`.\n\
+         - `template:X` — the target spells this built-in as a fixed shape `X` over the\n\
+         \x20 call's own positional arguments (`{n}` placeholders), interpreted by one generic\n\
+         \x20 printer routine that holds no function names; a call carrying a modifier a\n\
+         \x20 placeholder cannot express (`DISTINCT`, `FILTER`, `WITHIN GROUP`, an argument-list\n\
+         \x20 `ORDER BY`, `IGNORE`/`RESPECT NULLS`, a named argument, or `*`) is refused at\n\
+         \x20 compile time rather than silently dropping it.\n\
          - `rewrite:Id` — structurally rewritten by the printer's `RewriteId::Id` arm.\n\
          - `restructure:Id` — the enclosing query block is restructured around a\n\
          \x20 synthesised CTE by the planner's `RestructureId::Id` shape, because the\n\

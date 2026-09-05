@@ -74,7 +74,7 @@ audit before it is claimed — never from documentation.
 |---|-------|--------|
 | 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
-| 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | planned |
+| 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | pending |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
@@ -142,6 +142,18 @@ audit before it is claimed — never from documentation.
   gains the compile-path test once it registers the first function-call template. Nothing leaves
   the outcome. Phase 3 also needs no spec delta — `multi_backend.md` §"Template emission" already
   states the refusal rule and the per-`RewriteId` justification line normatively.
+
+- 2026-09-06 (implement 03) — phase 3 done. `template_unsupported_modifier` refuses a template
+  call carrying `DISTINCT`, `FILTER`, `WITHIN GROUP`, an argument-list `ORDER BY`, `IGNORE`/
+  `RESPECT NULLS`, a named argument, or `*`, inspecting only the call's own children and its own
+  `ARG_LIST`'s direct children (never `descendants()`, avoiding the nested-call misattribution
+  trap). `emission_ownership` gained two gates (every `RewriteId` justified with a `Not a
+  template:` doc line; the interpreter holds no target text). Coverage legend gained
+  `template:X`; doc regenerated. Discovered empirically that `COUNT(*)`'s argument is
+  `EXPRESSION(EXPRESSION(STAR))`, not one wrapper layer — `is_star_expression` peels to
+  arbitrary depth. `verify-phase.sh` ALL GREEN after updating 5 line-number-keyed
+  `.claude/unknown-census.toml` entries shifted by the `signatures.rs` doc-comment edit. See
+  `phases/03-summary.md`.
 
 ## Blocked
 

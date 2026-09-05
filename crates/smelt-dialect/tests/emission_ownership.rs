@@ -213,3 +213,75 @@ fn the_printer_classifies_position_through_one_function() {
          deriving it locally"
     );
 }
+
+/// Every `RewriteId` variant's doc comment must state which call structure a
+/// placeholder could not name — the reason it is not a `Template` row instead
+/// (`docs/specs/multi_backend.md` §"Template interpretation is generic").
+#[test]
+fn every_rewrite_id_states_why_it_is_not_a_template() {
+    let body = SIGNATURES_SRC
+        .split_once("pub enum RewriteId {")
+        .expect("signatures.rs must declare `pub enum RewriteId`")
+        .1
+        .split_once("\n}")
+        .expect("`enum RewriteId` must be brace-terminated")
+        .0;
+
+    // Walk the enum body, resetting the doc-comment buffer at each variant so
+    // the check is per-variant, not "somewhere in the enum".
+    let mut missing = Vec::new();
+    let mut doc_has_justification = false;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.starts_with("///") {
+            if line.contains("Not a template:") {
+                doc_has_justification = true;
+            }
+            continue;
+        }
+        if line.starts_with("#[") || line.is_empty() {
+            continue;
+        }
+        // A variant line: `Name,` or `Name { .. },`.
+        if let Some(name) = line.split([',', ' ', '{']).next().filter(|s| !s.is_empty()) {
+            if !doc_has_justification {
+                missing.push(name.to_string());
+            }
+            doc_has_justification = false;
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "RewriteId variant(s) {missing:?} carry no `Not a template: …` doc line stating which \
+         call structure a placeholder could not name"
+    );
+}
+
+/// The template interpreter holds no target-dialect text of its own — every
+/// character it emits comes from the registry's template string or from
+/// re-printing the call's own arguments. A double-quoted string literal in
+/// either function's body would be target text the interpreter authored
+/// itself, which is exactly the per-function knowledge templates exist to
+/// remove from the printer.
+#[test]
+fn the_template_interpreter_holds_no_target_text() {
+    for (fn_name, needle) in [
+        ("print_template", "pub fn print_template("),
+        ("is_compound_argument", "fn is_compound_argument("),
+    ] {
+        let start = PRINTER_SRC
+            .find(needle)
+            .unwrap_or_else(|| panic!("printer.rs must declare `{fn_name}`"));
+        let body = &PRINTER_SRC[start..];
+        let end = body
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`{fn_name}` must be brace-terminated"));
+        let body = &body[..end];
+        assert!(
+            !body.contains('"'),
+            "{fn_name} contains a double-quoted string literal — the template interpreter \
+             must hold no target-dialect text of its own; every character it emits must \
+             come from the registry's template string or a re-printed argument"
+        );
+    }
+}

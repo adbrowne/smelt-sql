@@ -15,6 +15,12 @@ Cell vocabulary:
 
 - `native` — same spelling, same semantics; smelt emits the name unchanged.
 - `rename:X` — same call shape, emitted as `X`.
+- `template:X` — the target spells this built-in as a fixed shape `X` over the
+  call's own positional arguments (`{n}` placeholders), interpreted by one generic
+  printer routine that holds no function names; a call carrying a modifier a
+  placeholder cannot express (`DISTINCT`, `FILTER`, `WITHIN GROUP`, an argument-list
+  `ORDER BY`, `IGNORE`/`RESPECT NULLS`, a named argument, or `*`) is refused at
+  compile time rather than silently dropping it.
 - `rewrite:Id` — structurally rewritten by the printer's `RewriteId::Id` arm.
 - `restructure:Id` — the enclosing query block is restructured around a
   synthesised CTE by the planner's `RestructureId::Id` shape, because the
