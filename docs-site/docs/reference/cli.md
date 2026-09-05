@@ -208,7 +208,7 @@ over a pending, non-eclipsed, unapproved definition delta — a redefined column
 `smelt migrate` hasn't reviewed yet — rather than silently maintaining a table whose definition
 no longer matches its contents. The run exits `3` naming `DefinitionDeltaPending` and the fix:
 `smelt migrate <model>` to review the plan, then `--apply`, or run with `--full-refresh`. See
-[Backbuild synthesis](../guide/backbuild-synthesis.md).
+[Migrations](../guide/migrations.md).
 
 ### Parallel execution with `--jobs`
 
@@ -837,7 +837,7 @@ smelt diff --json || echo "Schema changes detected!"
 
 Derive, approve, and apply a **definition-delta** migration plan: a targeted script that
 migrates a model's stored table in place after its SQL changed, instead of a full rebuild. See
-the [migration guide](../guide/backbuild-synthesis.md) for the full walkthrough of when each
+the [migration guide](../guide/migrations.md) for the full walkthrough of when each
 verdict (eclipsed, backfill in place, rederive, skeleton change) applies.
 
 **Usage:**

@@ -49,7 +49,7 @@ the tutorial pages in step.
 | 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | done |
 | 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | done |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | done |
-| 4 | Rename `guide/backbuild-synthesis.md` to `guide/migrations.md` (the `smelt migrate` verb); nav, cross-links, doc-sync gate path, retired-verb ratchet | planned |
+| 4 | Rename `guide/backbuild-synthesis.md` to `guide/migrations.md` (the `smelt migrate` verb); nav, cross-links, doc-sync gate path, retired-verb ratchet | done |
 | 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | pending |
 
 ## Decision log
@@ -130,6 +130,12 @@ the tutorial pages in step.
   *added inside* row 4 rather than deferred: a `docs_site_relative_links_resolve` gate, because
   a rename with four inbound cross-links and no link check would put criteria 2-4 one typo away
   from silent rot.
+- 2026-09-05 (implement, phase 4): shipped the rename (`git mv`), the two new
+  `docs_front_door.rs` gates (5/5 green), the retitled/reworded page, marker-id rename
+  (`backbuild-example` → `migrate-example`, 42 markers), `backbuild_docs.rs`'s `GUIDE_PATH` +
+  marker constants + doc comment (7/7 green, unchanged assertion count, no regen needed), the
+  `mkdocs.yml` nav entry, all four inbound cross-links, and the `definition_deltas.md` §References
+  path. `verify-phase.sh` ALL GREEN; see `phases/04-summary.md`.
 
 ## Blocked
 

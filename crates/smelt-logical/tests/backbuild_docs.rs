@@ -1,4 +1,4 @@
-//! Doc-sync gate for `docs-site/docs/guide/backbuild-synthesis.md` (research
+//! Doc-sync gate for `docs-site/docs/guide/migrations.md` (research
 //! `docs/research/20260802-backbuild-synthesis.md`, plan
 //! `docs/plans/20260802-backbuild-followups.md` Phase 8). The guide's
 //! before/after/emitted-script SQL is generated and verified here, not
@@ -13,8 +13,8 @@
 //! MkDocs output:
 //!
 //! ```markdown
-//! <!-- backbuild-example(<id>): before -->
-//! <!-- backbuild-example(<id>): after -->
+//! <!-- migrate-example(<id>): before -->
+//! <!-- migrate-example(<id>): after -->
 //! ```sql
 //! ...
 //! ```
@@ -31,7 +31,7 @@
 //!
 //! A block that genuinely cannot be derived end-to-end (none exist on this
 //! page as of this phase — see `every_script_block_is_marked`'s doc comment)
-//! would instead carry `<!-- backbuild-example-exempt: <reason> -->`.
+//! would instead carry `<!-- migrate-example-exempt: <reason> -->`.
 //!
 //! ## Regeneration mode
 //!
@@ -77,7 +77,7 @@ use smelt_logical::backbuild::{
 
 const GUIDE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../docs-site/docs/guide/backbuild-synthesis.md"
+    "/../../docs-site/docs/guide/migrations.md"
 );
 
 fn parse(sql: &str) -> smelt_parser::File {
@@ -139,7 +139,7 @@ enum Marker {
 fn parse_marker_line(line: &str) -> Option<Marker> {
     let line = line.trim();
     if let Some(rest) = line
-        .strip_prefix("<!-- backbuild-example-exempt:")
+        .strip_prefix("<!-- migrate-example-exempt:")
         .and_then(|s| s.strip_suffix("-->"))
     {
         return Some(Marker::Exempt {
@@ -147,7 +147,7 @@ fn parse_marker_line(line: &str) -> Option<Marker> {
         });
     }
     let rest = line
-        .strip_prefix("<!-- backbuild-example(")
+        .strip_prefix("<!-- migrate-example(")
         .and_then(|s| s.strip_suffix("-->"))?;
     let close_paren = rest.find(')')?;
     let id = rest[..close_paren].trim().to_string();
@@ -274,7 +274,7 @@ fn extract(doc: &str) -> (BTreeMap<String, ExtractedBlocks>, Vec<FenceSweep>) {
                         entry.script = Some(content.clone());
                     }
                     other => panic!(
-                        "unknown backbuild-example role '{other}' for id '{id}' at line \
+                        "unknown migrate-example role '{other}' for id '{id}' at line \
                          {start_line} in {GUIDE_PATH} — expected before, after, or script"
                     ),
                 }
@@ -686,7 +686,7 @@ fn doc_examples_match_emitters() {
             panic!(
                 "example '{}' is registered with has_script_block: true but no `script` marker \
                  was found in {GUIDE_PATH} — regeneration hint: add \
-                 `<!-- backbuild-example({}): script -->` above its fenced ```sql block",
+                 `<!-- migrate-example({}): script -->` above its fenced ```sql block",
                 example.id, example.id
             )
         });
@@ -742,7 +742,7 @@ fn collapse_block(block: &str) -> Vec<String> {
 /// every other line (including this id's own `before`/`after` fences and
 /// all prose) untouched. Only used in `SMELT_REGEN_DOCS=1` mode.
 fn replace_script_block(doc: &str, id: &str, new_content: &str) -> String {
-    let marker = format!("<!-- backbuild-example({id}): script -->");
+    let marker = format!("<!-- migrate-example({id}): script -->");
     let lines: Vec<&str> = doc.lines().collect();
     let marker_idx = lines
         .iter()
@@ -818,8 +818,8 @@ fn doc_examples_pass_the_oracle() {
 }
 
 /// Sweep rule: every fenced ```sql block in the guide must sit immediately
-/// under at least one `<!-- backbuild-example(<id>): <role> -->` marker or a
-/// `<!-- backbuild-example-exempt: <reason> -->` marker — no exceptions.
+/// under at least one `<!-- migrate-example(<id>): <role> -->` marker or a
+/// `<!-- migrate-example-exempt: <reason> -->` marker — no exceptions.
 /// This is deliberately stronger than "every *emitted-script* block is
 /// marked" (the plan's minimum bar): requiring `before`/`after` blocks to
 /// carry a marker too means a new hand-written example cannot be added
@@ -831,7 +831,7 @@ fn doc_examples_pass_the_oracle() {
 /// through the real classifier, so zero exemption markers exist. If a truly
 /// illustrative, non-derivable snippet is ever added (e.g. showing a refused
 /// shape's *would-be* SQL), it should carry
-/// `<!-- backbuild-example-exempt: <reason> -->` rather than a role marker.
+/// `<!-- migrate-example-exempt: <reason> -->` rather than a role marker.
 #[test]
 fn every_script_block_is_marked() {
     let doc = fs::read_to_string(GUIDE_PATH).unwrap_or_else(|e| panic!("read {GUIDE_PATH}: {e}"));
@@ -850,8 +850,8 @@ fn every_script_block_is_marked() {
     assert!(
         unmarked.is_empty(),
         "unmarked ```sql fence(s) in {GUIDE_PATH} at line(s) {unmarked:?} — every fenced SQL \
-         block must be preceded by a `<!-- backbuild-example(<id>): before|after|script -->` \
-         marker or a `<!-- backbuild-example-exempt: <reason> -->` marker (see this test's doc \
+         block must be preceded by a `<!-- migrate-example(<id>): before|after|script -->` \
+         marker or a `<!-- migrate-example-exempt: <reason> -->` marker (see this test's doc \
          comment)"
     );
 }

@@ -312,7 +312,7 @@ smelt run --allow-full-refresh
 ## Further reading
 
 - [Incremental Models](incremental-models.md) for how incremental processing works
-- [Backbuild Synthesis](backbuild-synthesis.md) for migrating a deployed table when the
+- [Migrations](migrations.md) for migrating a deployed table when the
   model's *definition* changes, an alternative to a full refresh for large tables
 - [Targets & Backends](targets.md) for backend configuration
 - [Project Configuration](../reference/smelt-yml.md) for `smelt.yml` reference

@@ -130,6 +130,111 @@ fn incremental_guide_front_door_headline_matches_real_explain_output() {
     );
 }
 
+/// Ratchet: the retired `backbuild` verb must never reappear in the
+/// docs-site's prose. **Exemptions**: (1) identifiers matching `__backbuild_`
+/// (`__backbuild_diff`, `__backbuild_branch`) are alias names *emitted by*
+/// `smelt-logical/src/backbuild/emit.rs` into real SQL — they are product
+/// output pinned by the conformance suite, not the retired verb, and
+/// renaming them is out of scope for this outcome; (2) backticked code spans
+/// (`` `derive_backbuild_options` ``, `` `backbuild_docs.rs` ``) name real
+/// code identifiers and paths that this phase does not rename.
+#[test]
+fn retired_backbuild_verb_absent_from_docs_site() {
+    let mut files = Vec::new();
+    walk_markdown_files(&docs_site_dir(), &mut files);
+    files.sort();
+
+    let mut offenders = Vec::new();
+    for path in &files {
+        let text = fs::read_to_string(path).unwrap();
+        for line in text.lines() {
+            // Strip backticked code spans before scanning the remainder.
+            let mut stripped = String::new();
+            let mut in_span = false;
+            for part in line.split('`') {
+                if !in_span {
+                    stripped.push_str(part);
+                }
+                in_span = !in_span;
+            }
+            let lower = stripped.to_lowercase();
+            let has_hit = lower
+                .match_indices("backbuild")
+                .any(|(i, _)| !lower[i..].starts_with("backbuild_"));
+            if has_hit {
+                offenders.push(format!(
+                    "{}: {}",
+                    path.strip_prefix(repo_root()).unwrap().display(),
+                    line.trim()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "docs-site files with the retired \"backbuild\" verb: {offenders:#?}"
+    );
+}
+
+/// Guards this rename (and every future one): every relative markdown link
+/// under `docs-site/docs/` must resolve to an existing file.
+#[test]
+fn docs_site_relative_links_resolve() {
+    let mut files = Vec::new();
+    walk_markdown_files(&docs_site_dir(), &mut files);
+    files.sort();
+
+    let link_re_prefix = "](";
+    let mut offenders = Vec::new();
+    for path in &files {
+        let text = fs::read_to_string(path).unwrap();
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find(link_re_prefix) {
+            let after = &rest[start + link_re_prefix.len()..];
+            let Some(end) = after.find(')') else {
+                break;
+            };
+            let target = &after[..end];
+            rest = &after[end + 1..];
+
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with('#')
+                || target.starts_with("mailto:")
+                || !target.contains(".md")
+            {
+                continue;
+            }
+
+            let file_part = target.split('#').next().unwrap_or(target);
+            if file_part.is_empty() {
+                continue;
+            }
+
+            let resolved = if let Some(stripped) = file_part.strip_prefix('/') {
+                docs_site_dir().join(stripped)
+            } else {
+                path.parent().unwrap().join(file_part)
+            };
+
+            if !resolved.exists() {
+                offenders.push(format!(
+                    "{}: link target {:?} does not resolve ({})",
+                    path.strip_prefix(repo_root()).unwrap().display(),
+                    target,
+                    resolved.display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "docs-site files with unresolved relative links: {offenders:#?}"
+    );
+}
+
 /// Ratchet: the retired "four corners" framing must never reappear under
 /// `docs-site/docs/`. The framing was already fully purged before this gate
 /// was written; this test exists to keep it that way.
