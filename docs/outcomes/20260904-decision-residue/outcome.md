@@ -77,7 +77,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | done |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | done |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | done |
-| 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | planned |
+| 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | done |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
 | 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
 
@@ -171,5 +171,19 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   conspicuous. This adds one sentence to `sources.md`'s `MalformedSource` row. Phase 5 also
   deletes its own two Known Divergence bullets (`models.md`, `model_properties.md`) per the
   phase-1 precedent, leaving phase 7 the bullets earlier phases did not close.
+
+- 2026-09-05 — Phase 5 done: `ColumnMetadata::data_latency` and the legacy
+  `SourceColumnDef::data_latency` both deleted, refused at parse time via the existing
+  `YamlParseError` channel with a shared fix-it naming `mutation_profile.lateness`.
+  `compute_effective_window` (`smelt-logical`) and the whole `smelt-runtime::windowing`
+  chain (`compute_incremental_windows`/`_impl`/calendar/integer/`_ordered`) drop
+  `data_latency_days` entirely — the effective window is the AST-derived reach alone. `smelt
+  explain` (text and `--json`) prints a source's declared `mutation_profile.lateness` as
+  `orchestration-only fact: lateness = <interval> (never a plan input)` via a new
+  `InboundEdgeContract::lateness` field. New grep-gate test
+  `smelt-logical/tests/lateness_orchestration_only.rs` pins both the field-read absence and
+  the signature. Two golden/tutorial fixtures drifted because `examples/timeseries`'s
+  `raw.events` already declared `mutation_profile.lateness` — both regenerated/updated.
+  `verify-phase.sh` ALL GREEN; `hardening_budget` baseline unchanged.
 
 ## Blocked

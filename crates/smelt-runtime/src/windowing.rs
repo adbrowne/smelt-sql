@@ -196,18 +196,16 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 /// Splits `full_range` into batches using the F1 bound-based batch-safety
 /// roll-up (`compile::batch_safety_for_model`, unless overridden by
 /// `batch_size_days` or `per_partition`), then widens each batch's filter
-/// range by the effective temporal window (max of SQL-inferred lookback and
-/// `data_latency_days`).
+/// range by the effective temporal window (the SQL-inferred lookback/
+/// lookahead alone — declared lateness is orchestration-only and plays no
+/// part in plan derivation, `docs/specs/model_properties.md` §Constraints
+/// "Declared lateness is orchestration-only").
 ///
 /// `dep_timeseries` maps each upstream dependency that carries `timeseries:`
 /// to its `(address_segments, partition_column)` — see
 /// `compile::build_source_bound_map` for the exact shape/derivation. It
 /// drives the batch-safety classification; it does not affect filter
-/// widening (that stays SQL/`data_latency_days`-derived, untouched by BL2).
-///
-/// `data_latency_days` should be resolved by the caller from the model's column
-/// metadata (`ColumnMetadata::data_latency` on the event-time column) or a
-/// sources configuration.
+/// widening (that stays SQL-derived, untouched by BL2).
 ///
 /// Returns `Err` (fail-closed, `incremental_shapes.md` §"Partition-grain constraints" #10) when the
 /// batch-safety roll-up cannot classify the model (a `NotDerivable` source
@@ -234,7 +232,6 @@ pub fn compute_incremental_windows(
     inc_config: &PartitionGrainConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
-    data_latency_days: u32,
     full_range: &TimeRange,
     axis: PartitionAxis,
     batch_size_days: Option<u32>,
@@ -245,7 +242,6 @@ pub fn compute_incremental_windows(
         inc_config,
         sql,
         dep_timeseries,
-        data_latency_days,
         full_range,
         axis,
         batch_size_days,
@@ -278,7 +274,6 @@ fn compute_incremental_windows_impl(
     _inc_config: &PartitionGrainConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
-    data_latency_days: u32,
     full_range: &TimeRange,
     axis: PartitionAxis,
     batch_size_days: Option<u32>,
@@ -290,7 +285,6 @@ fn compute_incremental_windows_impl(
             timeseries,
             sql,
             dep_timeseries,
-            data_latency_days,
             full_range,
             batch_size_days,
             per_partition,
@@ -300,7 +294,6 @@ fn compute_incremental_windows_impl(
             timeseries,
             sql,
             dep_timeseries,
-            data_latency_days,
             full_range,
             batch_size_days,
             per_partition,
@@ -318,7 +311,6 @@ fn compute_calendar_windows(
     timeseries: &TimeseriesConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
-    data_latency_days: u32,
     full_range: &TimeRange,
     batch_size_days: Option<u32>,
     per_partition: bool,
@@ -372,7 +364,7 @@ fn compute_calendar_windows(
     let stripped = smelt_parser::strip_frontmatter(sql);
     let temporal_dep = analyze_temporal_dependencies(&stripped);
     let period_days = granularity_period_days(&timeseries.granularity);
-    let effective_window = compute_effective_window(&temporal_dep, data_latency_days, period_days);
+    let effective_window = compute_effective_window(&temporal_dep, period_days);
 
     // The model's own derived partition-column skew bound — a pure leaf
     // classifier `smelt-logical` owns (`crate::analysis::walk::model_partition_skew`);
@@ -495,16 +487,14 @@ fn compute_calendar_windows(
 /// partition is one integer value; the chunk step is one unit (or
 /// `--batch-size N` units), never `timeseries.granularity` (that stays the
 /// declared propagation grain only). Day-typed widening inputs — a nonzero
-/// `data_latency_days`, a nonzero SQL-inferred lookback/lookahead, or a
-/// nonzero derived partition-column skew — have no conversion into integer
-/// units and are refused fail-closed (`Err`) rather than silently zeroed or
-/// coerced 1:1 into "N units".
+/// SQL-inferred lookback/lookahead, or a nonzero derived partition-column
+/// skew — have no conversion into integer units and are refused fail-closed
+/// (`Err`) rather than silently zeroed or coerced 1:1 into "N units".
 #[allow(clippy::too_many_arguments)]
 fn compute_integer_windows(
     timeseries: &TimeseriesConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
-    data_latency_days: u32,
     full_range: &TimeRange,
     batch_size_days: Option<u32>,
     per_partition: bool,
@@ -560,22 +550,13 @@ fn compute_integer_windows(
     // refused below regardless of scaling, so the calendar period constant
     // is fine to reuse as-is.
     let period_days = granularity_period_days(&timeseries.granularity);
-    let effective_window = compute_effective_window(&temporal_dep, data_latency_days, period_days);
+    let effective_window = compute_effective_window(&temporal_dep, period_days);
 
     let skew = skew_override
         .unwrap_or_else(|| model_partition_skew(&stripped, &timeseries.partition_column));
 
     // Fail-closed day-typed-widening refusal (`docs/specs/incremental_shapes.md`
     // §"The partition grain" rule 8a) — never coerced 1:1 into "N units".
-    if data_latency_days != 0 {
-        return Err(format!(
-            "partition column '{}' resolves to an integer partition axis, but a nonzero \
-             data_latency ({data_latency_days} day(s)) is declared on the event-time column; \
-             day-typed widening has no conversion into an integer axis and is refused rather \
-             than coerced into partition units",
-            timeseries.partition_column,
-        ));
-    }
     if !effective_window.is_unbounded
         && (effective_window.lookback_days != 0 || effective_window.lookahead_days != 0)
     {
@@ -685,7 +666,6 @@ pub fn compute_incremental_windows_ordered(
     inc_config: &PartitionGrainConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
-    data_latency_days: u32,
     full_range: &TimeRange,
     axis: PartitionAxis,
     batch_size_days: Option<u32>,
@@ -733,7 +713,6 @@ pub fn compute_incremental_windows_ordered(
         inc_config,
         sql,
         dep_timeseries,
-        data_latency_days,
         full_range,
         axis,
         batch_size_days,

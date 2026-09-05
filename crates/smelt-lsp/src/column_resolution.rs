@@ -116,7 +116,6 @@ fn find_source_column_line(
             && !trimmed.contains("name:")
             && !trimmed.contains("type:")
             && !trimmed.contains("description:")
-            && !trimmed.contains("data_latency:")
         {
             // Likely a new section key; stop looking
             break;

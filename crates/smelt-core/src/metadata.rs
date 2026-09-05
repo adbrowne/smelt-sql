@@ -24,8 +24,8 @@
 //!    ```
 
 use crate::config::{
-    DataLatency, Materialization, PartitionGrainConfig, PartitionGrainSafetyOverrides,
-    RefreshStrategy, StateConfig, TimeseriesConfig,
+    Materialization, PartitionGrainConfig, PartitionGrainSafetyOverrides, RefreshStrategy,
+    StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::de::Error as _;
@@ -104,10 +104,6 @@ pub enum SchemaEvolutionStrategy {
 /// Per-column metadata declared in model frontmatter.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ColumnMetadata {
-    /// How late data can arrive for this column.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_latency: Option<DataLatency>,
-
     /// Human-readable description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -911,6 +907,33 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
         lines.push("  (the block declared no sub-keys — remove it entirely)".to_string());
     }
     lines.join("\n")
+}
+
+/// Build the fix-it message for a refused per-column `data_latency:` key,
+/// naming each offending column (`docs/specs/models.md` §Known Divergences,
+/// `docs/specs/model_properties.md` §Known Divergences). Declared lateness is
+/// orchestration-only and is expressed once per source, not per column —
+/// callers should declare `mutation_profile.lateness` on the source instead.
+/// Returns `None` when `raw_columns` declares no `data_latency` key. Shares
+/// its wording with [`crate::sources::column_data_latency_retired_message`]
+/// (the same retirement, applied to the sibling `SourceColumnDef` shape).
+fn column_data_latency_fixit_message(raw_columns: &serde_yaml::Value) -> Option<String> {
+    let mapping = raw_columns.as_mapping()?;
+    let offending: Vec<String> = mapping
+        .iter()
+        .filter_map(|(col_name, col_def)| {
+            let has_data_latency = col_def
+                .as_mapping()
+                .is_some_and(|m| m.contains_key(serde_yaml::Value::String("data_latency".into())));
+            has_data_latency.then(|| col_name.as_str().unwrap_or("?").to_string())
+        })
+        .collect();
+    if offending.is_empty() {
+        return None;
+    }
+    Some(crate::sources::column_data_latency_retired_message(
+        &offending.join(", "),
+    ))
 }
 
 /// Fold the top-level `safety_overrides:` frontmatter key
@@ -1800,6 +1823,15 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                     batched_subblock_fixit_message(value),
                 )));
+            // The per-column `data_latency:` key is retired outright —
+            // declared lateness is orchestration-only and lives once on the
+            // source (`mutation_profile.lateness`), not per column.
+            } else if key_str == "columns" {
+                if let Some(msg) = column_data_latency_fixit_message(value) {
+                    return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                        msg,
+                    )));
+                }
             // `contract:` is strictly pre-validated: an unparseable
             // `frozen_horizon` or `deferral` (model-level or
             // `cells[].deferral`) is a dedicated `ContractFrozenHorizonInvalid`
@@ -1947,6 +1979,12 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                         batched_subblock_fixit_message(value),
                     )));
+                } else if key_str == "columns" {
+                    if let Some(msg) = column_data_latency_fixit_message(value) {
+                        return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                            msg,
+                        )));
+                    }
                 }
             }
 

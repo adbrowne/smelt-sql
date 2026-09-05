@@ -5493,12 +5493,6 @@ fn build_model_plans(
         match (inc_config, axis_and_window) {
             (Some(inc), Some((axis, ts, Some((window_start, window_end))))) => {
                 let ts = ts.clone();
-                // Resolve data latency from model column metadata for the event-time column.
-                let data_latency_days = metadata
-                    .and_then(|m| m.columns.get(&ts.event_time_column))
-                    .and_then(|c| c.data_latency.as_ref())
-                    .map(|l| l.to_days())
-                    .unwrap_or(0);
 
                 // Contract-lattice `frozen_horizon` write-eligibility clamp
                 // (`docs/specs/incremental_models.md` §"Contract relaxations
@@ -5608,7 +5602,6 @@ fn build_model_plans(
                     &inc,
                     &expanded_sql,
                     &dep_ts,
-                    data_latency_days,
                     &full_range,
                     axis,
                     request.batch_size_days,

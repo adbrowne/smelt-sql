@@ -416,11 +416,6 @@ recorded here — history lives in git and §References → Plans.
   by contrast, are enumerated as walk nodes and bound/reach, grain (key set, determinism,
   comparability), partition skew, and footprint-trajectory all consume their verdicts
   (§"The composition walk"). Tracked: `docs/plans/20260707-property-composition-walk.md`.
-- **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints
-  "Declared lateness is orchestration-only" forbids any proof from reading it; the summation
-  survives (its output feeds batch fields no execute path consumes, so it is inert today) and
-  must be removed rather than wired further. Scheduled:
-  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **`INTERSECT`/`EXCEPT` are unclassified for filter distribution** — their arm scopes are judged
   by the admission walk only; this is independent of the per-arm mutation-sensitivity combination
   rule (§"Per-column mutation-sensitivity / column provenance" "Across set-operation arms"), which

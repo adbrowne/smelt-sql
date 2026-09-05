@@ -207,6 +207,73 @@ fn explain_prints_cells_clamps_locality() {
     );
 }
 
+/// `docs/outcomes/20260904-decision-residue` phase 5: a source's declared
+/// `mutation_profile.lateness` prints as an orchestration-only fact — never a
+/// plan input — on its inbound-edge block. `daily_events` reads
+/// `raw.events`, which declares `mutation_profile.lateness: '2 hours'`
+/// (`examples/timeseries/models/sources/raw/events.yml`); `user_daily_spend`
+/// reads `raw.transactions`, which declares none, so its report carries no
+/// such line.
+#[test]
+fn explain_prints_lateness_as_orchestration_only() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "daily_events")
+        .expect("daily_events has a maintenance plan");
+    assert!(
+        report.contains("orchestration-only fact: lateness = 2 hours (never a plan input)"),
+        "expected the orchestration-only lateness line for raw.events: {report}"
+    );
+
+    let report = build_report_for(&project_dir, "user_daily_spend")
+        .expect("user_daily_spend has a maintenance plan");
+    assert!(
+        !report.contains("orchestration-only fact: lateness"),
+        "raw.transactions declares no lateness; none should be printed: {report}"
+    );
+}
+
+/// `--json`'s `inbound_edges[].lateness` carries the same append-stable fact
+/// as the text report's orchestration-only line (`docs/outcomes/
+/// 20260904-decision-residue` phase 5).
+#[test]
+fn explain_json_carries_lateness() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("daily_events")
+        .arg("--json")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt explain daily_events --json");
+    assert!(
+        output.status.success(),
+        "smelt explain daily_events --json failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("expected valid JSON: {e}: {stdout}"));
+
+    let edges = json
+        .get("inbound_edges")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("expected a top-level inbound_edges array: {stdout}"));
+    let events_edge = edges
+        .iter()
+        .find(|e| e["name"].as_str().unwrap_or_default().contains("events"))
+        .unwrap_or_else(|| panic!("expected an inbound edge for raw.events: {stdout}"));
+    assert_eq!(events_edge["lateness"], "2 hours");
+}
+
 /// The model's own delta signature (`incremental_models.md` §Surface "CLI",
 /// Headline bullet) is the report's first line: `examples/timeseries`'
 /// `user_spend_rollup` is a bare `grain: key` model (no key-temporal-

@@ -156,7 +156,14 @@ partition-locality verdict, any admission refusals, the model's own **Relation C
 contract block per inbound edge (upstream dependency) — a declared source or an upstream
 maintained model, rendered through the identical `clock:` / `identity:` / `derived grain:` rows
 and labelled `(source)` or `(model)` so the reader knows which provider filled them; a row prints
-`(none)` when that provider declares neither fact. For every presented column that folds through
+`(none)` when that provider declares neither fact. An inbound **source** edge that declares
+`mutation_profile.lateness` renders an `orchestration-only fact: lateness = <interval> (never a
+plan input)` line — declared lateness is read by nothing in plan derivation
+(`model_properties.md` §Constraints "Declared lateness is orchestration-only"); an edge with no
+declared lateness prints no such line. With `--json`, the corresponding entry in the per-model
+report's `inbound_edges` array carries the same fact as an append-stable `lateness: "<interval>"`
+field (§Constraints item 5); an edge with no declared lateness omits the key entirely, never
+`null`. For every presented column that folds through
 decomposed state (`incremental_shapes.md` §"Decomposed state (rung 2) in keyed models"), the
 report also lists that column's hidden state columns and the presentation expression `π` that
 recomputes the presented value from them, labelled as internal state and explicitly not part of

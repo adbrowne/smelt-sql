@@ -957,7 +957,6 @@ fn sources_config_from_source_infos(infos: &[smelt_core::SourceInfo]) -> Sources
                     name: c.name.clone(),
                     data_type: Some(c.data_type.clone()),
                     description: None,
-                    data_latency: None,
                 })
                 .collect();
             Some(smelt_core::SourceDef {
