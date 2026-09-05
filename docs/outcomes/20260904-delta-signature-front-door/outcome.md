@@ -48,7 +48,7 @@ the tutorial pages in step.
 |---|-------|--------|
 | 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | done |
 | 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | done |
-| 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | pending |
+| 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | planned |
 | 4 | Rename `guide/backbuild-synthesis.md` to the rebuild verb; nav + cross-links | pending |
 | 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | pending |
 
@@ -88,6 +88,19 @@ the tutorial pages in step.
   un-elided-prefix pin for `guide/incremental-models.md`); regenerated both hand-pasted excerpts
   from real `smelt explain` output; tutorial pages already fresh (no diff). `verify-phase.sh` ALL
   GREEN; see `phases/02-summary.md`.
+- 2026-09-05 (plan, phase 3): criterion 2's "no four corners text remains anywhere under
+  `docs-site/docs/`" is already literally true (`rg -in "four.corners" docs-site/docs/` is
+  empty today — the four-corners grid lives only in `docs/specs/models.md`). The phase
+  therefore spends its effort on the signature-first rewrite and converts the four-corners
+  clause into a standing ratchet test rather than a removal task, so the criterion cannot
+  quietly regress later.
+- 2026-09-05 (plan, phase 3): the guide's current front door is the DELETE+INSERT mechanics
+  paragraph, which states a *fixed* strategy — contradicting the spec's derived-per-cell
+  maintenance plan. Demoting it under §"Running incremental models" is folded into this phase
+  rather than deferred: leaving a fixed-strategy claim above the new signature front door
+  would defeat criterion 2 in substance while passing it in letter.
+- 2026-09-05 (plan, phase 3): no reshape of rows 4 and 5 — the phase 2 summary reported both
+  unaffected, and this phase's audit found nothing that changes them.
 
 ## Blocked
 
