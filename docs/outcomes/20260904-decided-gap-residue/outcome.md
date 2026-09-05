@@ -1,7 +1,7 @@
 # Outcome: Decided-gap residue — close the spec bullets whose target behaviour is already written
 
 **Created:** 2026-09-04
-**Status:** blocked
+**Status:** active
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows IM-25, IS-13 ("implementation gap in an already-decided design"); `docs/TODO.md` bullets "Frozen-horizon append-only gate", "Deferral oracle restatement", "Sidecar per-consuming-edge audit"
 **Spec anchors:** `docs/specs/incremental_models.md` §"The contract lattice", §Known Divergences "Conditional-maintenance gaps"; `docs/specs/incremental_shapes.md` §"The column-family catalogue" (once-write), §Known Divergences; `docs/specs/sources.md` §Known Divergences (sidecar per-consumer comparandum)
 
@@ -57,7 +57,7 @@ than the current residue.
 |---|-------|--------|
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
-| 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
+| 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | done |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | done |
@@ -183,6 +183,21 @@ than the current residue.
   landed, and the `incremental_shapes.md` bullet was narrowed to the residual clause rather than
   deleted, but the generative-pool once-write NULL-schedule witness has no legal path through
   `KeyedRecipe`'s current source shape. That clause is what blocks the outcome.
+
+- 2026-09-05: **Human decision recorded, outcome unblocked.** Of the three candidate options in
+  `phases/03-summary.md` "For the next planner", the answer is **(c)**: `classify_once_write`'s
+  route-2 loop skips the declared-FD requirement when the candidate column is already a member of
+  the model's `unique_key`. Rationale — `unique_key` membership already proves the non-null/
+  distinct guarantee the FD was there to establish, and route 1 (bare reference) already accepts
+  a `unique_key` column with zero FD, so this is the same argument extended to route 2 rather than
+  a new one. (a) (widen `SourceRecipe`/`KeyedRecipe` with a fourth identity column) and (b)
+  (relax `validate_functional_dependencies`'s self-contradiction check for trivial `key -> key`)
+  were both rejected: (a) is a bigger structural change than this gap needs, and (b) would loosen
+  FD-validation semantics generally rather than just this route. Phase 3 reopened (`pending`);
+  outcome flipped back to `active`. The next plan step should: implement the `unique_key`-member
+  skip in `classify_once_write`, add the generative-pool recipe/render/gate.rs wiring the phase-3
+  revert backed out, and rewrite `incremental_shapes.md`'s Known Divergences bullet to describe
+  the now-closed gap (or delete it if nothing residual remains).
 
 ## Blocked
 
