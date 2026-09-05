@@ -359,7 +359,8 @@ mod tests {
         let properties = PropertySet::derive("orders_by_customer", sql, &[], &bound_ctx).unwrap();
 
         let cell = sample_cell();
-        let contract_point = crate::contract::effective_contract(None, "raw.orders", &["amount".to_string()]).into();
+        let contract_point =
+            crate::contract::effective_contract(None, "raw.orders", &["amount".to_string()]).into();
         let refusal = Refusal::ScanUnbounded {
             source: "raw.orders".to_string(),
             why: "no partition_column declared".to_string(),

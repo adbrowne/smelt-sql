@@ -80,7 +80,10 @@ fn discover_all(project_dir: &Path) -> (Config, Vec<ModelFile>) {
 /// model has no maintenance plan (`smelt_db::maintenance_plan_report` is
 /// `None`) — the same condition under which the real CLI never reaches its
 /// `--json` maintenance-report branch at all.
-fn build_diagnostics_for(project_dir: &Path, model_name: &str) -> Option<(ModelDiagnostics, usize)> {
+fn build_diagnostics_for(
+    project_dir: &Path,
+    model_name: &str,
+) -> Option<(ModelDiagnostics, usize)> {
     let (config, models) = discover_all(project_dir);
     let sources = smelt_cli::SourcesConfig::load(project_dir).ok();
 
@@ -201,8 +204,9 @@ fn spawn_explain_json(project_dir: &Path, model_name: &str) -> serde_json::Value
         "smelt explain {model_name} --json failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("smelt explain {model_name} --json did not print JSON: {e}\nstdout={stdout}"))
+    serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("smelt explain {model_name} --json did not print JSON: {e}\nstdout={stdout}")
+    })
 }
 
 struct WorkspaceCheck {
@@ -243,8 +247,8 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         let report = spawn_explain_json(project_dir, &canonical);
 
         // `properties` — byte-identical string encodings.
-        let profile_properties = serde_json::to_value(&diagnostics.profile.properties)
-            .expect("serialize PropertySet");
+        let profile_properties =
+            serde_json::to_value(&diagnostics.profile.properties).expect("serialize PropertySet");
         assert_eq!(
             profile_properties, report["properties"],
             "model '{canonical}': report `properties` diverges from the profile's own encoding"
@@ -263,9 +267,21 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         );
         total_cell_verdicts += diagnostics.profile.cell_verdicts.len();
         for (verdict, cell_json) in diagnostics.profile.cell_verdicts.iter().zip(cells.iter()) {
-            assert_eq!(cell_json["group"], serde_json::json!(verdict.group), "{canonical}");
-            assert_eq!(cell_json["trigger"], serde_json::json!(verdict.trigger), "{canonical}");
-            assert_eq!(cell_json["corner"], serde_json::json!(verdict.corner), "{canonical}");
+            assert_eq!(
+                cell_json["group"],
+                serde_json::json!(verdict.group),
+                "{canonical}"
+            );
+            assert_eq!(
+                cell_json["trigger"],
+                serde_json::json!(verdict.trigger),
+                "{canonical}"
+            );
+            assert_eq!(
+                cell_json["corner"],
+                serde_json::json!(verdict.corner),
+                "{canonical}"
+            );
             assert_eq!(
                 cell_json["technique"],
                 serde_json::json!(verdict.technique),
@@ -277,7 +293,10 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
                 "{canonical}"
             );
             assert_eq!(
-                cell_json.get("row_identity_proven_mismatch").cloned().unwrap_or(serde_json::Value::Null),
+                cell_json
+                    .get("row_identity_proven_mismatch")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
                 serde_json::to_value(&verdict.row_identity.proven_mismatch).unwrap(),
                 "{canonical}"
             );
@@ -309,9 +328,21 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         );
         total_probes += diagnostics.profile.probes.len();
         for (probe, probe_json) in diagnostics.profile.probes.iter().zip(report_probes.iter()) {
-            assert_eq!(probe_json["fact"], serde_json::json!(probe.fact), "{canonical}");
-            assert_eq!(probe_json["probe"], serde_json::json!(probe.probe), "{canonical}");
-            assert_eq!(probe_json["cell"], serde_json::json!(probe.cell), "{canonical}");
+            assert_eq!(
+                probe_json["fact"],
+                serde_json::json!(probe.fact),
+                "{canonical}"
+            );
+            assert_eq!(
+                probe_json["probe"],
+                serde_json::json!(probe.probe),
+                "{canonical}"
+            );
+            assert_eq!(
+                probe_json["cell"],
+                serde_json::json!(probe.cell),
+                "{canonical}"
+            );
         }
     }
 
@@ -382,7 +413,10 @@ fn report_json_matches_profile_encoding() {
     // `examples/retail_analytics` since no report exists to compare against
     // (see module doc comment).
     let (_, retail_models) = discover_all(&retail_analytics_dir());
-    assert!(!retail_models.is_empty(), "fixture sanity: retail_analytics has models");
+    assert!(
+        !retail_models.is_empty(),
+        "fixture sanity: retail_analytics has models"
+    );
     for model in &retail_models {
         let sql = smelt_parser::strip_frontmatter(&model.content).to_string();
         let declared_unique_key: Vec<String> = model
@@ -391,13 +425,18 @@ fn report_json_matches_profile_encoding() {
             .and_then(|m| m.unique_key.clone())
             .unwrap_or_default();
         let bound_ctx = smelt_logical::analysis::source_bounds::BoundContext::new();
-        PropertySet::derive(&model.canonical_path(), &sql, &declared_unique_key, &bound_ctx)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "PropertySet::derive must succeed for retail_analytics model '{}': {e}",
-                    model.canonical_path()
-                )
-            });
+        PropertySet::derive(
+            &model.canonical_path(),
+            &sql,
+            &declared_unique_key,
+            &bound_ctx,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "PropertySet::derive must succeed for retail_analytics model '{}': {e}",
+                model.canonical_path()
+            )
+        });
     }
 }
 

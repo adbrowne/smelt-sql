@@ -25,14 +25,14 @@
 
 use serde::Serialize;
 
-pub use smelt_logical::analysis::profile::{ProfileError, PropertySet};
+use smelt_core::config::{ContractConfig, Grain as ContractGrain, TimeseriesConfig};
+use smelt_core::{Granularity, ModelFile, SourceInfo};
 use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::profile::{ProbePlanEntry, PropertyProfile};
+pub use smelt_logical::analysis::profile::{ProfileError, PropertySet};
 use smelt_logical::analysis::source_bounds::BoundContext;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::contract::ContractPointView;
-use smelt_core::config::{ContractConfig, Grain as ContractGrain, TimeseriesConfig};
-use smelt_core::{Granularity, ModelFile, SourceInfo};
 use smelt_logical::maintenance::choice::{
     effective_override, resolve_cell_write_suppression, technique_requires_row_identity,
     WriteSuppression,
@@ -1088,12 +1088,21 @@ pub fn build_model_diagnostics(
                 .map(|g| g.columns.clone())
                 .unwrap_or_default();
             let trigger_address = cell_trigger_address(&cell.trigger).unwrap_or_default();
-            smelt_logical::contract::effective_contract(contract_cfg, &trigger_address, &group_columns)
-                .into()
+            smelt_logical::contract::effective_contract(
+                contract_cfg,
+                &trigger_address,
+                &group_columns,
+            )
+            .into()
         })
         .collect();
-    let profile =
-        PropertyProfile::assemble(properties, plan_cells, &contract_points, refusals, probe_entries);
+    let profile = PropertyProfile::assemble(
+        properties,
+        plan_cells,
+        &contract_points,
+        refusals,
+        probe_entries,
+    );
 
     Ok(ModelDiagnostics {
         model: model.canonical_path(),

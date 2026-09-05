@@ -1222,8 +1222,7 @@ fn explain_json_carries_refusals() {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let project_dir = stage_scan_unbounded_project(&tmp);
 
-    let report =
-        build_report_for(&project_dir, "joined").expect("joined has a maintenance plan");
+    let report = build_report_for(&project_dir, "joined").expect("joined has a maintenance plan");
     assert!(
         report.contains("MaintenanceScanUnbounded") || report.contains("ScanUnbounded"),
         "expected the text report to print the ScanUnbounded refusal: {report}"

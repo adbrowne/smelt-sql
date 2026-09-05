@@ -220,7 +220,13 @@ fn assemble_diagnostics_independently(
         Vec<smelt_logical::maintenance::ColumnGroup>,
         Vec<smelt_logical::maintenance::Refusal>,
     ) = smelt_db::maintenance_plan_report(&db, ws, file)
-        .map(|result| (result.plan.cells, result.column_groups, result.plan.refusals))
+        .map(|result| {
+            (
+                result.plan.cells,
+                result.column_groups,
+                result.plan.refusals,
+            )
+        })
         .unwrap_or_default();
     let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
 
