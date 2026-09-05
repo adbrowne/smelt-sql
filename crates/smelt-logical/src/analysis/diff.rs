@@ -340,9 +340,9 @@ impl ChangeKind {
                 let def = interval_direction(old.deferral_seconds, new.deferral_seconds);
                 let rd = retain_departed_direction(&old.retain_departed, &new.retain_departed);
                 let verdicts = [fh, def, rd];
-                if verdicts.iter().any(|v| *v == Some(Direction::Downgrade)) {
+                if verdicts.contains(&Some(Direction::Downgrade)) {
                     Direction::Downgrade
-                } else if verdicts.iter().any(|v| *v == Some(Direction::Upgrade)) {
+                } else if verdicts.contains(&Some(Direction::Upgrade)) {
                     Direction::Upgrade
                 } else {
                     Direction::Neutral
@@ -1126,8 +1126,10 @@ pub fn diff_profiles(
         }
     });
 
-    let mut summary = DiffSummary::default();
-    summary.shifted_models = model_diffs.len();
+    let mut summary = DiffSummary {
+        shifted_models: model_diffs.len(),
+        ..Default::default()
+    };
     for m in &model_diffs {
         for c in &m.changes {
             match c.direction {
@@ -1875,7 +1877,7 @@ mod tests {
         ];
 
         for m in mutations {
-            let changed = &m != &base;
+            let changed = m != base;
             let kinds = diff_property_set(&base, &m);
             assert_eq!(
                 changed,
