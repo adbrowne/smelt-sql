@@ -2,15 +2,50 @@
 
 Incremental materialization lets you process only new or changed data instead of rebuilding an entire table from scratch. For large datasets, this can reduce run times from hours to seconds.
 
-## How it works
+## What a model emits
 
-smelt uses a **DELETE+INSERT** strategy on time partitions. For each incremental run:
+Between one run and the next, something changed upstream — new rows arrived, an existing row was
+corrected. That change is a **delta**, and every relation in your pipeline — a source or a
+model — has a **delta signature**: the shape of change it emits when it changes.
 
-1. **DELETE** rows in the output table where the partition column falls within the requested time range.
-2. **Run the query** with a WHERE filter restricting source data to that time range.
-3. **INSERT** the results into the output table.
+Not every delta is equally hard to absorb. smelt grades the shape of a change on a three-point
+scale, from easiest to hardest:
 
-This approach is idempotent -- running the same time range twice produces the same result, because the DELETE step clears any previous output before inserting.
+`append-only within a window` ⊑ `keyed upsert` ⊑ `general`
+
+- **append-only within a window** — only new rows, landing inside a bounded, recent time window.
+  An event feed is the canonical case.
+- **keyed upsert** — rows are added or replaced, addressed by a key. The output of a keyed
+  aggregation is the canonical case.
+- **general** — anything: inserts, updates, deletes, anywhere. The least that can be assumed,
+  and the most expensive to absorb.
+
+A signature's **addressing** says how the changed rows are located: by time **window**, by
+**key set**, or only as **whole-table**. Run `smelt explain <model>` to see the derived
+signature for one of the timeseries example project's models:
+
+```
+$ smelt explain user_daily_spend
+model user_daily_spend  (emits: keyed upsert over [user_id, spend_date], key-addressed, slice-bounded by spend_date under key temporal locality (settle bound: After { margin: Seconds(0) }); grain: partition)
+```
+
+That headline is the model's own delta signature — a keyed upsert over `[user_id, spend_date]`,
+narrowed to the `spend_date` window a given run touches. **A model's signature is derived from
+its SQL and its inputs' signatures — you never declare it.** A keyed `GROUP BY` over an
+append-only feed emits keyed upserts; a row-multiplying join degrades what flows through it
+toward `general`. `smelt explain` names the construct responsible whenever a model degrades:
+run it against `daily_events_enriched` in the same project and the headline reads
+`emits: general (degraded by: join proven OneToMany (row-multiplying) degrades output-delta
+shape to General), not delta-addressable` — the plain inner join is exactly the shape that
+can't be proven row-preserving (more on this in
+[Enrichment joins and dimension updates](#enrichment-joins-and-dimension-updates) below).
+
+What you actually declare are two shape-defining facts about the *output* — a clock, an
+identity, or both — covered next in [Configuration](#configuration). From there: the
+[composed shape](#the-composed-shape-key-time) when you declare both facts together,
+[contract relaxations](#contract-relaxations) if a column doesn't need strict equivalence,
+[Rebuilding](#rebuilding) for backfills and definition changes, and
+[Schema Evolution](schema-evolution.md) for adding or removing columns.
 
 ## Configuration
 
@@ -97,6 +132,24 @@ model's recorded snapshot at `.smelt/targets/<target>/schemas/<model>.json` and 
 next run addresses the table under the new column and records a fresh snapshot.
 
 ## Running incremental models
+
+### What a partition-shaped run does
+
+For a partition-shaped model (a declared clock, no declared identity — the shape this guide
+covers), the maintenance plan derives to the region-recompute technique on the model's own
+`NewData` trigger: **DELETE**+**INSERT** on time partitions. For each run touching a partition:
+
+1. **DELETE** rows in the output table where the partition column falls within the requested time range.
+2. **Run the query** with a WHERE filter restricting source data to that time range.
+3. **INSERT** the results into the output table.
+
+This is idempotent -- running the same time range twice produces the same result, because the
+DELETE step clears any previous output before inserting. It is the technique the derived plan
+assigns to this trigger for this shape, not a strategy you choose: a keyed or composed model,
+or a mutation triggered by an upstream dimension change, can derive a different technique for a
+different cell of the same plan (see [Enrichment joins](#enrichment-joins-and-dimension-updates)
+and [The composed shape](#the-composed-shape-key-time)). Run `smelt explain <model>` on your own
+model to see which technique its own plan actually assigned.
 
 ### Explicit time range
 

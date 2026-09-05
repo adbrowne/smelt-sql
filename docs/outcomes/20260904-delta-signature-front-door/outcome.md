@@ -48,7 +48,7 @@ the tutorial pages in step.
 |---|-------|--------|
 | 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | done |
 | 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | done |
-| 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | planned |
+| 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | done |
 | 4 | Rename `guide/backbuild-synthesis.md` to the rebuild verb; nav + cross-links | pending |
 | 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | pending |
 
@@ -101,6 +101,12 @@ the tutorial pages in step.
   would defeat criterion 2 in substance while passing it in letter.
 - 2026-09-05 (plan, phase 3): no reshape of rows 4 and 5 — the phase 2 summary reported both
   unaffected, and this phase's audit found nothing that changes them.
+- 2026-09-05 (implement, phase 3): shipped the signature-first `## What a model emits` section
+  (fronted with a real `smelt explain user_daily_spend` headline, chosen because it emits
+  `keyed upsert` rather than degrading to `general`) and demoted DELETE+INSERT mechanics to
+  `### What a partition-shaped run does`; new gate `crates/smelt-cli/tests/docs_front_door.rs`
+  (3 tests: first-section content, headline byte-pin, four-corners ratchet). All 11 inbound
+  anchors preserved. `verify-phase.sh` ALL GREEN; see `phases/03-summary.md`.
 
 ## Blocked
 
