@@ -193,16 +193,17 @@ A model's **property profile** is the pure, serialisable record of every composi
 verdict the maintenance report prints for that model. It is one value per model per project
 version, derived by the same pure functions the report is built from, and it contains exactly:
 
-1. `columns` — output column names in projection order.
-2. `grain` — the proven grain key (`PropertyGrain`), and `row_identity` (`RowIdentityVerdict`).
-3. `source_bounds` — per upstream source, the `BoundResult` (bound/reach verdict and its
-   derived interval or `Unbounded`).
-4. `determinism` and `discriminants` per column.
-5. `cells` — for a maintained model, each `PlanCell`'s `(group, trigger, corner, admitted
+1. `properties` — the model's derived property set (`PropertySet`): output columns in
+   projection order, the proven grain key (`Grain`) and `row_identity` (`RowIdentityVerdict`),
+   per-upstream-source `source_bounds` (bound/reach verdict and its derived interval or
+   `Unbounded`), and per-column `determinism`, `comparability`, and `discriminants`. These
+   verdicts are derived together, by one pure function, and are never split back into separate
+   profile fields — doing so would fork the derivation.
+2. `cells` — for a maintained model, each `PlanCell`'s `(group, trigger, corner, admitted
    technique, contract point)`; for an unmaintained model, empty.
-6. `refusals` — the set of maintenance admission refusals (`DiagnosticCode` plus the refusal
-   text), as the maintenance-plan gate would report them.
-7. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`, `cadence`).
+3. `refusals` — the set of maintenance admission refusals (the diagnostic code's *name* plus the
+   refusal text), as the maintenance-plan gate would report them.
+4. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`, `cadence`).
 
 The profile omits everything that is a *rendering* rather than a verdict: emitted statements,
 technique previews for non-admitted techniques, presentation expressions for decomposed state,

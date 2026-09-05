@@ -222,6 +222,12 @@ With `--json`, the per-model report gains an append-stable `probes` array (§Con
 `{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence": "per_run"|"periodic"|"off",
 "cost": "<one line>"}`.
 
+With `--json`, the per-model report also gains an append-stable `refusals` array (§Constraints
+item 5) carrying the same admission refusals the text report's "Refusals" section prints:
+`{"code": "<diagnostic code name>", "text": "<refusal text>"}`. `code` names the diagnostic code
+a refusal of this shape raises through the ordinary diagnostics pipeline; `text` is the report's
+own rendering of the refusal, verbatim. Empty when the model's plan admitted every cell.
+
 **Effective contract.** Each cell's block additionally prints its effective contract lattice point
 (`incremental_models.md` §"The contract lattice") — `default` when no `contract:` applies,
 otherwise the applicable relaxations with their declared intervals: `frozen_horizon: 90 days`

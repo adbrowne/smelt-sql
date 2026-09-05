@@ -21,7 +21,8 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
 ## Success criteria (checkable)
 
 1. `smelt_logical::analysis::profile::PropertyProfile` exists with exactly the fields
-   `property_diff.md` §"The property profile" lists; `smelt_runtime::diagnostics::ModelDiagnostics`
+   `property_diff.md` §"The property profile" lists (`properties: PropertySet`, `cells`,
+   `refusals`, `probes`); `smelt_runtime::diagnostics::ModelDiagnostics`
    and the CLI report render from it. Standing gate
    `cargo test -p smelt-cli --test property_profile_parity`: for every maintained model in
    `examples/timeseries` and `examples/retail_analytics`, the report's JSON for grain, bounds,
