@@ -89,3 +89,48 @@ profile_workspace` (2/2), `smelt-runtime --test execute_parity` (4/4),
 several minutes, and the coordinator is running the remaining full-suite and
 `example_diagnostics` gates directly rather than trusting a background
 result I cannot receive. Their run is authoritative for those two stages.
+
+## Fix round 1 (review P1-P8)
+
+- **P1 (Critical, fixed)**: `profiles_for_workspace` now returns
+  `Result<WorkspaceProfiles, ProfileWorkspaceError>`; workspace-init and
+  dependency-graph-build failures are errors, never an empty map.
+- **P2 (Important, fixed — live divergence, not just unreachable)**: wired
+  `maintenance_availability::availability_for_run(SqlDialect::DuckDB, &config)`
+  + `resolve_availability(&mut result.plan.cells, &availability)` before
+  building diagnostics, matching `smelt explain`'s own report path. Did
+  **not** add a fixture that actually downgrades — `examples/timeseries`
+  declares no `state.warehouse_tables: false` project, and I judged adding
+  one out of scope for a fix round already touching six files; flagging
+  this rather than silently skipping it.
+- **P3 (Important, fixed)**: `WorkspaceProfiles` now carries `failures:
+  BTreeMap<String, String>`; a per-model `build_ephemeral_resolver`/
+  `build_model_diagnostics` error is recorded there instead of `continue`d
+  past silently. No rendering added (still Phase 5's job, per R10).
+- **P4 (Important, fixed)**: `property_profile_parity.rs` gained
+  `refusal_counts_by_model`, an independent raw-Salsa count (same style as
+  `count_models_with_maintenance_plan`); `refusals_ground_truth` reads from
+  it, not from `profile.refusals.len()` — the tautology is gone.
+- **P5 (Minor, fixed)**: `diff_leaves_no_repository_state` now resolves the
+  baseline against a captured **earlier** commit (a second commit follows
+  it) and dirties the working tree with an uncommitted edit before taking
+  its before/after snapshots, so a stray `checkout`/`stash` would actually
+  change the observed state.
+- **P6 (Minor, fixed)**: `edited_set_ignores_a_formatting_only_edit` now
+  reflows a frontmatter comment (swaps a double-space for space+tab, same
+  byte length) instead of writing identical bytes back — a real edit that
+  must still resolve to "not edited".
+- **P7 (Minor, fixed)**: `build_bound_context` moved below
+  `build_model_diagnostics`'s closing brace in `diagnostics.rs`, so the
+  latter's own doc comment sits directly above it again.
+- **P8 (Minor, fixed)**: `canonicalize` I/O failures in
+  `show_toplevel_and_rel` now map to a new `BaselineError::PathResolutionFailed
+  { path, source }` variant instead of the misdescribing `GitUnavailable`.
+
+Gates run and observed directly: `cargo fmt --all -- --check` (clean),
+`cargo check -p smelt-core -p smelt-runtime -p smelt-cli --all-targets`
+(clean), `bash .claude/scripts/clippy-gate.sh` (clean, both feature sets),
+`smelt-core --test baseline` (20/20), `smelt-runtime --test profile_workspace`
+(2/2), `smelt-cli --test property_profile_parity --test explain_maintenance`
+(39/39), `smelt-core --test hardening_budget` (baseline unaffected). Did not
+run `cargo test --workspace` or `example_diagnostics`, per instruction.

@@ -95,6 +95,28 @@ fn discover_all(project_dir: &Path) -> (Config, Vec<ModelFile>) {
 fn profiles_for(project_dir: &Path) -> std::collections::BTreeMap<String, PropertyProfile> {
     let loaded = smelt_core::workspace::load_workspace(project_dir);
     smelt_runtime::profile::profiles_for_workspace(&loaded)
+        .unwrap_or_else(|e| panic!("profiles_for_workspace({}): {e}", project_dir.display()))
+        .profiles
+}
+
+/// Independent ground truth for a model's refusal count, computed directly
+/// via the raw Salsa query — deliberately NOT going through
+/// `profiles_for`/`profiles_for_workspace`'s own pipeline, the same
+/// independence `count_models_with_maintenance_plan` below already
+/// exercises for plan presence. Without this, comparing a profile's own
+/// `refusals.len()` against itself is a tautology (fix round 1, P4).
+fn refusal_counts_by_model(project_dir: &Path) -> std::collections::BTreeMap<String, usize> {
+    let (_, models) = discover_all(project_dir);
+    let db = init_db(project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    models
+        .iter()
+        .filter_map(|m| {
+            let file = db.source_file(&m.path).expect("model file registered");
+            let result = smelt_db::maintenance_plan_report(&db, ws, file)?;
+            Some((m.canonical_path(), result.plan.refusals.len()))
+        })
+        .collect()
 }
 
 /// Spawn the real `smelt` binary's `explain <model> --json` and parse its
@@ -138,6 +160,7 @@ struct WorkspaceCheck {
 fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
     let (_, models) = discover_all(project_dir);
     let profiles = profiles_for(project_dir);
+    let refusal_counts = refusal_counts_by_model(project_dir);
     let mut checked = 0usize;
     let mut total_cell_verdicts = 0usize;
     let mut total_refusals_underlying = 0usize;
@@ -150,12 +173,11 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
             continue;
         };
         checked += 1;
-        // The profile's own refusals ARE the ground truth (it is built by
-        // mapping the derived plan's refusals 1:1 into `ProfileRefusal`s),
-        // so this is length-equal to `profile.refusals` by
-        // construction — kept as its own variable to preserve this test's
-        // original "only assert non-vacuously" structure.
-        let refusals_ground_truth = profile.refusals.len();
+        // Independent ground truth (P4): read from a raw
+        // `maintenance_plan_report` call, never from `profile.refusals`
+        // itself — the latter would make the non-vacuity assertion below a
+        // tautology.
+        let refusals_ground_truth = *refusal_counts.get(&canonical).unwrap_or(&0);
         total_refusals_underlying += refusals_ground_truth;
 
         let report = spawn_explain_json(project_dir, &canonical);

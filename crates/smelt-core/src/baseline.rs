@@ -60,6 +60,11 @@ pub enum BaselineError {
     NoProjectAtRef { commit: String, rel: String },
     #[error("git is not available or could not be run: {0}")]
     GitUnavailable(std::io::Error),
+    #[error("could not resolve the real path of '{}': {source}", .path.display())]
+    PathResolutionFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("`git archive` failed: {stderr}")]
     Archive { stderr: String },
     #[error("failed to extract the baseline archive: {0}")]
@@ -126,12 +131,20 @@ fn show_toplevel_and_rel(project_dir: &Path) -> Result<(PathBuf, String), Baseli
         });
     }
     let repo_root_raw = PathBuf::from(stdout_trimmed(&output));
-    let repo_root = repo_root_raw
-        .canonicalize()
-        .map_err(BaselineError::GitUnavailable)?;
-    let project_dir_canon = project_dir
-        .canonicalize()
-        .map_err(BaselineError::GitUnavailable)?;
+    let repo_root =
+        repo_root_raw
+            .canonicalize()
+            .map_err(|source| BaselineError::PathResolutionFailed {
+                path: repo_root_raw.clone(),
+                source,
+            })?;
+    let project_dir_canon =
+        project_dir
+            .canonicalize()
+            .map_err(|source| BaselineError::PathResolutionFailed {
+                path: project_dir.to_path_buf(),
+                source,
+            })?;
 
     let rel = if project_dir_canon == repo_root {
         String::new()

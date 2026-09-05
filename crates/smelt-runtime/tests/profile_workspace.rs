@@ -18,8 +18,15 @@ fn workspace_dir(name: &str) -> std::path::PathBuf {
 fn profiles_for_workspace_covers_every_maintained_model() {
     let project_dir = workspace_dir("timeseries");
     let loaded = smelt_core::workspace::load_workspace(&project_dir);
-    let profiles = smelt_runtime::profile::profiles_for_workspace(&loaded);
+    let result = smelt_runtime::profile::profiles_for_workspace(&loaded)
+        .expect("profiles_for_workspace must not fail on examples/timeseries");
+    let profiles = result.profiles;
 
+    assert!(
+        result.failures.is_empty(),
+        "examples/timeseries must not have any per-model derivation failures: {:?}",
+        result.failures
+    );
     assert!(
         !profiles.is_empty(),
         "examples/timeseries must have at least one maintained model"
@@ -53,7 +60,9 @@ fn profiles_for_workspace_covers_every_maintained_model() {
 fn profiles_for_workspace_matches_the_report_builder() {
     let project_dir = workspace_dir("timeseries");
     let loaded = smelt_core::workspace::load_workspace(&project_dir);
-    let profiles = smelt_runtime::profile::profiles_for_workspace(&loaded);
+    let profiles = smelt_runtime::profile::profiles_for_workspace(&loaded)
+        .expect("profiles_for_workspace must not fail on examples/timeseries")
+        .profiles;
     assert!(!profiles.is_empty());
 
     let (name, profile) = profiles.iter().next().expect("at least one profile");

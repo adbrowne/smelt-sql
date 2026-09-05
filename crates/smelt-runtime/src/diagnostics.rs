@@ -1025,35 +1025,6 @@ pub struct ModelDiagnostics {
 /// `smelt_logical::contract::effective_contract` — the same single-owner
 /// resolution `smelt-cli`'s `--json` `contract_point` uses, so the two can
 /// never disagree.
-/// Build the [`BoundContext`] a model's bound/reach derivation needs: one
-/// `add_source` per upstream dependency that declares its own `timeseries:`
-/// clock. Moved here, verbatim, from `smelt_cli::explain::build_bound_context`
-/// (`docs/outcomes/20260905-property-diff/phases/04-plan.md` D9) so
-/// `profiles_for_workspace` and the CLI's single-model report build it from
-/// the same rule rather than two independent copies — `smelt-cli` keeps a
-/// `pub use` re-export at the old path so existing call sites are
-/// unaffected.
-pub fn build_bound_context(
-    model_name: &str,
-    graph: &DependencyGraph,
-    config: &Config,
-) -> BoundContext {
-    let mut ctx = BoundContext::new();
-    for dep_name in graph.get_upstream(model_name) {
-        if let Ok(dep_model) = graph.get_model(&dep_name) {
-            let dep_meta = dep_model.metadata.as_deref();
-            let ts = config
-                .get_timeseries_with_metadata(&dep_name, dep_meta)
-                .cloned()
-                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
-            if let Some(ts) = ts {
-                ctx.add_source(&dep_name, &ts.partition_column);
-            }
-        }
-    }
-    ctx
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn build_model_diagnostics(
     model: &ModelFile,
@@ -1141,6 +1112,35 @@ pub fn build_model_diagnostics(
         inbound_edges,
         cells,
     })
+}
+
+/// Build the [`BoundContext`] a model's bound/reach derivation needs: one
+/// `add_source` per upstream dependency that declares its own `timeseries:`
+/// clock. Moved here, verbatim, from `smelt_cli::explain::build_bound_context`
+/// (`docs/outcomes/20260905-property-diff/phases/04-plan.md` D9) so
+/// `profiles_for_workspace` and the CLI's single-model report build it from
+/// the same rule rather than two independent copies — `smelt-cli` keeps a
+/// `pub use` re-export at the old path so existing call sites are
+/// unaffected.
+pub fn build_bound_context(
+    model_name: &str,
+    graph: &DependencyGraph,
+    config: &Config,
+) -> BoundContext {
+    let mut ctx = BoundContext::new();
+    for dep_name in graph.get_upstream(model_name) {
+        if let Ok(dep_model) = graph.get_model(&dep_name) {
+            let dep_meta = dep_model.metadata.as_deref();
+            let ts = config
+                .get_timeseries_with_metadata(&dep_name, dep_meta)
+                .cloned()
+                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
+            if let Some(ts) = ts {
+                ctx.add_source(&dep_name, &ts.partition_column);
+            }
+        }
+    }
+    ctx
 }
 
 #[cfg(test)]

@@ -307,6 +307,22 @@ fn checkout_scratch_is_deleted_when_materialization_fails() {
 fn diff_leaves_no_repository_state() {
     let _guard = lock();
     let repo = fixture_repo();
+    let first_commit = {
+        let out = git_query(repo.path(), &["rev-parse", "HEAD"]);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // A second commit so the baseline resolved below is a genuinely EARLIER
+    // commit, not `HEAD` — a `checkout`/`reset` to it would be visible.
+    std::fs::write(repo.path().join("models/n.sql"), "SELECT 2\n").expect("write model");
+    git(repo.path(), &["add", "-A"]);
+    git_commit(repo.path(), "second commit");
+    // Dirty the working tree with an uncommitted edit, so a stray
+    // `checkout`/`stash` that discarded it would change `git status
+    // --porcelain` between the before/after snapshots below — on a clean
+    // tree at `HEAD`, that same mutation would be an invisible no-op and
+    // this test would pass regardless of whether Constraint 8 held.
+    std::fs::write(repo.path().join("models/m.sql"), "SELECT 1 -- dirty edit\n")
+        .expect("dirty edit");
 
     let status_before = git_query(repo.path(), &["status", "--porcelain"]);
     let worktree_before = git_query(repo.path(), &["worktree", "list"]);
@@ -314,7 +330,7 @@ fn diff_leaves_no_repository_state() {
     let refs_before = git_query(repo.path(), &["for-each-ref"]);
     let index_meta_before = std::fs::metadata(repo.path().join(".git/index")).ok();
 
-    let resolved = resolve_baseline(repo.path(), Some("HEAD")).expect("resolve");
+    let resolved = resolve_baseline(repo.path(), Some(&first_commit)).expect("resolve");
     let checkout = materialize(&resolved).expect("materialize");
     let base_loaded = load_workspace(checkout.project_root());
     let base_sources = discover_source_infos(checkout.project_root(), &base_loaded.config.paths);
@@ -401,14 +417,40 @@ fn edited_set_flags_uncommitted_sql_edit() {
 fn edited_set_ignores_a_formatting_only_edit() {
     let _guard = lock();
     let repo = fixture_repo();
+
+    // Give the model frontmatter containing a comment line, so there is
+    // something to reflow without touching a parsed metadata key.
+    std::fs::write(
+        repo.path().join("models/m.sql"),
+        "---\nunique_key: [customer_id]\n#  reflow comment\n---\nSELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id\n",
+    )
+    .expect("write frontmatter");
+    git(repo.path(), &["add", "-A"]);
+    git_commit(repo.path(), "add frontmatter comment");
+
     let resolved = resolve_baseline(repo.path(), Some("HEAD")).expect("resolve");
     let checkout = materialize(&resolved).expect("materialize");
 
-    // A frontmatter-only edit that strips to byte-identical SQL (a comment
-    // reflow inside the frontmatter block that keeps the same line count
-    // and blank-line stripping) must not be flagged.
+    // A true formatting-only reflow: swap one interior double-space for a
+    // space+tab inside the comment — same byte length, so
+    // `strip_frontmatter`'s length-preserving blank-out produces
+    // byte-identical stripped SQL, and the comment carries no parsed
+    // metadata key, so `ModelMetadata` is also unchanged. This is not the
+    // no-op "write the same bytes back" case Phase 4's original test used —
+    // the file's bytes genuinely differ here.
     let original = std::fs::read_to_string(repo.path().join("models/m.sql")).expect("read");
-    std::fs::write(repo.path().join("models/m.sql"), original.clone()).expect("rewrite");
+    assert!(
+        original.contains("#  reflow comment"),
+        "fixture sanity: expected the double-space comment to still be present"
+    );
+    let reflowed = original.replacen("#  reflow comment", "# \treflow comment", 1);
+    assert_eq!(
+        original.len(),
+        reflowed.len(),
+        "the reflow must be byte-length-preserving for this test to be meaningful"
+    );
+    assert_ne!(original, reflowed, "the reflow must actually change bytes");
+    std::fs::write(repo.path().join("models/m.sql"), &reflowed).expect("rewrite");
 
     let base_loaded = load_workspace(checkout.project_root());
     let base_sources = discover_source_infos(checkout.project_root(), &base_loaded.config.paths);
