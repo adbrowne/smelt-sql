@@ -57,7 +57,7 @@ than the current residue.
 |---|-------|--------|
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
-| 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
+| 3 | Once-write route-2 `unique_key` skip (decision (c)) + generative-pool witness | planned |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | done |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | done |
@@ -198,6 +198,16 @@ than the current residue.
   skip in `classify_once_write`, add the generative-pool recipe/render/gate.rs wiring the phase-3
   revert backed out, and rewrite `incremental_shapes.md`'s Known Divergences bullet to describe
   the now-closed gap (or delete it if nothing residual remains).
+
+- 2026-09-05: Phase 3 re-planned under the recorded human decision (c), no phase-table reshape
+  beyond retitling the row to what it now does. Scope: the skip goes in `classify_once_write`'s
+  route-2 candidate loop (so it covers `COALESCE(MAX(key))` as well as the fallback-bearing
+  spelling), consults no `PropertyVector` — route 1 does not either — and supersedes the
+  phase-3 test `once_write_not_null_route_still_requires_the_functional_dependency`, which is
+  deleted rather than weakened. The generative-pool wiring the earlier attempt reverted returns
+  as a new `KeyedCombiner::OnceWriteKeyFallback` (`COALESCE(MAX(id), 0)`) staged with **no**
+  `functional_dependencies:` block — the absent block is the witness that the FD-free route is
+  what admits it.
 
 ## Blocked
 
