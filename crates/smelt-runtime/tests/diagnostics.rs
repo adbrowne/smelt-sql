@@ -202,10 +202,13 @@ fn properties_cover_derivable_catalogue_subset() {
         &source_timeseries,
         &[],
         &[],
+        &[],
+        &[],
+        None,
     )
     .expect("diagnostics build succeeds for a real fixture model");
 
-    let props = &diagnostics.properties;
+    let props = &diagnostics.profile.properties;
 
     // Columns: every projected output column.
     assert!(
@@ -353,6 +356,9 @@ fn no_live_backend_required() {
         &source_timeseries,
         &[],
         &[],
+        &[],
+        &[],
+        None,
     );
     assert!(
         result.is_ok(),

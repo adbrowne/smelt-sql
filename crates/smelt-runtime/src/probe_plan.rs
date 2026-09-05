@@ -17,18 +17,13 @@ use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{KeyLocality, PlanCell};
 use smelt_state::source_postures::SourcePostureStore;
 
-/// One declared-fact probe this model would dispatch on a consuming run —
-/// the fact, its named diagnostic, the maintenance cell it licenses, and
-/// its static per-run cost. Never carries executable SQL: `smelt explain`
-/// stays offline (`docs/specs/cli.md` §"`smelt explain <model>`
-/// maintenance-plan report").
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProbePlanEntry {
-    pub fact: String,
-    pub probe: String,
-    pub cell: String,
-    pub cost: String,
-}
+/// Single-owned in `smelt_logical::analysis::profile` — the struct only;
+/// this builder stays here because it needs `smelt-backend`/`smelt-state`,
+/// both above `smelt-logical`
+/// (`docs/outcomes/20260905-property-diff/phases/02-plan.md` task 5).
+/// Re-exported so every existing `smelt_runtime::probe_plan::ProbePlanEntry`
+/// import keeps working unchanged.
+pub use smelt_logical::analysis::profile::ProbePlanEntry;
 
 /// Every consuming run dispatches at most one extra query per declared
 /// probe (`dispatch_probe`/the append-only baseline snapshot are each a

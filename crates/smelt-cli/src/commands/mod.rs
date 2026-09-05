@@ -5,6 +5,7 @@ pub mod clean;
 pub mod diff;
 pub mod docs;
 pub mod explain;
+pub mod explain_diff;
 pub mod history;
 pub mod init;
 pub mod list;

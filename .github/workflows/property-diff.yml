@@ -1,0 +1,85 @@
+name: property-diff
+
+# Dogfoods `smelt explain --diff --markdown` over this repository's own
+# examples/ on every pull request (docs-site/docs/guide/ci.md documents the
+# same job shape for user projects). Comment-only by default: this job does
+# NOT pass --fail-on, because examples/ shifts property profiles routinely
+# as maintenance work lands, and a default-on gate here would go red on
+# legitimate work and get bypassed
+# (docs/specs/property_diff.md §"Pull-request comment").
+#
+# Not a step in test.yml: this job needs `pull-requests: write`, which
+# test.yml's workspace-wide jobs should not gain, and it never needs a
+# warehouse (`smelt explain --diff` never connects to a backend).
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  DUCKDB_LIB_DIR: /usr/local/lib
+
+jobs:
+  property-diff:
+    name: Property diff (dogfood)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # git merge-base / rev-parse needs the base commit present —
+          # actions/checkout's default fetch-depth: 1 only fetches the PR
+          # merge commit, which would leave BASE_SHA unresolvable.
+          fetch-depth: 0
+
+      - name: Setup DuckDB system library
+        uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-property-diff-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build smelt-cli
+        run: cargo build --release -p smelt-cli --no-default-features --features duckdb
+
+      - name: Render the property diff over examples/
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          BIN=./target/release/smelt
+          : > body.md
+          for project in examples/timeseries examples/retail_analytics; do
+            echo "## $project" >> body.md
+            "$BIN" explain --diff "$BASE_SHA" --markdown --project-dir "$project" >> body.md
+            echo >> body.md
+          done
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post or update the PR comment
+        # Forked PRs get a read-only GITHUB_TOKEN, so gh api/gh pr comment
+        # would 403 here; the job summary above already carries the body on
+        # every PR, forked or not, so this step is guarded rather than the
+        # whole job.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/comments" --paginate \
+                --jq '[.[] | select(.user.login=="github-actions[bot]")
+                           | select(.body | contains("<!-- smelt-property-diff -->"))] | last | .id // empty')
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md
+          else
+            gh pr comment "$PR" --body-file body.md
+          fi

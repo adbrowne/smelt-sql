@@ -8,12 +8,16 @@ use smelt_cli::{
 use smelt_core::graph::DependencyGraph;
 use smelt_logical::maintenance::Technique;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
-use smelt_runtime::diagnostics::build_model_diagnostics;
+use smelt_runtime::diagnostics::{build_model_diagnostics, build_model_profile};
 use std::collections::HashMap;
 
 use crate::ExplainArgs;
 
 pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
+    if let Some(explicit_ref) = args.diff.clone() {
+        return crate::commands::explain_diff::explain_diff(&args, explicit_ref.as_deref()).await;
+    }
+
     if let Some(model_name) = args.model_name.clone() {
         return explain_maintenance_plan(&args, &model_name, scope).await;
     }
@@ -581,6 +585,22 @@ async fn explain_maintenance_plan(
         dialect,
     );
 
+    // The property profile (`docs/specs/property_diff.md` §"The property
+    // profile"): the text report renders its corner/technique/refusals from
+    // this value, not the raw plan (§Constraints item 1) — the same single
+    // assembly path `--json` and `profiles_for_workspace` use.
+    let profile_bound_ctx = smelt_cli::explain::build_bound_context(&canonical, &graph, &config);
+    let profile = build_model_profile(
+        model,
+        &profile_bound_ctx,
+        &result.plan.cells,
+        &result.column_groups,
+        &result.plan.refusals,
+        &probe_entries,
+        contract_cfg,
+    )
+    .with_context(|| format!("Failed to build property profile for `{}`", canonical))?;
+
     let report = build_maintenance_plan_report(
         &canonical,
         &result,
@@ -595,6 +615,7 @@ async fn explain_maintenance_plan(
         &edge_delta_types,
         pending_definition_delta.as_ref(),
         own_output_delta.as_ref(),
+        &profile,
     )
     .with_context(|| {
         format!(
@@ -749,6 +770,9 @@ async fn explain_maintenance_plan(
             &source_timeseries,
             &unique_key,
             &result.column_groups,
+            &result.plan.refusals,
+            &probe_entries,
+            contract_cfg,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("Failed to build model diagnostics for `{}`", canonical))?
@@ -782,14 +806,14 @@ async fn explain_maintenance_plan(
             own_contract.clone(),
             edges.clone(),
             &diagnostics.cells,
-            diagnostics.properties.clone(),
+            &diagnostics.profile.cell_verdicts,
+            diagnostics.profile.properties.clone(),
             result.state_columns.clone(),
             result.execution_postures.clone(),
             result.is_snapshot_reconcile,
             probe_entries.clone(),
             config.probes.cadence,
-            &result.column_groups,
-            contract_cfg,
+            diagnostics.profile.refusals.clone(),
             pending_definition_delta.as_ref(),
             own_output_delta.as_ref(),
             result.plan.key_locality.as_ref(),

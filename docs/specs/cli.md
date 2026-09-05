@@ -106,6 +106,8 @@ Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly
 
 **`smelt diff` specifics:** exits `0` if no schema changes are detected; exits `1` if any changes are found (including new or removed models). This makes it suitable as a CI gate.
 
+**`smelt explain --diff` specifics:** exits `0` whenever the diff was computed, whether or not any model shifted. Exits `1` only under `--fail-on`: `downgrade` when any downgrade is present, `any` when any model shifted at all. Exits `2` for a usage error — an unresolvable baseline (not a git work tree, an unknown ref, or a ref with no project at the given path) or combining `--diff` with the positional `<model>` argument, `--show-sql`, `--period`, or `--technique`. See `property_diff.md` §Surface for the full flag table.
+
 **`smelt test` specifics:** exits `0` if all tests pass; exits `1` if any test fails.
 
 **`smelt check` specifics:** exits `0` if every `error`-severity check passes (zero violating rows); exits `1` if any `error`-severity check has violations. `warn`-severity checks never affect the exit code — a check with `severity: warn` and violations reports `WARN` and the command still exits `0`. A check whose referenced model is not built in the target fails with `CheckTargetNotBuilt` (exit `1`), never a silent pass.
@@ -183,6 +185,10 @@ the report carries a top-level `delta_signature` object (§Constraints item 5): 
 once locality is admitted, `degraded_by` only for `general`, and `slice_bound`/`settle_bound`
 only once key temporal locality is admitted; an absent field is omitted, never `null`.
 
+`smelt explain --diff [<ref>]` diffs this report's underlying property profile between a git
+baseline and the working tree rather than rendering one project version; see
+`property_diff.md` for its flags, output forms, and diagnostics.
+
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
 that cell executes — the output of the same pure emitters a run executes
 (`incremental_models.md` §"Statement emission (single owner)"). Each cell's SELECT body is compiled
@@ -235,6 +241,13 @@ With `--json`, the per-model report gains an append-stable `probes` array (§Con
 `{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence": "per_run"|"periodic"|"off",
 "cost": "<one line>"}`.
 
+With `--json`, the per-model report also gains an append-stable `refusals` array (§Constraints
+item 5) carrying the same admission refusals the text report's "Refusals" section prints:
+`{"code": "<diagnostic code name>", "text": "<refusal text>"}`. `code` names the diagnostic code
+a refusal of this shape raises through the ordinary diagnostics pipeline, absent for a refusal
+that raises no diagnostic today; `text` is the report's own rendering of the refusal, verbatim.
+Empty when the model's plan admitted every cell.
+
 **Effective contract.** Each cell's block additionally prints its effective contract lattice point
 (`incremental_models.md` §"The contract lattice") — `default` when no `contract:` applies,
 otherwise the applicable relaxations with their declared intervals: `frozen_horizon: 90 days`
@@ -243,9 +256,10 @@ otherwise the applicable relaxations with their declared intervals: `frozen_hori
 labels its origin `(cell)`). A relaxation is never silent — a model declaring `contract:` always
 shows it here, per cell. A per-cell `deferral` refinement prints as declared even though it is not
 yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each cell in the
-`cells` array carries a `contract_point` object with the same information: `frozen_horizon` and/or
-`deferral` (plus `deferral_origin`: `"model"` or `"cell"`) when a relaxation applies; a default
-cell's `contract_point` is an empty object — absent relaxations are omitted, never rendered `null`.
+`cells` array carries a `contract_point` object with the same information: `frozen_horizon`
+and/or `deferral` (plus `deferral_origin`: `"model"` or `"cell"`) and/or `retain_departed` when a
+relaxation applies; a default cell's `contract_point` is an empty object — absent relaxations are
+omitted, never rendered `null`.
 
 **State downgrade.** Availability resolution (`state.md` §"The degradation contract" step 2) is
 resolved offline, from the model's declared target dialect and `state.warehouse_tables`, before

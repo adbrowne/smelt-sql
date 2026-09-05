@@ -11,7 +11,7 @@ use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
 use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
 use smelt_logical::maintenance::{lookup_write_pattern, PlanCell, Technique};
-use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
+use smelt_planner::{analyze_batch_safety, BatchSafety, BoundResult, ModelInfo};
 use smelt_runtime::{CompilerRegistry, EphemeralResolver, SourceBound, TimeRange};
 use std::collections::BTreeMap;
 
@@ -125,39 +125,10 @@ fn is_self_origin(origins: &[String]) -> bool {
 // imports (`use crate::explain::RelationContractView`, etc.) continue to work
 // unchanged — `smelt-cli` no longer owns a second copy of this derivation.
 pub use smelt_runtime::diagnostics::{
-    build_relation_contract, Admissibility, InboundEdgeContract, ModelDiagnostics,
-    PlanCellDiagnostics, PropertySet, RelationContractClock, RelationContractProvider,
-    RelationContractView, TechniquePreview,
+    build_bound_context, build_relation_contract, Admissibility, InboundEdgeContract,
+    ModelDiagnostics, PlanCellDiagnostics, PropertySet, RelationContractClock,
+    RelationContractProvider, RelationContractView, TechniquePreview,
 };
-
-/// Build the [`smelt_planner::BoundContext`] a model's `--json` source-bounds
-/// section (`compute_source_bounds`) and the shared `smelt-runtime::
-/// diagnostics` property-set derivation both need: one `add_source` per
-/// upstream dependency that declares its own `timeseries:` clock. Shared
-/// so both call sites build the bound context from the same rule rather
-/// than two independent copies of this loop
-/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
-/// boundary").
-pub fn build_bound_context(
-    model_name: &str,
-    graph: &DependencyGraph,
-    config: &Config,
-) -> BoundContext {
-    let mut ctx = BoundContext::new();
-    for dep_name in graph.get_upstream(model_name) {
-        if let Ok(dep_model) = graph.get_model(&dep_name) {
-            let dep_meta = dep_model.metadata.as_deref();
-            let ts = config
-                .get_timeseries_with_metadata(&dep_name, dep_meta)
-                .cloned()
-                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
-            if let Some(ts) = ts {
-                ctx.add_source(&dep_name, &ts.partition_column);
-            }
-        }
-    }
-    ctx
-}
 
 /// Render one [`RelationContractView`] as indented text lines shared by
 /// the model's own contract and every inbound edge's contract — the same
@@ -375,15 +346,11 @@ impl DeltaSignatureHeadline {
 /// A cell's own trigger, addressed the same way `maintenance.cells[]`/
 /// `contract.cells[]` address it (a source address, or the literal
 /// `backfill`) — `None` for `Trigger::ColumnAdded`, which has no `on:`
-/// address of its own.
-fn cell_trigger_address(trigger: &smelt_logical::maintenance::Trigger) -> Option<String> {
-    use smelt_logical::maintenance::Trigger;
-    match trigger {
-        Trigger::NewData { source } | Trigger::UpstreamMutation { source } => Some(source.clone()),
-        Trigger::Backfill => Some("backfill".to_string()),
-        Trigger::ColumnAdded { .. } => None,
-    }
-}
+/// address of its own. Single-owned in `smelt_logical::maintenance`
+/// (`cell_trigger_address`) so this resolution agrees, by construction,
+/// with the one `smelt_runtime::diagnostics` uses to build each cell's
+/// property-profile `contract_point`.
+use smelt_logical::maintenance::cell_trigger_address;
 
 /// Find `bare_name`'s [`SourceInfo`] among `source_infos` — same bare-name
 /// convention `smelt_runtime::execute::build_maint_source_facts` uses
@@ -452,6 +419,7 @@ pub fn build_maintenance_plan_report(
     edge_delta_types: &[(String, smelt_logical::analysis::output_delta::OutputDelta)],
     pending_definition_delta: Option<&(MigrationVerdict, String)>,
     own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
+    profile: &smelt_logical::analysis::profile::PropertyProfile,
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -511,14 +479,21 @@ pub fn build_maintenance_plan_report(
         let _ = writeln!(out, "Cells: (none)");
     } else {
         let _ = writeln!(out, "Cells ({}):", result.plan.cells.len());
-        for cell in &result.plan.cells {
+        for (cell, verdict) in result.plan.cells.iter().zip(profile.cell_verdicts.iter()) {
             let _ = writeln!(
                 out,
                 "  - group {} on trigger {:?}",
                 cell.group, cell.trigger
             );
-            let _ = writeln!(out, "      corner:    {:?}", cell.corner);
-            let _ = writeln!(out, "      technique: {:?}", cell.technique);
+            // Corner/technique render the property PROFILE's verdict
+            // (`docs/specs/property_diff.md` §Constraints item 1), not the
+            // raw plan cell — `verdict.corner` is already the `{:?}`-rendered
+            // string `PropertyProfile::assemble` captured, so it prints via
+            // `{}` (a second `{:?}` would double-escape it); `verdict.
+            // technique` is the enum, printed via `{:?}` exactly as the raw
+            // cell was.
+            let _ = writeln!(out, "      corner:    {}", verdict.corner);
+            let _ = writeln!(out, "      technique: {:?}", verdict.technique);
             // Recorded availability downgrade (`state.md` §"The degradation
             // contract" step 2, `docs/outcomes/20260904-state-residency/
             // outcome.md` phase 6): omitted entirely when the cell was not
@@ -1075,12 +1050,16 @@ pub fn build_maintenance_plan_report(
         let _ = writeln!(out);
     }
 
-    if result.plan.refusals.is_empty() {
+    // Rendered from the property profile's refusal list
+    // (`docs/specs/property_diff.md` §Constraints item 1) — `ProfileRefusal
+    // ::text` is the same `{:?}` string the raw `Refusal` used to render
+    // directly, so this is byte-identical output over a different source.
+    if profile.refusals.is_empty() {
         let _ = writeln!(out, "Refusals: (none)");
     } else {
-        let _ = writeln!(out, "Refusals ({}):", result.plan.refusals.len());
-        for refusal in &result.plan.refusals {
-            let _ = writeln!(out, "  - {:?}", refusal);
+        let _ = writeln!(out, "Refusals ({}):", profile.refusals.len());
+        for refusal in &profile.refusals {
+            let _ = writeln!(out, "  - {}", refusal.text);
         }
     }
     let _ = writeln!(out);
@@ -1601,38 +1580,15 @@ pub struct ExplainStateDowngradeJson {
 }
 
 /// JSON shape of one cell's effective contract (`smelt explain --json`):
-/// absent relaxations are omitted, never rendered as `null`.
-#[derive(Debug, Serialize, Default)]
-pub struct ExplainContractPointJson {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frozen_horizon: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deferral: Option<String>,
-    /// `"model"` or `"cell"` — which declaration `deferral` came from.
-    /// Omitted along with `deferral` when no deferral applies.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deferral_origin: Option<String>,
-}
-
-impl From<smelt_logical::contract::EffectiveContract> for ExplainContractPointJson {
-    fn from(effective: smelt_logical::contract::EffectiveContract) -> Self {
-        let (deferral, deferral_origin) = match effective.deferral {
-            Some(d) => {
-                let origin = match d.origin {
-                    smelt_logical::contract::DeferralOrigin::Model => "model",
-                    smelt_logical::contract::DeferralOrigin::Cell => "cell",
-                };
-                (Some(d.window.display), Some(origin.to_string()))
-            }
-            None => (None, None),
-        };
-        ExplainContractPointJson {
-            frozen_horizon: effective.frozen_horizon.map(|h| h.display),
-            deferral,
-            deferral_origin,
-        }
-    }
-}
+/// absent relaxations are omitted, never rendered as `null`. Single-owned
+/// in `smelt_logical::contract::ContractPointView`
+/// (`docs/outcomes/20260905-property-diff/phases/02-plan.md` task 5) —
+/// kept as a type alias here so every existing
+/// `smelt_cli::explain::ExplainContractPointJson` reference keeps working
+/// unchanged. Sourced from `smelt_logical::contract::effective_contract`
+/// inside `smelt_runtime::diagnostics::build_model_diagnostics`, never
+/// re-resolved here.
+pub type ExplainContractPointJson = smelt_logical::contract::ContractPointView;
 
 /// The `--json --show-sql` per-model report:
 /// `{"model": "<name>", "contract": {...}, "inbound_edges": [...], "cells":
@@ -1677,6 +1633,12 @@ pub struct ExplainMaintenanceJson {
     /// append-stable addition to this JSON shape (`docs/specs/cli.md`
     /// §Constraints item 5).
     pub probes: Vec<ExplainProbeJson>,
+    /// The model's maintenance-plan admission refusals
+    /// (`docs/specs/property_diff.md` §"The property profile" item 3),
+    /// read verbatim from the property profile — an append-stable addition
+    /// to this JSON shape (`docs/specs/cli.md` §Constraints item 5). Empty
+    /// when the model's plan admitted every cell.
+    pub refusals: Vec<smelt_logical::analysis::profile::ProfileRefusal>,
     /// A pending, non-eclipsed, unapproved definition delta
     /// (`docs/specs/definition_deltas.md` §"Detection"), absent when there
     /// is none — an append-stable addition to this JSON shape
@@ -1732,10 +1694,17 @@ pub struct ExplainProbeJson {
 /// fill, its inbound edges' contracts, and the shared diagnostics builder's
 /// per-cell technique-preview set and property set.
 ///
-/// `diagnostics_cells` must be in the same cell order as `plan_cells`/
-/// `statements` — `smelt_runtime::diagnostics::build_model_diagnostics`
-/// maps 1:1 over the same `plan_cells` slice this report's own `statements`
-/// are built from, so a positional `zip` is exact, not an approximation.
+/// `diagnostics_cells` and `cell_verdicts` must both be in the same cell
+/// order as `plan_cells`/`statements` —
+/// `smelt_runtime::diagnostics::build_model_diagnostics` maps 1:1 over the
+/// same `plan_cells` slice this report's own `statements` are built from,
+/// so a positional `zip` is exact, not an approximation. `cell_verdicts` is
+/// the model's property profile's own per-cell verdict
+/// (`docs/specs/property_diff.md` §"The property profile") — this function
+/// reads its `trigger`/`corner`/`technique`/`row_identity`/`contract_point`
+/// fields verbatim rather than re-deriving them, so the report and the
+/// profile structurally cannot disagree (`docs/specs/property_diff.md`
+/// §Constraints item 4, "Report/profile parity").
 #[allow(clippy::too_many_arguments)]
 pub fn build_maintenance_plan_json(
     model_name: &str,
@@ -1744,14 +1713,14 @@ pub fn build_maintenance_plan_json(
     own_contract: RelationContractView,
     inbound_edges: Vec<InboundEdgeContract>,
     diagnostics_cells: &[PlanCellDiagnostics],
+    cell_verdicts: &[smelt_logical::analysis::profile::CellVerdict],
     properties: PropertySet,
     state_columns: Vec<smelt_logical::StateColumnSummary>,
     execution_postures: Option<smelt_logical::ExecutionPostures>,
     is_snapshot_reconcile: Option<bool>,
     probe_entries: Vec<smelt_runtime::probe_plan::ProbePlanEntry>,
     cadence: smelt_core::config::ProbeCadence,
-    column_groups: &[smelt_logical::maintenance::ColumnGroup],
-    contract_cfg: Option<&smelt_core::config::ContractConfig>,
+    refusals: Vec<smelt_logical::analysis::profile::ProfileRefusal>,
     pending_definition_delta: Option<&(MigrationVerdict, String)>,
     own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
     key_locality: Option<&smelt_logical::maintenance::KeyLocality>,
@@ -1772,7 +1741,8 @@ pub fn build_maintenance_plan_json(
         .iter()
         .zip(statements.iter())
         .zip(diagnostics_cells.iter())
-        .map(|((cell, cs), diag_cell)| {
+        .zip(cell_verdicts.iter())
+        .map(|(((cell, cs), diag_cell), verdict)| {
             let (no_statements_reason, statements) = match &cs.outcome {
                 Ok(group) => {
                     let stmts = group
@@ -1792,27 +1762,17 @@ pub fn build_maintenance_plan_json(
                 }
                 Err(reason) => (Some(reason.clone()), Vec::new()),
             };
-            let group_columns: Vec<String> = column_groups
-                .iter()
-                .find(|g| g.name() == cell.group)
-                .map(|g| g.columns.clone())
-                .unwrap_or_default();
-            let effective_contract = smelt_logical::contract::effective_contract(
-                contract_cfg,
-                cell_trigger_address(&cell.trigger).as_deref().unwrap_or(""),
-                &group_columns,
-            );
             ExplainCellJson {
-                group: cell.group.clone(),
-                trigger: format!("{:?}", cell.trigger),
-                corner: format!("{:?}", cell.corner),
-                technique: format!("{:?}", cell.technique),
-                row_identity: format!("{:?}", cell.row_identity.identity),
-                row_identity_proven_mismatch: cell.row_identity.proven_mismatch.clone(),
+                group: verdict.group.clone(),
+                trigger: verdict.trigger.clone(),
+                corner: verdict.corner.clone(),
+                technique: format!("{:?}", verdict.technique),
+                row_identity: format!("{:?}", verdict.row_identity.identity),
+                row_identity_proven_mismatch: verdict.row_identity.proven_mismatch.clone(),
                 no_statements_reason,
                 statements,
                 technique_previews: diag_cell.technique_previews.clone(),
-                contract_point: effective_contract.into(),
+                contract_point: verdict.contract_point.clone(),
                 state_downgrade: cell
                     .state_downgrade
                     .as_ref()
@@ -1862,6 +1822,7 @@ pub fn build_maintenance_plan_json(
         properties,
         state_columns,
         probes,
+        refusals,
         definition_delta,
     }
 }
