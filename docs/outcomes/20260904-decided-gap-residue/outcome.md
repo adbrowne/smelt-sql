@@ -54,7 +54,7 @@ than the current residue.
 |---|-------|--------|
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
-| 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
+| 3 | Once-write fallback-case nullability route; generative pool coverage | planned |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
@@ -86,6 +86,14 @@ than the current residue.
   (deferred_model never folded that window); a new metamorphic test proves
   the restated comparator rejects a maintained state the superseded bracket
   admitted. See `phases/02-summary.md`.
+
+- 2026-09-05: Phase 3 planned with no reshape (phase 2's summary surfaced no new residue).
+  Scoped the nullability route to non-nullness proven from the model's own `unique_key` — the
+  fact `classify_once_write` already holds, and spec route 1's own argument. A driving-clock-
+  derived payload stays on the decomposed-state route because `derive_fold_spec` resolves no
+  driving source, so admitting it would need a new plan-layer input and risk CLI↔runtime
+  admission divergence; the `incremental_shapes.md` divergence bullet is therefore narrowed to
+  that residual clause rather than deleted.
 
 ## Blocked
 
