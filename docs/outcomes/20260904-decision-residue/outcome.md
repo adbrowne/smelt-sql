@@ -76,7 +76,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | done |
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | done |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | done |
-| 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | pending |
+| 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | planned |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
 | 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
@@ -126,5 +126,20 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   both deleted from `incremental_shapes.md`. `verify-phase.sh` ALL GREEN (fmt, clippy both
   feature sets, full workspace `cargo test`, `example_diagnostics`), plus every plan-listed
   targeted test green.
+
+- 2026-09-05 — Phase 4 planned with no table reshape (phase 3 surfaced no residue). Three
+  planning calls recorded: (a) the mismatch check fires only where the declared
+  `key_recurrence.key` set-equals the model's own `unique_key` — a bound declared over a
+  different key asserts nothing about this key, so it stays the existing route-3 key-mismatch
+  refusal, not a value mismatch; (b) an *agreeing* declaration admits the **derived**
+  `LocalitySlice::Window { recurrence_bounded: true }`, not the checked
+  `RecurrenceBounded` — rule 16 makes the declaration a check, so the proof-backed slice wins
+  and no runtime probe is added where a static proof exists; (c) the refusal is carried as a
+  new `LocalityRefusal`/`Refusal` variant with its own `DiagnosticCode`, rather than reusing
+  `KeyedForbidsTimeseries`'s message channel, so `file_diagnostics()` and the LSP name the
+  spec's own code. The order-independence clause resolved to two real sites: locality's
+  declared-key match (already set-based, made explicit) and `propagate.rs`'s
+  `push_keyed_dirt`, whose duplicate check compares `keys` as an ordered `Vec` and is the one
+  order-sensitive comparison found.
 
 ## Blocked
