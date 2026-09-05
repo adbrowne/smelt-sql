@@ -439,3 +439,50 @@ fn covers_at_least_one_maintained_model() {
          assertions would be vacuous; add one or note the coverage gap explicitly"
     );
 }
+
+/// C3 (`docs/outcomes/20260905-property-diff/phases/05-plan.md`): a small
+/// standalone fixture (`tests/fixtures/state_downgrade/`, deliberately NOT
+/// `examples/timeseries`) with `state.warehouse_tables: none` and one
+/// `refresh: incremental` keyed model gives Phase 4's `resolve_availability`
+/// wiring — and the `state_downgrade` profile dimension — a live producer:
+/// without it, nothing in this suite would fail if that wiring regressed.
+#[test]
+fn state_downgrade_fixture_technique_matches_the_report() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/state_downgrade");
+
+    let profiles = profiles_for(&project_dir);
+    let profile = profiles
+        .get("lifetime_spend")
+        .expect("lifetime_spend must have a derived profile");
+    assert!(
+        !profile.cell_verdicts.is_empty(),
+        "lifetime_spend must have at least one maintained cell"
+    );
+    assert!(
+        profile
+            .cell_verdicts
+            .iter()
+            .any(|c| c.state_downgrade.is_some()),
+        "warehouse_tables: none must force at least one cell's state_downgrade to be \
+         populated: {:?}",
+        profile.cell_verdicts
+    );
+
+    let json = spawn_explain_json(&project_dir, "lifetime_spend");
+    let json_cells = json["cells"].as_array().expect("cells must be an array");
+    assert_eq!(
+        json_cells.len(),
+        profile.cell_verdicts.len(),
+        "report and profile must carry the same number of cells"
+    );
+    for (json_cell, verdict) in json_cells.iter().zip(profile.cell_verdicts.iter()) {
+        let json_technique = json_cell["technique"]
+            .as_str()
+            .expect("cells[].technique must be a string");
+        let profile_technique = format!("{:?}", verdict.technique);
+        assert_eq!(
+            json_technique, profile_technique,
+            "the report's technique must match the profile's technique for this cell"
+        );
+    }
+}

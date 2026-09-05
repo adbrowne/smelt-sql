@@ -1,0 +1,15 @@
+name: state_downgrade_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    schema: main
+
+default_materialization: view
+
+state:
+  warehouse_tables: none
