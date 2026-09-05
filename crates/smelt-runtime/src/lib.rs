@@ -35,6 +35,7 @@ pub mod model_probes;
 pub mod mutation_probe;
 pub mod probe_plan;
 pub mod probes;
+pub mod profile;
 pub mod propagation;
 pub mod python;
 pub mod reporter;
