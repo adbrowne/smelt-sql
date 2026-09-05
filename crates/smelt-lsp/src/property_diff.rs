@@ -54,6 +54,13 @@ pub struct ProjectDiffState {
     /// Coalesces concurrent refresh triggers
     /// (`docs/outcomes/20260905-property-diff/phases/07-plan.md` D7).
     pub running: bool,
+    /// Set when a refresh is requested WHILE `running` is already true
+    /// (risk R3: a burst of events must not each pay the full pipeline
+    /// cost). `Backend::refresh_property_diff` schedules exactly one
+    /// trailing re-run when the in-flight one finishes and this is set,
+    /// then clears it — never more than one extra run per burst, however
+    /// many triggers landed mid-flight.
+    pub pending: bool,
     /// The cached baseline side, reused across refreshes while
     /// `baseline_commit` still matches the freshly re-resolved commit (D2).
     pub cached_baseline: Option<Arc<BaselineSide>>,

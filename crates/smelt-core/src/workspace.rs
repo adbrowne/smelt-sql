@@ -306,4 +306,120 @@ mod tests {
         assert!(!loaded.sources_text.is_empty());
         assert!(loaded.sources_text.contains("sources: []"));
     }
+
+    /// S2 (Phase 7 review fix round 1): `apply_open_buffers` is the
+    /// post-load patch the property-diff editor integration relies on to
+    /// make an unsaved edit visible on the working-tree side
+    /// (`docs/specs/property_diff.md` §Surface "Editor", Δ2). It had zero
+    /// coverage before this test.
+    ///
+    /// *Fails against a broken implementation* that matches on the wrong
+    /// key (e.g. the model's `name` instead of its `path`, or a
+    /// substring/prefix match instead of exact equality): the overlay
+    /// would either not apply here (`a.sql`'s content stays
+    /// `SELECT 1 AS x`) or would apply to the wrong entry.
+    #[test]
+    fn apply_open_buffers_overrides_matching_model_path_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+        std::fs::write(dir.path().join("models").join("b.sql"), "SELECT 2 AS y").unwrap();
+
+        let mut loaded = load_workspace(dir.path());
+        assert_eq!(loaded.sql_files.len(), 2);
+
+        let a_path = loaded
+            .sql_files
+            .iter()
+            .find(|m| m.name == "a")
+            .expect("model a")
+            .path
+            .clone();
+        let mut overlays = BTreeMap::new();
+        overlays.insert(a_path.clone(), "SELECT 999 AS x_edited".to_string());
+
+        apply_open_buffers(&mut loaded, &overlays);
+
+        let a = loaded.sql_files.iter().find(|m| m.name == "a").unwrap();
+        let b = loaded.sql_files.iter().find(|m| m.name == "b").unwrap();
+        assert_eq!(a.content, "SELECT 999 AS x_edited");
+        assert_eq!(
+            b.content, "SELECT 2 AS y",
+            "a buffer for `a.sql` must not leak onto `b.sql`"
+        );
+    }
+
+    /// An overlay for a path `load_workspace` never discovered (an
+    /// unrelated buffer, or a path typo) is silently ignored rather than
+    /// introducing a phantom entry — `apply_open_buffers` is a patch over
+    /// discovery, never a second discovery path (D4, workspace-loading
+    /// parity). *Fails against a broken implementation* that inserts a new
+    /// `ModelFile` for an unmatched overlay: `sql_files.len()` would grow.
+    #[test]
+    fn apply_open_buffers_ignores_an_overlay_for_an_undiscovered_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+
+        let mut loaded = load_workspace(dir.path());
+        let before_len = loaded.sql_files.len();
+
+        let mut overlays = BTreeMap::new();
+        overlays.insert(
+            dir.path().join("models").join("never_discovered.sql"),
+            "SELECT 1".to_string(),
+        );
+        apply_open_buffers(&mut loaded, &overlays);
+
+        assert_eq!(loaded.sql_files.len(), before_len);
+        assert_eq!(
+            loaded.sql_files[0].content, "SELECT 1 AS x",
+            "the real model's content must be untouched"
+        );
+    }
+
+    /// Δ2 is explicit that `smelt.yml`/source YAML are NOT overlaid — only
+    /// tracked `.sql` model buffers are. `apply_open_buffers` only ever
+    /// touches `loaded.sql_files`, so an overlay keyed on `smelt.yml`'s own
+    /// path (a caller mistake, or a future caller that forgets Δ2) has no
+    /// field to land on and is a no-op. *Fails against a broken
+    /// implementation* that widens `apply_open_buffers` to also patch
+    /// `loaded.sources_text`/config text for a matching path.
+    #[test]
+    fn apply_open_buffers_does_not_touch_config_or_sources_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+        let mut sources = std::fs::File::create(dir.path().join("sources.yml")).unwrap();
+        sources.write_all(b"sources: []\n").unwrap();
+
+        let mut loaded = load_workspace(dir.path());
+        let sources_before = loaded.sources_text.clone();
+
+        let mut overlays = BTreeMap::new();
+        overlays.insert(dir.path().join("smelt.yml"), "name: hijacked\n".to_string());
+        overlays.insert(
+            dir.path().join("sources.yml"),
+            "sources: [hijacked]\n".to_string(),
+        );
+        apply_open_buffers(&mut loaded, &overlays);
+
+        assert_eq!(loaded.sources_text, sources_before);
+        assert_eq!(loaded.config.paths, vec!["models".to_string()]);
+    }
 }

@@ -147,6 +147,14 @@ pub struct Backend {
     /// 07-plan.md` D7/R6) and is read-only from `code_lens` and
     /// `publish_diagnostics`.
     property_diff: Arc<Mutex<HashMap<PathBuf, crate::property_diff::ProjectDiffState>>>,
+    /// Counts every time `refresh_property_diff` actually runs the
+    /// pipeline (`crate::property_diff::refresh`) — not every call to
+    /// `refresh_property_diff` itself, most of which coalesce. Exposed via
+    /// `Backend::property_diff_derivation_count` so a test can assert a
+    /// burst of `didChangeWatchedFiles` events collapses to one derivation
+    /// per project root (`docs/outcomes/20260905-property-diff/phases/
+    /// 07-plan.md` risk R3).
+    property_diff_derivation_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Collect every `smelt.functions.<name>(...)` call-site path range across
@@ -461,7 +469,19 @@ impl Backend {
             negotiated_encoding: Arc::new(Mutex::new(PositionEncodingKind::UTF16)),
             known_tests: Arc::new(Mutex::new(Vec::new())),
             property_diff: Arc::new(Mutex::new(HashMap::new())),
+            property_diff_derivation_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Test-observable handle onto the property-diff derivation counter
+    /// (`docs/outcomes/20260905-property-diff/phases/07-plan.md` risk R3).
+    /// `pub` so integration tests in `tests/` can grab this (via
+    /// `LspService::inner()`, before the service is handed to `Server`)
+    /// and assert a burst of change events collapses to one derivation per
+    /// project root, without exposing anything about
+    /// `refresh_property_diff`'s internal coalescing mechanism itself.
+    pub fn property_diff_derivation_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.property_diff_derivation_count)
     }
 
     /// Convert URI to file path, logging a warning if conversion fails.
@@ -859,99 +879,134 @@ impl Backend {
     /// re-resolves and compares the commit). Concurrent triggers for the
     /// same project coalesce via `ProjectDiffState::running`.
     async fn refresh_property_diff(&self, project_root: PathBuf) {
-        let cached_baseline = {
-            let mut state = self.property_diff.lock().await;
-            let entry = state.entry(project_root.clone()).or_default();
-            if entry.running {
-                return;
-            }
-            entry.running = true;
-            entry.cached_baseline.clone()
-        };
-
-        // Snapshot open-buffer overlays for this project's tracked model
-        // files before handing off to the blocking task — Salsa access
-        // must stay on the async side (`docs/outcomes/20260905-property-
-        // diff/phases/07-plan.md` D4).
-        let db = self.snapshot().await;
-        let tracked = self.tracked_files.lock().await.clone();
-        let mut overlays = std::collections::BTreeMap::new();
-        for path in tracked.iter().filter(|p| p.starts_with(&project_root)) {
-            overlays.insert(path.clone(), file_text(&db, path));
-        }
-        drop(db);
-
-        let root_for_blocking = project_root.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            crate::property_diff::refresh(&root_for_blocking, &overlays, cached_baseline)
-        })
-        .await;
-
-        let mut affected: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        let mut log_info: Option<String> = None;
         {
             let mut state = self.property_diff.lock().await;
             let entry = state.entry(project_root.clone()).or_default();
-            entry.running = false;
-            match outcome {
-                Ok(crate::property_diff::RefreshOutcome::Report {
-                    commit,
-                    baseline,
-                    lenses,
-                    diagnostics,
-                }) => {
-                    affected.extend(entry.lenses.keys().cloned());
-                    affected.extend(entry.diagnostics.keys().cloned());
-                    affected.extend(lenses.keys().cloned());
-                    affected.extend(diagnostics.keys().cloned());
-                    entry.baseline_commit = Some(commit);
-                    entry.cached_baseline = Some(baseline);
-                    entry.lenses = lenses;
-                    entry.diagnostics = diagnostics;
-                    entry.silent_reason = None;
-                }
-                Ok(crate::property_diff::RefreshOutcome::Silent(reason)) => {
-                    // D8: not a git work tree, or the baseline cannot be
-                    // resolved — no lens, no diagnostic, logged at info
-                    // only (an un-versioned workspace is not an error).
-                    affected.extend(entry.lenses.keys().cloned());
-                    affected.extend(entry.diagnostics.keys().cloned());
-                    entry.lenses.clear();
-                    entry.diagnostics.clear();
-                    entry.cached_baseline = None;
-                    entry.baseline_commit = None;
-                    entry.silent_reason = Some(reason.clone());
-                    log_info = Some(reason);
-                }
-                Ok(crate::property_diff::RefreshOutcome::Failed(reason)) => {
-                    // Δ3 ("in-flight behaviour"): a transient derivation
-                    // failure keeps whatever diff was last computed rather
-                    // than showing nothing.
-                    log_info = Some(format!("property-diff refresh failed: {reason}"));
-                }
-                Err(join_err) => {
-                    log_info = Some(format!("property-diff refresh task panicked: {join_err}"));
-                }
+            if entry.running {
+                // A refresh for this project is already in flight — record
+                // that another trigger landed mid-flight rather than
+                // running the ~2.4-3.0s pipeline again right now. The
+                // in-flight run schedules exactly one trailing re-run when
+                // it finishes (below), however many triggers set this flag
+                // while it was running (risk R3: a burst collapses to one
+                // extra run, not one per event).
+                entry.pending = true;
+                return;
             }
+            entry.running = true;
         }
 
-        if let Some(reason) = log_info {
-            self.client.log_message(MessageType::INFO, reason).await;
-        }
-        for path in affected {
-            if let Ok(uri) = Url::from_file_path(&path) {
-                self.publish_diagnostics(uri).await;
+        // `running` is now true for this project and this call owns it
+        // until it breaks out of the loop below (clearing `running` or
+        // handing off to exactly one trailing iteration when `pending` was
+        // set while a pass was in flight).
+        loop {
+            let cached_baseline = {
+                let state = self.property_diff.lock().await;
+                state
+                    .get(&project_root)
+                    .and_then(|e| e.cached_baseline.clone())
+            };
+
+            // Snapshot open-buffer overlays for this project's tracked
+            // model files before handing off to the blocking task — Salsa
+            // access must stay on the async side (`docs/outcomes/20260905-
+            // property-diff/phases/07-plan.md` D4).
+            let db = self.snapshot().await;
+            let tracked = self.tracked_files.lock().await.clone();
+            let mut overlays = std::collections::BTreeMap::new();
+            for path in tracked.iter().filter(|p| p.starts_with(&project_root)) {
+                overlays.insert(path.clone(), file_text(&db, path));
+            }
+            drop(db);
+
+            self.property_diff_derivation_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root_for_blocking = project_root.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::property_diff::refresh(&root_for_blocking, &overlays, cached_baseline)
+            })
+            .await;
+
+            let mut affected: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+            let mut log_info: Option<String> = None;
+            let mut run_again = false;
+            {
+                let mut state = self.property_diff.lock().await;
+                let entry = state.entry(project_root.clone()).or_default();
+                match outcome {
+                    Ok(crate::property_diff::RefreshOutcome::Report {
+                        commit,
+                        baseline,
+                        lenses,
+                        diagnostics,
+                    }) => {
+                        affected.extend(entry.lenses.keys().cloned());
+                        affected.extend(entry.diagnostics.keys().cloned());
+                        affected.extend(lenses.keys().cloned());
+                        affected.extend(diagnostics.keys().cloned());
+                        entry.baseline_commit = Some(commit);
+                        entry.cached_baseline = Some(baseline);
+                        entry.lenses = lenses;
+                        entry.diagnostics = diagnostics;
+                        entry.silent_reason = None;
+                    }
+                    Ok(crate::property_diff::RefreshOutcome::Silent(reason)) => {
+                        // D8: not a git work tree, or the baseline cannot be
+                        // resolved — no lens, no diagnostic, logged at info
+                        // only (an un-versioned workspace is not an error).
+                        affected.extend(entry.lenses.keys().cloned());
+                        affected.extend(entry.diagnostics.keys().cloned());
+                        entry.lenses.clear();
+                        entry.diagnostics.clear();
+                        entry.cached_baseline = None;
+                        entry.baseline_commit = None;
+                        entry.silent_reason = Some(reason.clone());
+                        log_info = Some(reason);
+                    }
+                    Ok(crate::property_diff::RefreshOutcome::Failed(reason)) => {
+                        // Δ3 ("in-flight behaviour"): a transient derivation
+                        // failure keeps whatever diff was last computed rather
+                        // than showing nothing.
+                        log_info = Some(format!("property-diff refresh failed: {reason}"));
+                    }
+                    Err(join_err) => {
+                        log_info = Some(format!("property-diff refresh task panicked: {join_err}"));
+                    }
+                }
+
+                if entry.pending {
+                    // Exactly one trailing re-run, however many triggers
+                    // set `pending` while this pass was running.
+                    entry.pending = false;
+                    run_again = true;
+                } else {
+                    entry.running = false;
+                }
+            }
+
+            if let Some(reason) = log_info {
+                self.client.log_message(MessageType::INFO, reason).await;
+            }
+            for path in affected {
+                if let Ok(uri) = Url::from_file_path(&path) {
+                    self.publish_diagnostics(uri).await;
+                }
+            }
+            // Best-effort: ask the client to re-pull code lenses. Ignored
+            // if the client never advertised `codeLens.refreshSupport` —
+            // the next `textDocument/codeLens` request (e.g. on
+            // scroll/focus) picks up the fresh state regardless, since
+            // `code_lens` only reads cached state.
+            let _ = self
+                .client
+                .send_request::<request::CodeLensRefresh>(())
+                .await;
+
+            if !run_again {
+                break;
             }
         }
-        // Best-effort: ask the client to re-pull code lenses. Ignored if
-        // the client never advertised `codeLens.refreshSupport` — the next
-        // `textDocument/codeLens` request (e.g. on scroll/focus) picks up
-        // the fresh state regardless, since `code_lens` only reads cached
-        // state.
-        let _ = self
-            .client
-            .send_request::<request::CodeLensRefresh>(())
-            .await;
     }
 
     /// Collect test entries from sql_files and merge into `known_tests`.
@@ -1873,6 +1928,18 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // Property-diff refresh is deduped for the WHOLE notification
+        // (`docs/outcomes/20260905-property-diff/phases/07-plan.md` risk
+        // R3): a rebase or branch switch can carry hundreds of `.sql`/`.git`
+        // change events in one `DidChangeWatchedFilesParams`, and each
+        // project root must refresh at most once here, not once per event.
+        // `refresh_property_diff` itself absorbs any trigger that arrives
+        // WHILE a refresh for that root is already running (its own
+        // `pending` flag schedules exactly one trailing re-run) — this set
+        // only stops the same notification from queueing the same root
+        // twice up front.
+        let mut diff_roots: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
         for change in params.changes {
             let path = match change.uri.to_file_path() {
                 Ok(p) => p,
@@ -1925,7 +1992,7 @@ impl LanguageServer for Backend {
                     // Re-scan tests in case a test file was added/modified.
                     self.refresh_and_publish_tests().await;
                     // Δ2: a model file changed outside the editor.
-                    self.refresh_property_diff(project_root).await;
+                    diff_roots.insert(project_root);
                 }
             } else if path.components().any(|c| c.as_os_str() == ".git") {
                 // `.git/HEAD`, `.git/refs/**`, or `.git/packed-refs` changed
@@ -1934,14 +2001,14 @@ impl LanguageServer for Backend {
                 // promptness trigger only (D2): `refresh_property_diff`
                 // always re-resolves and compares the commit, so a client
                 // that never reports `.git` changes only loses promptness,
-                // not correctness. Every project refreshes (cheap:
-                // `running` coalesces a project already mid-refresh, and
-                // `resolve_baseline` is a handful of `git` subcommands).
+                // not correctness.
                 let project_roots = self.project_roots.lock().await.clone();
-                for root in project_roots {
-                    self.refresh_property_diff(root).await;
-                }
+                diff_roots.extend(project_roots);
             }
+        }
+
+        for root in diff_roots {
+            self.refresh_property_diff(root).await;
         }
     }
 

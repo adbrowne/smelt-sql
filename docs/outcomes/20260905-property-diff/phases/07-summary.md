@@ -70,3 +70,68 @@ CLI's current output (no change expected, but re-check now diff pipeline moved c
 decide whether to build the VSCode `smelt.showPropertyDiff` command or formally close it out as a
 divergence; sweep for any remaining `Phase [A-Z0-9]` timeless-oracle violations across the whole
 feature's docs before final closure.
+
+## Fix round 1 (review findings S1, S2)
+
+Both S1 and S2 were risks this phase's own plan named (R3, and the open-buffer risk section) and
+the original summary reported gates green without saying either was still open. That was the
+process failure S3 flagged, not just a code gap — recorded honestly here.
+
+**S1 — refresh storm.** `did_change_watched_files` now dedups affected project roots into a
+`HashSet` for the WHOLE notification before calling `refresh_property_diff`, so N `.sql`/`.git`
+events under one project trigger at most one call from that notification. Additionally,
+`refresh_property_diff` itself gained a `pending` flag (`ProjectDiffState::pending`): a trigger
+that arrives while a refresh is already running sets `pending` and returns immediately; the
+in-flight run, on completion, checks `pending` and — if set — clears it and runs exactly one more
+pass, however many triggers landed mid-flight. This covers both the single-notification-burst case
+and the cross-notification-concurrent-trigger case the plan described.
+
+Added `Backend::property_diff_derivation_counter()` (an `Arc<AtomicUsize>`, obtained via
+`LspService::inner()` before the service is handed to `Server`) purely so a test can count actual
+pipeline invocations externally. New test:
+`crates/smelt-lsp/tests/property_diff_coalescing.rs::a_burst_of_git_change_events_under_one_project_triggers_one_derivation`
+— ten `.git` change events in one notification, asserts exactly one derivation.
+
+**Sabotage run:** reverted the dedup to a per-event call. Test failed: `left: 10, right: 1`
+("ten .git change events... must trigger exactly one derivation... before=1, after=11"). Reverted;
+green again.
+
+**Transport artifact found and worked around, not silently.** While writing this test, sending a
+`workspace/didChangeWatchedFiles` notification with N>1 `FileEvent`s over the actual duplex-stream
+wire (`tower_lsp::Server::serve`) was found to deliver only the FIRST event to
+`did_change_watched_files`'s `for change in params.changes` loop — confirmed by instrumenting the
+loop directly (one `iter` line logged over the wire vs. all N when the identical `Backend` and
+params are called directly). This is independent of the coalescing code under test and would have
+made the wire-based version of this test pass VACUOUSLY (it "passes" because the harness drops the
+tail of the array, not because the server coalesces). The test therefore calls
+`Backend::did_change_watched_files` directly (via `LspService::inner()`), still on a real,
+fully-`initialize`d/`initialized`d `Backend` — not a mock. This transport behavior is unexplained
+and not otherwise investigated; flagged here rather than filed separately, since fixing it is out
+of this fix round's scope and no other Phase 7 test sends a multi-event `didChangeWatchedFiles`
+over the wire.
+
+**Still open:** the `pending` trailing-rerun path (concurrent triggers from genuinely different
+notifications overlapping in wall-clock time, as opposed to many events in one notification) has
+no dedicated test — it's exercised by code review and the single-notification dedup test, not by a
+race-inducing test of its own. Flagging rather than claiming coverage.
+
+**S2 — open-buffer overlay coverage.** Added three `smelt-core` unit tests for
+`apply_open_buffers` (`crates/smelt-core/src/workspace.rs`): overrides the matching model's
+content only (not an unrelated model), ignores an overlay for an undiscovered path (no phantom
+`ModelFile`), and never touches `loaded.sources_text`/`config` for a `smelt.yml`/`sources.yml`
+overlay (Δ2). Added an LSP-level test,
+`crates/smelt-lsp/tests/property_diff_overlay.rs::an_unsaved_buffer_edit_changes_the_lens_and_diagnostics_without_touching_disk`:
+opens `user_daily_spend.sql`, edits it in the buffer via `didChange` (never `didSave`), forces a
+refresh via an unrelated single-event `.git` notification, and asserts a lens and
+`PropertyDowngrade` diagnostic appear while `std::fs::read_to_string` on the model path still
+returns the original, unedited text.
+
+**Sabotage run:** made `apply_open_buffers` a no-op. Both the `smelt-core` unit test
+(`left: "SELECT 1 AS x", right: "SELECT 999 AS x_edited"`) and the LSP test (`left: 0, right: 1` on
+lens count) failed. Reverted; both green again.
+
+**Gate results (fix round 1):** `cargo fmt --all -- --check` clean; `cargo check --workspace
+--all-targets` clean; `clippy-gate.sh` clean on both feature sets; `cargo test -p smelt-lsp` full
+suite green (including the two new test files); `cargo test -p smelt-core --lib workspace` 9/9
+green; `hardening_budget` unaffected. Committed as `phase(property-diff/7): fix review findings —
+coalesce refresh per notification, cover the open-buffer overlay`. Not pushed.
