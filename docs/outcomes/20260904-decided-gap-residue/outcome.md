@@ -47,6 +47,9 @@ than the current residue.
   tracks that deserve their own outcome.
 - Widening once-write nullability to key-derived expressions (named out of scope by the
   keyed-grain residue outcome).
+- Orphaned-partition GC for the fingerprint sidecar (a deleted/redefined consumer's stale
+  rows): phase 4 rewrote the `sources.md` bullet to name it as the residual gap, which is what
+  criterion 4 asks for — closing it is a lifecycle feature, not this outcome's residue.
 
 ## Phases
 
@@ -56,7 +59,7 @@ than the current residue.
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
-| 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
+| 5 | `supports_fingerprint_sidecar` residue closed against its stated target | planned |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
 
 ## Decision log
@@ -126,6 +129,18 @@ than the current residue.
   each edge's changed-key set survives interleaved runs independently, and a sibling's refresh
   never mutates this edge's own stored rows. `sources.md` updated per the spec delta; the
   `docs/TODO.md` bullet removed. See `phases/04-summary.md`.
+
+- 2026-09-05: Phase 5 planned with no phase-table reshape. Located the residue precisely: the
+  spec makes `BackendCapabilities::supports_fingerprint_sidecar` the decider and says it is
+  "never re-derived by a consumer", but only `resolve_live_external_delta_restriction_facts`
+  reads it — the other six sidecar gates in `maintenance_driver.rs` re-derive it as
+  `dialect != SqlDialect::DuckDB`. Also settled that the bullet's "keeps the widened-scan
+  recompute" describes only the external-delta-restriction leg: the repair-family / model-edge
+  group-grain leg must keep refusing with `UnsupportedOnBackend`, because a clamped current-
+  source scan over a `mutable_snapshot` is unsound rather than merely wider. `multi_backend.md`
+  §"The fingerprint sidecar capability" therefore gets a spec delta naming both legs. Recorded
+  phase 4's orphaned-partition GC hand-off under ## Out of scope rather than as a new row — the
+  criterion it serves (4) explicitly admits a rewritten residual-gap bullet, which phase 4 wrote.
 
 ## Blocked
 
