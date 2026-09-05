@@ -295,7 +295,11 @@ The once-write family admits four spellings, and no others:
   with a fallback argument, admitted under the same functional dependency, backed by the
   decomposed `(value, written)` state (§"Decomposed state (rung 2) in keyed models"): the raw
   reduction and the fallback are kept apart, so the fallback is applied fresh in `π` on every
-  read rather than merged into the stored value.
+  read rather than merged into the stored value. When `<col>` is provably non-null within its
+  group (a `unique_key` column of the model), the fallback is dead — it can never actually
+  stand in for a value a later window would supply — so the spelling keeps the bare
+  `COALESCE(target, delta)` fold with no decomposed state instead; the functional dependency is
+  still required.
 - `COALESCE(MAX(<a>), MAX(<b>))` (and the `MIN` variants, and longer candidate lists) — a
   multi-candidate reduction, admitted under a declared functional dependency naming *every*
   candidate column, backed by one decomposed `(value, written)` state pair per candidate: `π`
@@ -824,9 +828,11 @@ later window (§"The column-family catalogue" enumerates the admitted spellings 
 functional dependencies). The fallback-bearing and multi-candidate spellings each get one
 `(value, written)` state pair per candidate, `written = (value IS NOT NULL)`, folded
 independently; `π` returns the first written candidate in declared preference order, else the
-fallback — a pure function of state, so merge order cannot leak into which candidate wins. The
-bare key-derived spelling needs no decomposed state: a key column is already non-null by
-construction, so plain `COALESCE(target, delta)` already computes the presented value.
+fallback — a pure function of state, so merge order cannot leak into which candidate wins. A
+spelling whose every candidate payload is provably non-null needs no decomposed state: the bare
+key-derived spelling (a key column is already non-null by construction) and a single
+`MAX`/`MIN` reduction of a `unique_key` column both compute their presented value with plain
+`COALESCE(target, delta)`, for the same by-construction reason.
 `smelt explain` renders state columns as internal state, distinct from the public schema
 (`incremental_models.md` §"CLI").
 
@@ -1230,14 +1236,25 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The key grain
 
-- **The once-write classifier has no nullability route around the fallback case** — the only
-  route to decomposed `(value, written)` state is the FD-backed proof, since the NOT-NULL
-  derivation proves not-null only for a partition/driving-clock-derived column; the key-derived
-  route still requires a bare `unique_key` column reference, not an arbitrary key-derived
-  *expression*; admission reads whole-scope fan-out/set-operation facts, so any fan-out or
-  undiscriminated set operation anywhere in scope refuses every candidate. Decision record:
-  `docs/research/20260705-keyed-collapse-application.md`; tracking:
-  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
+- **The once-write classifier's nullability route proves non-nullness only from the model's own
+  `unique_key`** — a single `MAX`/`MIN` reduction of a `unique_key` column is admitted without
+  decomposed state (the fallback is dead), but a driving-clock-derived payload still takes the
+  decomposed-state route: the classifier resolves no driving source, so widening this route to a
+  clock-derived proof would need a new plan-layer input and risks CLI↔runtime admission
+  divergence. Separately, the multi-column-`unique_key` shape this route needs to be reachable
+  through declared YAML (`key` and `determines` must name different columns — a single-column
+  `unique_key` can only self-determine, which `validate_functional_dependencies` rejects; and a
+  `grain: key` model's `GROUP BY` may not touch the driving source's `partition_column`, so the
+  partition column cannot supply the second key member either) has no generative-pool recipe
+  covering it today — the classifier route and its plan-layer/unit-test coverage exist
+  (`crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`,
+  `crates/smelt-db/tests/maintenance_fold_spec_companion.rs`), but no end-to-end DuckDB witness
+  does. The key-derived route (no `MAX`/`MIN` wrapper) still requires a bare `unique_key` column
+  reference, not an arbitrary key-derived *expression*; admission reads whole-scope
+  fan-out/set-operation facts, so any fan-out or undiscriminated set operation anywhere in scope
+  refuses every candidate. Decision record: `docs/research/20260705-keyed-collapse-application.md`;
+  tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
+  `docs/outcomes/20260904-decided-gap-residue/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is
   transactional, and the ledger table itself exists, on DuckDB only.** The default

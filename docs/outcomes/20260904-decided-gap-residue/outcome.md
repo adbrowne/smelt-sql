@@ -54,7 +54,7 @@ than the current residue.
 |---|-------|--------|
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
-| 3 | Once-write fallback-case nullability route; generative pool coverage | planned |
+| 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
@@ -95,6 +95,28 @@ than the current residue.
   admission divergence; the `incremental_shapes.md` divergence bullet is therefore narrowed to
   that residual clause rather than deleted.
 
+- 2026-09-05: Phase 3 implemented the classifier route, unit tests, and plan-layer parity test
+  (all green), then hit a structural wall trying to add generative-pool coverage: the route
+  needs a declared FD naming the `unique_key` candidate, but a single-column `unique_key` can
+  only self-determine (`key -> key`, rejected by `validate_functional_dependencies` as
+  self-contradictory), and widening the model's `GROUP BY` to a second, distinct key column
+  fails too when that column is the driving source's clock/partition column
+  (`KeyedGroupByContainsPartitionColumn`) — the only other column `KeyedRecipe`'s three-column
+  source shape offers. Reverted the recipe/render/gate.rs wiring attempt (dead code with no
+  legal path to exercise it) and rewrote the `incremental_shapes.md` Known Divergences bullet to
+  name this precisely rather than deleting it. See `phases/03-summary.md`.
+
 ## Blocked
+
+- 2026-09-05: Phase 3 (once-write fallback-case nullability route), generative-pool coverage
+  clause only — the classifier route, unit tests, and plan-layer parity test are done and
+  committed; only the end-to-end DuckDB generative-pool witness is blocked. Reason: no legal way
+  to declare the required FD or reach a composite `unique_key` through `KeyedRecipe`'s existing
+  source shape (see `phases/03-summary.md` "For the next planner" for the two validation walls
+  hit and three candidate options). A human/planner call is needed on which option to take
+  before this can proceed: (a) widen `SourceRecipe`/`KeyedRecipe` with a fourth identity column,
+  (b) reconsider `validate_functional_dependencies`'s self-contradiction check for the trivial
+  `key = determines` case, or (c) drop the FD requirement in `classify_once_write` for a
+  candidate that is already a `unique_key` member.
 
 <!-- Dated entries; each names the phase, what blocked it, and what a human must decide. -->

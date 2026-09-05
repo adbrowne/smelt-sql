@@ -483,6 +483,21 @@ pub fn classify_once_write(
         return OnceWriteAdmission::Admitted { state: None };
     }
 
+    // A single candidate whose payload is provably non-null within its own
+    // group (a `unique_key` column) can never actually invoke its
+    // fallback — the fallback is dead, so the spelling stays the plain
+    // `COALESCE(target, delta)` fold with no decomposed state
+    // (`docs/specs/incremental_shapes.md` §"The column-family catalogue").
+    // This proves non-nullness only from the model's own `unique_key`; a
+    // driving-clock-derived payload still takes the decomposed-state route
+    // below because this function resolves no driving source.
+    if candidates.len() == 1
+        && fallback_expr.is_some()
+        && crate::analysis::not_null::column_provably_not_null(unique_key, &candidates[0].1)
+    {
+        return OnceWriteAdmission::Admitted { state: None };
+    }
+
     let state_candidates: Vec<crate::analysis::decomposed_state::OnceWriteCandidate> = candidates
         .iter()
         .map(
@@ -2525,5 +2540,97 @@ GROUP BY device_id, user_id"#;
             "admission is not yet widened onto decomposed state: {:?}",
             classification.aggregator_columns
         );
+    }
+
+    /// Drives [`classify_once_write`] directly over `sql`'s single
+    /// `GroupByKey` projection named `output_name`, the same inputs
+    /// `classify_cumulative`/`derive_fold_spec` assemble for it.
+    fn once_write_admission_for(
+        sql: &str,
+        unique_key: &[String],
+        fds: &[FunctionalDependency],
+        output_name: &str,
+    ) -> OnceWriteAdmission {
+        let analysis = analyze_select(sql).expect("sql must analyze");
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::File::cast(parse.syntax()).expect("must cast to File");
+        let select = file.select_stmt().expect("must have select stmt");
+        let items = crate::analysis::select_stmt_items(&select).expect("must extract items");
+        let (text, expr) = items
+            .iter()
+            .find_map(|item| match item {
+                SelectItemKind::GroupByKey { alias, text, expr }
+                    if alias.eq_ignore_ascii_case(output_name) =>
+                {
+                    Some((text.clone(), expr.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no GroupByKey projection aliased {output_name}"));
+        let vector = model_property_vector(sql, &JoinContext::new());
+        classify_once_write(
+            &text,
+            &expr,
+            unique_key,
+            &analysis.group_by_exprs,
+            fds,
+            vector.as_ref(),
+            output_name,
+        )
+    }
+
+    /// `COALESCE(MAX(id), 0)` with `unique_key = [id]` and a declared
+    /// `id -> id` FD: the fallback is dead by construction (`id` is
+    /// non-null within its own group), so the spelling admits without
+    /// decomposed state (`docs/specs/incremental_shapes.md` §"The
+    /// column-family catalogue").
+    #[test]
+    fn once_write_fallback_over_a_not_null_key_payload_admits_without_state() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(id), 0) AS first_id
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let fds = vec![FunctionalDependency {
+            key: vec!["id".to_string()],
+            determines: "id".to_string(),
+        }];
+        let admission = once_write_admission_for(sql, &["id".to_string()], &fds, "first_id");
+        assert_eq!(admission, OnceWriteAdmission::Admitted { state: None });
+    }
+
+    /// Regression guard: an ordinary nullable payload (`val`, not a
+    /// `unique_key` column) with the same fallback shape still decomposes
+    /// to hidden state — the not-null route must not swallow it.
+    #[test]
+    fn once_write_fallback_over_a_nullable_payload_still_decomposes() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(val), 0) AS first_val
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let fds = vec![FunctionalDependency {
+            key: vec!["id".to_string()],
+            determines: "val".to_string(),
+        }];
+        let admission = once_write_admission_for(sql, &["id".to_string()], &fds, "first_val");
+        assert!(matches!(
+            admission,
+            OnceWriteAdmission::Admitted { state: Some(_) }
+        ));
+    }
+
+    /// The not-null route never substitutes for the required functional
+    /// dependency proof: the same not-null (`id`) payload with NO declared
+    /// FD stays `Unproven`.
+    #[test]
+    fn once_write_not_null_route_still_requires_the_functional_dependency() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(id), 0) AS first_id
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let admission = once_write_admission_for(sql, &["id".to_string()], &[], "first_id");
+        assert!(matches!(admission, OnceWriteAdmission::Unproven { .. }));
     }
 }
