@@ -1133,6 +1133,19 @@ pub enum KeyedCombiner {
     /// `(value, written)` state per candidate. Deliberately excluded from
     /// [`arb_keyed_combiner`], same reason as [`KeyedCombiner::OnceWrite`].
     OnceWriteMultiCandidate,
+    /// `COALESCE(MAX(<key>), 0) AS once_val` — the once-write family's
+    /// route-2 `unique_key`-member skip (human decision (c),
+    /// `docs/outcomes/20260904-decided-gap-residue` outcome.md Decision
+    /// log): the candidate is a wrapped reference to the model's own
+    /// `unique_key` column, so `classify_once_write` admits it with
+    /// `state: None` and **no** declared functional dependency —
+    /// `render::render_keyed_model_file` deliberately omits the
+    /// `functional_dependencies:` block for this variant; the absent block
+    /// is the witness that the FD-free route is what admits it. Deliberately
+    /// excluded from [`arb_keyed_combiner`] — same once-write world-fact
+    /// reason as [`KeyedCombiner::OnceWrite`], and additionally this variant
+    /// projects the KEY column, not the schedule's varying payload.
+    OnceWriteKeyFallback,
     /// `AVG(val) AS avg_val` — the decomposed-fold family
     /// (`incremental_shapes.md` §"The column-family catalogue", row 7):
     /// admits onto hidden additive `(sum, count)` state via
@@ -1156,6 +1169,7 @@ impl KeyedCombiner {
             KeyedCombiner::OnceWrite => "once_write",
             KeyedCombiner::OnceWriteFallback => "once_write_fallback",
             KeyedCombiner::OnceWriteMultiCandidate => "once_write_multi_candidate",
+            KeyedCombiner::OnceWriteKeyFallback => "once_write_key_fallback",
             KeyedCombiner::DecomposedAvg => "decomposed_avg",
             KeyedCombiner::DecomposedStddev => "decomposed_stddev",
         }
@@ -1174,7 +1188,8 @@ impl KeyedCombiner {
             KeyedCombiner::PlainOverwrite => ("ANY_VALUE", "current_val"),
             KeyedCombiner::OnceWrite
             | KeyedCombiner::OnceWriteFallback
-            | KeyedCombiner::OnceWriteMultiCandidate => ("COALESCE", "once_val"),
+            | KeyedCombiner::OnceWriteMultiCandidate
+            | KeyedCombiner::OnceWriteKeyFallback => ("COALESCE", "once_val"),
             KeyedCombiner::DecomposedAvg => ("AVG", "avg_val"),
             KeyedCombiner::DecomposedStddev => ("STDDEV_SAMP", "stddev_val"),
         }
@@ -1194,15 +1209,19 @@ impl KeyedCombiner {
             | KeyedCombiner::OnceWrite
             | KeyedCombiner::OnceWriteFallback
             | KeyedCombiner::OnceWriteMultiCandidate
+            | KeyedCombiner::OnceWriteKeyFallback
             | KeyedCombiner::DecomposedAvg
             | KeyedCombiner::DecomposedStddev => None,
         }
     }
 
     /// The full select-list fragment (beyond the key) this combiner
-    /// projects, given the source's payload column (`val`) and clock column
-    /// (`clock`, used as the order-monotone family's ordering expression).
-    pub fn projection_sql(self, val: &str, clock: &str) -> String {
+    /// projects, given the source's payload column (`val`), clock column
+    /// (`clock`, used as the order-monotone family's ordering expression),
+    /// and key column (`key`, used only by
+    /// [`KeyedCombiner::OnceWriteKeyFallback`]'s wrapped key-reference
+    /// candidate).
+    pub fn projection_sql(self, val: &str, clock: &str, key: &str) -> String {
         let (agg, alias) = self.agg_and_alias();
         match self {
             // `ordering_alias()` is `Some` for every `OrderMonotone` value —
@@ -1231,6 +1250,17 @@ impl KeyedCombiner {
                 // rather than the bare spelling's stateless merge
                 // (`decompose_once_write`, `classify_once_write`).
                 format!("COALESCE(MAX({val}), 0) AS {alias}")
+            }
+            KeyedCombiner::OnceWriteKeyFallback => {
+                // The candidate is a wrapped reference to the model's own
+                // `unique_key` column (`key`, not `val`) — `val` plays no
+                // role in this variant's projection at all.
+                // `classify_once_write`'s route-2 skip admits this with no
+                // declared FD because `key` is provably non-null within its
+                // own group; `render_keyed_model_file` correspondingly
+                // omits the `functional_dependencies:` block for this
+                // variant.
+                format!("COALESCE(MAX({key}), 0) AS {alias}")
             }
             KeyedCombiner::OnceWriteMultiCandidate => {
                 // Two candidates (a leading `MAX` and a trailing `MIN`),

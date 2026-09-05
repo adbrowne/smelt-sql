@@ -1808,6 +1808,7 @@ async fn once_write_null_pool_upholds_end_state_equivalence() {
         KeyedCombiner::OnceWrite,
         KeyedCombiner::OnceWriteFallback,
         KeyedCombiner::OnceWriteMultiCandidate,
+        KeyedCombiner::OnceWriteKeyFallback,
     ];
 
     let mut cases = 0;
@@ -1879,6 +1880,45 @@ async fn once_write_fallback_pool_upholds_end_state_equivalence() {
     drive_keyed_and_assert(&project, &recipe, &schedule)
         .await
         .expect("once-write-fallback keyed schedule must uphold end-state equivalence");
+}
+
+/// Human decision (c) (`docs/outcomes/20260904-decided-gap-residue`
+/// outcome.md Decision log): the once-write family's route-2 `unique_key`
+/// skip (`COALESCE(MAX(<key>), 0)`, [`KeyedCombiner::OnceWriteKeyFallback`])
+/// upholds end-state equivalence with **no** declared functional
+/// dependency — the rendered model file is asserted to carry no
+/// `functional_dependencies:` block at all, the absent block being the
+/// witness that the FD-free route is what admits this column.
+#[tokio::test]
+async fn once_write_key_fallback_pool_upholds_end_state_equivalence() {
+    let recipe =
+        KeyedRecipe::new_window_forward_once_write_with(KeyedCombiner::OnceWriteKeyFallback);
+    assert!(
+        !render::render_keyed_model_file(&recipe).contains("functional_dependencies:"),
+        "the unique_key-member route must declare no functional_dependencies block"
+    );
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project =
+        stage_keyed_recipe(&recipe, &tmp).expect("stage once-write-key-fallback keyed recipe");
+
+    let plan =
+        classify_keyed(&project, &recipe).expect("classify once-write-key-fallback keyed recipe");
+    assert!(
+        !plan.cells.is_empty(),
+        "expected the once-write-key-fallback keyed recipe to admit at least one cell: {plan:#?}"
+    );
+    assert!(
+        plan.cells
+            .iter()
+            .any(|c| c.technique == Technique::KeyedFold),
+        "expected a KeyedFold cell for the FD-free once-write-key-fallback column: {plan:#?}"
+    );
+
+    let schedule = once_write_constant_payload_schedule();
+
+    drive_keyed_and_assert(&project, &recipe, &schedule)
+        .await
+        .expect("once-write-key-fallback keyed schedule must uphold end-state equivalence");
 }
 
 /// Phase 8 task 4: the once-write family's multi-candidate spelling

@@ -1,7 +1,7 @@
 # Outcome: Decided-gap residue — close the spec bullets whose target behaviour is already written
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** done
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows IM-25, IS-13 ("implementation gap in an already-decided design"); `docs/TODO.md` bullets "Frozen-horizon append-only gate", "Deferral oracle restatement", "Sidecar per-consuming-edge audit"
 **Spec anchors:** `docs/specs/incremental_models.md` §"The contract lattice", §Known Divergences "Conditional-maintenance gaps"; `docs/specs/incremental_shapes.md` §"The column-family catalogue" (once-write), §Known Divergences; `docs/specs/sources.md` §Known Divergences (sidecar per-consumer comparandum)
 
@@ -57,7 +57,7 @@ than the current residue.
 |---|-------|--------|
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
-| 3 | Once-write route-2 `unique_key` skip (decision (c)) + generative-pool witness | planned |
+| 3 | Once-write route-2 `unique_key` skip (decision (c)) + generative-pool witness | done |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | done |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | done |
@@ -209,28 +209,22 @@ than the current residue.
   `functional_dependencies:` block — the absent block is the witness that the FD-free route is
   what admits it.
 
-## Blocked
+- 2026-09-05 (implement, phase 3 reopened): Phase 3 done — the route-2 `unique_key` skip
+  (human decision (c)) is implemented in `classify_once_write`, plus a new
+  `KeyedCombiner::OnceWriteKeyFallback` generative-pool recipe/schedule witness driven end-to-end
+  against real DuckDB (`once_write_key_fallback_pool_upholds_end_state_equivalence`), closing the
+  generative-pool clause that previously blocked this phase. `incremental_shapes.md`'s Known
+  Divergences bullet rewritten (not deleted — the driving-clock-derived and bare-key-reference
+  residual clauses are real and stay). All six success criteria are now met: 1
+  (`phases/01-summary.md`), 2 (`phases/02-summary.md`), 3 (`phases/03-summary.md`, now fully
+  closed), 4 (`phases/04-summary.md`), 5 (`phases/05-summary.md`), 6
+  (`phases/06-summary.md`) — this outcome has no remaining open phase.
 
-- 2026-09-05: Phase 3 (once-write fallback-case nullability route), generative-pool coverage
-  clause only — the classifier route, unit tests, and plan-layer parity test are done and
-  committed; only the end-to-end DuckDB generative-pool witness is blocked. Reason: no legal way
-  to declare the required FD or reach a composite `unique_key` through `KeyedRecipe`'s existing
-  source shape (see `phases/03-summary.md` "For the next planner" for the two validation walls
-  hit and three candidate options). A human/planner call is needed on which option to take
-  before this can proceed: (a) widen `SourceRecipe`/`KeyedRecipe` with a fourth identity column,
-  (b) reconsider `validate_functional_dependencies`'s self-contradiction check for the trivial
-  `key = determines` case, or (c) drop the FD requirement in `classify_once_write` for a
-  candidate that is already a `unique_key` member.
+## Blocked
 
 <!-- Dated entries; each names the phase, what blocked it, and what a human must decide. -->
 
-- 2026-09-05: **Outcome-level block.** The only open work is phase 3's generative-pool clause
-  (see the phase-level entry above and `phases/03-summary.md` "For the next planner"). A human
-  must pick one of three options before any further phase can be planned: (a) widen
-  `SourceRecipe`/`KeyedRecipe` with a fourth identity column so a composite `unique_key` and a
-  non-self-referential FD are both declarable; (b) relax
-  `validate_functional_dependencies`'s self-contradiction check for the trivial
-  `key -> key` case; or (c) drop the declared-FD requirement in `classify_once_write` when the
-  candidate column is already a `unique_key` member. Each changes user-visible validation
-  surface, so it is a spec-first product call this outcome cannot answer. Everything else the
-  outcome set out to close is done and gated.
+- 2026-09-05: Phase 3's generative-pool clause (once-write fallback-case nullability route) was
+  blocked pending a human product decision among three options (see the resolved decision-log
+  entry above dated "Human decision recorded, outcome unblocked"). Resolved 2026-09-05 with
+  decision (c); phase 3 re-planned and implemented; no longer blocked.

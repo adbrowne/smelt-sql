@@ -299,13 +299,20 @@ The once-write family admits four spellings, and no others:
   group (a `unique_key` column of the model), the fallback is dead — it can never actually
   stand in for a value a later window would supply — so the spelling keeps the bare
   `COALESCE(target, delta)` fold with no decomposed state instead; the functional dependency is
-  still required.
+  still required unless `<col>` is itself a `unique_key` column (see below).
 - `COALESCE(MAX(<a>), MAX(<b>))` (and the `MIN` variants, and longer candidate lists) — a
   multi-candidate reduction, admitted under a declared functional dependency naming *every*
   candidate column, backed by one decomposed `(value, written)` state pair per candidate: `π`
   applies the arguments' declared preference order over the candidates whose state is `written`,
   so the order candidates happened to arrive in across windows never overrides the declared
   preference.
+
+In any of the reduction spellings, a candidate column that is itself a member of the model's
+`unique_key` needs no declared functional dependency — key membership already establishes the
+per-key constancy the declaration would otherwise assert, the same argument the key-derived
+spelling makes, extended to a `MAX`/`MIN`-wrapped reference to that column. For the
+single-candidate fallback spelling, such a candidate also proves the fallback dead, so that
+spelling admits with `state: None` exactly as the bare key-derived spelling does.
 
 The functional dependency is declared in the model's frontmatter under
 `functional_dependencies:` (a declared world-fact owned by `model_properties.md`), naming the
@@ -1237,23 +1244,20 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 ### The key grain
 
 - **The once-write classifier's nullability route proves non-nullness only from the model's own
-  `unique_key`** — a single `MAX`/`MIN` reduction of a `unique_key` column is admitted without
-  decomposed state (the fallback is dead), but a driving-clock-derived payload still takes the
-  decomposed-state route: the classifier resolves no driving source, so widening this route to a
-  clock-derived proof would need a new plan-layer input and risks CLI↔runtime admission
-  divergence. Separately, the multi-column-`unique_key` shape this route needs to be reachable
-  through declared YAML (`key` and `determines` must name different columns — a single-column
-  `unique_key` can only self-determine, which `validate_functional_dependencies` rejects; and a
-  `grain: key` model's `GROUP BY` may not touch the driving source's `partition_column`, so the
-  partition column cannot supply the second key member either) has no generative-pool recipe
-  covering it today — the classifier route and its plan-layer/unit-test coverage exist
-  (`crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`,
-  `crates/smelt-db/tests/maintenance_fold_spec_companion.rs`), but no end-to-end DuckDB witness
-  does. The key-derived route (no `MAX`/`MIN` wrapper) still requires a bare `unique_key` column
-  reference, not an arbitrary key-derived *expression*; admission reads whole-scope
-  fan-out/set-operation facts, so any fan-out or undiscriminated set operation anywhere in scope
-  refuses every candidate. Decision record: `docs/research/20260705-keyed-collapse-application.md`;
-  tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
+  `unique_key`** — a `unique_key`-member candidate (bare, or `MAX`/`MIN`-wrapped, with or without
+  a fallback) is admitted with no decomposed state and no declared functional dependency (the
+  route-2 skip, `crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`, with
+  plan-layer parity in `crates/smelt-db/tests/maintenance_fold_spec_companion.rs` and an
+  end-to-end DuckDB witness in `crates/smelt-cli/tests/maintenance_conformance/gate.rs::
+  once_write_key_fallback_pool_upholds_end_state_equivalence`), but a driving-clock-derived
+  payload still takes the decomposed-state route: the classifier resolves no driving source, so
+  widening this route to a clock-derived proof would need a new plan-layer input and risks
+  CLI↔runtime admission divergence. The key-derived route (no `MAX`/`MIN` wrapper) still requires
+  a bare `unique_key` column reference, not an arbitrary key-derived *expression*; admission reads
+  whole-scope fan-out/set-operation facts, so any fan-out or undiscriminated set operation
+  anywhere in scope refuses every candidate. Decision record:
+  `docs/research/20260705-keyed-collapse-application.md`; tracking:
+  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/outcomes/20260904-decided-gap-residue/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is

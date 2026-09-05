@@ -679,7 +679,7 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
     let key = &recipe.source.key_column;
     let val = &recipe.source.payload_column;
     let clock = &recipe.source.clock_column;
-    let proj = recipe.combiner.projection_sql(val, clock);
+    let proj = recipe.combiner.projection_sql(val, clock, key);
     format!("SELECT {key}, {proj} FROM {src} GROUP BY {key}")
 }
 
@@ -1259,7 +1259,9 @@ pub fn stage_composed_for_target(
 /// fixed regardless of which run window a schedule step later drives).
 pub fn render_repair_model_body(recipe: &RepairRecipe) -> String {
     let src = format!("smelt.sources.{}", recipe.source_name);
-    let proj = recipe.combiner.projection_sql("amount", "order_date");
+    let proj = recipe
+        .combiner
+        .projection_sql("amount", "order_date", "customer_id");
     format!(
         "SELECT customer_id, {proj} FROM {src} WHERE order_date BETWEEN TIMESTAMP \
          '{REPAIR_BAND_ANCHOR}' - INTERVAL '{band} days' AND TIMESTAMP '{REPAIR_BAND_ANCHOR}' \
