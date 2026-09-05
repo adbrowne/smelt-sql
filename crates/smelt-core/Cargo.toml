@@ -22,9 +22,10 @@ anyhow.workspace = true
 walkdir = "2.4"
 tracing.workspace = true
 pyo3 = { workspace = true, optional = true }
+tempfile = "3"
+tar = "0.4"
 
 [dev-dependencies]
-tempfile = "3"
 
 [features]
 python = ["pyo3"]
