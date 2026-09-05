@@ -1200,8 +1200,46 @@ smelt explain [MODEL_NAME] [OPTIONS]
 | `--show-sql` | | bool | `false` | With `MODEL_NAME`, additionally print the maintenance statements each cell executes. Never connects to a backend. |
 | `--period` | | `<start>..<end>` | | With `--show-sql`, use these real literal date bounds (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
 | `--technique` | | string | | Requires `--show-sql`. Render a named technique's own preview statements instead of the admitted one's, for every cell — including a cell where the technique is not applicable, whose reason is printed rather than silently skipped. Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute` (`recompute` and `delete_insert` both resolve to the same DELETE+INSERT / region-recompute technique). Doesn't affect `--json`, whose `technique_previews` array always carries every technique regardless of this flag. |
+| `--diff` | | `[<ref>]` | merge-base with `main` | Diff the project's property profile between a git baseline and the working tree instead of printing a graph or a report. See "Property diff" below. Exclusive with `MODEL_NAME`, `--show-sql`, `--period`, and `--technique` (usage error, exit `2`). |
+| `--fail-on` | | `downgrade`\|`any` | | Only with `--diff`. Exit `1` when a downgrade (`downgrade`) or any shift at all (`any`) is present in the reported set. Without this flag, `--diff` always exits `0` once the diff was computed. |
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
+
+### Property diff
+
+`smelt explain --diff [<ref>]` derives every model's property profile at two versions of the
+project — a git baseline (`<ref>`, defaulting to the merge-base with `main`) and the working
+tree, uncommitted edits included — and reports every model whose profile changed: grain,
+bound/reach, per-cell technique, refusals, contract point, and probes. This is how a silent
+downgrade (a `SUM` folding through `KeyedFold` suddenly recomputing the whole table because an
+upstream edit broke its row identity, say) gets caught before it ships, including on a model
+nobody touched directly — a shifted model whose own file was not edited is reported
+`(downstream of <model>)`, naming the nearest edited ancestor.
+
+```
+$ smelt explain --diff
+
+property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+
+  user_daily_spend  (edited)
+    ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
+
+  user_spend_running_total  (downstream of user_daily_spend)
+    ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
+
+1 downgrades, 0 upgrades, 0 neutral.
+```
+
+`--json` emits the same diff as a JSON object with `baseline` (the resolved ref, its commit, and
+whether it was explicit or defaulted), `edited_files`, `summary` (downgrade/upgrade/neutral
+counts and the shifted-model count), and `models` (one entry per shifted model, each with a
+`cause` and its `changes`). See `docs/specs/property_diff.md` §Surface "JSON" for the full
+schema. `--select` narrows the *reported* set only — every model is still compared at both
+versions so attribution stays correct — and the summary counts follow the reported set.
+
+Exit codes: `0` whenever the diff was computed (whether or not anything shifted); `1` only under
+`--fail-on`; `2` for an unresolvable baseline (not a git work tree, an unknown ref, or a ref with
+no project at that path) or an exclusive-flag combination. See [Exit codes](#exit-codes).
 
 With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: the
 model's own **delta signature** as the report's first line (an `emits:` headline — see below),
