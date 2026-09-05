@@ -85,7 +85,7 @@ the exact reverse.
 | `DATE` | call | native | native | native |
 | `DATE_ADD` | special | native (gap #176) | native (gap #176) | native (gap #176, divergent) |
 | `DATE_PART` | call | native | native | native (gap #179) |
-| `DATE_SUB` | special | native (gap #177) | native (gap #178) | native (gap #176) |
+| `DATE_SUB` | special | template:{0} - {1} (gap #176) | native (gap #178) | native (gap #176) |
 | `DATE_TRUNC` | call | native | native | native (gap #179) |
 | `DAY` | call | native | native | native (gap #179) |
 | `DAYOFWEEK` | call | native | native (gap #174) | native (gap #179) |
@@ -104,7 +104,7 @@ the exact reverse.
 | `IFNULL` | call | native | native | native |
 | `ILIKE` | infix | native | native | native (gap #179) |
 | `IN` | special | native | native | native |
-| `INITCAP` | call | native (gap #177) | native | native |
+| `INITCAP` | call | unsupported | native | native |
 | `IS_NOT_NULL` | postfix | native | native | native |
 | `IS_NULL` | postfix | native | native | native |
 | `JSON_ARRAY` | call | native | native (gap #178) | native |
@@ -145,16 +145,16 @@ the exact reverse.
 | `NTH_VALUE` | call | native | native | native |
 | `NTILE` | call | native | native | native |
 | `NULLIF` | call | native | native | native |
-| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
-| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
+| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
+| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
 | `PERCENT_RANK` | call | native | native | native |
 | `PI` | call | native | native | native (gap #179) |
 | `POSITION` | call | native | native | native (gap #179) |
 | `POW` | call | native | native | native |
 | `POWER` | call | native | native | native (gap divergent) |
 | `QUARTER` | call | native | native | native (gap #179) |
-| `QUOTE_IDENT` | call | native (gap #177) | native (gap #178) | native (gap #179) |
-| `QUOTE_LITERAL` | call | native (gap #177) | native (gap #178) | native (gap #179) |
+| `QUOTE_IDENT` | call | unsupported | native (gap #178) | native (gap #179) |
+| `QUOTE_LITERAL` | call | unsupported | native (gap #178) | native (gap #179) |
 | `RANDOM` | call | native | native | rename:RAND |
 | `RANK` | call | native | native | native |
 | `REGR_SLOPE` | call | native | native (gap divergent) | native (gap #179) |
@@ -181,7 +181,7 @@ the exact reverse.
 | `SUM` | call | native | native | native |
 | `TAN` | call | native | native | native |
 | `TANH` | call | native | native | native |
-| `TO_CHAR` | call | native (gap #177) | native | native (gap #179) |
+| `TO_CHAR` | call | unsupported | native | native (gap #179) |
 | `TO_JSON` | call | native | native (gap #178) | native (gap divergent) |
 | `TO_SECONDS` | call | native | native (gap #178) | native (gap #179) |
 | `TRANSLATE` | call | native | native | native |

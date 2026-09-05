@@ -75,7 +75,7 @@ audit before it is claimed — never from documentation.
 | 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
-| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | planned |
+| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
 | 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
@@ -167,6 +167,24 @@ audit before it is claimed — never from documentation.
   (infer the unquoted interval literal; correct `DATE_ADD`/`DATE_SUB`'s return type to
   `Timestamp`, matching `binary.rs` and the engine) so criterion 5's `≤ 5` stays reachable
   without touching the `#175`/`#176` rows it deliberately leaves standing.
+
+- 2026-09-06 (implement 04) — phase 4 done. DuckDB gap count 12 → 6:
+  `PERCENTILE_CONT`/`PERCENTILE_DISC` Window rows deleted (redundant with the
+  registry's existing `Unsupported`); `INITCAP`/`TO_CHAR`/`QUOTE_IDENT`/
+  `QUOTE_LITERAL` given `Emission::Unsupported`; `DATE_SUB` given
+  `Emission::Template("{0} - {1}")` — the first function-call template row,
+  closing criterion 3's deferred end-to-end leg. Measured against the pinned
+  DuckDB 1.5.4 library, not the ambient CLI (v1.4.4) — the CLI would have
+  wrongly claimed `INITCAP` unsupported; the audit's own two-sided check
+  caught it. Contingency triggered: the plan's unquoted-`INTERVAL`-literal
+  guess was wrong (that literal already infers correctly); the real cause is
+  `DATE_ADD`/`DATE_SUB` having no `SqlFunction` enum variant at all, so the
+  registry's return type (corrected to `Timestamp`, matching `binary.rs`) is
+  never reached — landed as fresh `type_gap` rows per the bail-out clause
+  (count 6, not 4). Also rewrote `a_ledger_row_the_engine_now_accepts_is_reported_stale`
+  to unit-test a new pure `classify_accepted` helper directly, since phase 4
+  closed the only DuckDB Schema-leg row that test used to borrow. `verify-phase.sh`
+  ALL GREEN. See `phases/04-summary.md`.
 
 ## Blocked
 

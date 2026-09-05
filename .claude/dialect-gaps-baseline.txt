@@ -22,6 +22,20 @@
 # emission dialect is retired — no backend crate ever existed to verify its
 # verdicts, so the metric is removed because the dialect no longer exists,
 # not because its gaps were absorbed.
-dialect_gaps_duckdb 12
+#
+# 2026-09-06 (#177, docs/outcomes/20260904-dialect-emission-vocabulary phase 4,
+# sign-off: Andrew Browne): dialect_gaps_duckdb 12 -> 6. Closed: PERCENTILE_CONT
+# and PERCENTILE_DISC at Window (already Unsupported in the registry, rows were
+# redundant), INITCAP/TO_CHAR/QUOTE_IDENT/QUOTE_LITERAL (Emission::Unsupported —
+# none exists on DuckDB 1.5.4, measured live), DATE_SUB (Emission::Template,
+# DuckDB spells interval subtraction infix). DATE_ADD's existing type_gap
+# survives, and DATE_SUB gained a new one: templating DATE_SUB made its type
+# leg run for the first time, and both `DATE_ADD`/`DATE_SUB` turned out to have
+# no `SqlFunction` enum variant at all, so the registry's now-corrected
+# `Timestamp` return type is never reached by `infer_function_type` — a deeper
+# registry-wiring gap than the contingency's unquoted-`INTERVAL`-literal guess
+# (that literal already infers `Interval` correctly on its own, measured
+# directly). Net: 12 - 7 + 1 = 6.
+dialect_gaps_duckdb 6
 dialect_gaps_spark 27
 dialect_gaps_bigquery 42

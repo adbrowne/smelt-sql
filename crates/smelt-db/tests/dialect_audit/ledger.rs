@@ -203,39 +203,32 @@ pub fn find(
 /// Closing one means adding an `Emission::Rename`, an `Emission::Rewrite`, or
 /// an `Emission::Unsupported` row to the entry, and deleting its row here.
 static ROWS: &[LedgerRow] = &[
-    // The ordered-set form has no *running*-window form: `PERCENTILE_CONT(f)
-    // WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g ORDER BY rid)` is not a
-    // thing on DuckDB. Scoped to the position that still fails — the
-    // aggregate position was always covered, and a whole-partition window
-    // now restructures around a grouped CTE
-    // (`RestructureId::WindowToCte`), so only the running case remains a
-    // gap.
-    gap_at(
-        "PERCENTILE_CONT",
-        DialectId::DuckDb,
-        Position::Window,
-        "#177",
-        "DuckDB has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
-    ),
-    gap_at(
-        "PERCENTILE_DISC",
-        DialectId::DuckDb,
-        Position::Window,
-        "#177",
-        "DuckDB has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
-    ),
-    //
     // Type-leg gaps: the engine accepts the probe, but smelt's inferred output
     // type disagrees with what the engine reports. These are inference holes,
     // not emission ones — and none of them is reachable by
     // `type_property_tests`, which generates from `core_functions()`, a
     // hand-maintained registry-blind table.
+    //
+    // `DATE_ADD`/`DATE_SUB` specifically: the registry's `Concrete(Timestamp)`
+    // return type (corrected to match `binary.rs` and the live engine —
+    // `docs/outcomes/20260904-dialect-emission-vocabulary` phase 4) is never
+    // consulted, because neither name has a `SqlFunction` enum variant, so
+    // `infer_function_type` returns `None` before `try_registry_inference`
+    // ever runs. Not the contingency's assumed unquoted-`INTERVAL`-literal
+    // gap — that literal already infers `Interval` correctly on its own
+    // (measured directly) — a distinct, deeper registry-wiring gap. See
+    // `phases/04-summary.md`.
     type_gap(
         "DATE_ADD",
         DialectId::DuckDb,
-        "#176", "`DATE_ADD(date, INTERVAL …)` infers Unknown(Dynamic); DuckDB returns TIMESTAMP",
+        "#176", "`DATE_ADD` has no `SqlFunction` enum variant, so `infer_function_type` never \
+                 reaches the registry; infers Unknown(Dynamic) while DuckDB returns TIMESTAMP",
+    ),
+    type_gap(
+        "DATE_SUB",
+        DialectId::DuckDb,
+        "#176", "`DATE_SUB` has no `SqlFunction` enum variant, so `infer_function_type` never \
+                 reaches the registry; infers Unknown(Dynamic) while DuckDB returns TIMESTAMP",
     ),
     type_gap(
         "EXPLODE",
@@ -578,28 +571,5 @@ static ROWS: &[LedgerRow] = &[
         "REGR_SLOPE",
         DialectId::SparkSql,
         "Spark returns NULL for a degenerate regression where DuckDB returns NaN.",
-    ),
-    // ── DuckDB ───────────────────────────────────────────────────────────
-    // Measured against DuckDB 1.5.4 in-process.
-    gap(
-        "INITCAP",
-        DialectId::DuckDb,
-        "#177", "no `initcap` in DuckDB 1.5.4; the closest is a manual UPPER/LOWER split",
-    ),
-    gap(
-        "TO_CHAR",
-        DialectId::DuckDb,
-        "#177", "no `to_char` in DuckDB; `strftime` is the temporal half of it",
-    ),
-    gap("QUOTE_IDENT", DialectId::DuckDb, "#177", "PostgreSQL-only builtin"),
-    gap(
-        "QUOTE_LITERAL",
-        DialectId::DuckDb,
-        "#177", "PostgreSQL-only builtin",
-    ),
-    gap(
-        "DATE_SUB",
-        DialectId::DuckDb,
-        "#177", "no `date_sub` in DuckDB; interval subtraction is infix `-`",
     ),
 ];

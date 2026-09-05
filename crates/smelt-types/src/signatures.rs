@@ -5204,7 +5204,13 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             "DATE_ADD",
             vec![],
             vec![concrete(DataType::Date), concrete(DataType::Interval)],
-            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+            // `Date + Interval → Timestamp`, matching `binary.rs`'s handling
+            // of the equivalent infix form and DuckDB's own reported type
+            // (measured live 2026-09-06; phase 4 of
+            // docs/outcomes/20260904-dialect-emission-vocabulary).
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+                with_timezone: false,
+            })),
         )
         .with_syntax_form(SyntaxForm::Special),
     );
@@ -5213,9 +5219,20 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             "DATE_SUB",
             vec![],
             vec![concrete(DataType::Date), concrete(DataType::Interval)],
-            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+            // See `DATE_ADD` above — `Date - Interval → Timestamp` as well.
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+                with_timezone: false,
+            })),
         )
-        .with_syntax_form(SyntaxForm::Special),
+        .with_syntax_form(SyntaxForm::Special)
+        // DuckDB spells interval subtraction infix; its own
+        // `date_sub(VARCHAR, ts, ts)` is a different function entirely.
+        // Verified live 2026-09-06.
+        .with_emission(&[(
+            DialectId::DuckDb,
+            Position::Any,
+            Emission::Template("{0} - {1}"),
+        )]),
     );
     insert(
         Signature::new(
@@ -5491,14 +5508,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ));
     }
     // Extended text scalars → Text.
-    for name in [
-        "INITCAP",
-        "QUOTE_IDENT",
-        "QUOTE_LITERAL",
-        "REVERSE",
-        "TO_CHAR",
-        "TRANSLATE",
-    ] {
+    for name in ["REVERSE", "TRANSLATE"] {
         insert(Signature::new(
             name,
             vec![],
@@ -5506,6 +5516,73 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         ));
     }
+    // Lifted out of the loop above so each can carry its own emission
+    // verdict: DuckDB 1.5.x has none of these four scalars (`Catalog Error:
+    // … does not exist`, measured live 2026-09-06), and none has a
+    // placeholder-expressible equivalent — `TO_CHAR`'s format string is not
+    // `strftime`'s. `docs/outcomes/20260904-dialect-emission-vocabulary`
+    // phase 4.
+    insert(
+        Signature::new(
+            "INITCAP",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_emission(&[(
+            DialectId::DuckDb,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "DuckDB has no `initcap`; the closest is a manual UPPER/LOWER split",
+            },
+        )]),
+    );
+    insert(
+        Signature::new(
+            "TO_CHAR",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_emission(&[(
+            DialectId::DuckDb,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "DuckDB has no `to_char`; `strftime` is the temporal half of it, not \
+                         a placeholder-expressible general formatter",
+            },
+        )]),
+    );
+    insert(
+        Signature::new(
+            "QUOTE_IDENT",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_emission(&[(
+            DialectId::DuckDb,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "a builtin from another SQL dialect entirely, with no DuckDB equivalent",
+            },
+        )]),
+    );
+    insert(
+        Signature::new(
+            "QUOTE_LITERAL",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_emission(&[(
+            DialectId::DuckDb,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "a builtin from another SQL dialect entirely, with no DuckDB equivalent",
+            },
+        )]),
+    );
     // 1-based string search position → BigInt.
     insert(Signature::new(
         "POSITION",

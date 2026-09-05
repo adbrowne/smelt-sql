@@ -128,6 +128,50 @@ fn the_same_model_compiles_for_duckdb() {
         .expect("DuckDB has `//`");
 }
 
+/// The end-to-end leg of criterion 3, deferred from phase 3 because no
+/// production template was call-shaped until phase 4 registered `DATE_SUB` as
+/// one (`docs/outcomes/20260904-dialect-emission-vocabulary` phase 4). A
+/// `BINARY_EXPR` operator template (`%`, `^`, `**`) can carry none of these
+/// modifiers, so this needed a function-call template row to exist at all.
+#[test]
+fn a_template_call_carrying_distinct_is_refused_for_duckdb() {
+    let model = make_model(
+        "q",
+        "SELECT DATE_SUB(DISTINCT d, INTERVAL 1 DAY) AS x FROM events",
+    );
+    let err = registry()
+        .get("duckdb")
+        .compile(&model, "main")
+        .expect_err("a template call cannot carry DISTINCT");
+    let msg = format!("{err}");
+    assert!(msg.contains("DISTINCT"), "must name the modifier: {msg}");
+    assert!(
+        msg.contains("UnsupportedOnBackend"),
+        "must carry its diagnostic code: {msg}"
+    );
+}
+
+/// An `Emission::Unsupported` verdict reaches the user as a compile-time
+/// diagnostic rather than an engine error — `INITCAP` is the first DuckDB row
+/// closed this way (phase 4: DuckDB 1.5.4 has no such scalar).
+#[test]
+fn a_model_using_initcap_is_refused_for_duckdb() {
+    let model = make_model("q", "SELECT INITCAP(name) AS x FROM events");
+    let err = registry()
+        .get("duckdb")
+        .compile(&model, "main")
+        .expect_err("DuckDB has no `initcap`");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("INITCAP") || msg.contains("initcap"),
+        "must name the construct: {msg}"
+    );
+    assert!(
+        msg.contains("UnsupportedOnBackend"),
+        "must carry its diagnostic code: {msg}"
+    );
+}
+
 /// The refusal is not specific to `compile`: an ephemeral model is inlined as a
 /// CTE into its consumer, so it never passes through a consumer's own check.
 #[test]

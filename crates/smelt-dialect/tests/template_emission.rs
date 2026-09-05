@@ -178,6 +178,27 @@ fn compound_argument_is_parenthesised() {
     assert_eq!(out, "(x - 1)");
 }
 
+/// `DATE_SUB` is the first *function-call* template row (phase 4 of
+/// `docs/outcomes/20260904-dialect-emission-vocabulary`) — DuckDB spells
+/// interval subtraction infix. Exercised through the real `print` entry
+/// point, registry row and all, rather than `print_template_str`'s synthetic
+/// harness above.
+#[test]
+fn date_sub_lowers_to_infix_subtraction_on_duckdb() {
+    // `{0} - {1}` is not call-shaped, so its whole output is wrapped in
+    // parens (`non_call_template_is_wrapped_in_parens`'s rule) so it composes
+    // safely wherever the original call appeared.
+    assert_eq!(
+        duckdb("SELECT DATE_SUB(d, INTERVAL 1 DAY) FROM t"),
+        "SELECT (d - INTERVAL 1 DAY) FROM t"
+    );
+    // A compound first argument picks up its own inner parenthesisation too.
+    assert_eq!(
+        duckdb("SELECT DATE_SUB(a + b, INTERVAL 1 DAY) FROM t"),
+        "SELECT ((a + b) - INTERVAL 1 DAY) FROM t"
+    );
+}
+
 #[test]
 fn non_call_template_is_wrapped_in_parens() {
     // A template such as `{0} - {1}` is not call-shaped — its output must be

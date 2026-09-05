@@ -598,6 +598,32 @@ fn run_schema_leg(dialect: DialectId, oracle: &dyn TypeOracle) -> LegOutcome {
     outcome
 }
 
+/// What an accepted probe means, decided purely from the two lookups —
+/// separated from `probe_schema_once` so the decision (see
+/// `a_ledger_row_the_engine_now_accepts_is_reported_stale`) can be proven
+/// without an oracle and without depending on which real ledger rows happen
+/// to be live at the time: both go to zero for DuckDB once every DuckDB
+/// Schema-leg gap is closed, which phase 4 of
+/// `docs/outcomes/20260904-dialect-emission-vocabulary` did.
+enum AcceptedVerdict {
+    /// Compare the engine's reported type against smelt's inference.
+    CheckType,
+    /// The registry declares this refused, but the engine just accepted it.
+    UnsupportedButAccepted,
+    /// The ledger still lists this as a gap, but the engine just accepted it.
+    StaleLedgerRow,
+}
+
+fn classify_accepted(is_declared_unsupported: bool, is_known_gap: bool) -> AcceptedVerdict {
+    if is_declared_unsupported {
+        AcceptedVerdict::UnsupportedButAccepted
+    } else if is_known_gap {
+        AcceptedVerdict::StaleLedgerRow
+    } else {
+        AcceptedVerdict::CheckType
+    }
+}
+
 fn probe_schema_once(
     dialect: DialectId,
     oracle: &dyn TypeOracle,
@@ -607,29 +633,37 @@ fn probe_schema_once(
     let sql = probe::print_for(dialect, &p.statement());
     match oracle.query_types(&sql) {
         Ok(cols) => {
-            if is_declared_unsupported(p.name, dialect, p.position) {
-                outcome.failures.push(format!(
-                    "  {} [{:?}] on {}: the registry declares this Unsupported, but the \
-                     engine accepts it. Either the verdict is wrong or the printer is \
-                     lowering it after all.",
-                    p.name,
-                    p.position,
-                    dialect.slug()
-                ));
-            } else if is_registered(p.name, dialect, p.position, ledger::Leg::Schema) {
-                outcome.failures.push(format!(
-                    "  {} [{:?}] on {}: STALE LEDGER ROW — the engine now accepts this. \
-                     Delete the row and tighten .claude/dialect-gaps-baseline.txt.",
-                    p.name,
-                    p.position,
-                    dialect.slug()
-                ));
-            } else {
-                outcome.probes_compared += 1;
-                if let Some((_, engine_type)) =
-                    cols.iter().find(|(n, _)| n.eq_ignore_ascii_case(&p.alias))
-                {
-                    check_inferred_type(dialect, p, engine_type, outcome);
+            let verdict = classify_accepted(
+                is_declared_unsupported(p.name, dialect, p.position),
+                is_registered(p.name, dialect, p.position, ledger::Leg::Schema),
+            );
+            match verdict {
+                AcceptedVerdict::UnsupportedButAccepted => {
+                    outcome.failures.push(format!(
+                        "  {} [{:?}] on {}: the registry declares this Unsupported, but the \
+                         engine accepts it. Either the verdict is wrong or the printer is \
+                         lowering it after all.",
+                        p.name,
+                        p.position,
+                        dialect.slug()
+                    ));
+                }
+                AcceptedVerdict::StaleLedgerRow => {
+                    outcome.failures.push(format!(
+                        "  {} [{:?}] on {}: STALE LEDGER ROW — the engine now accepts this. \
+                         Delete the row and tighten .claude/dialect-gaps-baseline.txt.",
+                        p.name,
+                        p.position,
+                        dialect.slug()
+                    ));
+                }
+                AcceptedVerdict::CheckType => {
+                    outcome.probes_compared += 1;
+                    if let Some((_, engine_type)) =
+                        cols.iter().find(|(n, _)| n.eq_ignore_ascii_case(&p.alias))
+                    {
+                        check_inferred_type(dialect, p, engine_type, outcome);
+                    }
                 }
             }
         }
@@ -914,31 +948,41 @@ fn the_value_leg_reports_a_planted_divergence() {
 
 /// A ledger row that the engine has started accepting is reported as stale
 /// rather than left standing — the same two-sidedness the hardening baseline
-/// has. Proven by pointing the check at a pair with a live row and a query the
-/// engine does accept.
+/// has. Proven directly against `classify_accepted` (the pure decision
+/// `probe_schema_once` delegates to) rather than through a live ledger row +
+/// oracle pair: no real DuckDB Schema-leg gap survives phase 4 of
+/// `docs/outcomes/20260904-dialect-emission-vocabulary` to borrow for this,
+/// and mixing dialects (printing for one, querying with another's oracle)
+/// produces a real syntax mismatch rather than the scenario under test.
 #[test]
 fn a_ledger_row_the_engine_now_accepts_is_reported_stale() {
-    let oracle = DuckDbOracle::new();
-    let mut outcome = LegOutcome::default();
-    let accepted = Probe {
-        // A registered DuckDB gap…
-        name: "INITCAP",
-        position: Position::Scalar,
-        // …but an expression DuckDB accepts, standing in for the day the
-        // lowering lands.
-        expr: "n_bigint".to_string(),
-        alias: "p_initcap_scalar".to_string(),
-        schema_only: None,
-    };
-    probe_schema_once(DialectId::DuckDb, &oracle, &accepted, &mut outcome);
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|f| f.contains("STALE LEDGER ROW")),
-        "{}",
-        outcome.report()
-    );
+    assert!(matches!(
+        classify_accepted(false, true),
+        AcceptedVerdict::StaleLedgerRow
+    ));
+}
+
+#[test]
+fn an_unsupported_verdict_the_engine_now_accepts_is_reported() {
+    assert!(matches!(
+        classify_accepted(true, false),
+        AcceptedVerdict::UnsupportedButAccepted
+    ));
+    // Unsupported takes priority: a pair that is somehow both a declared
+    // Unsupported verdict and a ledger row still reports the Unsupported
+    // finding, never silently prefers the other.
+    assert!(matches!(
+        classify_accepted(true, true),
+        AcceptedVerdict::UnsupportedButAccepted
+    ));
+}
+
+#[test]
+fn a_pair_the_engine_accepts_with_no_gap_is_type_checked() {
+    assert!(matches!(
+        classify_accepted(false, false),
+        AcceptedVerdict::CheckType
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
