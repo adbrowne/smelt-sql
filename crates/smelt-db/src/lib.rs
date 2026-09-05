@@ -38,7 +38,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use line_index::{LineCol as LILineCol, LineIndex as LI};
 use salsa::{Accumulator, Setter};
@@ -515,6 +515,20 @@ pub struct Database {
 #[salsa::db]
 impl salsa::Database for Database {}
 
+/// Read/write a `Database` registry lock, recovering from poisoning instead of
+/// panicking. The lock is only poisoned by a panic while the guard is held,
+/// which cannot happen in the single-threaded Salsa mutation context these
+/// registries are used in; recovering keeps the registry readable rather than
+/// cascading a second panic if that invariant is ever violated.
+fn read_registry<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn write_registry<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Database {
     /// Create or retrieve the `SourceFile` input for `path`, seeding its fields.
     /// If a `SourceFile` already exists, its text/project_root are updated to
@@ -525,9 +539,7 @@ impl Database {
         text: String,
         project_root: PathBuf,
     ) -> SourceFile {
-        // invariant: RwLock is poisoned only on thread panic, which cannot happen in
-        // this single-threaded Salsa mutation context. unwrap() is safe here.
-        let existing = self.files.read().unwrap().get(&path).copied();
+        let existing = read_registry(&self.files).get(&path).copied();
         match existing {
             Some(file) => {
                 file.set_text(self).to(text);
@@ -536,7 +548,7 @@ impl Database {
             }
             None => {
                 let file = SourceFile::new(self, path.clone(), text, project_root);
-                self.files.write().unwrap().insert(path, file);
+                write_registry(&self.files).insert(path, file);
                 file
             }
         }
@@ -550,8 +562,7 @@ impl Database {
     /// `set_project_smelt_yml` later to propagate in-editor edits.
     pub fn set_project_input(&mut self, root: PathBuf, sources_yaml: String) -> ProjectInput {
         let smelt_yml_text = std::fs::read_to_string(root.join("smelt.yml")).unwrap_or_default();
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        let existing = self.projects.read().unwrap().get(&root).copied();
+        let existing = read_registry(&self.projects).get(&root).copied();
         match existing {
             Some(project) => {
                 project.set_sources_yaml(self).to(sources_yaml);
@@ -560,7 +571,7 @@ impl Database {
             }
             None => {
                 let project = ProjectInput::new(self, root.clone(), sources_yaml, smelt_yml_text);
-                self.projects.write().unwrap().insert(root, project);
+                write_registry(&self.projects).insert(root, project);
                 project
             }
         }
@@ -570,8 +581,7 @@ impl Database {
     /// the LSP whenever the file changes on disk; Salsa propagates the
     /// invalidation through `project_unstable_schema` and any query that reads it.
     pub fn set_project_smelt_yml(&mut self, root: &Path, smelt_yml_text: String) {
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        let project = self.projects.read().unwrap().get(root).copied();
+        let project = read_registry(&self.projects).get(root).copied();
         if let Some(project) = project {
             project.set_smelt_yml_text(self).to(smelt_yml_text);
         }
@@ -579,14 +589,12 @@ impl Database {
 
     /// Look up an already-registered `SourceFile` by path.
     pub fn source_file(&self, path: &Path) -> Option<SourceFile> {
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        self.files.read().unwrap().get(path).copied()
+        read_registry(&self.files).get(path).copied()
     }
 
     /// Look up an already-registered `ProjectInput` by root path.
     pub fn project_input(&self, root: &Path) -> Option<ProjectInput> {
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        self.projects.read().unwrap().get(root).copied()
+        read_registry(&self.projects).get(root).copied()
     }
 
     /// Set (or create) the workspace singleton with the given file and project lists.
@@ -642,8 +650,7 @@ impl Database {
         exists: bool,
     ) -> LoaderFileInput {
         let path_str = path.to_string();
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        let existing = self.loader_files.read().unwrap().get(&path_str).copied();
+        let existing = read_registry(&self.loader_files).get(&path_str).copied();
         match existing {
             Some(input) => {
                 input.set_path(self).to(path);
@@ -654,7 +661,7 @@ impl Database {
             }
             None => {
                 let input = LoaderFileInput::new(self, path, text, exists);
-                self.loader_files.write().unwrap().insert(path_str, input);
+                write_registry(&self.loader_files).insert(path_str, input);
                 // Register the new input into the workspace singleton so that
                 // Salsa-tracked queries (which receive `&dyn salsa::Database`)
                 // can enumerate loader files without downcasting.
@@ -670,8 +677,7 @@ impl Database {
 
     /// Look up an already-registered `LoaderFileInput` by workspace-relative path.
     pub fn loader_file(&self, path: &str) -> Option<LoaderFileInput> {
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        self.loader_files.read().unwrap().get(path).copied()
+        read_registry(&self.loader_files).get(path).copied()
     }
 
     /// Create or update the `DeployedSchemaInput` for `(project_root, model)`.
@@ -692,8 +698,7 @@ impl Database {
         partition_column: Option<Arc<str>>,
     ) -> DeployedSchemaInput {
         let key = (project_root.clone(), model.to_string());
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        let existing = self.deployed_schemas.read().unwrap().get(&key).copied();
+        let existing = read_registry(&self.deployed_schemas).get(&key).copied();
         match existing {
             Some(input) => {
                 input.set_columns(self).to(columns);
@@ -710,7 +715,7 @@ impl Database {
                     model_sql,
                     partition_column,
                 );
-                self.deployed_schemas.write().unwrap().insert(key, input);
+                write_registry(&self.deployed_schemas).insert(key, input);
                 if let Some(ws) = Workspace::try_get(self) {
                     let mut current = ws.deployed_schemas(self).to_vec();
                     current.push(input);
@@ -724,10 +729,7 @@ impl Database {
     /// Look up an already-registered `DeployedSchemaInput` by
     /// `(project_root, model)`.
     pub fn deployed_schema(&self, project_root: &Path, model: &str) -> Option<DeployedSchemaInput> {
-        // invariant: same RwLock poisoning rationale as set_source_file.
-        self.deployed_schemas
-            .read()
-            .unwrap()
+        read_registry(&self.deployed_schemas)
             .get(&(project_root.to_path_buf(), model.to_string()))
             .copied()
     }

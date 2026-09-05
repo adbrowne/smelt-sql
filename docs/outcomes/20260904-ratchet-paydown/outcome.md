@@ -43,7 +43,7 @@ implementer, not this loop.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Establish the pre-burst baseline values from git; census every added `unwrap`/`expect`/`println!` site in `39228307..HEAD`, with a per-site verdict | done |
-| 2 | `smelt-db`: convert the added `unwrap` sites (shared poison-recovering registry accessors) | planned |
+| 2 | `smelt-db`: convert the added `unwrap` sites (shared poison-recovering registry accessors) | done |
 | 3 | `smelt-cli`: mark the 13 added `println!`/`eprintln!` sites `// stdout: <reason>` and justify `migrate.rs:403`'s `expect` (not `rebuild.rs`) | pending |
 | 4 | Regenerate the baseline with sign-off; record the file-split deferral in `docs/TODO.md`; gates green | pending |
 
@@ -84,6 +84,14 @@ implementer, not this loop.
   Phase 4's restatement now only needs to change the `println` clause.
 - 2026-09-06 (plan 02): phase 3's row retitled to match the census correction — `rebuild.rs`'s two
   `expect`s are a verbatim rename of pre-burst `backbuild.rs` lines and are out of scope.
+
+- 2026-09-06 (implement 02): phase 2 done — `smelt-db unwrap` 19 → 6 via shared
+  `read_registry`/`write_registry` accessors, baseline regenerated (single-line diff), all gates
+  green (`verify-phase.sh`, `hardening_budget`, `execute_parity`). Found and worked around a live
+  deadlock in an early draft of the poison-recovery tests: cloning the whole `Database` (not just
+  the target `RwLock`) before poisoning stands up a Salsa snapshot, and a subsequent `&mut self`
+  mutation on the original handle blocks on Salsa's cancellation machinery. Fixed by cloning only
+  the `Arc<RwLock<_>>` field; not a code-path change, so not tracked as a new TODO.
 
 ## Blocked
 
