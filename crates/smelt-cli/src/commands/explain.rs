@@ -14,6 +14,10 @@ use std::collections::HashMap;
 use crate::ExplainArgs;
 
 pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
+    if let Some(explicit_ref) = args.diff.clone() {
+        return crate::commands::explain_diff::explain_diff(&args, explicit_ref.as_deref()).await;
+    }
+
     if let Some(model_name) = args.model_name.clone() {
         return explain_maintenance_plan(&args, &model_name, scope).await;
     }
