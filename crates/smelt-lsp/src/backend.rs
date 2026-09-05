@@ -407,6 +407,8 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::ReservedProjectionAliasPrefix => "reserved-projection-alias-prefix",
         DbCode::UnsupportedOnBackend => "unsupported-on-backend",
         DbCode::KeyedRetractableContribution => "keyed-retractable-contribution",
+        DbCode::PropertyDowngrade => "property-downgrade",
+        DbCode::PropertyDiffBaselineUnavailable => "property-diff-baseline-unavailable",
     }
 }
 

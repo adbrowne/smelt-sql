@@ -1014,6 +1014,22 @@ pub enum DiagnosticCode {
     /// `refresh: materialized_view` or DAG composition. Anchored at the
     /// model SQL body start.
     KeyedRetractableContribution,
+
+    /// A model's property profile at the working tree is worse than at the
+    /// baseline ref along one dimension (`property_diff.md` §"Direction").
+    /// Editor-only: the LSP raises one `PropertyDowngrade` diagnostic per
+    /// downgrade on a shifted model file, anchored at the shift's reported
+    /// location; the CLI reports the same fact as a `▼` line in
+    /// `smelt explain --diff` and via `--fail-on`, never as a diagnostic.
+    /// Warning severity.
+    PropertyDowngrade,
+
+    /// `smelt explain --diff` was requested but the baseline could not be
+    /// resolved: the project is not inside a git work tree, the ref does not
+    /// resolve, or the resolved ref has no `smelt.yml` at the project's path
+    /// (`property_diff.md` §"Baseline materialisation"). CLI only; exits
+    /// `2`. Never falls back to an empty diff.
+    PropertyDiffBaselineUnavailable,
 }
 
 /// Structured metadata attached to diagnostics for code actions

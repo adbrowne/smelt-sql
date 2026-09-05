@@ -14,7 +14,7 @@ smelt emits named diagnostic codes through its compiler, LSP server, and CLI. Ev
 
 The complete `DiagnosticCode` catalogue — every variant, its severity, and the user-input condition that triggers it — is maintained in
 [`docs/specs/diagnostics.md`](https://github.com/brownie/smelt/blob/main/docs/specs/diagnostics.md).
-Codes are grouped by owning feature: models & core analysis, sources, seeds, timeseries, incremental & cumulative, types, Python models, functions & expansion, meta-language, records/maps/loaders, and multi-model production.
+Codes are grouped by owning feature: models & core analysis, sources, seeds, timeseries, incremental & cumulative, types, Python models, functions & expansion, meta-language, records/maps/loaders, multi-model production, and property diff (`PropertyDowngrade`, `PropertyDiffBaselineUnavailable` — see [`smelt explain --diff`](smelt-explain.md)).
 
 ### Example: `UnknownStructFieldType`
 

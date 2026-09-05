@@ -166,6 +166,10 @@ same schema either way, since the JSON form always carries every cell's `stateme
 `technique_previews` arrays plus the model's `state_columns` array; `--show-sql` only changes the
 *text* rendering). A flag combination is never silently ignored.
 
+`smelt explain --diff [<ref>]` diffs this report's underlying property profile between a git
+baseline and the working tree rather than rendering one project version; see
+`property_diff.md` for its flags, output forms, and diagnostics.
+
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
 that cell executes — the output of the same pure emitters a run executes
 (`incremental_models.md` §"Statement emission (single owner)"). Each cell's SELECT body is compiled
