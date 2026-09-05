@@ -58,6 +58,22 @@ State columns:
 
 A model with no decomposed-state columns prints no state section. With `--json`, the same information appears as a top-level `state_columns` array: `[{"presented_column": "avg_amount", "state_columns": ["avg_amount__sum", "avg_amount__count"], "presentation_expr": "avg_amount__sum / avg_amount__count"}]`.
 
+## Refusals
+
+`smelt explain <model>` also prints any maintenance admission refusals — the cases where no
+technique could be admitted for a cell, or the plan admitted the model with a caveat:
+
+```
+Refusals (1):
+  - ScanUnbounded { source: "raw.orders", why: "no partition_column declared" }
+```
+
+A model whose plan admitted every cell prints `Refusals: (none)`. With `--json`, the same set
+appears as a top-level `refusals` array: `[{"code": "MaintenanceScanUnbounded", "text":
+"ScanUnbounded { source: \"raw.orders\", why: \"no partition_column declared\" }"}]` — `code`
+names the diagnostic code a refusal of this shape raises, `text` is the report's own rendering of
+the refusal, verbatim. Empty when the model's plan admitted every cell.
+
 ## Probes
 
 A declared world-fact (`functional_dependencies:`, `bounded_domain:`, `assert_monotonic`,

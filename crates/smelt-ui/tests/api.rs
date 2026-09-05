@@ -215,12 +215,14 @@ fn assemble_diagnostics_independently(
         .unwrap_or_else(|| panic!("model `{model_name}` not found"));
     let file = db.source_file(&model.path).expect("model file registered");
 
-    let (plan_cells, column_groups): (
+    let (plan_cells, column_groups, refusals): (
         Vec<smelt_logical::maintenance::PlanCell>,
         Vec<smelt_logical::maintenance::ColumnGroup>,
+        Vec<smelt_logical::maintenance::Refusal>,
     ) = smelt_db::maintenance_plan_report(&db, ws, file)
-        .map(|result| (result.plan.cells, result.column_groups))
+        .map(|result| (result.plan.cells, result.column_groups, result.plan.refusals))
         .unwrap_or_default();
+    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
 
     let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
     let upstream = graph.get_upstream(model_name);
@@ -303,6 +305,9 @@ fn assemble_diagnostics_independently(
         &source_timeseries,
         &unique_key,
         &column_groups,
+        &refusals,
+        &[],
+        contract_cfg,
     )
     .expect("build diagnostics");
 
@@ -353,6 +358,26 @@ async fn diagnostics_endpoint_returns_full_payload() {
         .as_array()
         .expect("`cells` must be an array");
     assert!(!cells.is_empty(), "daily_events must have plan cells");
+
+    // The flattened property profile (`docs/specs/property_diff.md` §"The
+    // property profile", `docs/specs/ui_model_diagnostics.md` §Surface):
+    // `cell_verdicts`/`refusals`/`probes` sit beside the unchanged
+    // `properties` key.
+    let cell_verdicts = endpoint_json["cell_verdicts"]
+        .as_array()
+        .expect("`cell_verdicts` must be an array");
+    assert!(
+        !cell_verdicts.is_empty(),
+        "daily_events must have at least one cell verdict"
+    );
+    assert!(
+        endpoint_json["refusals"].is_array(),
+        "expected a `refusals` array: {endpoint_json}"
+    );
+    assert!(
+        endpoint_json["probes"].is_array(),
+        "expected a `probes` array: {endpoint_json}"
+    );
 
     // Cross-consumer parity check: an independently-assembled call into the
     // same shared builder must produce byte-for-byte identical JSON.

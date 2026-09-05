@@ -199,8 +199,11 @@ version, derived by the same pure functions the report is built from, and it con
    `Unbounded`), and per-column `determinism`, `comparability`, and `discriminants`. These
    verdicts are derived together, by one pure function, and are never split back into separate
    profile fields — doing so would fork the derivation.
-2. `cells` — for a maintained model, each `PlanCell`'s `(group, trigger, corner, admitted
-   technique, contract point)`; for an unmaintained model, empty.
+2. `cell_verdicts` — for a maintained model, each `PlanCell`'s `(group, trigger, corner, admitted
+   technique, row identity, contract point)`; for an unmaintained model, empty. Named
+   `cell_verdicts` rather than `cells` because the model-diagnostics response
+   (`ui_model_diagnostics.md` §Surface) already carries an unrelated `cells` key (the
+   technique-preview set) beside the flattened profile.
 3. `refusals` — the set of maintenance admission refusals (the diagnostic code's *name* plus the
    refusal text), as the maintenance-plan gate would report them.
 4. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`, `cadence`).

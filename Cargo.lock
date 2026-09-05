@@ -4302,6 +4302,7 @@ dependencies = [
  "smelt-dialect",
  "smelt-parser",
  "smelt-types",
+ "thiserror 2.0.18",
  "tracing",
 ]
 

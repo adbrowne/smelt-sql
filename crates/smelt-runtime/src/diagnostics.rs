@@ -15,19 +15,24 @@
 //! later stage of the diagnostics builder; this module currently populates
 //! the property set and relation contract halves of [`ModelDiagnostics`] and
 //! carries an always-empty `cells` field as a typed placeholder.
-
-use std::collections::BTreeMap;
+//!
+//! [`PropertySet`] and the property profile it feeds
+//! (`docs/specs/property_diff.md` §"The property profile") are single-owned
+//! in `smelt_logical::analysis::profile`, re-exported here so every existing
+//! `smelt_runtime::diagnostics::PropertySet` import keeps working unchanged
+//! (`docs/outcomes/20260905-property-diff/phases/02-plan.md` §"Design
+//! decisions" — "Where").
 
 use serde::Serialize;
 
-use smelt_core::config::{Grain as ContractGrain, TimeseriesConfig};
-use smelt_core::{Granularity, ModelFile, SourceInfo};
+pub use smelt_logical::analysis::profile::{ProfileError, PropertySet};
 use smelt_logical::analysis::join_shape::JoinContext;
-use smelt_logical::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
-use smelt_logical::analysis::walk::{
-    model_property_vector, ColumnComparability, ColumnDeterminism, ColumnDiscriminant, DerivedFd,
-    Grain as PropertyGrain,
-};
+use smelt_logical::analysis::profile::{ProbePlanEntry, PropertyProfile};
+use smelt_logical::analysis::source_bounds::BoundContext;
+use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::contract::ContractPointView;
+use smelt_core::config::{ContractConfig, Grain as ContractGrain, TimeseriesConfig};
+use smelt_core::{Granularity, ModelFile, SourceInfo};
 use smelt_logical::maintenance::choice::{
     effective_override, resolve_cell_write_suppression, technique_requires_row_identity,
     WriteSuppression,
@@ -39,7 +44,7 @@ use smelt_logical::maintenance::emit::{
     MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
 };
 use smelt_logical::maintenance::{
-    ColumnGroup, PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger,
+    cell_trigger_address, ColumnGroup, PlanCell, Refusal, RowIdentity, Technique, Trigger,
 };
 use smelt_planner::SourceTimeseriesMap;
 
@@ -53,102 +58,8 @@ use crate::transformer::{inject_source_filters, inject_time_filter, SourceBound,
 /// defaulted to an empty/optimistic property set.
 #[derive(Debug, thiserror::Error)]
 pub enum DiagnosticsError {
-    #[error("could not derive the property set for model {model}: SQL did not parse into an analyzable query tree")]
-    PropertyDerivation { model: String },
-}
-
-/// The model's full derived-property set (`docs/specs/model_properties.md`
-/// §Surface), serialized from the existing single-owner walk output
-/// ([`smelt_logical::analysis::walk::model_property_vector`]) plus the two
-/// other already-derived, single-call facts reachable at whole-model scope:
-/// region row identity ([`row_identity`]) and per-source bound/reach
-/// ([`derive_model_bounds`]). This struct never re-derives any of these
-/// facts — it is an adapter over the existing walk/derive outputs, adding
-/// `Serialize` and giving the composed shape one name.
-///
-/// Scope note: `model_properties.md` §Surface catalogues properties beyond
-/// what is folded into a single top-level `PropertyVector`/bound-map call —
-/// several (event-time monotonicity trace, partition alignment, fan-out/
-/// cardinality, skeleton-role extraction, …) are scope-, join-, or
-/// column-position facts the walk computes internally per node but does not
-/// yet expose as a single whole-model derivation, and several catalogue rows
-/// are themselves `not-yet`/`partial` maturity in the spec. `PropertySet`
-/// covers every `built`-maturity property reachable from one already-derived
-/// per-model call; extending it to the remaining catalogue rows needs new
-/// plumbing to locate their inputs (e.g. the event-time expression's AST
-/// node) and is left to a follow-up phase rather than invented here.
-#[derive(Debug, Clone, Serialize)]
-pub struct PropertySet {
-    /// Output columns of the model, in projection order.
-    pub columns: Vec<String>,
-    /// The proven grain (keys). Empty ⇒ unkeyed
-    /// (`model_properties.md` §"Fan-out / cardinality" — the grain a
-    /// conditional write's row identity is built from, see `row_identity`
-    /// below).
-    pub grain: PropertyGrain,
-    /// Query-derived functional dependencies (`model_properties.md` — the
-    /// FD set implied by grain + literal columns).
-    pub functional_dependencies: Vec<DerivedFd>,
-    /// Per-column determinism (`model_properties.md` §"Determinism (run vs
-    /// row) and the nondeterminism predicate").
-    pub determinism: Vec<ColumnDeterminism>,
-    /// Per-column change-comparability (`model_properties.md` §"Change
-    /// comparability").
-    pub comparability: Vec<ColumnComparability>,
-    /// Per-column aggregate discriminants (`model_properties.md` §"Algebraic
-    /// discriminants").
-    pub discriminants: Vec<ColumnDiscriminant>,
-    /// Output columns that are constant literals here, name → literal text.
-    pub literal_columns: Vec<(String, String)>,
-    /// Whether an output column crosses a set operation whose branches are
-    /// not proven key-disjoint — a structural barrier for FD survival.
-    pub has_set_op_barrier: bool,
-    /// Whether an input join proves `OneToMany` (row-multiplying).
-    pub has_fan_out_join: bool,
-    /// The model's own region row identity (`model_properties.md` §"Region
-    /// row identity"): declared `unique_key` → proven grain key → the
-    /// identity-free `WholeRow` fallback.
-    pub row_identity: RowIdentityVerdict,
-    /// Per-upstream-source bound/reach (`model_properties.md` §"Unified
-    /// bound / reach derivation"), keyed by source name.
-    pub source_bounds: BTreeMap<String, BoundResult>,
-}
-
-impl PropertySet {
-    /// Derive a model's [`PropertySet`] from its (frontmatter-stripped) SQL,
-    /// its declared `unique_key`, and a caller-built [`BoundContext`]
-    /// (mirroring `smelt-cli::explain::compute_source_bounds`'s own
-    /// construction: one `BoundContext::add_source` per upstream source with
-    /// a declared timeseries clock).
-    fn derive(
-        model_name: &str,
-        sql: &str,
-        declared_unique_key: &[String],
-        bound_ctx: &BoundContext,
-    ) -> Result<Self, DiagnosticsError> {
-        let vector = model_property_vector(sql, &JoinContext::new()).ok_or_else(|| {
-            DiagnosticsError::PropertyDerivation {
-                model: model_name.to_string(),
-            }
-        })?;
-        let identity = row_identity(declared_unique_key, sql);
-        let source_bounds: BTreeMap<String, BoundResult> =
-            derive_model_bounds(sql, bound_ctx).into_iter().collect();
-
-        Ok(PropertySet {
-            columns: vector.columns,
-            grain: vector.grain,
-            functional_dependencies: vector.fds,
-            determinism: vector.determinism,
-            comparability: vector.comparability,
-            discriminants: vector.discriminants,
-            literal_columns: vector.literal_columns,
-            has_set_op_barrier: vector.has_set_op_barrier,
-            has_fan_out_join: vector.has_fan_out_join,
-            row_identity: identity,
-            source_bounds,
-        })
-    }
+    #[error(transparent)]
+    PropertyDerivation(#[from] ProfileError),
 }
 
 /// The clock slot's shared fields (`docs/specs/models.md` §"The Relation
@@ -1056,7 +967,15 @@ pub fn build_plan_cell_diagnostics(
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelDiagnostics {
     pub model: String,
-    pub properties: PropertySet,
+    /// The model's property profile (`docs/specs/property_diff.md` §"The
+    /// property profile"): `properties`, `cell_verdicts`, `refusals`, and
+    /// `probes`, flattened so the pre-existing `properties` key is
+    /// unchanged and the other three sit beside it
+    /// (`docs/specs/ui_model_diagnostics.md` §Surface). `smelt-cli`'s
+    /// `explain` report and `smelt-ui`'s diagnostics endpoint render this
+    /// value, never re-deriving any of its fields.
+    #[serde(flatten)]
+    pub profile: PropertyProfile,
     pub contract: RelationContractView,
     pub inbound_edges: Vec<InboundEdgeContract>,
     pub cells: Vec<PlanCellDiagnostics>,
@@ -1095,6 +1014,16 @@ pub struct ModelDiagnostics {
 /// comment). Passing `declared_unique_key` to both purposes — the shape this
 /// function used before this parameter existed — silently starved every such
 /// model's `ColumnScopedMerge` preview of its real key.
+/// `refusals` and `probe_entries` are the model's already-derived
+/// maintenance-plan refusals (`MaintenancePlan::refusals`) and declared-fact
+/// probe set (`smelt_runtime::probe_plan::probe_plan_for_model`'s output) —
+/// folded, unchanged, into the returned [`ModelDiagnostics`]'s property
+/// profile (`docs/specs/property_diff.md` §"The property profile") rather
+/// than re-derived here. `contract_cfg` is the model's declared
+/// `contract:` block (or `None`), resolved per cell through
+/// `smelt_logical::contract::effective_contract` — the same single-owner
+/// resolution `smelt-cli`'s `--json` `contract_point` uses, so the two can
+/// never disagree.
 #[allow(clippy::too_many_arguments)]
 pub fn build_model_diagnostics(
     model: &ModelFile,
@@ -1111,6 +1040,9 @@ pub fn build_model_diagnostics(
     source_timeseries: &SourceTimeseriesMap,
     write_unique_key: &[String],
     column_groups: &[ColumnGroup],
+    refusals: &[Refusal],
+    probe_entries: &[ProbePlanEntry],
+    contract_cfg: Option<&ContractConfig>,
 ) -> Result<ModelDiagnostics, DiagnosticsError> {
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let declared_unique_key: Vec<String> = model
@@ -1147,9 +1079,25 @@ pub fn build_model_diagnostics(
         })
         .collect();
 
+    let contract_points: Vec<ContractPointView> = plan_cells
+        .iter()
+        .map(|cell| {
+            let group_columns: Vec<String> = column_groups
+                .iter()
+                .find(|g| g.name() == cell.group)
+                .map(|g| g.columns.clone())
+                .unwrap_or_default();
+            let trigger_address = cell_trigger_address(&cell.trigger).unwrap_or_default();
+            smelt_logical::contract::effective_contract(contract_cfg, &trigger_address, &group_columns)
+                .into()
+        })
+        .collect();
+    let profile =
+        PropertyProfile::assemble(properties, plan_cells, &contract_points, refusals, probe_entries);
+
     Ok(ModelDiagnostics {
         model: model.canonical_path(),
-        properties,
+        profile,
         contract,
         inbound_edges,
         cells,
@@ -1162,6 +1110,7 @@ mod tests {
     use smelt_core::config::{Config, Materialization, Target};
     use smelt_core::metadata::ModelMetadata;
     use smelt_core::{Granularity, RefInfo, SmeltRef};
+    use smelt_logical::maintenance::RowIdentityVerdict;
     use std::collections::HashMap;
 
     /// A minimal `Trigger::Backfill` cell — `build_technique_statements`

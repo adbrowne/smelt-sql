@@ -726,6 +726,9 @@ async fn explain_maintenance_plan(
             &source_timeseries,
             &unique_key,
             &result.column_groups,
+            &result.plan.refusals,
+            &probe_entries,
+            contract_cfg,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("Failed to build model diagnostics for `{}`", canonical))?
@@ -759,14 +762,14 @@ async fn explain_maintenance_plan(
             own_contract.clone(),
             edges.clone(),
             &diagnostics.cells,
-            diagnostics.properties.clone(),
+            &diagnostics.profile.cell_verdicts,
+            diagnostics.profile.properties.clone(),
             result.state_columns.clone(),
             result.execution_postures.clone(),
             result.is_snapshot_reconcile,
             probe_entries.clone(),
             config.probes.cadence,
-            &result.column_groups,
-            contract_cfg,
+            diagnostics.profile.refusals.clone(),
             pending_definition_delta.as_ref(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);

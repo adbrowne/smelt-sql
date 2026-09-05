@@ -170,6 +170,23 @@ pub enum Trigger {
     Backfill,
 }
 
+/// The `contract.cells[].on` / `maintenance.cells[].on` addressing string a
+/// cell's own [`Trigger`] resolves to — `"backfill"` for `Trigger::Backfill`,
+/// the mutated source's address for `Trigger::NewData`/
+/// `Trigger::UpstreamMutation`, and `None` for `Trigger::ColumnAdded` (a
+/// definition-change trigger has no per-source address to match against a
+/// declared cell override). Single-owned so `smelt-runtime` (building a
+/// cell's effective contract point for the property profile) and
+/// `smelt-cli` (the same resolution for `--json`'s `contract_point`) agree
+/// by construction rather than by two independently maintained matches.
+pub fn cell_trigger_address(trigger: &Trigger) -> Option<String> {
+    match trigger {
+        Trigger::NewData { source } | Trigger::UpstreamMutation { source } => Some(source.clone()),
+        Trigger::Backfill => Some("backfill".to_string()),
+        Trigger::ColumnAdded { .. } => None,
+    }
+}
+
 /// One corner of the read-scope × write-scope 2×2 (`01-framework.md` §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Corner {
