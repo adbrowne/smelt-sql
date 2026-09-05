@@ -66,6 +66,8 @@ pub enum Dimension {
     LiteralColumn,
     SetOpBarrier,
     FanOutJoin,
+    MaintenanceLost,
+    MaintenanceGained,
 }
 
 /// Whether a change makes the model's maintenance proofs weaker, stronger,
@@ -168,18 +170,25 @@ pub enum ChangeKind {
     ColumnRemoved(String),
     Determinism {
         column: String,
-        old: Det,
-        new: Det,
+        // `Option`: G3 (`docs/outcomes/20260905-property-diff` fix round 1)
+        // — the fact can be present on only one side of a matched column
+        // (the per-column map desynced from `columns`, an anomaly a
+        // consistent derivation should never produce but the field-coverage
+        // rule must still surface rather than silently drop). `None` on
+        // either side always grades `Neutral` (see `direction`): there is
+        // no lattice position to compare a missing fact against.
+        old: Option<Det>,
+        new: Option<Det>,
     },
     Comparability {
         column: String,
-        old: Comp,
-        new: Comp,
+        old: Option<Comp>,
+        new: Option<Comp>,
     },
     Discriminant {
         column: String,
-        old: crate::analysis::discriminants::Discriminants,
-        new: crate::analysis::discriminants::Discriminants,
+        old: Option<crate::analysis::discriminants::Discriminants>,
+        new: Option<crate::analysis::discriminants::Discriminants>,
     },
     FdAdded(DerivedFd),
     FdRemoved(DerivedFd),
@@ -196,6 +205,17 @@ pub enum ChangeKind {
         old: bool,
         new: bool,
     },
+    /// A model went from having at least one [`CellVerdict`] to having none
+    /// at all — it is no longer incrementally maintained. Emitted ONCE per
+    /// model in `diff_profile`, never derived from individual
+    /// `cell_removed` changes (`docs/specs/property_diff.md` §"Direction"
+    /// "maintenance_lost"/"maintenance_gained"; G1,
+    /// `docs/outcomes/20260905-property-diff` fix round 1 — the case a
+    /// `refresh: incremental` → `refresh: full` edit hit, which produced
+    /// neither a refusal nor a downgrade before this dimension existed).
+    MaintenanceLost,
+    /// The symmetric partner: a model went from no cells to at least one.
+    MaintenanceGained,
 }
 
 /// Whether `new`'s `retain_departed` relaxed relative to `old`'s: absent →
@@ -251,6 +271,8 @@ impl ChangeKind {
             ChangeKind::LiteralColumn { .. } => Dimension::LiteralColumn,
             ChangeKind::SetOpBarrier { .. } => Dimension::SetOpBarrier,
             ChangeKind::FanOutJoin { .. } => Dimension::FanOutJoin,
+            ChangeKind::MaintenanceLost => Dimension::MaintenanceLost,
+            ChangeKind::MaintenanceGained => Dimension::MaintenanceGained,
         }
     }
 
@@ -267,12 +289,25 @@ impl ChangeKind {
                 } else if !old_has && new_has {
                     Direction::Upgrade
                 } else {
-                    let lost = old.keys.iter().any(|k| !new.keys.contains(k));
-                    let gained = new.keys.iter().any(|k| !old.keys.contains(k));
+                    // G5 (`docs/outcomes/20260905-property-diff` fix round
+                    // 1): compare the UNION of columns each side's keys
+                    // cover, not key-set membership — `Key(["id","region"])
+                    // -> Key(["id"])` is a composite key column dropped
+                    // ("lost a key column", spec §"Direction"), but the two
+                    // `KeySet`s are unequal as *values* so the prior
+                    // membership check saw both "lost" (old's composite
+                    // isn't in new) and "gained" (new's shorter key isn't in
+                    // old) and graded it `Neutral`. A dropped column from
+                    // the grain's footprint is always worse regardless of
+                    // what else changed, so `lost` wins ties.
+                    let old_cols: BTreeSet<&String> = old.keys.iter().flatten().collect();
+                    let new_cols: BTreeSet<&String> = new.keys.iter().flatten().collect();
+                    let lost = !old_cols.is_subset(&new_cols);
+                    let gained = !new_cols.is_subset(&old_cols);
                     match (lost, gained) {
-                        (true, false) => Direction::Downgrade,
                         (false, true) => Direction::Upgrade,
-                        _ => Direction::Neutral,
+                        (false, false) => Direction::Neutral,
+                        _ => Direction::Downgrade,
                     }
                 }
             }
@@ -351,20 +386,22 @@ impl ChangeKind {
             ChangeKind::ProbeAdded(_) => Direction::Upgrade,
             ChangeKind::ProbeRemoved(_) => Direction::Downgrade,
             ChangeKind::ColumnAdded(_) | ChangeKind::ColumnRemoved(_) => Direction::Neutral,
-            ChangeKind::Determinism { old, new, .. } => {
-                if new > old {
-                    Direction::Downgrade
-                } else {
-                    Direction::Upgrade
-                }
-            }
-            ChangeKind::Comparability { old, new, .. } => {
-                if new > old {
-                    Direction::Downgrade
-                } else {
-                    Direction::Upgrade
-                }
-            }
+            ChangeKind::Determinism { old, new, .. } => match (old, new) {
+                (Some(o), Some(n)) if n > o => Direction::Downgrade,
+                (Some(o), Some(n)) if n < o => Direction::Upgrade,
+                (Some(_), Some(_)) => Direction::Neutral,
+                // One side has no fact for this column at all — an
+                // asymmetric-presence anomaly (G3); there is no lattice
+                // position to rank a missing fact against, so this is
+                // deliberately `Neutral` rather than guessed.
+                _ => Direction::Neutral,
+            },
+            ChangeKind::Comparability { old, new, .. } => match (old, new) {
+                (Some(o), Some(n)) if n > o => Direction::Downgrade,
+                (Some(o), Some(n)) if n < o => Direction::Upgrade,
+                (Some(_), Some(_)) => Direction::Neutral,
+                _ => Direction::Neutral,
+            },
             ChangeKind::Discriminant { .. } => Direction::Neutral,
             ChangeKind::FdAdded(_) | ChangeKind::FdRemoved(_) => Direction::Neutral,
             ChangeKind::LiteralColumn { .. } => Direction::Neutral,
@@ -377,6 +414,8 @@ impl ChangeKind {
                     Direction::Neutral
                 }
             }
+            ChangeKind::MaintenanceLost => Direction::Downgrade,
+            ChangeKind::MaintenanceGained => Direction::Upgrade,
         }
     }
 
@@ -405,6 +444,7 @@ impl ChangeKind {
             }
             ChangeKind::SetOpBarrier { .. } => String::new(),
             ChangeKind::FanOutJoin { .. } => String::new(),
+            ChangeKind::MaintenanceLost | ChangeKind::MaintenanceGained => String::new(),
         }
     }
 
@@ -437,6 +477,8 @@ impl ChangeKind {
             ChangeKind::SetOpBarrier { old, .. } | ChangeKind::FanOutJoin { old, .. } => {
                 Some(to_json(old))
             }
+            ChangeKind::MaintenanceLost => Some(to_json(&true)),
+            ChangeKind::MaintenanceGained => Some(to_json(&false)),
         }
     }
 
@@ -469,6 +511,8 @@ impl ChangeKind {
             ChangeKind::SetOpBarrier { new, .. } | ChangeKind::FanOutJoin { new, .. } => {
                 Some(to_json(new))
             }
+            ChangeKind::MaintenanceLost => Some(to_json(&false)),
+            ChangeKind::MaintenanceGained => Some(to_json(&true)),
         }
     }
 
@@ -485,6 +529,29 @@ impl ChangeKind {
 
 fn to_json<T: Serialize>(v: &T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
+}
+
+/// The items of `a` that occur more times in `a` than in `b`, one entry per
+/// excess occurrence — a multiset difference. `DerivedFd` has no `Ord`/
+/// `Hash`, so this is a small O(n²) linear scan rather than a `BTreeMap`
+/// one; functional-dependency lists are short (G7,
+/// `docs/outcomes/20260905-property-diff` fix round 1 — a plain
+/// `Vec::contains` membership check silently drops a duplicate's removal).
+fn multiset_excess<T: Clone + PartialEq>(a: &[T], b: &[T]) -> Vec<T> {
+    let mut b_remaining: Vec<bool> = vec![true; b.len()];
+    let mut excess = Vec::new();
+    for item in a {
+        if let Some(slot) = b_remaining
+            .iter_mut()
+            .zip(b.iter())
+            .find(|(available, candidate)| **available && *candidate == item)
+        {
+            *slot.0 = false;
+        } else {
+            excess.push(item.clone());
+        }
+    }
+    excess
 }
 
 /// One reported difference (`docs/specs/property_diff.md` §Surface "JSON").
@@ -780,7 +847,11 @@ fn diff_property_set(old: &PropertySet, new: &PropertySet) -> Vec<ChangeKind> {
     }
 
     // Per-column determinism/comparability/discriminants: matched on
-    // column name.
+    // column name, over the UNION of both sides' keys (G3,
+    // `docs/outcomes/20260905-property-diff` fix round 1) — a column
+    // present in one map and absent from the other, with `columns`
+    // otherwise unchanged, must still surface as a change, mirroring
+    // `literal_columns`'s own union-based diff just below.
     let old_det: BTreeMap<&String, &Det> = old_determinism
         .iter()
         .map(|d| (&d.output, &d.level))
@@ -789,15 +860,16 @@ fn diff_property_set(old: &PropertySet, new: &PropertySet) -> Vec<ChangeKind> {
         .iter()
         .map(|d| (&d.output, &d.level))
         .collect();
-    for (col, old_level) in &old_det {
-        if let Some(new_level) = new_det.get(col) {
-            if old_level != new_level {
-                changes.push(ChangeKind::Determinism {
-                    column: (*col).clone(),
-                    old: **old_level,
-                    new: **new_level,
-                });
-            }
+    let all_det_cols: BTreeSet<&String> = old_det.keys().chain(new_det.keys()).copied().collect();
+    for col in all_det_cols {
+        let o = old_det.get(col).copied();
+        let n = new_det.get(col).copied();
+        if o != n {
+            changes.push(ChangeKind::Determinism {
+                column: col.clone(),
+                old: o.copied(),
+                new: n.copied(),
+            });
         }
     }
 
@@ -809,15 +881,17 @@ fn diff_property_set(old: &PropertySet, new: &PropertySet) -> Vec<ChangeKind> {
         .iter()
         .map(|c| (&c.output, &c.comparability))
         .collect();
-    for (col, old_c) in &old_comp {
-        if let Some(new_c) = new_comp.get(col) {
-            if old_c != new_c {
-                changes.push(ChangeKind::Comparability {
-                    column: (*col).clone(),
-                    old: **old_c,
-                    new: **new_c,
-                });
-            }
+    let all_comp_cols: BTreeSet<&String> =
+        old_comp.keys().chain(new_comp.keys()).copied().collect();
+    for col in all_comp_cols {
+        let o = old_comp.get(col).copied();
+        let n = new_comp.get(col).copied();
+        if o != n {
+            changes.push(ChangeKind::Comparability {
+                column: col.clone(),
+                old: o.copied(),
+                new: n.copied(),
+            });
         }
     }
 
@@ -831,31 +905,32 @@ fn diff_property_set(old: &PropertySet, new: &PropertySet) -> Vec<ChangeKind> {
             .iter()
             .map(|d| (&d.output, &d.discriminants))
             .collect();
-    for (col, old_d) in &old_disc {
-        if let Some(new_d) = new_disc.get(col) {
-            if old_d != new_d {
-                changes.push(ChangeKind::Discriminant {
-                    column: (*col).clone(),
-                    old: **old_d,
-                    new: **new_d,
-                });
-            }
+    let all_disc_cols: BTreeSet<&String> =
+        old_disc.keys().chain(new_disc.keys()).copied().collect();
+    for col in all_disc_cols {
+        let o = old_disc.get(col).copied();
+        let n = new_disc.get(col).copied();
+        if o != n {
+            changes.push(ChangeKind::Discriminant {
+                column: col.clone(),
+                old: o.copied(),
+                new: n.copied(),
+            });
         }
     }
 
     // Functional dependencies: matched on (key, determines) as a whole
     // tuple (an FD is identified by its full shape, not a separate name).
-    // `DerivedFd` has no `Ord`, so this is a linear diff rather than a
-    // `BTreeSet` one.
-    for fd in old_fds {
-        if !new_fds.contains(fd) {
-            changes.push(ChangeKind::FdRemoved(fd.clone()));
-        }
+    // `multiset_excess` (G7, `docs/outcomes/20260905-property-diff` fix
+    // round 1) counts occurrences rather than membership — plain `.contains`
+    // would silently drop a duplicate FD's removal (two copies of the same
+    // FD on the old side, one on the new side, is a real removal `.contains`
+    // cannot see since the value is still present).
+    for fd in multiset_excess(old_fds, new_fds) {
+        changes.push(ChangeKind::FdRemoved(fd));
     }
-    for fd in new_fds {
-        if !old_fds.contains(fd) {
-            changes.push(ChangeKind::FdAdded(fd.clone()));
-        }
+    for fd in multiset_excess(new_fds, old_fds) {
+        changes.push(ChangeKind::FdAdded(fd));
     }
 
     // Literal columns: matched on column name.
@@ -981,20 +1056,47 @@ fn diff_refusals(old: &[ProfileRefusal], new: &[ProfileRefusal]) -> Vec<ChangeKi
 }
 
 /// Diff two probe sets, matched on `(fact, cell)`
-/// (`docs/specs/property_diff.md` §"The diff").
+/// (`docs/specs/property_diff.md` §"The diff"). G2 (`docs/outcomes/
+/// 20260905-property-diff` fix round 1): a matched pair's `probe` field
+/// (the named diagnostic) is destructured explicitly, with NO `..`, so a
+/// change to it cannot be silently dropped the way it previously was — a
+/// matched probe whose `probe` field changed emitted nothing at all. There
+/// is no dedicated dimension for "the probe's diagnostic changed" (the JSON
+/// schema names only `probe_added`/`probe_removed`), so it is reported the
+/// same way a renamed column is (spec "The diff": "Renames are not
+/// detected... is a removal plus an addition").
 fn diff_probes(old: &[ProfileProbe], new: &[ProfileProbe]) -> Vec<ChangeKind> {
     let mut changes = Vec::new();
     let key = |p: &ProfileProbe| (p.fact.clone(), p.cell.clone());
-    let old_keys: BTreeSet<(String, String)> = old.iter().map(key).collect();
-    let new_keys: BTreeSet<(String, String)> = new.iter().map(key).collect();
-    for p in old {
-        if !new_keys.contains(&key(p)) {
-            changes.push(ChangeKind::ProbeRemoved(p.clone()));
+    let old_by_key: BTreeMap<(String, String), &ProfileProbe> =
+        old.iter().map(|p| (key(p), p)).collect();
+    let new_by_key: BTreeMap<(String, String), &ProfileProbe> =
+        new.iter().map(|p| (key(p), p)).collect();
+
+    for (k, old_p) in &old_by_key {
+        match new_by_key.get(k) {
+            None => changes.push(ChangeKind::ProbeRemoved((*old_p).clone())),
+            Some(new_p) => {
+                let ProfileProbe {
+                    fact: _,
+                    probe: old_probe,
+                    cell: _,
+                } = *old_p;
+                let ProfileProbe {
+                    fact: _,
+                    probe: new_probe,
+                    cell: _,
+                } = *new_p;
+                if old_probe != new_probe {
+                    changes.push(ChangeKind::ProbeRemoved((*old_p).clone()));
+                    changes.push(ChangeKind::ProbeAdded((*new_p).clone()));
+                }
+            }
         }
     }
-    for p in new {
-        if !old_keys.contains(&key(p)) {
-            changes.push(ChangeKind::ProbeAdded(p.clone()));
+    for (k, new_p) in &new_by_key {
+        if !old_by_key.contains_key(k) {
+            changes.push(ChangeKind::ProbeAdded((*new_p).clone()));
         }
     }
     changes
@@ -1019,6 +1121,20 @@ fn diff_profile(old: &PropertyProfile, new: &PropertyProfile) -> Vec<Change> {
 
     let mut kinds = diff_property_set(old_properties, new_properties);
     kinds.extend(diff_cell_verdicts(old_cells, new_cells));
+    // G1 (`docs/outcomes/20260905-property-diff` fix round 1): emitted ONCE
+    // here, at the profile level, never derived from the per-cell
+    // `cell_removed`/`cell_added` changes above — `cell_removed` stays
+    // `Neutral` in this case (see its own doc comment), so this is the only
+    // signal that "no longer incrementally maintained" surfaces as. This is
+    // the fix for the case a plain `refresh: incremental` -> `refresh: full`
+    // edit hit: `derive_model_maintenance_plan` returns `None` before any
+    // refusal is constructed, so old cells/new refusals were both empty and
+    // nothing downgraded.
+    if !old_cells.is_empty() && new_cells.is_empty() {
+        kinds.push(ChangeKind::MaintenanceLost);
+    } else if old_cells.is_empty() && !new_cells.is_empty() {
+        kinds.push(ChangeKind::MaintenanceGained);
+    }
     kinds.extend(diff_refusals(old_refusals, new_refusals));
     kinds.extend(diff_probes(old_probes, new_probes));
     kinds.into_iter().map(Change::from_kind).collect()
@@ -1062,6 +1178,13 @@ fn whole_model_changes(profile: &PropertyProfile, added: bool) -> Vec<Change> {
         } else {
             c.new = None;
         }
+        // G6 (`docs/outcomes/20260905-property-diff` fix round 1):
+        // per-dimension directions are noise for a model that is wholly
+        // added or removed — the `cause` (`added`/`removed`) already says
+        // so, and grading e.g. a new model's every `refusal_added` as
+        // `Downgrade` and a deleted model's every `refusal_removed` as
+        // `Upgrade` invents a signal the summary counts should not carry.
+        c.direction = Direction::Neutral;
     }
     changes
 }
@@ -1634,8 +1757,8 @@ mod tests {
     fn determinism_clean_to_run_is_a_downgrade() {
         let k = ChangeKind::Determinism {
             column: "c".to_string(),
-            old: Det::Clean,
-            new: Det::Run,
+            old: Some(Det::Clean),
+            new: Some(Det::Run),
         };
         assert_eq!(k.direction(), Direction::Downgrade);
     }
@@ -1644,8 +1767,8 @@ mod tests {
     fn determinism_run_to_row_is_a_downgrade() {
         let k = ChangeKind::Determinism {
             column: "c".to_string(),
-            old: Det::Run,
-            new: Det::Row,
+            old: Some(Det::Run),
+            new: Some(Det::Row),
         };
         assert_eq!(k.direction(), Direction::Downgrade);
     }
@@ -1654,8 +1777,8 @@ mod tests {
     fn determinism_row_to_clean_is_an_upgrade() {
         let k = ChangeKind::Determinism {
             column: "c".to_string(),
-            old: Det::Row,
-            new: Det::Clean,
+            old: Some(Det::Row),
+            new: Some(Det::Clean),
         };
         assert_eq!(k.direction(), Direction::Upgrade);
     }
@@ -1695,8 +1818,8 @@ mod tests {
         assert_eq!(
             ChangeKind::Discriminant {
                 column: "c".to_string(),
-                old: d1,
-                new: d2
+                old: Some(d1),
+                new: Some(d2)
             }
             .direction(),
             Direction::Neutral
@@ -1707,14 +1830,14 @@ mod tests {
     fn comparability_loss_is_a_downgrade() {
         let k = ChangeKind::Comparability {
             column: "c".to_string(),
-            old: Comp::Comparable,
-            new: Comp::Incomparable,
+            old: Some(Comp::Comparable),
+            new: Some(Comp::Incomparable),
         };
         assert_eq!(k.direction(), Direction::Downgrade);
         let reverse = ChangeKind::Comparability {
             column: "c".to_string(),
-            old: Comp::Incomparable,
-            new: Comp::Comparable,
+            old: Some(Comp::Incomparable),
+            new: Some(Comp::Comparable),
         };
         assert_eq!(reverse.direction(), Direction::Upgrade);
     }
@@ -1778,6 +1901,10 @@ mod tests {
         assert!(!m.changes.is_empty());
         for c in &m.changes {
             assert_eq!(c.old, None, "added model's changes must have old=null");
+            // G6 (`docs/outcomes/20260905-property-diff` fix round 1): a
+            // wholly new model's changes are never graded — the `cause`
+            // already says `added`.
+            assert_eq!(c.direction, Direction::Neutral);
         }
     }
 
@@ -1792,7 +1919,115 @@ mod tests {
         assert!(matches!(m.cause.kind, CauseKind::Removed));
         for c in &m.changes {
             assert_eq!(c.new, None, "removed model's changes must have new=null");
+            assert_eq!(c.direction, Direction::Neutral);
         }
+    }
+
+    // --- Fix round 1 (G1, G5, G7) ---
+
+    #[test]
+    fn maintenance_lost_is_a_downgrade_and_gained_is_an_upgrade() {
+        assert_eq!(
+            ChangeKind::MaintenanceLost.direction(),
+            Direction::Downgrade
+        );
+        assert_eq!(
+            ChangeKind::MaintenanceGained.direction(),
+            Direction::Upgrade
+        );
+        assert_eq!(
+            ChangeKind::MaintenanceLost.dimension(),
+            Dimension::MaintenanceLost
+        );
+        assert_eq!(
+            ChangeKind::MaintenanceGained.dimension(),
+            Dimension::MaintenanceGained
+        );
+    }
+
+    /// G1: `refresh: incremental` -> `refresh: full` with byte-identical SQL
+    /// yields empty cells and empty refusals on the new side — before this
+    /// fix, N `cell_removed` changes all graded `Neutral` and nothing
+    /// downgraded. `diff_profile` must emit exactly one `maintenance_lost`
+    /// change, graded `Downgrade`, alongside the (neutral) per-cell removals.
+    #[test]
+    fn losing_maintenance_entirely_surfaces_as_one_downgrade() {
+        let mut old_profile = profile_from(base_set());
+        old_profile.cell_verdicts = vec![
+            cell(Technique::KeyedFold, "{a}", "orders"),
+            cell(Technique::KeyedFold, "{b}", "orders"),
+        ];
+        let mut new_profile = old_profile.clone();
+        new_profile.cell_verdicts = Vec::new();
+
+        let changes = diff_profile(&old_profile, &new_profile);
+        let lost: Vec<_> = changes
+            .iter()
+            .filter(|c| c.dimension == Dimension::MaintenanceLost)
+            .collect();
+        assert_eq!(
+            lost.len(),
+            1,
+            "expected exactly one maintenance_lost change: {changes:?}"
+        );
+        assert_eq!(lost[0].direction, Direction::Downgrade);
+        assert!(
+            changes.iter().any(|c| c.direction == Direction::Downgrade),
+            "the model must show at least one downgrade when it stops being maintained"
+        );
+        // The per-cell removals themselves stay neutral — the event is
+        // named once, not N times.
+        for c in changes
+            .iter()
+            .filter(|c| c.dimension == Dimension::CellRemoved)
+        {
+            assert_eq!(c.direction, Direction::Neutral);
+        }
+    }
+
+    #[test]
+    fn grain_composite_key_column_dropped_is_a_downgrade() {
+        // Key(["id", "region"]) -> Key(["id"]): the composite narrowed —
+        // "lost a key column" per spec §Direction. Before G5 this graded
+        // Neutral (the two KeySets are unequal as values, so the prior
+        // membership check saw both "lost" and "gained").
+        let k = ChangeKind::Grain {
+            subject: String::new(),
+            old: Grain {
+                keys: vec![vec!["id".to_string(), "region".to_string()]],
+            },
+            new: Grain {
+                keys: vec![vec!["id".to_string()]],
+            },
+        };
+        assert_eq!(k.direction(), Direction::Downgrade);
+
+        // Symmetric: gaining a column on the composite is an upgrade.
+        let reverse = ChangeKind::Grain {
+            subject: String::new(),
+            old: Grain {
+                keys: vec![vec!["id".to_string()]],
+            },
+            new: Grain {
+                keys: vec![vec!["id".to_string(), "region".to_string()]],
+            },
+        };
+        assert_eq!(reverse.direction(), Direction::Upgrade);
+    }
+
+    #[test]
+    fn fd_multiplicity_is_respected() {
+        // Two copies of the same FD on the old side, one on the new side:
+        // a plain `.contains` membership check sees the FD "still present"
+        // and misses the removal of the duplicate.
+        let fd = DerivedFd {
+            key: vec!["id".to_string()],
+            determines: "amount".to_string(),
+        };
+        let old = vec![fd.clone(), fd.clone()];
+        let new = vec![fd.clone()];
+        assert_eq!(multiset_excess(&old, &new), vec![fd.clone()]);
+        assert!(multiset_excess(&new, &old).is_empty());
     }
 
     #[test]
@@ -1862,6 +2097,19 @@ mod tests {
         let mut columns_changed = base.clone();
         columns_changed.columns.push("extra".to_string());
 
+        // G3/G4 (`docs/outcomes/20260905-property-diff` fix round 1): remove
+        // the per-column entry entirely while `columns` stays unchanged —
+        // the presence-asymmetry case the value-only mutations above cannot
+        // exercise. `literal_columns` is exempted: it already diffs the
+        // union of keys (`:867`), so removing its one entry is covered by
+        // `lit_changed` above via a value-level round trip already.
+        let mut det_removed = base.clone();
+        det_removed.determinism = Vec::new();
+        let mut comp_removed = base.clone();
+        comp_removed.comparability = Vec::new();
+        let mut disc_removed = base.clone();
+        disc_removed.discriminants = Vec::new();
+
         let mutations = [
             grain_changed,
             fd_changed,
@@ -1874,6 +2122,9 @@ mod tests {
             row_identity_changed,
             source_bound_changed,
             columns_changed,
+            det_removed,
+            comp_removed,
+            disc_removed,
         ];
 
         for m in mutations {
@@ -1885,6 +2136,75 @@ mod tests {
                 "PropertySet difference must produce a change (or the profile must actually be equal): {m:?} vs {base:?}"
             );
         }
+    }
+
+    /// G2/G4 (`docs/outcomes/20260905-property-diff` fix round 1): the
+    /// PropertySet-level test above cannot see `cell_verdicts`/`refusals`/
+    /// `probes` at all — this covers the rest of [`PropertyProfile`]. Before
+    /// the G2/G1 fixes this test caught: a matched probe whose `probe` field
+    /// changed produced zero changes (`diff_probes` matched on `(fact,
+    /// cell)` only and never compared the third field), and a model whose
+    /// cell list went from non-empty to empty produced only `Neutral`
+    /// `cell_removed` changes with no dimension naming the event itself.
+    #[test]
+    fn every_profile_field_difference_produces_at_least_one_change() {
+        let mut base = profile_from(base_set());
+        base.cell_verdicts = vec![cell(Technique::KeyedFold, "{a}", "orders")];
+        base.refusals = vec![refusal(Some("MaintenanceScanUnbounded"), "boom")];
+        base.probes = vec![probe("assert_monotonic")];
+
+        let mut probe_fact_changed = base.clone();
+        probe_fact_changed.probes = vec![ProfileProbe {
+            fact: "assert_other".to_string(),
+            ..probe("assert_monotonic")
+        }];
+        let mut probe_diagnostic_changed = base.clone();
+        probe_diagnostic_changed.probes = vec![ProfileProbe {
+            probe: "SomeOtherProbe".to_string(),
+            ..probe("assert_monotonic")
+        }];
+        let mut probe_cell_changed = base.clone();
+        probe_cell_changed.probes = vec![ProfileProbe {
+            cell: "main.other_model (declared)".to_string(),
+            ..probe("assert_monotonic")
+        }];
+        let mut refusal_code_changed = base.clone();
+        refusal_code_changed.refusals = vec![refusal(Some("MaintenanceUnsupportedGrain"), "boom")];
+        let mut refusal_text_changed = base.clone();
+        refusal_text_changed.refusals =
+            vec![refusal(Some("MaintenanceScanUnbounded"), "different text")];
+        let mut maintenance_lost = base.clone();
+        maintenance_lost.cell_verdicts = Vec::new();
+        let mut all_empty = profile_from(base_set());
+        let mut maintenance_gained = all_empty.clone();
+        maintenance_gained.cell_verdicts = vec![cell(Technique::KeyedFold, "{a}", "orders")];
+        all_empty.refusals = Vec::new();
+        all_empty.probes = Vec::new();
+
+        let mutations = [
+            probe_fact_changed,
+            probe_diagnostic_changed,
+            probe_cell_changed,
+            refusal_code_changed,
+            refusal_text_changed,
+            maintenance_lost,
+        ];
+        for m in mutations {
+            let changed = m != base;
+            let changes = diff_profile(&base, &m);
+            assert_eq!(
+                changed,
+                !changes.is_empty(),
+                "PropertyProfile difference must produce a change: {m:?} vs {base:?}"
+            );
+        }
+
+        // Symmetric gained-maintenance case, diffed the other way round.
+        assert_ne!(all_empty, maintenance_gained);
+        assert!(
+            !diff_profile(&all_empty, &maintenance_gained).is_empty(),
+            "a model gaining maintenance (empty cells -> non-empty) must produce a change"
+        );
     }
 
     #[test]

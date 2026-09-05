@@ -131,7 +131,8 @@ and neutrals. When nothing shifted the whole output is the single line
                      | "refusal_added" | "refusal_removed" | "contract_point" | "probe_added"
                      | "probe_removed" | "column_added" | "column_removed" | "determinism"
                      | "discriminant" | "comparability" | "fd_added" | "fd_removed"
-                     | "literal_column" | "set_op_barrier" | "fan_out_join",
+                     | "literal_column" | "set_op_barrier" | "fan_out_join"
+                     | "maintenance_lost" | "maintenance_gained",
           "subject": "<cell group@source | source name | column name | probe fact>",
           "direction": "downgrade" | "upgrade" | "neutral",
           "old": <json value or null>,
@@ -224,8 +225,12 @@ extras; the diff never reads the report, only the profile.
 Given the profile maps `P_old` (baseline) and `P_new` (working tree), keyed by model name:
 
 - A model in `P_new` but not `P_old` is **added**; every profile field is reported as a change
-  with `old = null`, and the whole entry has cause `added`.
-- A model in `P_old` but not `P_new` is **removed**, symmetrically.
+  with `old = null`, and the whole entry has cause `added`. Every such change is graded `neutral`
+  regardless of its dimension's ordinary rule — a per-dimension direction is noise for a model
+  that is wholly new or gone; the `cause` already says so, and grading it would inflate the
+  summary counts and `--fail-on` with a signal the dimension's rule was never meant to answer for
+  this case.
+- A model in `P_old` but not `P_new` is **removed**, symmetrically (also all `neutral`).
 - A model in both with `P_old[m] == P_new[m]` is **unshifted** and is not reported.
 - Otherwise the model is **shifted**, and its changes are the per-dimension differences, computed
   field by field with the following matching rules: cells match on `(group, trigger)`, source
@@ -245,6 +250,15 @@ Given the profile maps `P_old` (baseline) and `P_new` (working tree), keyed by m
   literal columns (`literal_column`, matched on column name), set-operation barrier and fan-out
   join (`set_op_barrier`, `fan_out_join`, whole-model booleans), and a cell's row identity
   (`cell_row_identity`) all produce a change whenever they differ.
+- A model going from having at least one maintained cell to having none at all — no longer
+  incrementally maintained — is reported once, as `maintenance_lost`, never only as N individual
+  `cell_removed` changes (which stay `cell_added`/`cell_removed`'s ordinary per-cell dimension,
+  graded `neutral` in this case — see §Direction). The symmetric case (no cells to at least one)
+  is `maintenance_gained`. This is deliberate: some admission paths (a `refresh: incremental` →
+  `refresh: full` edit, in particular) produce an empty cell list with **no** refusal at all, so
+  without a dedicated dimension the model's most consequential possible change — losing
+  incremental maintenance entirely — could surface as a page of neutral lines with zero
+  downgrades.
 
 Renames are not detected: a renamed column or model is a removal plus an addition. This is
 fail-loud by construction (§Constraints) — a rename that changes nothing else still surfaces.
@@ -258,6 +272,7 @@ are data in `smelt-logical`, not spread across renderers:
 |-----------|----------------|--------------|
 | `cell_technique` | new technique is lower on the ladder `KeyedFold` ≻ `ColumnScopedMerge` ≻ `InPlaceUpdate` ≻ `PerGroupRecompute` ≻ `DeleteInsert` | higher |
 | `cell_added` / `cell_removed` | a cell is removed from a still-maintained model (a column group lost its maintenance route) | a cell is added |
+| `maintenance_lost` / `maintenance_gained` | the model's cell list went from non-empty to empty — no cell survived at all, so it is no longer incrementally maintained | empty to non-empty (maintenance regained) |
 | `source_bound` | `Bounded` → `Unbounded`, or a bounded interval widened (`before + after` grew) | narrower, or `Unbounded` → `Bounded`. `NotDerivable` orders with `Unbounded`: `Bounded` ≻ `{Unbounded, NotDerivable}`, and a change between `Unbounded` and `NotDerivable` in either direction is `neutral` — both force a full read, so neither is worse than the other |
 | `grain` / `row_identity` / `cell_row_identity` | a non-empty grain became empty or lost a key column; a row identity moved `Key` → `WholeRow` | gained a proven grain; `WholeRow` → `Key` |
 | `refusal_added` / `refusal_removed` | a refusal appeared | one disappeared |
