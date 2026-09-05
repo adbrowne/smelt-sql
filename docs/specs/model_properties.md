@@ -169,29 +169,41 @@ otherwise — absence of a proof is a refusal, never an approximate or partial a
    exactly once and cannot un-see a retracted one (`incremental_shapes.md` §"Run shape and late
    events").
 2. **Every window function in the outermost projection is a succession function.** Each
-   `OVER (...)` clause is `LEAD(t)`/`LAG(t)` **over the clock column itself**, or a scalar
-   expression over exactly one such call (an `IS NULL`, a `CASE`, an arithmetic expression),
-   never a plain aggregate window, a running total, a ranking function, or a `LEAD`/`LAG` over
-   any other column. Columns derived from a `LEAD` call are collected as `lead_cols`, from a
-   `LAG` call as `lag_cols`; the technique patches a new event's predecessor for the former
-   and its successor for the latter.
+   `OVER (...)` clause is `LEAD(t)`/`LAG(t)` **over the clock column itself, with the default
+   offset of 1 and no default-value argument**, or a scalar expression over exactly one such
+   call (an `IS NULL`, a `CASE`, an arithmetic expression), never a plain aggregate window, a
+   running total, a ranking function, a `LEAD`/`LAG` over any other column, or one with an
+   explicit offset (`LEAD(t, 2)` reaches past the immediate neighbour the maintenance theorem
+   patches). Columns derived from a `LEAD` call are collected as `lead_cols`, from a `LAG`
+   call as `lag_cols`; the technique patches a new event's predecessor for the former and its
+   successor for the latter.
 3. **Every succession function shares one `PARTITION BY` key set** (`key_cols`) and **one
-   `ORDER BY` column** (`clock_col`). `clock_col` must trace `Traceable` **with `is_strict`**
-   under the event-time monotonicity trace (§"Event-time monotonicity trace") against the
-   driving source — an `ORDER BY` column the trace cannot certify monotone refuses the whole
-   model, since a non-monotone order makes "immediate predecessor" undefined, and one it
-   certifies monotone but not strict refuses too, since a clock that can collapse two distinct
-   source times onto one value makes the derived `(k, t)` identity collide.
-4. **Every other projected column is row-local** — a function of the current row's own columns
+   ascending `ORDER BY` column** (`clock_col`). Every `key_cols` member is proven `NOT NULL`
+   (a NULL key belongs to no key's sequence). `clock_col` must trace `Traceable` **with
+   `is_strict`** under the event-time monotonicity trace (§"Event-time monotonicity trace")
+   against the driving source — an `ORDER BY` column the trace cannot certify monotone refuses
+   the whole model, since a non-monotone order makes "immediate predecessor" undefined, and
+   one it certifies monotone but not strict refuses too, since a clock that can collapse two
+   distinct source times onto one value makes the derived `(k, t)` identity collide. A
+   descending order or a second sort key refuses: the former swaps which neighbour `LEAD` and
+   `LAG` name, the latter makes the order depend on more than the clock.
+4. **The key columns and the clock column are each projected row-locally** (possibly under an
+   alias), so the derived `(k, t)` identity is recoverable from the presented table and the
+   succession `MERGE` can address rows by it. A projection that drops `k` or `t` refuses
+   (`SuccessionIdentityNotProjected`).
+5. **Every other projected column is row-local** — a function of the current row's own columns
    alone, containing no aggregate and no further window function. A column that mixes
    aggregation into the same projection as a succession window (a would-be
    `SUM(...) OVER (...)` sibling) refuses; that shape is not this pattern
    (`incremental_shapes.md` §"What stays out of this grain").
-5. **At most one trailing filter is admitted**, and only in the exact shape `WHERE NOT
+6. **At most one trailing filter is admitted**, and only in the exact shape `WHERE NOT
    <row-local boolean column>`, applied *after* the window functions rather than filtering the
    FROM-clause input before them — the delete-flag admission (`incremental_shapes.md`
-   §"Delete events"). The filtered column becomes `delete_flag`; its absence leaves
-   `delete_flag = None`. Any other filter shape, position, or column refuses.
+   §"Delete events"). The column must be proven `NOT NULL`: under `WHERE NOT`, a NULL flag
+   drops the row from the output exactly as `TRUE` does, so a nullable flag would let a row
+   vanish without being recorded as a tombstone. The filtered column becomes `delete_flag`;
+   its absence leaves `delete_flag = None`. Any other filter shape, position, or column
+   refuses.
 
 The classifier is a **leaf** the shared bottom-up walk invokes over one already-bounded scope's
 own projection (the Property composition walk rule, `architecture.md`) — it does not itself

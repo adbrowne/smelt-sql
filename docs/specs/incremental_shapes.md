@@ -465,15 +465,16 @@ silently; it refuses with the nearest fix (§"Succession-grain admission (no dec
 
 | Code | Fires when |
 |---|---|
-| `SuccessionWindowFunctionNotLead` | A window function appears in the projection that is not `LEAD(t)`/`LAG(t)` over the clock column, or not a scalar expression over one — including `LEAD`/`LAG` over a non-clock column; names the offending call. |
-| `SuccessionPartitionKeyMismatch` | Two or more window functions in the projection partition by different column sets, or partition by a column set the classifier cannot resolve to a stable per-row key. |
-| `SuccessionOrderNotMonotoneClock` | A window's `ORDER BY` column does not trace as a **strictly** monotone event-time clock on the driving source (`model_properties.md` §"Event-time monotonicity trace" returns `NotTraceable`, or `Traceable` without `is_strict`); names the column and the trace's refusal reason or the non-strict layer. |
+| `SuccessionWindowFunctionNotLead` | A window function appears in the projection that is not `LEAD(t)`/`LAG(t)` over the clock column with the default offset of 1, or not a scalar expression over one — including `LEAD`/`LAG` over a non-clock column, or with an explicit offset or default argument; names the offending call. |
+| `SuccessionPartitionKeyMismatch` | Two or more window functions in the projection partition by different column sets, partition by a column set the classifier cannot resolve to a stable per-row key, or partition by a column not proven `NOT NULL` (a NULL key row belongs to no key's sequence). |
+| `SuccessionOrderNotMonotoneClock` | A window's `ORDER BY` column does not trace as a **strictly** monotone event-time clock on the driving source (`model_properties.md` §"Event-time monotonicity trace" returns `NotTraceable`, or `Traceable` without `is_strict`), or the `ORDER BY` is descending or carries a second sort key; names the column and the trace's refusal reason, the non-strict layer, or the offending sort clause. |
 | `SuccessionRowLocalColumnViolation` | A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local; names the column. |
+| `SuccessionIdentityNotProjected` | A key column or the clock column does not appear row-locally in the projection, so the derived `(k, t)` identity is not recoverable from the presented table; names the missing column. |
 | `SuccessionSingleSourceOnly` | The `FROM` clause is not exactly one source reference — a join, CTE, subquery, or set operation is present; names the offending clause (§"Succession-grain admission (no declaration)"). |
 | `SuccessionDrivingSourceNotAppendOnly` | The driving source does not declare `mutation_profile.kind: append_only`; names the source and its declared kind (§"The succession grain" §"Run shape and late events"). |
-| `SuccessionDeleteFilterMisplaced` | A post-projection filter exists but is not exactly `WHERE NOT <row-local boolean column>` applied after the window functions — e.g. it filters before the window, filters a non-boolean or non-row-local expression, or is not a negated single column (§"The succession grain" §"Delete events"). |
+| `SuccessionDeleteFilterMisplaced` | A post-projection filter exists but is not exactly `WHERE NOT <row-local boolean column>` applied after the window functions — e.g. it filters before the window, filters a non-boolean or non-row-local expression, is not a negated single column, or names a column not proven `NOT NULL` (a NULL flag drops the row under `WHERE NOT` without marking it a delete) (§"The succession grain" §"Delete events"). |
 | `SuccessionPatternUnrecognized` | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names; the general fallback when the model does not resemble any admitted grain. Names the three declared routes as fixes. |
-| `SuccessionClockTie` | Runtime: a delta presents two events with equal `(k, t)`, or an event whose `(k, t)` is already stored (as a presented row or a tombstone) with different row-local content or delete flag. The run's transaction rolls back; reports the key, the clock value, and a sample (§"The succession grain" §"Run shape and late events"). |
+| `SuccessionClockTie` | Runtime: a delta presents two non-identical events with equal `(k, t)`; an event whose `(k, t)` matches a presented row with different row-local content or delete flag; or a delete and a non-delete at one `(k, t)` in either direction (against a stored tombstone only the delete flag is comparable). The run's transaction rolls back; reports the key, the clock value, and a sample. Identical rows are a redelivery and fold once (§"The succession grain" §"Run shape and late events"). |
 
 ## Semantics
 
@@ -1100,9 +1101,12 @@ neighbours within its key** in the event sequence's `t` order: its **predecessor
 with the greatest `t` below the new event's) for every `LEAD`-derived column, and its
 **successor** (the least `t` above) for every `LAG`-derived column. A model projecting only
 `LEAD` touches at most two presented rows per event; one projecting both `LEAD` and `LAG` at
-most three. Both neighbours are located over the union of presented rows and the tombstone
-ledger (§"The tombstone ledger (hidden state)"), so a neighbour that is a tombstone is found and
-correctly contributes its `t` even though it has no presented row to patch.
+most three. Both neighbours are located over the **neighbour domain**: the union of the
+presented rows, the tombstone ledger (§"The tombstone ledger (hidden state)"), and the other
+events of the same batch — two new events in one batch may be each other's neighbours, so a
+batch is folded as if its events were applied one at a time in `t` order. A neighbour that is
+a tombstone is found and correctly contributes its `t` even though it has no presented row to
+patch.
 
 The theorem is **arrival-order independent**. An event that splices into the middle of a key's
 history patches exactly its predecessor (whose `LEAD(t)` becomes the new event's `t`) and its
@@ -1150,10 +1154,14 @@ declaration is paired with its usual verification mechanism, the append-only pos
 Two derived execution postures follow from the theorem and are surfaced by `smelt explain`,
 never declared. The grain is **re-run tolerant**: a window already folded may be folded again,
 because the `MERGE` addresses presented rows by `(k, t)` and the ledger dedupes on the same
-identity, so the second fold is a no-op. It is **order-independent**: windows may apply out of
-temporal order or in parallel, because neighbours are located in the stored event sequence
-rather than assumed to be the last-folded row. Consequently **reprocessing is admitted, not refused** —
-there is no `KeyedReprocessedWindow` analogue here.
+identity, so the second fold is a no-op. It is **order-independent but serial**: windows may
+apply in any temporal order, because neighbours are located in the stored event sequence
+rather than assumed to be the last-folded row — but never concurrently, since two windows
+folding events with a shared neighbour would race on that neighbour's patch and the later
+commit could carry the wrong `t`. Consequently **reprocessing is admitted, not refused** —
+there is no `KeyedReprocessedWindow` analogue here. The model keeps the window-forward
+driver's per-model frontier (§"The transactional frontier write (merge ledger)") at the
+re-run-tolerant grade — bookkeeping for `--auto` staleness, never a refusal structure.
 
 Those postures bound what a late event *costs*, not how it is *discovered*. Consumption is the
 framework's ordinary window-forward step over the driving source's landed delta (`sources.md`
@@ -1169,13 +1177,26 @@ Divergences).
 and a clock value. At admission the trace must certify the `ORDER BY` column **strictly**
 monotone (`is_strict`, `model_properties.md` §"Event-time monotonicity trace"); a clock
 expression that can collapse distinct source times onto one value — a truncation, a
-date-cast — refuses (`SuccessionOrderNotMonotoneClock`, naming non-strictness). At runtime, a
-delta presenting two rows with equal `(k, t)`, or a row whose `(k, t)` is already in the
-event sequence with different row-local content or a different delete flag, fails the run
-transactionally
-(`SuccessionClockTie`): the former is an identity collision the SQL's `LEAD` would resolve
-nondeterministically, the latter a source mutation `append_only` forbids. A row identical to
-one already folded is the re-run case above and is a no-op.
+date-cast — refuses (`SuccessionOrderNotMonotoneClock`, naming non-strictness). Strictness
+is a property of the clock *expression* — it says the expression never maps two distinct source
+times to one value — not of the source's rows, so a source that genuinely carries two distinct
+events at one `(k, t)` is caught only at runtime. There, a delta presenting two
+non-identical rows with equal `(k, t)`, a row whose `(k, t)` matches a presented row with
+different row-local content or delete flag, or a delete whose `(k, t)` matches a presented row
+(and vice versa), fails the run transactionally (`SuccessionClockTie`): each is an identity
+collision the SQL's `LEAD` would resolve nondeterministically, or a source mutation
+`append_only` forbids. A delete and an insert at the same `(k, t)` — which some CDC feeds
+emit for a replace — is refused on the same grounds: the oracle's `LEAD` order between them
+is undefined. Against a stored tombstone only the delete flag is comparable, since the ledger
+carries no row-local content.
+
+A row **identical** to one already folded — or two identical rows in one delta — is treated
+as a redelivery (`sources.md` §"`mutation_profile`", `redelivery: at_least_once`) and folded
+once. This equals the oracle over the *deduplicated* input, the same footing every fold
+technique stands on under redelivery; a feed in which two genuinely distinct events share
+both `(k, t)` and every row-local value is indistinguishable from redelivery, and the
+zero-length interval the raw oracle would emit for it is not produced. This is a declared
+boundary of the grain (§Constraints), not a divergence to close.
 
 #### What stays out of this grain
 
@@ -1379,9 +1400,18 @@ events are already fully represented by their presented rows, so recording them 
 duplicates the whole history for no information gain; the union of presented rows and a
 deletes-only ledger is the same event sequence at a fraction of the state.
 
-**One driving source, append-only, clock-only windows.** The v1 grammar admits exactly one
-source reference and no joins, requires `append_only`, and admits `LEAD`/`LAG` only over the
-clock column. Each is a deliberate narrowing with a named widening path. Joins were excluded
+**One driving source, append-only, clock-only unit-offset ascending windows.** The v1 grammar
+admits exactly one source reference and no joins, requires `append_only`, admits `LEAD`/`LAG`
+only over the clock column with the default offset of 1 and an ascending single-key `ORDER
+BY`, and requires the key and clock columns to be projected. The offset and direction
+restrictions are what make "immediate neighbour" the theorem's footprint — `LEAD(t, 2)` would
+touch the second predecessor, `ORDER BY t DESC` would swap the roles of `LEAD` and `LAG` —
+and each could be admitted later by widening the patch to the offset-th neighbour or swapping
+the roles, but neither buys anything SCD2 needs. Projecting `k` and `t` is required rather
+than carried as hidden rung-2 columns because a history table that does not expose its own
+key and version time is not a usable history table, and hidden identity columns would make
+the presented schema differ from the SQL's. Each of the source-side narrowings is a
+deliberate choice with a named widening path. Joins were excluded
 because the skeleton-source closure proof (`model_properties.md`) rules a join feeding a
 window `Open` in its own v1, so nothing today can prove an enrichment side cannot add, drop,
 or duplicate a version row; admitting joins is a closure widening first. `append_only` is
@@ -1538,24 +1568,28 @@ larger one.
    neighbours within its key** — the predecessor for `LEAD`-derived columns, the successor for
    `LAG`-derived columns. No derived horizon, no lateness bound, and no declared margin ever
    widens or narrows it — late arrivals are admitted by the same rule as on-time ones.
-4. **Neighbours are located over the union of presented rows and the tombstone ledger, never
-   the presented table alone.** Every folded delete event is recorded as `(k, t)` in the
-   ledger, written in the same transaction as the presented `MERGE`; a backend that cannot
-   hold it downgrades the model to full refresh (`MaintenanceStateDowngraded`), never to a
-   patch that ignores tombstones. The ledger holds deletes only — a non-delete event is
-   represented by its presented row and nowhere else.
-5. **The run shape is window-forward only; the grain is re-run tolerant and
-   order-independent, and reprocessing is admitted.** Snapshot-reconcile is never admitted.
+4. **Neighbours are located over the neighbour domain — presented rows, the tombstone ledger,
+   and the batch's own events — never the presented table alone.** Every folded delete event
+   is recorded as `(k, t)` in the ledger, written in the same transaction as the presented
+   `MERGE`; a backend that cannot hold it downgrades the model to full refresh
+   (`MaintenanceStateDowngraded`), never to a patch that ignores tombstones. The ledger holds
+   deletes only — a non-delete event is represented by its presented row and nowhere else.
+5. **The run shape is window-forward only; the grain is re-run tolerant, order-independent,
+   and serial; reprocessing is admitted.** Windows never apply concurrently. Snapshot-reconcile
+   is never admitted.
 6. **The driving source is exactly one `append_only` source reference**, verified by the
    append-only posture probe; joins, CTEs, subqueries, and set operations refuse.
-7. **`(k, t)` is a strict identity.** The clock traces strictly monotone at admission, and a
-   runtime collision — two distinct events at one `(k, t)` — rolls the run back
-   (`SuccessionClockTie`).
+7. **`(k, t)` is a strict identity, and both `k` and `t` are projected.** The clock traces
+   strictly monotone at admission; the key columns and the clock column each appear
+   row-locally in the projection so the `MERGE` can address presented rows; a runtime
+   collision — two distinct events at one `(k, t)` — rolls the run back
+   (`SuccessionClockTie`). Identical rows at one `(k, t)` are folded once as a redelivery.
 8. **The classifier is fail-closed.** A window function that is not `LEAD(t)`/`LAG(t)` (or an
-   expression over one), a non-row-local non-window projection, an unresolvable partition key,
-   a non-strict `ORDER BY`, a second source, a non-append-only source, or a misplaced filter
-   each refuses with a named diagnostic (§"Diagnostics") — never falls back to an approximate
-   or partial maintenance.
+   expression over one, or with an offset other than the default 1), a non-row-local
+   non-window projection, an unresolvable or nullable partition key, a non-strict or
+   descending `ORDER BY`, an unprojected key or clock, a second source, a non-append-only
+   source, or a misplaced or nullable delete filter each refuses with a named diagnostic
+   (§"Diagnostics") — never falls back to an approximate or partial maintenance.
 9. **End-state equivalence holds with the model's own SQL as the oracle**, identically to the
    key grain's rule: `full_refresh(model SQL)` over the same processed inputs is the executable
    correctness definition, with no bespoke interval-keyed specialisation.
@@ -1685,6 +1719,24 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   whose only events are deletes, `LAG`-projecting models under each of those, out-of-order and
   repeated window application, and an equal-`(k, t)` collision expecting `SuccessionClockTie`.
   Until they exist, this profile's theorem is a design claim, not a verified one.
+- **The append-only posture probe rejects the late appends this grain's theorem admits — an
+  undecided framework question, not a grain-local one.** §"Run shape and late events" requires
+  `append_only` paired with the append-only posture probe, and the probe's fingerprint leg
+  (`sources.md` §Semantics 4, `model_properties.md` §"Probe obligation") re-checks every
+  partition strictly below the source's recorded maximum, so a genuinely late row landing in a
+  closed partition changes that partition's digest and fails the consuming run with
+  `SourceMutationProfileViolated`. Under the probe as built, `append_only` therefore means
+  "append-only into the open partition", and the theorem's late-splice guarantee is
+  reachable only through a run that presents the late row *without* the probe rejecting it.
+  The same tension already exists for every window-forward consumer of an `append_only`
+  source declared with a non-zero `lateness` (the running example's `orders`, "up to 2 days
+  late"). Candidate resolutions, none decided: gate the fingerprint leg to partitions older
+  than the source's declared `lateness` (which would make `lateness` a probe input, contrary
+  to the orchestration-only decision in `docs/research/20260904-decision-track.md`); a
+  weaker `append_only` sub-fact — count-non-decrease only, no fingerprint — that the succession
+  grain admits and the additive-fold families do not; or accepting that a late append is a
+  posture violation and dropping the late-splice claims from this profile. This must be decided
+  before implementation planning; the profile is written assuming the second.
 - **Late-event discovery is the shared window-forward gap, not a grain-local one.** The theorem
   makes presenting a late event safe and cheap (§"Run shape and late events"), but a scheduled
   `--auto` run steps uncovered windows of the driving source's landed delta and does not by
