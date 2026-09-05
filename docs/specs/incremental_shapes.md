@@ -392,29 +392,23 @@ SELECT
 FROM smelt.customer_changes
 ```
 
-The classifier admits a model iff:
+The classifier's admission rules are owned by `model_properties.md` §"Keyed-succession
+classification" and are not restated here. In outline, the admitted scope is:
 
-- the `FROM` clause is exactly one source reference — no join, CTE, subquery, or set
-  operation — and that source declares `mutation_profile.kind: append_only` and a
-  `timeseries:` block (`sources.md`, `timeseries.md`; the source's `partition_column` is the
-  run axis, its `event_time_column` the clock, and the two may differ — §"The succession
-  grain" §"Run shape and late events");
-- at most one filter precedes the window projection, and it is a deterministic row-local
-  predicate over the driving source's own columns (the optional lateness clamp, §"The
-  succession grain" §"Run shape and late events");
-- every window function in the outermost projection is `LEAD(t)`/`LAG(t)` — or a scalar
-  expression over one, such as the `IS NULL` above — with `PARTITION BY k ORDER BY t`, where
-  `t` is the driving source's event-time column (`model_properties.md` §"Event-time
-  monotonicity trace" must certify `t` `Traceable` and strictly monotone) and `k` is a column
-  set every window shares identically; the window argument is the clock itself, never another
-  column;
-- every projected column that is not a window function (or an expression over one) is
-  row-local — a function of the current row alone, not an aggregate or a further window;
-- at most one filter follows the window functions, spelled `QUALIFY NOT <boolean column>`
-  over a `NOT NULL` row-local boolean column (the delete-flag admission, §"The succession
-  grain" §"Delete events"). `QUALIFY` is the only single-scope clause SQL evaluates *after*
-  window functions; a `WHERE` in the same scope is evaluated before them and is the pre-window
-  clamp above, never the delete filter.
+```
+SELECT <row-local columns, including k and t> , <LEAD(t)/LAG(t) OVER (PARTITION BY k ORDER BY t) and scalar expressions over them>
+FROM smelt.<one append_only, clocked source>
+[WHERE <one deterministic row-local predicate>]          -- optional lateness clamp
+[QUALIFY NOT <NOT NULL boolean column>]                  -- optional delete-flag filter
+```
+
+and nothing else: no join, CTE, subquery, or set operation in `FROM`; no `DISTINCT`,
+`GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the scope; no aggregate, ranking, or
+frame-based window. Every clause outside the outline is refused by the named code that
+covers it (§"Diagnostics"), with `SuccessionPatternUnrecognized` as the fallback for a scope
+clause no more specific rule names (`DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`).
+The source's `partition_column` is the run axis and its `event_time_column` the succession
+clock; the two may differ (§"The succession grain" §"Run shape and late events").
 
 The derived output identity is `(k, t)` — one row per key per event, addressed by the pair the
 window functions themselves partition and order by. No `unique_key` is declared or inferable
@@ -475,15 +469,15 @@ silently; it refuses with the nearest fix (§"Succession-grain admission (no dec
 |---|---|
 | `SuccessionWindowFunctionNotLead` | A window function appears in the projection that is not `LEAD(t)`/`LAG(t)` over the clock column with the default offset of 1, or not a scalar expression over one — including `LEAD`/`LAG` over a non-clock column, or with an explicit offset or default argument; names the offending call. |
 | `SuccessionPartitionKeyMismatch` | Two or more window functions in the projection partition by different column sets, partition by a column set the classifier cannot resolve to a stable per-row key, or partition by a column not proven `NOT NULL` (a NULL key row belongs to no key's sequence). |
-| `SuccessionOrderNotMonotoneClock` | A window's `ORDER BY` column does not trace as a **strictly** monotone event-time clock on the driving source (`model_properties.md` §"Event-time monotonicity trace" returns `NotTraceable`, or `Traceable` without `is_strict`), or the `ORDER BY` is descending or carries a second sort key; names the column and the trace's refusal reason, the non-strict layer, or the offending sort clause. |
+| `SuccessionOrderNotMonotoneClock` | A window's `ORDER BY` column does not trace as a **strictly** monotone clock to the driving source's declared `event_time_column` (`model_properties.md` §"Event-time monotonicity trace" returns `NotTraceable`, `Traceable` without `is_strict`, or `Traceable` to a different source column), is not proven `NOT NULL`, or the `ORDER BY` is descending or carries a second sort key; names the column and the trace's refusal reason, the non-strict layer, the traced column, or the offending sort clause. |
 | `SuccessionRowLocalColumnViolation` | A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local; names the column. |
 | `SuccessionIdentityNotProjected` | A key column or the clock column does not appear row-locally in the projection, so the derived `(k, t)` identity is not recoverable from the presented table; names the missing column. |
 | `SuccessionSingleSourceOnly` | The `FROM` clause is not exactly one source reference — a join, CTE, subquery, or set operation is present; names the offending clause (§"Succession-grain admission (no declaration)"). |
 | `SuccessionDrivingSourceNotAppendOnly` | The driving source does not declare `mutation_profile.kind: append_only`, or declares no `timeseries:` block; names the source and its declared kind or the missing block (§"The succession grain" §"Run shape and late events"). |
 | `SuccessionPreFilterNotRowLocal` | A filter precedes the window projection but is not a deterministic row-local predicate over the driving source's own columns — it references a window-derived column, an aggregate, a subquery, another relation, or a run-nondeterministic function; or more than one such filter is present. Names the offending predicate (§"The succession grain" §"Run shape and late events"). |
 | `SuccessionDeleteFilterMisplaced` | A `QUALIFY` clause exists but is not exactly `QUALIFY NOT <row-local boolean column>` — it filters a non-boolean, non-row-local, or window-derived expression, is not a negated single column, or names a column not proven `NOT NULL` (a NULL flag drops the row under `NOT` without marking it a delete); or a `WHERE` predicate tests a window-derived column, which no same-scope `WHERE` can do (§"The succession grain" §"Delete events"). |
-| `SuccessionDriverEventTimePartitioned` (warning) | The driving source's `partition_column` traces to the succession clock, so the run axis and the clock coincide: a late append is a violation of the source's own `append_only` posture, not an event this grain can fold. Names the source and suggests partitioning the feed by arrival (§"The succession grain" §"Run shape and late events"). |
-| `SuccessionPatternUnrecognized` | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names; the general fallback when the model does not resemble any admitted grain. Names the three declared routes as fixes. |
+| `SuccessionPreFilterNegatesFlag` (warning) | The pre-window `WHERE` is a bare negated boolean column (`WHERE NOT <col>`). Admitted unchanged — it is a legitimate clamp — but named because a CDC delete flag filtered here never closes its predecessor's interval; suggests `QUALIFY NOT <col>` if the column is a delete flag (§"The succession grain" §"Delete events"). Advisory: never feeds admission. |
+| `SuccessionPatternUnrecognized` | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names — a `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the scope, or a model that does not resemble any admitted grain at all. Names the offending clause where there is one, and the three declared routes as fixes. |
 | `SuccessionClockTie` | Runtime: a delta presents two non-identical events with equal `(k, t)`; an event whose `(k, t)` matches a presented row with different row-local content or delete flag; or a delete and a non-delete at one `(k, t)` in either direction (against a stored tombstone only the delete flag is comparable). The run's transaction rolls back; reports the key, the clock value, and a sample. Identical rows are a redelivery and fold once (§"The succession grain" §"Run shape and late events"). |
 
 ## Semantics
@@ -1103,6 +1097,21 @@ state *columns*, it is a sibling table rather than hidden columns on the present
 a tombstone has no presented row to carry columns on (§"Succession-grain design"). The presented
 table is therefore exactly the oracle's output for every reader, inside or outside smelt.
 
+**Lifecycle.** The ledger is always a pure function of the processed input: its contents are
+exactly `SELECT k, t FROM <source> WHERE <pre-filter> AND <delete flag>` over every window
+ever folded. Every path that rebuilds presented state rebuilds the ledger from that
+definition, in the same transaction: a `--full-refresh` rebuilds both from the whole source;
+`smelt repair` over a range re-derives the ledger rows whose run-axis partition lies in that
+range alongside the presented rows; a definition delta that touches the key, the clock, the
+delete flag, or the pre-window filter changes what the ledger *is* and is a skeleton change —
+a new relation, ledger included (`definition_deltas.md` §"Skeleton changes are a new
+relation"). A definition delta that touches only row-local payload columns leaves the ledger
+untouched. The ledger-rebuild `SELECT` is the third emitter output of the succession-patch
+technique (`model_transforms.md`), never authored by a backend. Ledger size is proportional
+to the number of delete events ever folded and is never compacted: a tombstone stays
+load-bearing for as long as a later-arriving event could splice next to it, which under the
+default contract point is forever.
+
 #### The maintenance theorem (bounded footprint)
 
 When a batch of new events is processed, the only presented rows whose output changes are the
@@ -1152,8 +1161,13 @@ QUALIFY NOT is_deleted
 
 The `LEAD` is computed over every row including deletes, so a deleted row still contributes
 its timestamp to its predecessor's `valid_to`, and only then is it filtered from the
-materialised output. A `WHERE NOT is_deleted` in the same scope would run *before* the window
-and drop the tombstone's timestamp from its predecessor — the misplaced case. On a backend
+materialised output. A `WHERE NOT is_deleted` in the same scope is **not** refused — it is a
+legitimate pre-window clamp under rule 1a and equivalence-preserving, since the row never
+enters the sequence in oracle or state — but it means something different: the tombstone's
+timestamp never reaches its predecessor, so the previous version stays open. Because that is
+the classic mistake, the classifier warns when a pre-window filter is a bare negated boolean
+column (`SuccessionPreFilterNegatesFlag`, advisory only — it never changes admission),
+naming `QUALIFY` as the delete-flag spelling. On a backend
 without native `QUALIFY` the dialect layer lowers the clause to a wrapping subquery
 (`multi_backend.md`, `supports_qualify`), so the full-refresh oracle runs unchanged everywhere. The succession-patch `MERGE` (`model_transforms.md`)
 reflects this: a delete event is recorded in the tombstone ledger and contributes neighbour
@@ -1196,16 +1210,18 @@ therefore the single fact that decides how late events reach this grain:
   window*: the ordinary window-forward step presents it, the theorem folds it, no discovery
   mechanism beyond the landed delta is involved. The running example's `customer_changes`
   declares `partition_column: ingested_date, event_time_column: effective_ts`.
-- **Event-time-partitioned** (`partition_column` is the clock's date) — admitted, but a late
-  append into a closed partition is then a violation of the source's own `append_only`
-  posture under the framework's existing definition (`sources.md` §Semantics 4), excluded by
-  the source, not by this grain. Nothing here changes that rule — but because
-  `SourceMutationProfileViolated`'s remedy is "correct the source", never "repartition it",
-  the classifier warns at plan time when it can see the two axes coincide (the trace shows
-  `partition_column` derives from the clock): `SuccessionDriverEventTimePartitioned`, naming
-  arrival partitioning as the route to the late-splice guarantee.
+- **Event-time-partitioned** (`partition_column` is the clock's date) — admitted, and late
+  events still reach the grain, by the framework's general rule rather than by construction:
+  the append-only posture probe classifies a row-count *increase* in a closed partition as a
+  late arrival to re-process, never as a violation (`model_properties.md` §Constraints
+  "Declared lateness is orchestration-only"), so the late row surfaces as an observed delta
+  on that closed partition and the window covering it is re-presented. Because this grain is
+  re-run tolerant (below), re-presenting the window is a no-op for every event already
+  folded and a correct fold for the late one. The cost is the re-presentation of a closed
+  partition, which arrival partitioning never incurs.
 
-`smelt explain` names the run axis and the clock and states which posture the source has.
+`smelt explain` names the run axis and the clock and states which of the two the source has,
+so an author can see whether late events cost a closed-partition re-presentation.
 This is the partition grain's default-point doctrine applied to a keyed history — arrival
 time places the row, the model's own SQL decides what counts (`incremental_models.md`
 §"Windowed maintenance and the horizon", late arrivals at the default point) — and it is why
@@ -1244,10 +1260,11 @@ re-run-tolerant grade — bookkeeping for `--auto` staleness, never a refusal st
 Consumption is the framework's ordinary window-forward step over the driving source's landed
 delta on the run axis (`sources.md` §"Landed-delta (derived, recorded)"): a run folds the
 events the delta presents. Under arrival partitioning that is every event, however late its
-clock value; under event-time partitioning it is every event the source's posture admits.
-Either way, presenting an event is always safe and always cheap, and a window may be
-re-presented — by a re-run, an explicit `--landed` range, or `smelt repair` — without
-refusal.
+clock value, in the open partition; under event-time partitioning a late event arrives as an
+observed delta on a closed partition and that window is re-presented. Either way, presenting
+an event is always safe and always cheap, and a window may be re-presented — by the probe's
+late-arrival classification, a re-run, an explicit `--landed` range, or `smelt repair` —
+without refusal.
 
 **Clock ties.** The derived identity `(k, t)` requires that no two distinct events share a key
 and a clock value. At admission the trace must certify the `ORDER BY` column **strictly**
@@ -1266,15 +1283,21 @@ emit for a replace — is refused on the same grounds: the oracle's `LEAD` order
 is undefined. Against a stored tombstone only the delete flag is comparable, since the ledger
 carries no row-local content.
 
-A row **identical** to one already folded — or two identical rows in one delta — is read
-through the source's declared `redelivery` sub-fact (`sources.md` §"`mutation_profile`").
-Under `redelivery: at_least_once` (the default) it is a redelivery and folds once; this
-equals the oracle over the *deduplicated* input, the same footing every fold technique
-stands on under redelivery, and a feed in which two genuinely distinct events share both
-`(k, t)` and every row-local value is indistinguishable from redelivery, so the zero-length
-interval the raw oracle would emit for it is not produced — a declared boundary of the grain
-(§Constraints), not a divergence to close. Under `redelivery: none` the source has promised
-that no row arrives twice, so two identical rows are two events at one `(k, t)` and refuse
+A row **identical** to one already folded — matching a presented row's `(k, t)` and every
+row-local value, or a stored tombstone's `(k, t)` and delete flag — is always a
+**re-presentation** and a no-op: a re-run, an explicit `--landed` range, or a repair
+re-presents exactly such rows, and the technique cannot and need not distinguish that from a
+source redelivery. (Against a tombstone only the flag is comparable, so a redelivered delete
+whose payload changed is accepted silently; nothing in the oracle depends on a tombstone's
+payload.) Two identical rows **within one delta** are read through the source's declared
+`redelivery` sub-fact (`sources.md` §"`mutation_profile`"). Under `redelivery: at_least_once`
+(the default) they are a redelivery and fold once; this equals the oracle over the
+*deduplicated* input, the same footing every fold technique stands on under redelivery, and
+a feed in which two genuinely distinct events share both `(k, t)` and every row-local value
+is indistinguishable from redelivery, so the zero-length interval the raw oracle would emit
+for it is not produced — a declared boundary of the grain (§Constraints), not a divergence
+to close. Under `redelivery: none` the source has promised that no row arrives twice within
+a delivery, so two identical rows in one delta are two events at one `(k, t)` and refuse
 (`SuccessionClockTie`) like any other collision.
 
 #### What stays out of this grain
@@ -1457,28 +1480,26 @@ footprint (the new row and its immediate neighbours) for every event regardless 
 it arrives, so a late event folds correctly whenever it is presented, and there is nothing
 to derive a bound over.
 
-**Late events arrive on the run axis, not through a posture change.** The append-only posture
-probe fingerprints every closed partition of the source (`model_properties.md` §"Probe
-obligation", the frontier gate), so under an event-time-partitioned
-source a late append is a posture violation and the theorem's late-splice guarantee is
-unreachable. Three fixes were considered and rejected: gating the fingerprint leg to
-partitions older than the source's declared `lateness` (makes `lateness` a probe input,
-reversing the orchestration-only decision in `docs/research/20260904-decision-track.md`); a
-weaker `append_only` sub-fact with no fingerprint leg (a second posture vocabulary whose only
-consumer would be this grain, and which would silently weaken the probe for any other
-consumer of the same source); and dropping the late-splice claims (gives up the feature's
-main advantage over the partition grain). The chosen answer separates the **run axis** from
-the **succession clock**: a change stream is partitioned by *arrival*, so every append is
-into the open partition and a late event is merely an event in a later window. This is
-already the framework's default-point lateness doctrine — arrival time places the row, the
-SQL decides what counts (`incremental_models.md` §"Windowed maintenance and the horizon") —
-and it needs no new source vocabulary, no grain-local rescan margin, and no discovery
-mechanism beyond the landed delta. The cost is a declaration on the source
+**Late events arrive on the run axis; arrival partitioning makes them free.** Under an
+event-time-partitioned source, a late append lands in a closed partition, which the
+append-only posture probe classifies as a late arrival to re-process (`model_properties.md`
+§Constraints "Declared lateness is orchestration-only"): correct, but it costs a
+closed-partition re-presentation per late batch, and a feed with routine lateness would
+re-present old partitions on most runs. Two alternatives to that cost were considered and
+rejected: a grain-local rescan margin (a per-model restatement of a source fact,
+`sources.md` §Design "World-facts live on the source, never per model") and making the
+source's declared `lateness` a probe input (reverses the orchestration-only decision in
+`docs/research/20260904-decision-track.md`). The chosen answer separates the **run axis**
+from the **succession clock**: a change stream partitioned by *arrival* puts every append
+into the open partition, so a late event is merely an event in a later window and no closed
+partition is ever re-presented. This is already the framework's default-point lateness
+doctrine — arrival time places the row, the SQL decides what counts (`incremental_models.md`
+§"Windowed maintenance and the horizon") — and it needs no new source vocabulary and no
+discovery mechanism beyond the landed delta. The cost is a declaration on the source
 (`partition_column` ≠ `event_time_column`), which `timeseries.md` already admits and which
-states a true fact about the feed rather than restating a source fact per consumer
-(`sources.md` §Design "World-facts live on the source, never per model"). An
-event-time-partitioned source is still admitted, with the framework's existing posture rule
-applying unchanged, so no source is refused for how it happens to be partitioned.
+states a true fact about the feed. An event-time-partitioned source is admitted on equal
+terms — the theorem does not depend on which axis the source uses — and `smelt explain`
+reports which one is in force, so the difference is cost, never correctness or a refusal.
 
 **The lateness clamp is SQL, admitted as a pre-window filter.** A declared `max_lateness:`
 on the model was rejected — it would be a frontmatter fact restating something the SQL can
@@ -1507,7 +1528,7 @@ events are already fully represented by their presented rows, so recording them 
 duplicates the whole history for no information gain; the union of presented rows and a
 deletes-only ledger is the same event sequence at a fraction of the state.
 
-**One driving source, append-only, clock-only unit-offset ascending windows.** The v1 grammar
+**One driving source, append-only, clock-only unit-offset ascending windows.** The grammar
 admits exactly one source reference and no joins, requires `append_only`, admits `LEAD`/`LAG`
 only over the clock column with the default offset of 1 and an ascending single-key `ORDER
 BY`, and requires the key and clock columns to be projected. The offset and direction
@@ -1520,7 +1541,7 @@ key and version time is not a usable history table, and hidden identity columns 
 the presented schema differ from the SQL's. Each of the source-side narrowings is a
 deliberate choice with a named widening path. Joins were excluded
 because the skeleton-source closure proof (`model_properties.md`) rules a join feeding a
-window `Open` in its own v1, so nothing today can prove an enrichment side cannot add, drop,
+window `Open` in its non-aggregating-scope restriction, so nothing can yet prove an enrichment side cannot add, drop,
 or duplicate a version row; admitting joins is a closure widening first. `append_only` is
 required because the theorem folds each event once and a mutated or retracted event would
 leave the stored event sequence disagreeing with the oracle; a `change_feed` driving source,
@@ -1530,14 +1551,28 @@ next-event-feature form — was excluded because a tombstone neighbour's `other_
 to be carried in the ledger too, widening the state per projected column; the clock-only form
 keeps the ledger at the fixed `(k, t)` pair (§Future Extensions).
 
-**Delete admission is a grammar widening, not a change-feed dependency.** Recognising
-`QUALIFY NOT <boolean column>` as a permitted post-window filter was chosen over requiring the
+**Delete admission is a grammar widening, not a change-feed dependency, and it is
+negation-only.** Recognising `QUALIFY NOT <boolean column>` as a permitted post-window
+filter was chosen over requiring the
 driving source to declare a change feed (`sources.md`) or waiting on general change-feed/CDF
 consumption (`incremental_models.md` §Future Extensions "Live change-feed folds"): the delete
 flag is already an ordinary row in the input the model reads, so admitting it needs only a
 classifier rule, not new source-layer or delta-typing machinery. Coupling SCD2 delete-handling
 to the unrelated, unscheduled CDF work would have blocked a self-contained feature on a much
-larger one.
+larger one. The clause is admitted only as a negation (`QUALIFY NOT <col>`), not as a bare
+`QUALIFY <col>`, because the classifier must know which polarity marks a tombstone to write
+the ledger: `NOT is_deleted` says `TRUE` is a delete; an un-negated `QUALIFY is_active`
+would require the classifier to infer that `FALSE` is, which is a guess. Admitting both
+polarities with the polarity carried on the verdict is a straightforward later widening.
+
+**The output declares neither a clock nor an identity — a known composition cost.** A
+succession model declares no `timeseries:` and no `unique_key`, so to a downstream consumer
+its output has no clock and no identity (`model_properties.md`): every consumer inherits
+whole-model dirt on any change, even though a history table with `valid_from` is the
+archetypal clocked upstream. Deriving an output clock from the projected clock column (it is
+`t`, already proven strictly monotone) and an output identity from `(k, t)` is the obvious
+widening, deferred so that the first inferred grain does not also introduce the first
+inferred *output* facts (§Future Extensions).
 
 ## Constraints & Invariants
 
@@ -1695,8 +1730,9 @@ larger one.
    strictly monotone at admission; the key columns and the clock column each appear
    row-locally in the projection so the `MERGE` can address presented rows; a runtime
    collision — two distinct events at one `(k, t)` — rolls the run back
-   (`SuccessionClockTie`). Identical rows at one `(k, t)` fold once under
-   `redelivery: at_least_once` and refuse under `redelivery: none`.
+   (`SuccessionClockTie`). A row identical to stored state is always a re-presentation and a
+   no-op; two identical rows within one delta fold once under `redelivery: at_least_once`
+   and refuse under `redelivery: none`.
 8. **The classifier is fail-closed.** A window function that is not `LEAD(t)`/`LAG(t)` (or an
    expression over one, or with an offset other than the default 1), a non-row-local
    non-window projection, an unresolvable or nullable partition key, a non-strict or
@@ -1884,8 +1920,14 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   a `change_feed` driving source, folding its retractions as removals from the event sequence, once
   offset-based change-feed consumption exists (`sources.md`). A dedupe-before-`LEAD` CTE — the
   `LAG`-comparison filter that drops no-op change events — is a fourth: the classifier is a
-  leaf over one scope today, and recognising a succession projection above a row-local filter
-  scope is a walk-composition question.
+  leaf over one scope, and recognising a succession projection above a row-local filter
+  scope is a walk-composition question. A fifth is un-negated `QUALIFY <col>` with the
+  polarity carried on the verdict.
+- **Derived output facts for the succession grain.** The succession model's output could
+  carry a derived clock (`t`, already proven strictly monotone) and a derived identity
+  (`(k, t)`) so downstream consumers see a clocked, keyed upstream rather than an opaque one
+  (§"Succession-grain design"). Not specified: whether inferred output facts should exist at
+  all is a design question broader than this grain.
 - **Widening inference beyond the succession grain.** The succession-grain classifier recognises
   exactly one window-function shape (`LEAD`/`LAG`-over-clock-within-key). Other window shapes —
   session-gap detection, running ranks — could plausibly earn their own inferred grain by the

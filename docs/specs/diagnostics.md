@@ -206,8 +206,8 @@ broke admission — never a silent fallback to `refresh: full`. Specified, unimp
 | `SuccessionDrivingSourceNotAppendOnly` | Error | The driving source does not declare `mutation_profile.kind: append_only`, or declares no `timeseries:` block. Names the source and its declared kind or the missing block (`incremental_shapes.md` §"Run shape and late events"). |
 | `SuccessionPreFilterNotRowLocal` | Error | A filter precedes the window projection but is not a deterministic row-local predicate over the driving source's own columns, or more than one such filter is present. Names the offending predicate (`incremental_shapes.md` §"Run shape and late events"). |
 | `SuccessionDeleteFilterMisplaced` | Error | A `QUALIFY` clause exists but is not exactly `QUALIFY NOT <row-local boolean column>`, the flag column is not proven `NOT NULL`, or a same-scope `WHERE` tests a window-derived column (`incremental_shapes.md` §"Delete events"). |
-| `SuccessionDriverEventTimePartitioned` | Warning | The driving source's `partition_column` traces to the succession clock, so a late append is a violation of the source's `append_only` posture rather than an event the grain can fold. Names the source; suggests arrival partitioning (`incremental_shapes.md` §"Run shape and late events"). |
-| `SuccessionPatternUnrecognized` | Error | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names. Names the three declared routes (`refresh: full`, `refresh: materialized_view`, or declaring `unique_key`/`timeseries` to reach another grain) as fixes. |
+| `SuccessionPreFilterNegatesFlag` | Warning | The pre-window `WHERE` is a bare negated boolean column. Admitted unchanged; names the column and suggests `QUALIFY NOT <col>` if it is a CDC delete flag, since a flag filtered before the window never closes its predecessor's interval (`incremental_shapes.md` §"Delete events"). Advisory only. |
+| `SuccessionPatternUnrecognized` | Error | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names — a `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the scope, or a model resembling no admitted grain. Names the offending clause where there is one, and the three declared routes (`refresh: full`, `refresh: materialized_view`, or declaring `unique_key`/`timeseries` to reach another grain) as fixes. |
 | `SuccessionClockTie` | Error | Runtime: a delta presents two non-identical events with equal `(k, t)`; an event whose `(k, t)` matches a presented row with different row-local content or delete flag; or a delete and a non-delete at one `(k, t)` in either direction. Identical rows fold once as a redelivery. The run's transaction rolls back; reports the key, clock value, and a sample (`incremental_shapes.md` §"Run shape and late events"). |
 
 ---
@@ -602,7 +602,7 @@ Owned by `docs/specs/state.md` §Diagnostics.
   `SuccessionPartitionKeyMismatch`, `SuccessionOrderNotMonotoneClock`,
   `SuccessionRowLocalColumnViolation`, `SuccessionIdentityNotProjected`, `SuccessionSingleSourceOnly`,
   `SuccessionDrivingSourceNotAppendOnly`, `SuccessionPreFilterNotRowLocal`, `SuccessionDeleteFilterMisplaced`,
-  the advisory `SuccessionDriverEventTimePartitioned`,
+  the advisory `SuccessionPreFilterNegatesFlag`,
   `SuccessionPatternUnrecognized`, or the runtime `SuccessionClockTie`
   (`incremental_shapes.md` §"Succession-grain admission (no declaration)"). No plan exists
   yet — this spec diff is the input to one.

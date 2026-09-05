@@ -173,7 +173,15 @@ otherwise — absence of a proof is a refusal, never an approximate or partial a
     row-local predicate over the driving source's own columns — no window-derived column,
     aggregate, subquery, second relation, or run-nondeterministic function (the determinism
     predicate, §Surface). This is the optional lateness clamp; its predicate is carried as
-    `pre_filter`. Any other pre-window filter refuses (`SuccessionPreFilterNotRowLocal`).
+    `pre_filter`. Any other pre-window filter refuses (`SuccessionPreFilterNotRowLocal`). A
+    pre-filter that is a bare negated boolean column is admitted but carries the advisory
+    `SuccessionPreFilterNegatesFlag` on the verdict (a delete flag filtered here never closes
+    its predecessor — `incremental_shapes.md` §"Delete events"); the advisory never changes
+    admission.
+1b. **No other clause on the scope.** `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, and
+    `LIMIT` each refuse (`SuccessionPatternUnrecognized`, naming the clause): the first three
+    are aggregation, which is not this shape; the last two impose an order or a bound on the
+    output that the succession patch cannot maintain.
 2. **Every window function in the outermost projection is a succession function.** Each
    `OVER (...)` clause is `LEAD(t)`/`LAG(t)` **over the clock column itself, with the default
    offset of 1 and no default-value argument**, or a scalar expression over exactly one such
@@ -201,10 +209,7 @@ otherwise — absence of a proof is a refusal, never an approximate or partial a
    the derived `(k, t)` identity collide; one that traces to a column other than
    `event_time_column` refuses because the succession clock must be the source's own time
    fact. A descending order or a second sort key refuses: the former swaps which neighbour
-   `LEAD` and `LAG` name, the latter makes the order depend on more than the clock. When the
-   source's `partition_column` itself traces to `clock_col`, the run axis and the clock
-   coincide and the classifier emits the advisory `SuccessionDriverEventTimePartitioned`
-   alongside its `Recognized` verdict.
+   `LEAD` and `LAG` name, the latter makes the order depend on more than the clock.
 4. **The key columns and the clock column are each projected row-locally** (possibly under an
    alias), so the derived `(k, t)` identity is recoverable from the presented table and the
    succession `MERGE` can address rows by it. A projection that drops `k` or `t` refuses
@@ -227,7 +232,7 @@ otherwise — absence of a proof is a refusal, never an approximate or partial a
 The classifier is a **leaf** the shared bottom-up walk invokes over one already-bounded scope's
 own projection (the Property composition walk rule, `architecture.md`) — it does not itself
 compose through CTEs or set operations; a succession-shaped projection nested inside a CTE or
-a `UNION` arm is future work (`incremental_shapes.md` §Future Extensions), and today refuses at
+a `UNION` arm is future work (`incremental_shapes.md` §Future Extensions), and refuses at
 the outer scope rather than being silently missed.
 
 ### Per-column mutation-sensitivity / column provenance
