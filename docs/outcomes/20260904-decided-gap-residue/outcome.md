@@ -1,7 +1,7 @@
 # Outcome: Decided-gap residue — close the spec bullets whose target behaviour is already written
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** blocked
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows IM-25, IS-13 ("implementation gap in an already-decided design"); `docs/TODO.md` bullets "Frozen-horizon append-only gate", "Deferral oracle restatement", "Sidecar per-consuming-edge audit"
 **Spec anchors:** `docs/specs/incremental_models.md` §"The contract lattice", §Known Divergences "Conditional-maintenance gaps"; `docs/specs/incremental_shapes.md` §"The column-family catalogue" (once-write), §Known Divergences; `docs/specs/sources.md` §Known Divergences (sidecar per-consumer comparandum)
 
@@ -173,6 +173,17 @@ than the current residue.
   and gate sweep. No new phase row: nothing the summaries surfaced serves a success criterion
   without already having a home.
 
+- 2026-09-05: Outcome terminated `blocked` at the plan step. No workable `pending` row remains
+  (phases 1, 2, 4, 5, 6 `done`; phase 3 `blocked`). Success criteria judged against the phase
+  summaries: 1 met (`phases/01-summary.md`), 2 met (`phases/02-summary.md`), 4 met
+  (`phases/04-summary.md`), 5 met (`phases/05-summary.md`), 6 met (`phases/06-summary.md` —
+  targeted drift check on the five closed bullets found none; `verify-phase.sh`'s four legs,
+  `maintenance_conformance`, `statement_parity` and `fingerprint_sidecar` all green). Criterion 3
+  is met only in part: the classifier route, its unit tests and the plan-layer parity test
+  landed, and the `incremental_shapes.md` bullet was narrowed to the residual clause rather than
+  deleted, but the generative-pool once-write NULL-schedule witness has no legal path through
+  `KeyedRecipe`'s current source shape. That clause is what blocks the outcome.
+
 ## Blocked
 
 - 2026-09-05: Phase 3 (once-write fallback-case nullability route), generative-pool coverage
@@ -187,3 +198,14 @@ than the current residue.
   candidate that is already a `unique_key` member.
 
 <!-- Dated entries; each names the phase, what blocked it, and what a human must decide. -->
+
+- 2026-09-05: **Outcome-level block.** The only open work is phase 3's generative-pool clause
+  (see the phase-level entry above and `phases/03-summary.md` "For the next planner"). A human
+  must pick one of three options before any further phase can be planned: (a) widen
+  `SourceRecipe`/`KeyedRecipe` with a fourth identity column so a composite `unique_key` and a
+  non-self-referential FD are both declarable; (b) relax
+  `validate_functional_dependencies`'s self-contradiction check for the trivial
+  `key -> key` case; or (c) drop the declared-FD requirement in `classify_once_write` when the
+  candidate column is already a `unique_key` member. Each changes user-visible validation
+  surface, so it is a spec-first product call this outcome cannot answer. Everything else the
+  outcome set out to close is done and gated.
