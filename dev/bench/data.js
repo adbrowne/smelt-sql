@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788648699747,
+  "lastUpdate": 1788648702895,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.595304,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "aa19cd9bb60966a5f55b5e658c4b75d2fec1580d",
+          "message": "Merge remote-tracking branch 'origin/main' into scd2-keyed-succession-spec\n\n# Conflicts:\n#\tdocs/specs/diagnostics.md",
+          "timestamp": "2026-09-06T08:49:19+10:00",
+          "tree_id": "717ba5fe74f7ac78eac6930e370fbb660f17bbd5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/aa19cd9bb60966a5f55b5e658c4b75d2fec1580d"
+        },
+        "date": 1788648701711,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.356255365823372,
+            "unit": "MB/s"
           }
         ]
       }
