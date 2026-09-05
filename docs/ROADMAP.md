@@ -185,9 +185,11 @@ Structured diagnostic output designed for LLM consumption. Exposes Smelt's seman
 
 See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
-### 9. Orchestrator Integration
+### 9. Self-Directed Scheduler (orchestration's decision half)
 
-Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
+The execution half of orchestration is built (wavefront `--jobs`, transient-only retry, `--resume`, advisory lock, run manifests/reports, check-skip closure, exit-code contract). The **decision half is not**: smelt cannot yet answer "what needs to run now" without being told — `--since-upstream` needs hand-typed `--source/--landed` deltas, `--auto` is a max-date-to-today stub, and the interval ledger is still date-keyed. Every input the decision needs already exists (typed-edge propagation, the per-source landed-delta record, `watermark.complete_through`, observed output deltas, the fingerprint sidecar); what is missing is the discovery step that turns them into `SourceDelta`s and a window-less `smelt run` that consumes it. This is research §6 step 1 of [`20260811-delta-signatures-and-definition-deltas.md`](research/20260811-delta-signatures-and-definition-deltas.md), gated until `state-residency` landed (done 2026-09-05 on the outcome-loop branch).
+
+Framing, decision surface, and proposed sequence: [`docs/research/20260905-self-directed-scheduler.md`](research/20260905-self-directed-scheduler.md). Next step is a human-reviewed spec diff (the 2026-08-16 handoff flagged this as the programme's highest design risk), preceded by the move-only split of `execute.rs` that the ratchet-paydown outcome deferred to a fork-level implementer. The Dagster/Airflow adapter previously listed here becomes a thin consumer of the resulting idempotent per-model command plus `smelt explain --json`, and is out of scope until the decision half exists.
 
 ### 10. PostgreSQL Backend
 
