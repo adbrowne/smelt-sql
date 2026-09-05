@@ -31,6 +31,7 @@ pub use analysis::{analyze_select, SelectAnalysis, SelectItemKind};
 pub use contract::deferral::validate_deferral;
 pub use contract::frozen_horizon::{
     clamp_write_range as clamp_frozen_horizon_write_range, validate_frozen_horizon,
+    validate_frozen_horizon_posture,
 };
 pub use contract::retain_departed::validate as validate_retain_departed;
 pub use data_tests::{

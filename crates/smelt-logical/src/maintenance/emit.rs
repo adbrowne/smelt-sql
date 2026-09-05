@@ -2861,10 +2861,15 @@ pub fn emit_fingerprint_digest_select(
 /// "Digest" — "the collision-soundness invariant").
 ///
 /// `sidecar_table` is already fully qualified (`schema.table`);
-/// `source_address`/`projection_identity`/`stamp` are plain string values,
-/// escaped here (this emitter, like every other, does its own literal
-/// quoting — see `emit_delete_insert_delta_restricted`'s `delta_keys`
-/// handling for the same pattern).
+/// `source_address`/`projection_identity`/`consumer_address`/`stamp` are
+/// plain string values, escaped here (this emitter, like every other, does
+/// its own literal quoting — see `emit_delete_insert_delta_restricted`'s
+/// `delta_keys` handling for the same pattern). `consumer_address` is the
+/// CONSUMING model's own address (`docs/specs/sources.md` §"The fingerprint
+/// sidecar" — "Naming and namespace"): filtering on it, alongside
+/// `source_address`/`projection_identity`, is what keeps two consumers of
+/// the same source under the same P4 projection from reading each other's
+/// comparandum.
 ///
 /// `stamp` (Phase F4,
 /// `docs/plans/20260715-composed-axes-conditional-maintenance.md` —
@@ -2890,6 +2895,7 @@ pub fn emit_fingerprint_sidecar_diff(
     sidecar_table: &str,
     source_address: &str,
     projection_identity: &str,
+    consumer_address: &str,
     stamp: &str,
     dialect: MaintenanceDialect,
 ) -> String {
@@ -2900,6 +2906,7 @@ pub fn emit_fingerprint_sidecar_diff(
         sidecar_table,
         source_address,
         projection_identity,
+        consumer_address,
         stamp,
     )
 }
@@ -2918,17 +2925,19 @@ fn sidecar_diff_over_digest_select(
     sidecar_table: &str,
     source_address: &str,
     projection_identity: &str,
+    consumer_address: &str,
     stamp: &str,
 ) -> String {
     let source_address_lit = source_address.replace('\'', "''");
     let projection_identity_lit = projection_identity.replace('\'', "''");
+    let consumer_address_lit = consumer_address.replace('\'', "''");
     let stamp_lit = stamp.replace('\'', "''");
     format!(
         "SELECT COALESCE(__smelt_src.delta_key, __smelt_sidecar.source_key) AS delta_key \
          FROM ({digest_select}) AS __smelt_src \
          FULL OUTER JOIN (SELECT source_key, digest FROM {sidecar_table} \
          WHERE source_address = '{source_address_lit}' AND projection_identity = '{projection_identity_lit}' \
-         AND stamp = '{stamp_lit}') \
+         AND consumer_address = '{consumer_address_lit}' AND stamp = '{stamp_lit}') \
          AS __smelt_sidecar ON __smelt_src.delta_key = __smelt_sidecar.source_key \
          WHERE __smelt_sidecar.source_key IS NULL \
          OR __smelt_src.delta_key IS NULL \
@@ -3008,6 +3017,7 @@ pub fn emit_repair_group_sidecar_diff(
     sidecar_table: &str,
     source_address: &str,
     projection_identity: &str,
+    consumer_address: &str,
     stamp: &str,
     dialect: MaintenanceDialect,
 ) -> String {
@@ -3018,6 +3028,7 @@ pub fn emit_repair_group_sidecar_diff(
         sidecar_table,
         source_address,
         projection_identity,
+        consumer_address,
         stamp,
     )
 }
@@ -3391,6 +3402,7 @@ mod fingerprint_sidecar_tests {
             "main._smelt_fingerprint_sidecar",
             "smelt.sources.dim_users",
             "cols:name,tier",
+            "smelt.models.consumer_a",
             "v1:cols:name,tier:sha256:deadbeef",
             MaintenanceDialect::DuckDb,
         );
@@ -3398,6 +3410,7 @@ mod fingerprint_sidecar_tests {
         assert!(sql.contains("FROM main._smelt_fingerprint_sidecar"));
         assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
         assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer_a'"));
         assert!(sql.contains("stamp = 'v1:cols:name,tier:sha256:deadbeef'"));
         assert!(sql.contains("__smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"));
         assert!(sql.contains("__smelt_sidecar.source_key IS NULL"));
@@ -3419,10 +3432,12 @@ mod fingerprint_sidecar_tests {
             "main._smelt_fingerprint_sidecar",
             "smelt.sources.dim's_users",
             "cols:name",
+            "smelt.models.consumer's_a",
             "stamp's",
             MaintenanceDialect::DuckDb,
         );
         assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer''s_a'"));
         assert!(sql.contains("stamp = 'stamp''s'"));
     }
 
@@ -3441,6 +3456,7 @@ mod fingerprint_sidecar_tests {
             "main._smelt_fingerprint_sidecar",
             "smelt.sources.dim_users",
             "cols:name",
+            "smelt.models.consumer_a",
             "v2:cols:name:sha256:newhash",
             MaintenanceDialect::DuckDb,
         );
@@ -3448,7 +3464,8 @@ mod fingerprint_sidecar_tests {
         // a row stamped under any other value is never a candidate match.
         assert!(sql.contains(
             "WHERE source_address = 'smelt.sources.dim_users' AND projection_identity = \
-             'cols:name' AND stamp = 'v2:cols:name:sha256:newhash'"
+             'cols:name' AND consumer_address = 'smelt.models.consumer_a' AND stamp = \
+             'v2:cols:name:sha256:newhash'"
         ));
     }
 
@@ -3544,11 +3561,11 @@ mod fingerprint_sidecar_tests {
             .1;
         conn.execute_batch(&format!(
             "CREATE TABLE sidecar (source_address VARCHAR, projection_identity VARCHAR, \
-             source_key VARCHAR, digest VARCHAR, stamp VARCHAR); \
+             consumer_address VARCHAR, source_key VARCHAR, digest VARCHAR, stamp VARCHAR); \
              INSERT INTO sidecar VALUES \
-             ('src', 'repair:group=customer_id:digest=amount', '1', '{customer_1_digest}', \
-             'stamp1'), \
-             ('src', 'repair:group=customer_id:digest=amount', '2', \
+             ('src', 'repair:group=customer_id:digest=amount', 'smelt.models.consumer_a', '1', \
+             '{customer_1_digest}', 'stamp1'), \
+             ('src', 'repair:group=customer_id:digest=amount', 'smelt.models.consumer_a', '2', \
              'stale-digest-for-vanished-group', 'stamp1');"
         ))
         .expect("seed sidecar: customer 1 matches current content, customer 2 has vanished");
@@ -3560,6 +3577,7 @@ mod fingerprint_sidecar_tests {
             "sidecar",
             "src",
             "repair:group=customer_id:digest=amount",
+            "smelt.models.consumer_a",
             "stamp1",
             MaintenanceDialect::DuckDb,
         );

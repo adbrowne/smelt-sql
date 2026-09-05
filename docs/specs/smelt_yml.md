@@ -28,7 +28,7 @@ owners: [andrew]
 | `python` | string | no | — | Path to a Python interpreter for Python-model discovery. The `SMELT_PYTHON` environment variable takes precedence. |
 | `unstable_schema` | bool | no | `false` | Gate for unstable feature surfaces. When `true`, the gated keys listed in §"`unstable_schema:` gated keys" parse without warnings. |
 | `vars` | map of `<name>` → YAML scalar | no | `{}` | Compile-time variable declarations read by `smelt.config.var('<name>')`. The value shape is a flat map of name → scalar (string/number/bool/null); the lookup, YAML-scalar coercion, and per-target overlay semantics are owned by `meta_language.md` §"Compile-time variables". |
-| `state` | object | no | `{ mode: stateless }` | Project state posture. Carries `mode:` (`stateless` \| `intervals` \| `environments`); the posture lattice, reuse semantics, and environment addressing are owned by `virtual_environments.md` §"`state.mode` — the opt-in posture". |
+| `state` | object | no | `{ mode: stateless, warehouse_tables: allowed }` | Project state posture. Carries `mode:` (`stateless` \| `intervals` \| `environments`) — the posture lattice, reuse semantics, and environment addressing are owned by `virtual_environments.md` §"`state.mode` — the opt-in posture" — and `warehouse_tables:` (`allowed` \| `none`), owned by `state.md` §"Opting out of warehouse bookkeeping" for semantics and §"The degradation contract" for the consequence of setting it to `none`. |
 | `probes` | object | no | `{ cadence: per_run }` | Project-level cadence policy for every declared-fact probe (`model_properties.md` §"Probe obligation"). Carries `cadence:` (`per_run` \| `periodic` \| `off`) and, when `periodic`, `periodic.every_n_runs`. |
 
 ### Environment interpolation

@@ -17,7 +17,7 @@ owners: [andrew]
 
 ### Composition
 
-Per the composition contract (`incremental_models.md` §"The composition contract"), this mode is a composition of the capabilities below. It is the extreme case: it requires **essentially no smelt-side property** — it runs no combiner, does no eligibility analysis of its own, and keeps no maintenance state. Its one input is a backend world-fact.
+Per the composition contract (`incremental_models.md` §"Shape profiles"), this mode is a composition of the capabilities below. It is the extreme case: it requires **essentially no smelt-side property** — it runs no combiner, does no eligibility analysis of its own, and keeps no maintenance state. Its one input is a backend world-fact.
 
 | Facet | Value |
 |---|---|

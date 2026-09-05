@@ -317,6 +317,7 @@ mod tests {
             },
             corner: Corner::RecomputeRegion,
             technique: Technique::KeyedFold,
+            state_downgrade: None,
             partition_local: PartitionLocal::Yes,
             scans: vec![],
             ledger_catch_up: false,

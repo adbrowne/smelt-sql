@@ -1,7 +1,7 @@
 ---
 feature: state
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -29,7 +29,9 @@ smelt is a compiler and orchestrator, not a database — yet several features ne
 between runs: an incremental fold must know which deltas it already absorbed, `--resume` must
 know what the last run did, forward propagation must know what landed upstream. This spec
 answers one question for every such memory: **who is trusted to keep it, and what does smelt
-do when it isn't there?**
+do when it isn't there?** Other specs that touch state cite §"The residency rule",
+§"The degradation contract" or §Diagnostics by name rather than restating the residency class
+of a structure or the downgrade rule; this spec is the sole normative statement of both.
 
 The central rule is a two-class split:
 
@@ -74,6 +76,8 @@ structure's format and semantics; this table owns only its class.
 | Snapshot / environment store | observability | `.smelt/targets/<t>/snapshots.json` | `run_state.md`, `virtual_environments.md` |
 | Source postures | observability | `.smelt/` (per target) | `sources.md` |
 | Probe baselines (frozen-band) | observability | `.smelt/` (per target) | `incremental_models.md` §"The contract lattice" |
+| Source-mutation baselines | observability | `.smelt/targets/<t>/source_mutations.json` | `sources.md` |
+| Migration approvals | observability | `.smelt/targets/<t>/migration_approvals.json` | `definition_deltas.md` |
 
 The class assignment is itself normative: a structure listed as correctness may never be
 realised only in `.smelt/`, and a structure listed as observability may never become a
@@ -88,7 +92,7 @@ the consequence table:
 | Posture | Observability structures written | Correctness structures |
 |---|---|---|
 | `stateless` (default) | none — `.smelt/` need not exist | all, whenever the plan derives them |
-| `intervals` | manifests, reports, interval ledger, landed deltas, schema snapshots, source postures, probe baselines | all |
+| `intervals` | manifests, reports, interval ledger, landed deltas, schema snapshots, source postures, probe baselines, source-mutation baselines, migration approvals | all |
 | `environments` | everything in `intervals` plus the snapshot/environment store | all |
 
 Correctness structures are identical in every row: they are a property of the *plan*, not of
@@ -156,7 +160,10 @@ maintained table equals. Concretely:
   landed deltas recomputes the full dirty set and reports why) or **refuse loudly by name**
   (`--resume` with no manifest refuses, `run_state.md` §"`--resume` semantics") — never
   silently pretend the state was empty. Which of the two applies is owned by the consuming
-  feature's spec; this spec requires that one of them is specified.
+  feature's spec; this spec requires that one of them is specified. Under `state.mode:
+  stateless`, `--resume` is always in the refuse-by-name case: there is no manifest to resume
+  from *by posture*, not by accident, so the error names the posture rather than reading as an
+  ordinary "no partially-failed run found".
 
 ### The degradation contract
 
@@ -276,33 +283,9 @@ lands.
 
 ## Known Divergences / Open Questions
 
-- **The runtime ignores `state.mode` entirely.** `execute_project` unconditionally creates
-  the `.smelt/` file store, acquires the lock, and writes manifests, intervals,
-  reconciliation entries, landed deltas, and schema snapshots on every run
-  (`crates/smelt-runtime/src/execute.rs`) — `StateMode` is parsed (`smelt-core/src/config.rs`)
-  but never consulted. The optionality rule is therefore entirely unimplemented: today every
-  project behaves as (at least) `intervals`. No tracking plan yet; this spec is the intent.
-- **The reconciliation ledger is `.smelt/`-resident, violating the residency rule.** Both
-  gradings live in `.smelt/reconciliation.json` (`crates/smelt-state/src/reconciliation.rs`)
-  rather than in a backend table transactional with the fold. `run_state.md`
-  §"Relationship to the reconciliation ledger" and `incremental_models.md` §Known Divergences
-  already record the intended move; this spec makes the end-state normative. Until the move,
-  the additive grade's never-fold-twice check rides on `.smelt/`, so deleting `.smelt/`
-  today *can* affect correctness for keyed additive folds — the flagship gap this doctrine
-  exists to close.
-- **No availability-resolution step exists in derivation.** Today an additive-graded cell on
-  a backend without a ledger builder fails loudly (the ledger's warehouse substrate is
-  DuckDB-only, `incremental_models.md` §Known Divergences) instead of downgrading with
-  `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented.
-- **Structure-level degradation behaviours are unevenly specified.** `--resume` (refuses) and
-  forward propagation (falls back to full dirty set, `run_state.md` §Known Divergences) have
-  named behaviours; schema snapshots, source postures, and probe baselines do not yet have
-  their absent-state behaviour specified by their owning specs, as the optionality rule
-  requires. Each owner spec needs one sentence.
-- **`state.warehouse_tables` is unimplemented.** The key (§"Opting out of warehouse
-  bookkeeping") is not parsed, and availability resolution — which it feeds — does not exist
-  (previous bullet). Decision record:
-  `docs/research/20260816-open-questions-triage.md` item 11.
+None currently open — `state.mode` is honoured by `execute_project`, the reconciliation ledger
+is engine-resident, and `state.warehouse_tables` is parsed and feeds availability resolution, as
+this spec describes normatively above.
 
 ## Future Extensions
 
@@ -321,22 +304,30 @@ lands.
   Spark-dialect ledger builder is built when a real Spark-targeted incremental workload
   demands the fold-family techniques the downgrade forgoes — not speculatively before.
   Decision record: `docs/research/20260816-open-questions-triage.md` item 12.
-- **Conformance gate leg for state deletion.** A generative gate variant that interleaves
-  `.smelt/` deletion (and, later, downgrade-forcing) between run steps and asserts the
-  equivalence oracle still holds — the executable form of the "no correctness state outside
-  the engine" invariant. Sensible only after the reconciliation ledger's move makes it pass.
+- **Downgrade-forcing conformance leg.** A generative gate variant that forces an availability
+  downgrade (`MaintenanceStateDowngraded`) mid-schedule and asserts the equivalence oracle
+  still holds across the switch — the state-deletion leg (§References → Tests) proves ledger
+  residency; this residual proves the recompute-family fallback itself.
 
 ## References
 
 - **Code**: `crates/smelt-state/src/` (the `.smelt/` store: `file_store.rs`, `intervals.rs`,
   `reconciliation.rs`, `landed_deltas.rs`, `schema_tracking.rs`, `snapshot_store.rs`,
   `source_postures.rs`, `frozen_band_baselines.rs`; backend ledger DDL: `ddl_duckdb.rs`,
-  `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`);
-  `crates/smelt-runtime/src/execute.rs` (state-write sites)
-- **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance.rs`
-  (the equivalence oracle this doctrine's gate leg would extend)
-- **User docs**: none yet — `docs-site/docs/reference/smelt-yml.md` documents `state.mode`
-- **Plans (history)**: none yet — this spec precedes its first implementation plan
+  `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`, `parse_warehouse_tables`);
+  `crates/smelt-runtime/src/execute.rs` (state-write sites); `crates/smelt-logical/src/maintenance/availability.rs`
+  (the pure availability-resolution step)
+- **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance/`
+  (the standing equivalence-oracle gate; `state_deletion.rs` is the leg that interleaves
+  `.smelt/` deletion between run steps for every maintained recipe, the executable form of
+  "no correctness state outside the engine")
+- **User docs**: `docs-site/docs/reference/state.md` (state-structure inventory, per-posture
+  write set, recovery playbook), `docs-site/docs/reference/smelt-yml.md` §"State Configuration"
+  (`state.mode`, `state.warehouse_tables`, both diagnostics), `docs-site/docs/guide/targets.md`
+  (per-backend ledger availability), `docs-site/docs/guide/incremental-models.md` (per-model
+  maintenance-plan downgrade reporting), `docs-site/docs/reference/smelt-explain.md`
+  (`MaintenanceStateDowngraded` printing)
+- **Plans (history)**: `docs/outcomes/20260904-state-residency/outcome.md`
 - **Related specs**: `run_state.md` (`.smelt/` layout and formats), `incremental_models.md`
   (frontier semantics, equivalence invariant, graph layer), `incremental_shapes.md` (merge
   ledger, partition-grain state ownership), `virtual_environments.md` (`state.mode` surface,

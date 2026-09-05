@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-09-03
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -418,11 +418,16 @@ contract:
 
 - `smelt explain <model>` — prints the plan (a worked rendering is §"Per-cell write
   addressing"'s `order_facts` example). Its sections:
-  - **Headline**: the model's **delta signature** — for a bare keyed model,
-    `emits: keyed upsert over [order_id], key-addressed`; for a composed model, the same with
-    its locality slice bound appended (the worked example below); for a partition-grain model,
-    `emits: append-only within a window, window-addressed by order_date` — with the derived
-    `grain` label alongside as the friendly name.
+  - **Headline**: the report's **first line** — the model's own **delta signature**: for a bare
+    keyed model, `emits: keyed upsert over [order_id], key-addressed`; for a composed model, the
+    same with its locality slice bound and settle bound appended (the worked example below); for
+    a partition-grain model, `emits: append-only within a window, window-addressed by
+    order_date`; for a model whose own SQL degrades to `general`,
+    `emits: general (degraded by: <reason>), not delta-addressable` — naming the construct or
+    world-fact responsible and making no addressing claim. Every form carries the derived
+    `grain` label alongside as the friendly name — the same label the report's own
+    `derived grain:` row prints. `--json` carries the identical fields as a top-level
+    `delta_signature` object (§Constraints item 5 of `cli.md`).
   - **Per cell**: the cells with their addressing, scan clamps, locality verdicts, the
     effective contract point, and the **per-column guarantee ledger** — the printed summary
     of what each output column is guaranteed (its equivalence contract and its **settle
@@ -477,7 +482,7 @@ contract:
 - `smelt build <model> --period <start>..<end> --include-upstreams` — **backward resolution**:
   print the per-ancestor required slices and build order; optionally execute the bounded build
   (§"The graph layer").
-- `smelt rebuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]` — a
+- `smelt rebuild <selector> --start <ISO-8601> --end <ISO-8601>` — a
   **ranged re-run**: rebuild a model (and, with selectors, its upstreams) over a time range
   using its ordinary maintenance plan, with batch-safety-aware chunking
   (`incremental_shapes.md` §"First-run and backfill"). A data-side verb, deliberately disjoint
@@ -511,7 +516,7 @@ follows from its derived run shape:
 
 ```
 smelt run     --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]   # partition grain; keyed window-forward
-smelt rebuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]   # same, batch-safety-aware chunking
+smelt rebuild <selector> --start <ISO-8601> --end <ISO-8601>                          # same, batch-safety-aware chunking
 smelt run     [selectors]                                                             # keyed snapshot-reconcile
 ```
 
@@ -815,7 +820,13 @@ of the default point for every model that opts in. The first run has nothing to 
 against, so it only establishes the baseline. Count comparison is sound only where the source
 is `append_only` (row counts non-decreasing); declaring `frozen_horizon` on a model whose
 driving source has any other declared mutation profile is refused at declaration time
-(`ContractFrozenHorizonInvalid`, naming the posture) rather than probed blind.
+(`ContractFrozenHorizonInvalid`, naming the posture) rather than probed blind. Because the probe
+is baseline-comparative across runs, declaring `frozen_horizon` under a posture that does not
+persist probe baselines is refused the same way, by name: `DeclaredContractRequiresState`
+(`state.md` §"Declarations stay fail-loud"), the same call made for `contract.deferral` and for
+the same reason — silently skipping the comparison would turn the declared guarantee into an
+unverified hope. The first-run baseline-establishment case above is unaffected, since it makes
+no comparison to skip.
 
 **Deferral (`D`).** The oracle bounds the lag between the landed and processed sets (§"The
 equivalence invariant", landed vs processed): at every scheduled evaluation, every input in
@@ -2052,9 +2063,8 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   per-source watermark is persisted. Tracked:
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
-- **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes
-  the signature the first line; today's output leads with grain), nor the per-column guarantee
-  summary or derived run shape. Tracked:
+- **`smelt explain` does not yet print the per-column guarantee summary or derived run shape**
+  (§Surface "CLI"'s "Per cell" bullet). Tracked:
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
 - **A `contract.cells[].deferral` cell addressing a strict subset of the plain fold's own
   column groups cannot decline the fold's whole-row write.** The plain `Trigger::NewData`
@@ -2092,7 +2102,13 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   recompute family, explain-visible). A Spark-dialect ledger builder is deliberately deferred
   until a real Spark-targeted incremental workload demands one — on a ledger-less backend the
   recorded downgrade is the intended behaviour, not a stopgap (decision record:
-  `docs/research/20260816-open-questions-triage.md`).
+  `docs/research/20260816-open-questions-triage.md`). Tracking the availability-resolution step
+  that implements the downgrade: `docs/outcomes/20260904-state-residency/outcome.md`
+  (criteria 3-5).
+- **The reconciliation ledger is `.smelt/`-resident, not engine-resident.** `state.md`
+  §"The residency rule" is the normative statement (a backend table transactional with the
+  fold); tracking the move: `docs/outcomes/20260904-state-residency/outcome.md`
+  (criterion 1).
 - **Graph-layer gaps**: a `grain: key` model that also declares `timeseries:` but cannot
   establish key temporal locality still refuses (`MaintenanceGraphUnsupportedNode`) — key-
   temporal-locality establishment (§"Key temporal locality") is a separate proof from
@@ -2111,11 +2127,18 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   mutation cell"), but the cell never reads the feed's own delta rows; live fold machinery over
   a change feed's delta shape (retractions, `delta_identity`) remains §Future Extensions, blocked
   on the retention point.
-- **Conditional-maintenance gaps**: a target whose `BackendCapabilities::supports_fingerprint_sidecar`
-  is `false` keeps the widened-scan recompute for a mutation-sensitive cell driven by an external
-  `mutable_snapshot` source (`multi_backend.md` §"The fingerprint sidecar capability" — DuckDB
-  alone sets it today). Refs: `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
-  `docs/outcomes/20260815-definition-delta-migrate/phases/27b-plan.md`.
+- **Conditional-maintenance gaps**: every fingerprint-sidecar consumer — never just one leg —
+  decides on `BackendCapabilities::supports_fingerprint_sidecar`, and never re-derives the
+  question from the target's dialect. A flagless target's consequence differs by leg: the
+  external-delta-restriction cell (a mutation-sensitive cell driven by an external
+  `mutable_snapshot` source) keeps the widened-scan recompute, while the repair-family /
+  key-addressed-model-edge group-grain cell refuses with `UnsupportedOnBackend` — a clamped
+  current-source scan over a `mutable_snapshot` would be unsound there, not merely wider. The
+  residual divergence is only that DuckDB alone declares the flag today, because the sidecar's
+  own DDL owner (`smelt-state`) is DuckDB-shaped (`multi_backend.md` §"The fingerprint sidecar
+  capability"). Refs: `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
+  `docs/outcomes/20260815-definition-delta-migrate/phases/27b-plan.md`,
+  `docs/outcomes/20260904-decided-gap-residue/`.
 
 ## Future Extensions
 

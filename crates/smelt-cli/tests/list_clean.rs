@@ -39,6 +39,14 @@ fn scaffold(tmp: &TempDir) -> PathBuf {
         "smelt init should succeed.\nstderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
+    // `smelt init`'s scaffold declares no `state:` key, so it defaults to
+    // `state.mode: stateless` (`docs/specs/state.md` §"`state.mode` and
+    // what each posture provides"); `clean_removes_artifacts_preserves_state`
+    // needs a posture that actually writes `.smelt/`.
+    let smelt_yml_path = project_dir.join("smelt.yml");
+    let mut smelt_yml = std::fs::read_to_string(&smelt_yml_path).unwrap();
+    smelt_yml.push_str("state:\n  mode: intervals\n");
+    std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
 
     std::fs::write(
         project_dir.join("models").join("orders_table.sql"),

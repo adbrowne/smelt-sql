@@ -52,6 +52,10 @@ impl BackendFactory for PlainDuckDbFactory {
 }
 
 fn stage_project(project_dir: &Path, db_path: &Path) {
+    stage_project_with_mode(project_dir, db_path, "intervals");
+}
+
+fn stage_project_with_mode(project_dir: &Path, db_path: &Path, state_mode: &str) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
 
     let source_yml = r#"description: Raw events.
@@ -118,7 +122,7 @@ GROUP BY 1
     // orthogonal enforcement — a real deployment would tune cadence and D
     // together so routine catch-up runs do not also trip the probe.
     let smelt_yml = format!(
-        "name: deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+        "name: deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nstate:\n  mode: {state_mode}\nprobes:\n  cadence: off\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
@@ -195,7 +199,7 @@ GROUP BY 1
     // See `stage_project`'s doc comment on `probes: cadence: off` — the
     // same rationale applies here for the catch-up-run scenario.
     let smelt_yml = format!(
-        "name: cell_deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+        "name: cell_deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
@@ -404,6 +408,104 @@ async fn deferred_run_is_recorded_skipped_and_writes_nothing() {
         maintained.format("%Y-%m-%d").to_string(),
         "2026-01-02",
         "a skipped run must not advance the interval ledger"
+    );
+}
+
+/// `docs/outcomes/20260904-state-residency/outcome.md` phase 8: under
+/// `state.mode: stateless` neither the interval ledger nor the landed-delta
+/// record exists (`FileStore::with_state_mode` no-ops every save), so
+/// `deferral_decision`'s frontiers are always `None` and
+/// `run_license` (`crates/smelt-logical/src/contract/deferral.rs`) always
+/// returns `Run` — the same shape as `run_license_runs_when_nothing_is_
+/// pending`. This is the coarser, always-correct degradation
+/// `docs/specs/state.md` §"The optionality rule" requires: a `contract.
+/// deferral` model under a posture that cannot measure lag folds every run
+/// rather than ever taking a skip it has no state to license.
+#[tokio::test]
+async fn stateless_deferral_cell_folds_every_run() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_project_with_mode(&project_dir, &db_path, "stateless");
+    seed_events(&db_path).expect("seed events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    assert_eq!(
+        config.state.mode,
+        smelt_core::config::StateMode::Stateless,
+        "fixture must actually declare state.mode: stateless"
+    );
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    // Run A: same shape as `deferred_run_is_recorded_skipped_and_writes_
+    // nothing`'s run A, but under `stateless` no interval/landed-delta
+    // state survives it.
+    run(
+        "run-a",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec![],
+        "2026-01-01",
+        "2026-01-02",
+    )
+    .await
+    .expect("run A must succeed");
+
+    assert!(
+        !project_dir.join(".smelt").exists(),
+        "state.mode: stateless must leave no .smelt/ directory"
+    );
+
+    // Run B: only `upstream_advancer`, same as before.
+    run(
+        "run-b",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["upstream_advancer".to_string()],
+        "2026-01-02",
+        "2026-01-04",
+    )
+    .await
+    .expect("run B must succeed");
+
+    // Run C: under the intervals-backed fixture this same shape licenses a
+    // skip (see `deferred_run_is_recorded_skipped_and_writes_nothing`).
+    // Under `stateless` there is no frontier to measure a lag against, so
+    // `deferred_model` must fold instead of skip.
+    let outcome = run(
+        "run-c",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["deferred_model".to_string()],
+        "2026-01-04",
+        "2026-01-05",
+    )
+    .await
+    .expect("run C must succeed");
+
+    let record = outcome
+        .models
+        .get("deferred_model")
+        .expect("deferred_model must have a manifest entry");
+    assert_ne!(
+        record.strategy, "skipped_deferral",
+        "a stateless project has no frontier to license a skip with — it must fold every run"
+    );
+    assert_eq!(record.outcome, RunOutcomeKind::Success);
+
+    assert!(
+        !project_dir.join(".smelt").exists(),
+        "state.mode: stateless must still leave no .smelt/ directory after three runs"
     );
 }
 

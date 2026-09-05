@@ -396,6 +396,7 @@ fn synthetic_cell(technique: Technique, row_identity: RowIdentity) -> PlanCell {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        state_downgrade: None,
     }
 }
 
@@ -730,6 +731,7 @@ fn choice_rs_execution_semantics_unchanged() {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            state_downgrade: None,
         }],
         refusals: vec![],
         key_locality: None,
@@ -944,6 +946,7 @@ fn merge_probe_cell(trigger: Trigger, ledger_catch_up: bool) -> PlanCell {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        state_downgrade: None,
     }
 }
 

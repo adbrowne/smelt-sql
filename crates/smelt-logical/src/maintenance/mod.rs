@@ -25,6 +25,7 @@
 //! Nothing here is wired into diagnostics, planning, or execution; the module
 //! is pure data + pure functions (Salsa-purity compatible by construction).
 
+pub mod availability;
 pub mod choice;
 pub mod derive;
 pub mod diff_patch;
@@ -369,6 +370,14 @@ pub struct PlanCell {
     /// (`docs/outcomes/20260809-output-delta-typing/outcome.md` 2026-08-10
     /// decision log). `None` for every other cell — unaffected.
     pub key_scope: Option<KeyScope>,
+    /// Set by [`availability::resolve_availability`] when this cell's ideal
+    /// technique required a [`availability::StateStructure`] with no
+    /// available realisation for this project (`state.md` §"The degradation
+    /// contract") — `None` for every cell straight out of ideal derivation,
+    /// since availability resolution is a distinct, later step no deriver
+    /// consults (maintenance-plan purity, `state.md` §"The degradation
+    /// contract" step 1 "Ideal derivation").
+    pub state_downgrade: Option<availability::StateDowngrade>,
 }
 
 /// A key-addressed read restriction: recompute only the rows identified by

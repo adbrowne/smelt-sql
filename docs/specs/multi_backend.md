@@ -706,9 +706,18 @@ specified ahead of their own struct fields (see §Known Divergences).
 
 - **`supports_fingerprint_sidecar`** — the backend can build and diff the fingerprint sidecar
   (`sources.md` §"The fingerprint sidecar") that synthesizes an exact changed-key delta for an
-  external `mutable_snapshot` source with no native change feed. `true` for DuckDB alone today. A
-  backend without it keeps the widened-scan recompute for a mutation-sensitive cell driven by such
-  a source — the gap is declared here, never a silent narrowing a consumer has to discover.
+  external `mutable_snapshot` source with no native change feed. `true` for DuckDB alone today.
+  The flag is queried by admission exactly like every other capability flag — never re-derived by
+  a consumer from the target's dialect. A flagless target's consequence differs by leg:
+  - **External delta restriction** (a mutation-sensitive cell driven by such a source): keeps the
+    widened-scan recompute — the gap is declared here, never a silent narrowing a consumer has to
+    discover.
+  - **Repair-family / model-edge group-grain recompute**: refuses with `UnsupportedOnBackend`
+    rather than falling back to a widened scan, because a clamped current-source scan over a
+    `mutable_snapshot` is unsound on this leg, not merely wider.
+  The sidecar's own DDL (`smelt-state`'s `ddl_duckdb::generate_fingerprint_sidecar_table_ddl`) is
+  DuckDB-shaped; a second backend declaring the flag needs its own DDL before the flag can be set
+  for it. `capability_conformance` pins the current declared matrix (DuckDB alone `true`).
 
 ### Whole-row MERGE
 

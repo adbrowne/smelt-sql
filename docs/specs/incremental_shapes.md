@@ -295,7 +295,11 @@ The once-write family admits four spellings, and no others:
   with a fallback argument, admitted under the same functional dependency, backed by the
   decomposed `(value, written)` state (§"Decomposed state (rung 2) in keyed models"): the raw
   reduction and the fallback are kept apart, so the fallback is applied fresh in `π` on every
-  read rather than merged into the stored value.
+  read rather than merged into the stored value. When `<col>` is provably non-null within its
+  group (a `unique_key` column of the model), the fallback is dead — it can never actually
+  stand in for a value a later window would supply — so the spelling keeps the bare
+  `COALESCE(target, delta)` fold with no decomposed state instead; the functional dependency is
+  still required.
 - `COALESCE(MAX(<a>), MAX(<b>))` (and the `MIN` variants, and longer candidate lists) — a
   multi-candidate reduction, admitted under a declared functional dependency naming *every*
   candidate column, backed by one decomposed `(value, written)` state pair per candidate: `π`
@@ -364,8 +368,8 @@ chooser").
 | `KeyedForbidsSafetyOverrides` | A key-addressed model (`grain: key`, declared or resolved) declares `safety_overrides:` — every keyed rejection guards the equivalence invariant, and there is nothing safe to waive; names the two escapes (remodel as partition-shaped, or `refresh: materialized_view`). |
 | `KeyedUnknownCombiner` | A non-key projection is not a direct call to a catalogued aggregator; names the offending expression. For a bare column or `ANY_VALUE` under window-forward, names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | The `GROUP BY` contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partition shape and the key-embedded time-partitioned shape; suggests both fixes: `grain: partition` + `timeseries:`, or declaring `timeseries:` on the model to stay `grain: key`. |
-| `KeyedForbidsWindowFunctions` | The outer SELECT uses `OVER (...)`. The keyed state *is* the window. |
-| `KeyedForbidsNondeterministic` | The SQL uses `RANDOM()`, `UUID()`, or another per-row non-deterministic function. Time-dependent functions (`NOW()`/`CURRENT_*`) are admitted in payload positions and run as-is — the columns they feed carry no equivalence promise (`incremental_models.md` §"The equivalence invariant") — but stay refused in a `unique_key`/`GROUP BY` or other membership position, where they would make row identity itself time-of-run-dependent. |
+| `KeyedForbidsWindowFunctions` | **Any** SELECT scope of the model — the outer body, a CTE, a derived table, or an expression-position subquery — uses `OVER (...)`. The keyed state *is* the window, and a window evaluated over a delta-filtered scope is not the window over history, so the refusal is not limited to the outer SELECT. Derived by the composition walk (`model_properties.md` §"The composition walk"): the match is a parsed `OVER` clause at any scope, so one appearing only inside a string literal or comment never fires. |
+| `KeyedForbidsNondeterministic` | **Any** SELECT scope of the model calls `RANDOM()`, `UUID()`, or another per-row non-deterministic function — matched as a parsed function call, not a substring, so a name that merely ends in a listed one (`SNOW(...)` vs `NOW(...)`) or a listed name inside a string literal never fires. Time-dependent functions (`NOW()`/`CURRENT_*`) are admitted in payload positions and run as-is — the columns they feed carry no equivalence promise (`incremental_models.md` §"The equivalence invariant") — but stay refused in a `unique_key`/`GROUP BY` or other membership position, where they would make row identity itself time-of-run-dependent. |
 | `KeyedSqlNotParseable` | The model body cannot be parsed into the shape the classifier reads. |
 | `KeyedMultipleDrivingSources` | More than one timeseries-tagged source in the FROM clause; lists the candidates. |
 | `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no once-write provenance proof for one or more of its candidate columns; names the column, the unproven candidate(s), and the three fixes (key-derived form; declaring the dependency — `functional_dependencies: [{key: [...], determines: <col>}]`, `model_properties.md`; remodelling). |
@@ -712,10 +716,10 @@ bookkeeping, not refusal. The two grades differ in classification, not existence
 additive-fold model the frontier is a correctness structure and always exists; for a
 re-run-tolerant model it is bookkeeping, written automatically whenever the project's state
 mode supports it (`state.md`), so `--auto` staleness always has a record to consult. Where the
-backend offers no ledger substrate, the re-run-tolerant bookkeeping record is **not written**,
-and the omission is reported as a named fact on the run's reporter channel — never silently
-dropped; the additive grade has no such fallback and refuses the run outright there, since for
-it the frontier is a correctness structure. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
+backend offers no ledger substrate, availability resolution downgrades the cell to its
+recompute-family equivalent and records the downgrade as `MaintenanceStateDowngraded`
+(`state.md` §"The degradation contract") rather than skipping the bookkeeping write or refusing
+the run. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
 describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
 state-structure inventory"), distinct from the opt-in run-state observability surface
 (`run_state.md`), and the model realisation of `state.md` §"The residency rule".
@@ -824,9 +828,11 @@ later window (§"The column-family catalogue" enumerates the admitted spellings 
 functional dependencies). The fallback-bearing and multi-candidate spellings each get one
 `(value, written)` state pair per candidate, `written = (value IS NOT NULL)`, folded
 independently; `π` returns the first written candidate in declared preference order, else the
-fallback — a pure function of state, so merge order cannot leak into which candidate wins. The
-bare key-derived spelling needs no decomposed state: a key column is already non-null by
-construction, so plain `COALESCE(target, delta)` already computes the presented value.
+fallback — a pure function of state, so merge order cannot leak into which candidate wins. A
+spelling whose every candidate payload is provably non-null needs no decomposed state: the bare
+key-derived spelling (a key column is already non-null by construction) and a single
+`MAX`/`MIN` reduction of a `unique_key` column both compute their presented value with plain
+`COALESCE(target, delta)`, for the same by-construction reason.
 `smelt explain` renders state columns as internal state, distinct from the public schema
 (`incremental_models.md` §"CLI").
 
@@ -1214,11 +1220,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
   Divergences).
-- **The `PartitionGrainForbidsMetrics` refusal is unimplemented** — §"Functions inside
-  partition-grain bodies" refuses `smelt.metric()` in a partition-grain body, but no
-  classifier or diagnostic produces the code today, so the combination's behaviour is
-  effectively undefined at runtime. Decision record:
-  `docs/research/20260816-open-questions-triage.md`.
 - **The sub-`g_part` rejection does not yet name the coarsened window** — §"Run window vs
   partition granularity" requires the refusal to spell out the run window that would be
   accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over
@@ -1230,24 +1231,40 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The key grain
 
-- **The once-write classifier has no nullability route around the fallback case** — the only
-  route to decomposed `(value, written)` state is the FD-backed proof, since the NOT-NULL
-  derivation proves not-null only for a partition/driving-clock-derived column; the key-derived
-  route still requires a bare `unique_key` column reference, not an arbitrary key-derived
-  *expression*; admission reads whole-scope fan-out/set-operation facts, so any fan-out or
-  undiscriminated set operation anywhere in scope refuses every candidate. Decision record:
-  `docs/research/20260705-keyed-collapse-application.md`; tracking:
-  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
+- **The once-write classifier's nullability route proves non-nullness only from the model's own
+  `unique_key`** — a single `MAX`/`MIN` reduction of a `unique_key` column is admitted without
+  decomposed state (the fallback is dead), but a driving-clock-derived payload still takes the
+  decomposed-state route: the classifier resolves no driving source, so widening this route to a
+  clock-derived proof would need a new plan-layer input and risks CLI↔runtime admission
+  divergence. Separately, the multi-column-`unique_key` shape this route needs to be reachable
+  through declared YAML (`key` and `determines` must name different columns — a single-column
+  `unique_key` can only self-determine, which `validate_functional_dependencies` rejects; and a
+  `grain: key` model's `GROUP BY` may not touch the driving source's `partition_column`, so the
+  partition column cannot supply the second key member either) has no generative-pool recipe
+  covering it today — the classifier route and its plan-layer/unit-test coverage exist
+  (`crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`,
+  `crates/smelt-db/tests/maintenance_fold_spec_companion.rs`), but no end-to-end DuckDB witness
+  does. The key-derived route (no `MAX`/`MIN` wrapper) still requires a bare `unique_key` column
+  reference, not an arbitrary key-derived *expression*; admission reads whole-scope
+  fan-out/set-operation facts, so any fan-out or undiscriminated set operation anywhere in scope
+  refuses every candidate. Decision record: `docs/research/20260705-keyed-collapse-application.md`;
+  tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
+  `docs/outcomes/20260904-decided-gap-residue/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is
-  transactional, and the ledger table itself exists, on DuckDB only (Open Question)** — the
-  default `Backend::fold_ledger_delta` and `Backend::execute_write_with_bookkeeping` are
-  best-effort check-then-act across separate statements; only the DuckDB backend overrides
-  either with a real transaction, and every merge-ledger record (additive `INSERT` or
-  re-run-tolerant `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB
-  window-forward keyed model writes no frontier record at all today — the re-run-tolerant grade
-  reports the omission on the run's reporter channel rather than dropping it silently; the
-  additive grade instead refuses the run.
+  transactional, and the ledger table itself exists, on DuckDB only.** The default
+  `Backend::fold_ledger_delta` and `Backend::execute_write_with_bookkeeping` are best-effort
+  check-then-act across separate statements; only the DuckDB backend overrides either with a
+  real transaction, and every merge-ledger record (additive `INSERT` or re-run-tolerant
+  `ON CONFLICT DO NOTHING` upsert) is DuckDB-dialect SQL, so a non-DuckDB window-forward keyed
+  model writes no frontier record at all today. §"The transactional frontier write (merge
+  ledger)" now specifies the end-state (a recorded `MaintenanceStateDowngraded` downgrade for
+  both grades). The re-run-tolerant grade now matches: availability resolution downgrades a
+  ledger-requiring cell to its recompute-family equivalent before this driver ever runs, and the
+  downgrade is the affected cell's own recorded `state_downgrade`, surfaced by `smelt explain`
+  (`cli.md` §"`smelt explain <model>` maintenance-plan report") — not a reporter event. The
+  additive grade still refuses the run outright on a non-DuckDB target rather than downgrading.
+  Tracking: `docs/outcomes/20260904-state-residency/outcome.md` (criterion 3).
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.
@@ -1388,9 +1405,9 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   `WindowedKeyedRule`); `crates/smelt-runtime/src/cumulative.rs` (per-window merge execution);
   `crates/smelt-backend/src/lib.rs` (`merge_into`, `Backend::execute_write_with_bookkeeping` —
   the transactional-write seam), impls in `crates/smelt-backend-duckdb` (the transactional
-  override) `/-spark`; `crates/smelt-runtime/src/reporter.rs`
-  (`RunReporter::state_structure_unavailable` — the fail-loud report when a non-DuckDB backend
-  skips the idempotent-grade ledger record).
+  override) `/-spark`; `crates/smelt-logical/src/maintenance/availability.rs`
+  (`resolve_availability` — the recorded `MaintenanceStateDowngraded` downgrade a non-DuckDB
+  target's ledger-requiring cell carries, surfaced by `smelt explain`; see §Known Divergences).
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`);
   `crates/smelt-logical/tests/execution_postures.rs`; the keyed end-state-equivalence harness;
   `crates/smelt-runtime/tests/keyed_frontier_bookkeeping.rs`; `smelt-backend-duckdb` `merge_into`

@@ -787,6 +787,12 @@ pub enum DiagnosticCode {
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
     /// clause is a subquery that does not project the column. Error severity.
     EventTimeColumnNotVisibleAtOuterSelect,
+    /// A `grain: partition` model's body calls `smelt.metric(...)`. The
+    /// composition of metric expansion with time-filter injection is
+    /// deliberately unspecified (`incremental_shapes.md` §"Functions inside
+    /// partition-grain bodies"), so the combination refuses ahead of
+    /// execution rather than composing unpredictably. Error severity.
+    PartitionGrainForbidsMetrics,
     /// Emitted when two files in the same project resolve to the same
     /// `smelt.<path>` address across any entity kind (model, function, seed,
     /// source). Hard workspace-load error; the colliding entities do not load.
@@ -1030,6 +1036,24 @@ pub enum DiagnosticCode {
     /// (`property_diff.md` §"Baseline materialisation"). CLI only; exits
     /// `2`. Never falls back to an empty diff.
     PropertyDiffBaselineUnavailable,
+    /// Emitted (Warning) when availability resolution
+    /// (`smelt_logical::maintenance::availability::resolve_availability`)
+    /// downgrades a plan cell's technique to its recompute-family
+    /// equivalent because the state structure it needs has no available
+    /// realisation on a declared backend — no ledger builder,
+    /// `state.warehouse_tables: none`, or a posture that excludes it
+    /// (`docs/specs/state.md` §"The degradation contract",
+    /// §Diagnostics). Names the cell, the original technique, the missing
+    /// structure, and the backend the downgrade was observed against.
+    /// Printed by `smelt explain`. Anchored at the model SQL body start.
+    MaintenanceStateDowngraded,
+    /// Emitted (Error) when a declared contract-lattice point whose
+    /// semantics require a state structure (e.g. `contract.deferral`'s
+    /// ledger-measured lag) is declared in a project whose posture,
+    /// backend, or `state.warehouse_tables: none` opt-out cannot supply it
+    /// (`docs/specs/state.md` §Diagnostics). Names the declaration and the
+    /// missing structure. Anchored at the model SQL body start.
+    DeclaredContractRequiresState,
 }
 
 /// Structured metadata attached to diagnostics for code actions

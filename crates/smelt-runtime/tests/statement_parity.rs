@@ -655,6 +655,137 @@ async fn region_recompute_statements_come_from_the_emitter() {
     );
 }
 
+/// State residency (`docs/outcomes/20260904-state-residency/outcome.md`
+/// criterion 1): each DuckDB DeleteInsert batch's own reconciliation-ledger
+/// reset — the idempotent `_smelt_ledger` DDL plus this batch's own
+/// `[start, end)` region-recompute reset — must be sent to the connection
+/// as raw SQL byte-identical to `generate_ledger_table_ddl`/
+/// `generate_ledger_recompute_reset_sqls`'s own output, and must never
+/// appear inside the write's own `StatementGroup` (bookkeeping never leaks
+/// into the emitted write, `docs/specs/incremental_models.md` §"Statement
+/// emission (single owner)").
+#[tokio::test]
+async fn ledger_recompute_reset_statements_come_from_the_state_builder() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+
+    write_model(
+        project_dir,
+        "daily_events",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT * FROM (VALUES (DATE '2024-01-01', 10), (DATE '2024-01-02', 20)) AS t(event_date, amount)",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: ledger_reset_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    // Run 1: first-run create — no ledger reset yet (the target doesn't
+    // exist, so this run never reaches the DeleteInsert branch).
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        execute_project(
+            "ledger-reset-run-1".to_string(),
+            make_request("dev", "2024-01-01", "2024-01-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("run 1 (first-run create)");
+    }
+
+    // Run 2: the table exists — two daily batches dispatch `IncrementalStrategy::
+    // DeleteInsert`, each recording its own ledger reset.
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    execute_project(
+        "ledger-reset-run-2".to_string(),
+        make_request("dev", "2024-01-01", "2024-01-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("run 2 (incremental)");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let sql_log = backend.recorded_sql();
+
+    let ensure_ddl = smelt_state::ddl_duckdb::generate_ledger_table_ddl("main");
+    assert!(
+        sql_log.iter().any(|s| s == &ensure_ddl),
+        "the ledger's idempotent ensure DDL must be sent as raw SQL byte-identical to \
+         `generate_ledger_table_ddl`: {sql_log:?}"
+    );
+
+    // No `batch_size_days` is set, so the whole `[start, end)` request range
+    // runs as a single batch, not one batch per day.
+    let expected_reset = smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
+        "main",
+        "daily_events",
+        "{*}",
+        "2024-01-01",
+        "2024-01-03",
+        "self",
+        "2024-01-03",
+    );
+    for stmt in &expected_reset {
+        assert!(
+            sql_log.contains(stmt),
+            "the batch must record its ledger reset statement byte-identical to \
+             `generate_ledger_recompute_reset_sqls`: {stmt}\nrecorded: {sql_log:?}"
+        );
+    }
+
+    // Bookkeeping never leaks into the emitted write's own StatementGroup.
+    let groups = backend.recorded_groups();
+    for group in &groups {
+        for stmt in &group.statements {
+            assert!(
+                !stmt.sql.contains("_smelt_ledger"),
+                "ledger bookkeeping must never appear inside a maintenance StatementGroup: {}",
+                stmt.sql
+            );
+        }
+    }
+}
+
 /// First-run bootstrap for a **self-referential** partition-grain model
 /// (`docs/specs/incremental_shapes.md` §"First-run and backfill" — "First-run
 /// bootstrap for a self-referential model"): building from scratch (no
@@ -4277,6 +4408,8 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("delta-restricted recompute must succeed");
@@ -4308,6 +4441,159 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
          over the same inputs"
     );
     assert_eq!(group.transactional, expected.transactional);
+}
+
+/// State residency (`docs/outcomes/20260904-state-residency/outcome.md`
+/// criterion 1): the delta-restricted branch of `execute_delete_insert_
+/// with_delta_restriction` — phase 2 left this path recording no
+/// reconciliation-ledger reset at all — must, when handed non-empty
+/// `ensure_sqls`/`pre_write_sqls`, route the write through `Backend::
+/// execute_write_with_bookkeeping` and record the SAME reset pair a caller
+/// (`execute.rs`) builds via `generate_ledger_recompute_reset_sqls`, byte
+/// for byte, alongside its own delta-restricted DELETE+INSERT.
+#[tokio::test]
+async fn delta_restricted_recompute_records_the_ledger_reset() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql("CREATE TABLE main.enriched (event_id VARCHAR, event_date DATE, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.enriched VALUES ('ev-1', '2026-07-01', 'OLD'), \
+             ('ev-2', '2026-07-01', 'OLD')",
+        )
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql(
+            "CREATE TABLE main.enrichment_recompute (event_id VARCHAR, event_date DATE, tier VARCHAR)",
+        )
+        .await
+        .expect("create recompute source");
+    backend
+        .execute_sql(
+            "INSERT INTO main.enrichment_recompute VALUES ('ev-1', '2026-07-01', 'NEW'), \
+             ('ev-2', '2026-07-01', 'NEW')",
+        )
+        .await
+        .expect("seed recompute source");
+
+    let ensure_sql = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend
+        .execute_sql(&ensure_sql)
+        .await
+        .expect("ensure observed-delta table");
+    let upsert_sql = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        "silver.fact",
+        "2026-07-01",
+        "2026-07-02",
+        "SELECT * FROM (VALUES ('ev-1', NULL)) AS t(delta_key, delta_partition)",
+    );
+    backend
+        .execute_sql(&upsert_sql)
+        .await
+        .expect("record the upstream observed delta");
+
+    let region = smelt_logical::maintenance::emit::Region {
+        start: "'2026-07-01'".to_string(),
+        end: "'2026-07-02'".to_string(),
+    };
+    let body = "SELECT event_id, event_date, tier FROM main.enrichment_recompute";
+    let closure = smelt_logical::maintenance::SkeletonSourceClosure::Closed {
+        row_preservation: smelt_logical::maintenance::RowPreservation::JoinShape,
+    };
+
+    let ledger_ensure_sqls = vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl("main")];
+    let ledger_pre_write_sqls = smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
+        "main",
+        "silver.enriched",
+        "{*}",
+        "2026-07-01",
+        "2026-07-02",
+        "self",
+        "2026-07-02",
+    );
+
+    smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
+        &backend,
+        "main",
+        "enriched",
+        "event_date",
+        &region,
+        body,
+        body,
+        Some("event_id"),
+        Some(&closure),
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: "silver.fact",
+            window_start: "2026-07-01",
+            window_end: "2026-07-02",
+        },
+        None,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
+        &ledger_ensure_sqls,
+        &ledger_pre_write_sqls,
+    )
+    .await
+    .expect("delta-restricted recompute with ledger bookkeeping must succeed");
+
+    let sql_log = backend.recorded_sql();
+    assert!(
+        sql_log.contains(&ledger_ensure_sqls[0]),
+        "the ledger ensure DDL must be sent as raw SQL: {sql_log:?}"
+    );
+    for stmt in &ledger_pre_write_sqls {
+        assert!(
+            sql_log.contains(stmt),
+            "the delta-restricted branch must record the SAME ledger reset a plain DeleteInsert \
+             write would (byte-identical to `generate_ledger_recompute_reset_sqls`): {stmt}\n\
+             recorded: {sql_log:?}"
+        );
+    }
+
+    let groups = backend.recorded_groups();
+    let delete_insert_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| g.statements[0].sql.starts_with("DELETE FROM main.enriched"))
+        .collect();
+    assert_eq!(
+        delete_insert_groups.len(),
+        1,
+        "exactly one delta-restricted DELETE+INSERT group: {groups:?}"
+    );
+    let group = delete_insert_groups[0];
+    for stmt in &group.statements {
+        assert!(
+            !stmt.sql.contains("_smelt_ledger"),
+            "ledger bookkeeping must never appear inside the maintenance StatementGroup: {}",
+            stmt.sql
+        );
+    }
+
+    let expected = smelt_logical::maintenance::emit::emit_delete_insert_delta_restricted(
+        "main.enriched",
+        "event_date",
+        &region,
+        body,
+        "event_id",
+        &["ev-1".to_string()],
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements, expected.statements,
+        "the write group itself must still be byte-identical to the emitter's own output — \
+         bookkeeping must not alter what gets written"
+    );
 }
 
 /// The region family's own change-suppressed conditional variant
@@ -4369,6 +4655,8 @@ async fn region_conditional_write_matches_the_emitted_group_byte_for_byte() {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("suppressed region recompute must succeed");
@@ -4459,6 +4747,8 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("unrestricted recompute must succeed");
@@ -4536,6 +4826,9 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
     // Phase F4 — the consuming model's SQL text, folded into the sidecar's
     // identity stamp (`compute_fingerprint_sidecar_stamp`).
     let model_sql = "SELECT id, name, tier FROM smelt.sources.dim_users";
+    // Phase 4 (`docs/outcomes/20260904-decided-gap-residue`) — the sidecar
+    // namespace also includes the CONSUMING model's own address.
+    let consumer_address = "smelt.models.consumer_a";
 
     // Run 1: absent sidecar — every source row is "changed" (whole-table
     // delta), and this diff also creates the sidecar table.
@@ -4548,6 +4841,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &projection,
         &all_source_columns,
         model_sql,
+        consumer_address,
     )
     .await
     .expect("first diff against an absent sidecar");
@@ -4571,6 +4865,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main._smelt_fingerprint_sidecar",
         "smelt.sources.dim_users",
         &identity,
+        consumer_address,
         &stamp,
         MaintenanceDialect::DuckDb,
     );
@@ -4597,6 +4892,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &projection,
         &all_source_columns,
         model_sql,
+        consumer_address,
         &empty_write_group,
     )
     .await
@@ -4612,6 +4908,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main",
         "smelt.sources.dim_users",
         &identity,
+        consumer_address,
         &stamp,
         &expected_digest_select,
     );
@@ -4619,6 +4916,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main",
         "smelt.sources.dim_users",
         &identity,
+        consumer_address,
         &expected_digest_select,
     );
     let recorded_sql = backend.recorded_sql();
@@ -4652,6 +4950,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
             &projection,
             &all_source_columns,
             model_sql,
+            consumer_address,
         )
         .await
         .expect("second diff after a targeted edit");
@@ -4674,6 +4973,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &projection,
         &all_source_columns,
         model_sql,
+        consumer_address,
         &empty_write_group,
     )
     .await
@@ -4692,6 +4992,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
             &projection,
             &all_source_columns,
             model_sql,
+            consumer_address,
         )
         .await
         .expect("third diff after an out-of-projection edit");
@@ -4744,7 +5045,7 @@ async fn stage_and_migrate(
 
     let db_path = project_dir.join("run.duckdb");
     let smelt_yml = format!(
-        "name: backbuild_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        "name: backbuild_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\nstate:\n  mode: intervals\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
@@ -5706,5 +6007,260 @@ async fn source_mutation_fingerprint_comes_from_the_emitter() {
     assert_eq!(
         verdict2,
         smelt_runtime::mutation_probe::MutationVerdict::NoOp
+    );
+}
+
+// =============================================================================
+// State residency (`docs/outcomes/20260904-state-residency/outcome.md`
+// criterion 1): the reconciliation ledger's region-recompute reset shares
+// ONE backend transaction with the write it protects — proven directly
+// against `DuckDbBackend::execute_write_with_bookkeeping` rather than
+// through the full `execute_project` pipeline, since provoking a mid-batch
+// write failure through the real pipeline has no clean seam.
+// =============================================================================
+
+/// A valid ledger reset as `pre_write_sqls`, paired with a deliberately
+/// invalid write `StatementGroup`: the call must error, and `_smelt_ledger`
+/// must hold no row for the region the failed write never actually wrote —
+/// proving "same transaction as the maintained write", not merely "runs
+/// alongside it".
+#[tokio::test]
+async fn ledger_reset_rolls_back_with_a_failed_write() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    let ensure_sqls = vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl("main")];
+    let pre_write_sqls = smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
+        "main",
+        "rollback_model",
+        "{*}",
+        "2026-08-01",
+        "2026-08-02",
+        "self",
+        "2026-08-02",
+    );
+    let write_group = StatementGroup {
+        statements: vec![smelt_backend::MaintenanceStatement {
+            sql: "INSERT INTO main.does_not_exist VALUES (1)".to_string(),
+        }],
+        transactional: false,
+    };
+
+    let result = backend
+        .execute_write_with_bookkeeping(&ensure_sqls, &pre_write_sqls, &write_group)
+        .await;
+    assert!(
+        result.is_err(),
+        "the failed write must surface an error, not silently swallow it"
+    );
+
+    // The ensure DDL is idempotent DDL run OUTSIDE the transaction (same
+    // precedent as `Backend::fold_ledger_delta`'s `ensure_sql`), so the
+    // table exists even after the rollback; the query below proves it holds
+    // no row, not that it's absent.
+    let rows = backend
+        .execute_sql("SELECT COUNT(*) FROM main._smelt_ledger WHERE model_name = 'rollback_model'")
+        .await
+        .expect("query ledger row count");
+    let batch = rows.first().expect("COUNT returns one row");
+    let count = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("COUNT column is Int64")
+        .value(0);
+    assert_eq!(
+        count, 0,
+        "a failed write must leave no reconciliation-ledger reset row behind"
+    );
+}
+
+/// A non-DuckDB dialect's DeleteInsert batch write emits no `_smelt_ledger`
+/// SQL at all — the skip is now driven by the run's resolved
+/// `StateAvailability` (`docs/outcomes/20260904-state-residency/
+/// outcome.md` phase 5), not a raw `backend.dialect() == DuckDB` check.
+/// The old `RunReporter` stand-in method for this skip is retired entirely
+/// (phase 6): the affected cell's own recorded `MaintenanceStateDowngraded` is the
+/// user-visible channel now, surfaced by `smelt explain`
+/// (`crates/smelt-cli/tests/explain_maintenance.rs`) — this test asserts
+/// only the emitted-statement set, which is the half this crate owns.
+/// Uses a fully mocked `Backend` (never a real connection) so the dialect
+/// mismatch between the claimed `SqlDialect::SparkSQL` and no real Spark
+/// engine can never itself cause a spurious failure — this test is about
+/// which SQL gets BUILT, not whether it executes against a live warehouse.
+#[tokio::test]
+async fn ledger_reset_is_skipped_on_a_non_duckdb_dialect() {
+    struct NonDuckDbBackend {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Backend for NonDuckDbBackend {
+        async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+            self.calls.lock().unwrap().push(sql.to_string());
+            Ok(vec![])
+        }
+        async fn create_table_as(
+            &self,
+            _schema: &str,
+            _name: &str,
+            sql: &str,
+        ) -> Result<(), BackendError> {
+            self.calls.lock().unwrap().push(sql.to_string());
+            Ok(())
+        }
+        async fn create_view_as(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn drop_table_if_exists(
+            &self,
+            _schema: &str,
+            _name: &str,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        async fn drop_view_if_exists(
+            &self,
+            _schema: &str,
+            _name: &str,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        async fn get_row_count(&self, _schema: &str, _name: &str) -> Result<usize, BackendError> {
+            Ok(0)
+        }
+        async fn get_preview(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _limit: usize,
+        ) -> Result<Vec<RecordBatch>, BackendError> {
+            Ok(vec![])
+        }
+        async fn table_exists(&self, _schema: &str, _name: &str) -> Result<bool, BackendError> {
+            Ok(true)
+        }
+        async fn ensure_schema(&self, _schema: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn dialect(&self) -> SqlDialect {
+            SqlDialect::SparkSQL
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::spark()
+        }
+        async fn load_table(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _arrow_schema: SchemaRef,
+            _batches: Vec<RecordBatch>,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn delete_partitions(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _partition: &PartitionRange,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn insert_into_from_query(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+        async fn insert_overwrite(
+            &self,
+            _schema: &str,
+            _table: &str,
+            _sql: &str,
+            _partition: &PartitionRange,
+        ) -> Result<(), BackendError> {
+            unreachable!()
+        }
+    }
+
+    struct NonDuckDbFactory {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+    impl BackendFactory for NonDuckDbFactory {
+        fn create<'a>(
+            &'a self,
+            _target_name: &'a str,
+            _target_config: &'a Target,
+            _project_dir: &'a Path,
+        ) -> BackendFuture<'a> {
+            let calls = Arc::clone(&self.calls);
+            Box::pin(async move { Ok(Box::new(NonDuckDbBackend { calls }) as Box<dyn Backend>) })
+        }
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+    write_model(
+        project_dir,
+        "daily_events",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT * FROM (VALUES (DATE '2024-01-01', 10)) AS t(event_date, amount)",
+    );
+    // `type: spark` (`docs/outcomes/20260904-state-residency/outcome.md`
+    // phase 5): the run's availability resolution reads the target's
+    // *declared* dialect from `smelt.yml`
+    // (`sql_dialect_for_target`/`availability_for_run`), never the mocked
+    // backend's own `dialect()` claim — so this fixture's target type must
+    // itself say `spark` for the ledger-less skip this test exercises to
+    // actually be reached.
+    let smelt_yml = "name: ledger_skip_test\nversion: 1\npaths:\n  - models\ntargets:\n  \
+                      dev:\n    type: spark\n    schema: main\n\
+                      default_materialization: table\ntarget: dev\n";
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+
+    let factory = NonDuckDbFactory {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let calls_handle = Arc::clone(&factory.calls);
+    execute_project(
+        "ledger-skip-run".to_string(),
+        make_request("dev", "2024-01-01", "2024-01-02"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &NO_OP_REPORTER,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("a run over a non-DuckDB backend must still succeed");
+
+    let calls = calls_handle.lock().unwrap();
+    assert!(
+        !calls.iter().any(|c| c.contains("_smelt_ledger")),
+        "a non-DuckDB dialect must emit no ledger-reset SQL at all: {calls:?}"
     );
 }

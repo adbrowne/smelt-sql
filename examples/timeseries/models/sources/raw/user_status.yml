@@ -17,10 +17,12 @@ timeseries:
   partition_column: changed_at
   event_time_column: changed_at
   granularity: day
-# Declared so the mutation-driven column-scoped MERGE (MP11) can prove its
-# join against this dimension does not fan out (`join_shape::fan_out`,
+# Declared so the mutation-driven region recompute can prove its join
+# against this dimension does not fan out (`join_shape::fan_out`,
 # `smelt_runtime::maintenance_driver::dimension_join_contribution`) —
-# licensing the horizon-clamped merge (F15) without re-reading the fact.
+# licensing the clamped-window recompute (region key `WholeRow`) without
+# re-reading the fact. The derived technique today is `DeleteInsert`; no
+# per-column-targeted merge is reached for this model.
 unique_key: [user_id]
 # A dimension: rows may be corrected in place after creation. Declared
 # explicitly (not the fail-closed default) so `daily_events_status`'s

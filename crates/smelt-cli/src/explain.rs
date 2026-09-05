@@ -208,6 +208,170 @@ fn format_output_delta(delta: &smelt_logical::analysis::output_delta::OutputDelt
     }
 }
 
+/// The model's own **delta signature** (`docs/specs/incremental_models.md`
+/// §Surface "CLI", Headline bullet): the first thing `smelt explain` prints,
+/// in `--json`'s `delta_signature` object and text's `emits:` line alike —
+/// one struct renders both surfaces so they cannot drift
+/// (`docs/outcomes/20260904-delta-signature-front-door/outcome.md` phase 1).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeltaSignatureHeadline {
+    /// `"append_only_window"` | `"keyed_upsert"` | `"general"`.
+    pub shape: String,
+    /// `"window"` | `"key"` | `"none"` — `"none"` only for `general`, which
+    /// makes no addressing claim.
+    pub addressing: String,
+    /// Present for `keyed_upsert`: the upsert key columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+    /// Present for `append_only_window`, and for `keyed_upsert` once key
+    /// temporal locality is admitted: the output axis addressing ranges
+    /// over.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axis: Option<String>,
+    /// Present for `general`: the construct or world-fact that degraded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_by: Option<String>,
+    /// Present when key temporal locality is admitted: the rendered slice
+    /// bound clause (`"slice-bounded by <axis> under key temporal
+    /// locality"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slice_bound: Option<String>,
+    /// Present when key temporal locality is admitted: the derived settle
+    /// bound (`smelt_logical::maintenance::locality::SettleBound`'s own
+    /// `Debug` — route 2's `Never` is printed honestly, never a large
+    /// sentinel duration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settle_bound: Option<String>,
+    /// The derived grain friendly label — the SAME string the report's
+    /// `derived grain:` row prints (`write_relation_contract`), never a
+    /// second label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grain: Option<String>,
+}
+
+/// The output axis a [`smelt_logical::maintenance::locality::LocalitySlice`]
+/// ranges its slice predicate over — every route carries the same
+/// `partition_column` field, just under a different variant.
+fn locality_axis(slice: &smelt_logical::maintenance::locality::LocalitySlice) -> &str {
+    use smelt_logical::maintenance::locality::LocalitySlice;
+    match slice {
+        LocalitySlice::Window {
+            partition_column, ..
+        }
+        | LocalitySlice::DeltaValues { partition_column }
+        | LocalitySlice::RecurrenceBounded {
+            partition_column, ..
+        } => partition_column,
+    }
+}
+
+/// Derive the model's own [`DeltaSignatureHeadline`] (`incremental_models.md`
+/// §Surface "CLI"): `shape` is this model's own derived
+/// [`smelt_logical::analysis::output_delta::OutputDelta`]
+/// (`smelt_db::model_output_delta_for`) — `None` (no derivable output-delta
+/// shape at all) renders as a `general` verdict rather than fabricating one.
+/// `key_locality` is `result.plan.key_locality` — present only for an
+/// admitted `grain: key` + `timeseries:` model, appending the slice-bound
+/// and settle-bound clauses the composed-shape worked example shows.
+/// `own_contract` supplies the SAME `derived_grain` the report's own
+/// Relation Contract block prints.
+pub fn delta_signature_headline(
+    shape: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
+    key_locality: Option<&smelt_logical::maintenance::KeyLocality>,
+    own_contract: &RelationContractView,
+) -> DeltaSignatureHeadline {
+    use smelt_logical::analysis::output_delta::OutputDelta;
+
+    let grain = own_contract.derived_grain.map(|g| g.to_string());
+    let (slice_bound, settle_bound, locality_axis_str) = match key_locality {
+        Some(locality) => {
+            let axis = locality_axis(&locality.slice).to_string();
+            (
+                Some(format!(
+                    "slice-bounded by {axis} under key temporal locality"
+                )),
+                Some(format!("{:?}", locality.settle_bound)),
+                Some(axis),
+            )
+        }
+        None => (None, None, None),
+    };
+
+    match shape {
+        Some(OutputDelta::KeyedUpsert { keys }) => DeltaSignatureHeadline {
+            shape: "keyed_upsert".to_string(),
+            addressing: "key".to_string(),
+            keys: Some(keys.clone()),
+            axis: locality_axis_str,
+            degraded_by: None,
+            slice_bound,
+            settle_bound,
+            grain,
+        },
+        Some(OutputDelta::AppendOnlyWindow { axis }) => DeltaSignatureHeadline {
+            shape: "append_only_window".to_string(),
+            addressing: "window".to_string(),
+            keys: None,
+            axis: Some(axis.clone()),
+            degraded_by: None,
+            slice_bound: None,
+            settle_bound: None,
+            grain,
+        },
+        Some(OutputDelta::General { reason }) => DeltaSignatureHeadline {
+            shape: "general".to_string(),
+            addressing: "none".to_string(),
+            keys: None,
+            axis: None,
+            degraded_by: Some(reason.clone()),
+            slice_bound: None,
+            settle_bound: None,
+            grain,
+        },
+        None => DeltaSignatureHeadline {
+            shape: "general".to_string(),
+            addressing: "none".to_string(),
+            keys: None,
+            axis: None,
+            degraded_by: Some("no derivable output-delta shape".to_string()),
+            slice_bound: None,
+            settle_bound: None,
+            grain,
+        },
+    }
+}
+
+impl DeltaSignatureHeadline {
+    /// Render as the report's headline `(emits: …; grain: …)` clause — the
+    /// same text both the plain-text report and (indirectly, since
+    /// `--json`'s consumer can reconstruct it from the same fields)
+    /// `--json` describe.
+    pub fn render_text(&self) -> String {
+        use std::fmt::Write as _;
+        let mut emits = match self.shape.as_str() {
+            "keyed_upsert" => {
+                let keys = self.keys.as_deref().unwrap_or_default().join(", ");
+                format!("keyed upsert over [{keys}], key-addressed")
+            }
+            "append_only_window" => {
+                let axis = self.axis.as_deref().unwrap_or("?");
+                format!("append-only within a window, window-addressed by {axis}")
+            }
+            _ => {
+                let reason = self.degraded_by.as_deref().unwrap_or("unclassified");
+                format!("general (degraded by: {reason}), not delta-addressable")
+            }
+        };
+        if let (Some(slice_bound), Some(settle_bound)) = (&self.slice_bound, &self.settle_bound) {
+            let _ = write!(emits, ", {slice_bound} (settle bound: {settle_bound})");
+        }
+        match &self.grain {
+            Some(grain) => format!("(emits: {emits}; grain: {grain})"),
+            None => format!("(emits: {emits})"),
+        }
+    }
+}
+
 /// A cell's own trigger, addressed the same way `maintenance.cells[]`/
 /// `contract.cells[]` address it (a source address, or the literal
 /// `backfill`) — `None` for `Trigger::ColumnAdded`, which has no `on:`
@@ -283,11 +447,23 @@ pub fn build_maintenance_plan_report(
     cadence: smelt_core::config::ProbeCadence,
     edge_delta_types: &[(String, smelt_logical::analysis::output_delta::OutputDelta)],
     pending_definition_delta: Option<&(MigrationVerdict, String)>,
+    own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
 
     let mut out = String::new();
+    // Headline (`incremental_models.md` §Surface "CLI"): the model's own
+    // delta signature, first line of the report — ahead of the pending
+    // definition-delta note, since it is a fact about the model itself,
+    // not about the run.
+    let headline = delta_signature_headline(
+        own_output_delta,
+        result.plan.key_locality.as_ref(),
+        own_contract,
+    );
+    let _ = writeln!(out, "model {}  {}", model_name, headline.render_text());
+    let _ = writeln!(out);
     let _ = writeln!(out, "Maintenance plan: {}", model_name);
     let _ = writeln!(out);
 
@@ -339,6 +515,20 @@ pub fn build_maintenance_plan_report(
             );
             let _ = writeln!(out, "      corner:    {:?}", cell.corner);
             let _ = writeln!(out, "      technique: {:?}", cell.technique);
+            // Recorded availability downgrade (`state.md` §"The degradation
+            // contract" step 2, `docs/outcomes/20260904-state-residency/
+            // outcome.md` phase 6): omitted entirely when the cell was not
+            // downgraded, matching the existing `contract_point` posture.
+            if let Some(downgrade) = &cell.state_downgrade {
+                let _ = writeln!(
+                    out,
+                    "      state downgrade: {:?} → {:?} (missing: {}) — {}",
+                    downgrade.original,
+                    cell.technique,
+                    downgrade.missing.as_str(),
+                    downgrade.reason
+                );
+            }
             let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
             // Effective contract (`docs/specs/incremental_models.md` §"The
             // contract lattice"): default or a relaxed point, with its
@@ -1387,6 +1577,23 @@ pub struct ExplainCellJson {
     /// effective_contract`. An append-stable addition to this JSON shape
     /// (`docs/specs/cli.md` §Constraints item 5).
     pub contract_point: ExplainContractPointJson,
+    /// This cell's recorded availability downgrade (`state.md` §"The
+    /// degradation contract" step 2), absent when the cell was not
+    /// downgraded — an append-stable addition to this JSON shape
+    /// (`docs/specs/cli.md` §Constraints item 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_downgrade: Option<ExplainStateDowngradeJson>,
+}
+
+/// JSON shape of one cell's recorded state downgrade (`smelt explain
+/// --json`): the technique ideal derivation chose, the structure that was
+/// missing, and the rendered reason (`docs/specs/state.md` §"The
+/// degradation contract").
+#[derive(Debug, Serialize)]
+pub struct ExplainStateDowngradeJson {
+    pub original: String,
+    pub missing: String,
+    pub reason: String,
 }
 
 /// JSON shape of one cell's effective contract (`smelt explain --json`):
@@ -1414,6 +1621,12 @@ pub type ExplainContractPointJson = smelt_logical::contract::ContractPointView;
 #[derive(Debug, Serialize)]
 pub struct ExplainMaintenanceJson {
     pub model: String,
+    /// The model's own delta signature (`incremental_models.md` §Surface
+    /// "CLI", Headline bullet) — the SAME struct the text report's first
+    /// line renders, so `--json` and text can never disagree. An
+    /// append-stable addition to this JSON shape (`docs/specs/cli.md`
+    /// §Constraints item 5).
+    pub delta_signature: DeltaSignatureHeadline,
     pub contract: RelationContractView,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inbound_edges: Vec<InboundEdgeContract>,
@@ -1526,7 +1739,10 @@ pub fn build_maintenance_plan_json(
     cadence: smelt_core::config::ProbeCadence,
     refusals: Vec<smelt_logical::analysis::profile::ProfileRefusal>,
     pending_definition_delta: Option<&(MigrationVerdict, String)>,
+    own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
+    key_locality: Option<&smelt_logical::maintenance::KeyLocality>,
 ) -> ExplainMaintenanceJson {
+    let delta_signature = delta_signature_headline(own_output_delta, key_locality, &own_contract);
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
         .into_iter()
@@ -1543,7 +1759,7 @@ pub fn build_maintenance_plan_json(
         .zip(statements.iter())
         .zip(diagnostics_cells.iter())
         .zip(cell_verdicts.iter())
-        .map(|(((_cell, cs), diag_cell), verdict)| {
+        .map(|(((cell, cs), diag_cell), verdict)| {
             let (no_statements_reason, statements) = match &cs.outcome {
                 Ok(group) => {
                     let stmts = group
@@ -1574,6 +1790,14 @@ pub fn build_maintenance_plan_json(
                 statements,
                 technique_previews: diag_cell.technique_previews.clone(),
                 contract_point: verdict.contract_point.clone(),
+                state_downgrade: cell
+                    .state_downgrade
+                    .as_ref()
+                    .map(|d| ExplainStateDowngradeJson {
+                        original: format!("{:?}", d.original),
+                        missing: d.missing.as_str().to_string(),
+                        reason: d.reason.clone(),
+                    }),
             }
         })
         .collect();
@@ -1607,6 +1831,7 @@ pub fn build_maintenance_plan_json(
     });
     ExplainMaintenanceJson {
         model: model_name.to_string(),
+        delta_signature,
         contract: own_contract,
         inbound_edges,
         cells,

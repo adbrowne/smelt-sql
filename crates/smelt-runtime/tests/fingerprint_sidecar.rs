@@ -32,11 +32,12 @@
 //!   mid-sequence invalidation still matches the full-refresh oracle on
 //!   every subsequent step.
 
-use smelt_backend::{Backend, BackendError, StatementGroup};
+use smelt_backend::{Backend, BackendError, PartitionRange, StatementGroup};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::analysis::fingerprint::Projection;
 use smelt_runtime::maintenance_driver::{
-    diff_fingerprint_sidecar_changed_keys, refresh_fingerprint_sidecar,
+    diff_fingerprint_sidecar_changed_keys, diff_repair_group_sidecar_changed_keys,
+    refresh_fingerprint_sidecar, refresh_repair_group_sidecar,
 };
 use std::cell::RefCell;
 use std::sync::Once;
@@ -44,6 +45,7 @@ use tracing_subscriber::layer::SubscriberExt;
 
 const SOURCE_ADDRESS: &str = "smelt.sources.dim_users";
 const SOURCE_TABLE: &str = "main.dim_users";
+const CONSUMER_ADDRESS: &str = "smelt.models.consumer_a";
 
 /// A placeholder "consuming model's SQL text" — these tests aren't about
 /// any real model body, just a stable value threaded through as
@@ -116,6 +118,7 @@ async fn diff_with_projection_and_model(
         projection,
         &all_columns(),
         model_sql,
+        CONSUMER_ADDRESS,
     )
     .await
     .expect("diff")
@@ -144,6 +147,7 @@ async fn refresh_with_projection_and_model(
         projection,
         &all_columns(),
         model_sql,
+        CONSUMER_ADDRESS,
         write_group,
     )
     .await
@@ -1182,4 +1186,503 @@ async fn sidecar_fed_run_sequence_survives_a_mid_sequence_model_recipe_edit_and_
         "after run 3 (back to steady state post-invalidation)",
     )
     .await;
+}
+
+// ── Phase 4 (`docs/outcomes/20260904-decided-gap-residue`): per-consuming-
+// edge namespace ────────────────────────────────────────────────────────
+//
+// The sidecar row key is `(source_address, projection_identity,
+// consumer_address, source_key)` (`docs/specs/sources.md` §"The fingerprint
+// sidecar" — "Naming and namespace"). Two consuming models reading the SAME
+// source under the SAME P4 projection must each get their own comparandum
+// partition — a sibling's diff/refresh must never narrow (or, for
+// byte-identical bodies, unsoundly satisfy) this edge's own next diff.
+
+const CONSUMER_A: &str = "smelt.models.consumer_a";
+const CONSUMER_B: &str = "smelt.models.consumer_b";
+
+async fn sidecar_row_count_for_consumer(backend: &DuckDbBackend, consumer_address: &str) -> usize {
+    let sql = format!(
+        "SELECT COUNT(*) FROM main._smelt_fingerprint_sidecar WHERE consumer_address = \
+         '{consumer_address}'"
+    );
+    let batches = backend
+        .execute_sql(&sql)
+        .await
+        .expect("count sidecar rows for consumer");
+    let batch = &batches[0];
+    let col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("COUNT(*) is BIGINT");
+    col.value(0) as usize
+}
+
+/// Test 1 (Phase 4 plan): two consuming edges with **byte-identical**
+/// `model_sql` bodies must not share a comparandum. Pre-fix, the sidecar had
+/// no consumer discriminator, so consumer B's first-ever diff would land on
+/// consumer A's already-populated partition and report a narrower (or even
+/// empty) changed-key set instead of the whole-table delta a brand-new
+/// consumer must see.
+#[tokio::test]
+async fn two_consumers_with_identical_bodies_do_not_share_a_comparandum() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 20).await;
+
+    // Consumer A establishes a baseline over the whole source.
+    let changed_a = diff_fingerprint_sidecar_changed_keys(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &["id".to_string()],
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_A,
+    )
+    .await
+    .expect("consumer A diff");
+    assert_eq!(
+        changed_a.len(),
+        20,
+        "consumer A's first diff sees every row"
+    );
+    refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &["id".to_string()],
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_A,
+        &empty_write_group(),
+    )
+    .await
+    .expect("consumer A refresh");
+
+    // An edit touching exactly one row.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'platinum' WHERE id = 5")
+        .await
+        .expect("edit 1 row");
+
+    // Consumer B — SAME source, SAME projection, byte-identical model_sql —
+    // has never diffed or refreshed before. Its first diff must see the
+    // WHOLE table as changed, not just the 1 edited row a shared partition
+    // would report.
+    let changed_b = diff_fingerprint_sidecar_changed_keys(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &["id".to_string()],
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_B,
+    )
+    .await
+    .expect("consumer B diff");
+    assert_eq!(
+        changed_b.len(),
+        20,
+        "consumer B's first diff must see every current row as changed — it has no partition \
+         of its own yet, so it must not inherit consumer A's already-populated comparandum: \
+         {changed_b:?}"
+    );
+}
+
+/// Test 2 (Phase 4 plan): consumers A and B alternate diff+refresh over a
+/// sequence of edits; each one's changed-key set must be exactly the keys
+/// edited since THAT consumer's own last refresh, never a sibling-narrowed
+/// or sibling-widened set.
+#[tokio::test]
+async fn each_consuming_edge_keeps_its_own_comparandum_across_interleaved_runs() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 30).await;
+
+    async fn diff_for(backend: &DuckDbBackend, consumer: &str) -> Vec<String> {
+        diff_fingerprint_sidecar_changed_keys(
+            backend,
+            "main",
+            SOURCE_ADDRESS,
+            SOURCE_TABLE,
+            &["id".to_string()],
+            &projection(),
+            &all_columns(),
+            MODEL_SQL,
+            consumer,
+        )
+        .await
+        .expect("diff")
+    }
+    async fn refresh_for(backend: &DuckDbBackend, consumer: &str) {
+        refresh_fingerprint_sidecar(
+            backend,
+            "main",
+            SOURCE_ADDRESS,
+            SOURCE_TABLE,
+            &["id".to_string()],
+            &projection(),
+            &all_columns(),
+            MODEL_SQL,
+            consumer,
+            &empty_write_group(),
+        )
+        .await
+        .expect("refresh")
+    }
+
+    // Run 0: both consumers establish a baseline.
+    diff_for(&backend, CONSUMER_A).await;
+    refresh_for(&backend, CONSUMER_A).await;
+    diff_for(&backend, CONSUMER_B).await;
+    refresh_for(&backend, CONSUMER_B).await;
+
+    // Run 1: an edit, but only consumer A observes+refreshes it.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'platinum' WHERE id IN (1, 2)")
+        .await
+        .expect("edit for run 1");
+    let changed_a = diff_for(&backend, CONSUMER_A).await;
+    let mut sorted_a = changed_a.clone();
+    sorted_a.sort();
+    assert_eq!(sorted_a, vec!["1".to_string(), "2".to_string()]);
+    refresh_for(&backend, CONSUMER_A).await;
+
+    // Consumer B has NOT refreshed since run 0 — it must still see the
+    // run-1 edit as changed (it never absorbed it), unaffected by A's
+    // refresh.
+    let changed_b = diff_for(&backend, CONSUMER_B).await;
+    let mut sorted_b = changed_b.clone();
+    sorted_b.sort();
+    assert_eq!(
+        sorted_b,
+        vec!["1".to_string(), "2".to_string()],
+        "consumer B must still see the run-1 edit — consumer A's refresh must not advance B's \
+         own comparandum: {sorted_b:?}"
+    );
+    refresh_for(&backend, CONSUMER_B).await;
+
+    // Run 2: another edit, only consumer B observes it this time.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'silver' WHERE id = 10")
+        .await
+        .expect("edit for run 2");
+    let changed_b2 = diff_for(&backend, CONSUMER_B).await;
+    assert_eq!(changed_b2, vec!["10".to_string()]);
+    refresh_for(&backend, CONSUMER_B).await;
+
+    // Consumer A must still see the run-2 edit as changed too — it has not
+    // refreshed since before run 2.
+    let changed_a2 = diff_for(&backend, CONSUMER_A).await;
+    assert_eq!(
+        changed_a2,
+        vec!["10".to_string()],
+        "consumer A must independently see the run-2 edit: {changed_a2:?}"
+    );
+}
+
+/// Test 3 (Phase 4 plan): after both consumers refresh, the sidecar holds
+/// one row PER `(source_key, consumer_address)` pair — a sibling consumer's
+/// refresh must never mutate this edge's own stored digest/stamp row.
+#[tokio::test]
+async fn a_sibling_consumers_refresh_leaves_this_edges_sidecar_rows_untouched() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 5).await;
+
+    refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &["id".to_string()],
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_A,
+        &empty_write_group(),
+    )
+    .await
+    .expect("consumer A initial refresh");
+    refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &["id".to_string()],
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_B,
+        &empty_write_group(),
+    )
+    .await
+    .expect("consumer B initial refresh");
+
+    assert_eq!(
+        sidecar_row_count_for_consumer(&backend, CONSUMER_A).await,
+        5,
+        "consumer A holds its own 5 rows"
+    );
+    assert_eq!(
+        sidecar_row_count_for_consumer(&backend, CONSUMER_B).await,
+        5,
+        "consumer B holds its own 5 rows"
+    );
+
+    // Capture consumer A's stored digest for key `1` before B's refresh.
+    let a_digest_before = {
+        let batches = backend
+            .execute_sql(
+                "SELECT digest FROM main._smelt_fingerprint_sidecar WHERE consumer_address = \
+                 'smelt.models.consumer_a' AND source_key = '1'",
+            )
+            .await
+            .expect("read consumer A's digest for key 1");
+        let batch = &batches[0];
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("digest is VARCHAR");
+        col.value(0).to_string()
+    };
+
+    // Edit the source and let consumer B (only) diff + refresh.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'platinum' WHERE id = 1")
+        .await
+        .expect("edit key 1");
+    diff_fingerprint_sidecar_changed_keys(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &["id".to_string()],
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_B,
+    )
+    .await
+    .expect("consumer B diff");
+    refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &["id".to_string()],
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_B,
+        &empty_write_group(),
+    )
+    .await
+    .expect("consumer B refresh after edit");
+
+    // Consumer A's row for key 1 must be byte-identical to before — B's
+    // refresh must never touch A's partition.
+    let a_digest_after = {
+        let batches = backend
+            .execute_sql(
+                "SELECT digest FROM main._smelt_fingerprint_sidecar WHERE consumer_address = \
+                 'smelt.models.consumer_a' AND source_key = '1'",
+            )
+            .await
+            .expect("read consumer A's digest for key 1 after B's refresh");
+        let batch = &batches[0];
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("digest is VARCHAR");
+        col.value(0).to_string()
+    };
+    assert_eq!(
+        a_digest_before, a_digest_after,
+        "consumer B's refresh must never mutate consumer A's own stored digest row"
+    );
+    assert_eq!(
+        sidecar_row_count_for_consumer(&backend, CONSUMER_A).await,
+        5,
+        "consumer A's row count must be unaffected by consumer B's refresh"
+    );
+}
+
+// ── P9/phase-5 test ─────────────────────────────────────────────────────
+/// A stub backend that declares DuckDB's dialect but NOT
+/// `supports_fingerprint_sidecar` — the sharpest possible red before this
+/// phase's fix: every one of the four sidecar entry points previously gated
+/// on `dialect != SqlDialect::DuckDB`, so a DuckDB-dialected backend alone
+/// satisfied that check regardless of the declared capability. All four
+/// must now refuse with `BackendError::UnsupportedFeature`.
+struct SidecarLessBackend;
+
+#[async_trait::async_trait]
+impl Backend for SidecarLessBackend {
+    async fn execute_sql(
+        &self,
+        _sql: &str,
+    ) -> Result<Vec<arrow::array::RecordBatch>, BackendError> {
+        unimplemented!("must not be called — the driver refuses before any backend call")
+    }
+    async fn create_table_as(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn create_view_as(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn drop_table_if_exists(&self, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn drop_view_if_exists(&self, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn get_row_count(&self, _: &str, _: &str) -> Result<usize, BackendError> {
+        unimplemented!()
+    }
+    async fn get_preview(
+        &self,
+        _: &str,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<arrow::array::RecordBatch>, BackendError> {
+        unimplemented!()
+    }
+    async fn table_exists(&self, _: &str, _: &str) -> Result<bool, BackendError> {
+        unimplemented!()
+    }
+    async fn ensure_schema(&self, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    fn dialect(&self) -> smelt_backend::SqlDialect {
+        smelt_backend::SqlDialect::DuckDB
+    }
+    fn capabilities(&self) -> smelt_backend::BackendCapabilities {
+        smelt_backend::BackendCapabilities {
+            supports_fingerprint_sidecar: false,
+            ..smelt_backend::BackendCapabilities::duckdb()
+        }
+    }
+    async fn load_table(
+        &self,
+        _: &str,
+        _: &str,
+        _: arrow::datatypes::SchemaRef,
+        _: Vec<arrow::array::RecordBatch>,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn delete_partitions(
+        &self,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn insert_into_from_query(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn insert_overwrite(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+}
+
+#[tokio::test]
+async fn sidecar_entry_points_refuse_without_the_capability() {
+    let backend = SidecarLessBackend;
+    let key = vec!["id".to_string()];
+    let digest_columns = vec!["name".to_string(), "tier".to_string()];
+
+    let diff_err = diff_fingerprint_sidecar_changed_keys(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &key,
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+    )
+    .await
+    .expect_err("diff_fingerprint_sidecar_changed_keys must refuse without the capability");
+    assert!(matches!(diff_err, BackendError::UnsupportedFeature { .. }));
+
+    let refresh_err = refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &key,
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+        &empty_write_group(),
+    )
+    .await
+    .expect_err("refresh_fingerprint_sidecar must refuse without the capability");
+    assert!(matches!(
+        refresh_err,
+        BackendError::UnsupportedFeature { .. }
+    ));
+
+    let repair_diff_err = diff_repair_group_sidecar_changed_keys(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        "main.customer_max_amount",
+        &key,
+        &digest_columns,
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+    )
+    .await
+    .expect_err("diff_repair_group_sidecar_changed_keys must refuse without the capability");
+    assert!(matches!(
+        repair_diff_err,
+        BackendError::UnsupportedFeature { .. }
+    ));
+
+    let repair_refresh_err = refresh_repair_group_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &key,
+        &digest_columns,
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+        &empty_write_group(),
+    )
+    .await
+    .expect_err("refresh_repair_group_sidecar must refuse without the capability");
+    assert!(matches!(
+        repair_refresh_err,
+        BackendError::UnsupportedFeature { .. }
+    ));
 }

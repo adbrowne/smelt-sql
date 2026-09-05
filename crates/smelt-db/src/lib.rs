@@ -349,11 +349,12 @@ pub use queries::project::{
     emitted_models, evaluate_generator, generator_files, models_all, models_all_with_generators,
     models_with_tag, project_active_backends, project_address_collisions,
     project_emitted_name_collisions, project_paths, project_seeds, project_source_diagnostics,
-    project_sources, project_unstable_schema, resolve_seed_or_source_path, smelt_yml_vars_query,
-    sorted_workspace_files, sources_all, sources_config, sources_type_errors, sources_with_tag,
-    sources_yaml_error, AddressCollisionDiagnostic, EmissionBodyAnalysis, EmittedModelDef,
-    EmittedModelsResult, EmittedNameCollisionDiagnostic, EvaluatedGenerator, SourceDiagnostic,
-    SourceTypeError, YamlParseError,
+    project_sources, project_unstable_schema, project_warehouse_tables,
+    resolve_seed_or_source_path, smelt_yml_vars_query, sorted_workspace_files, sources_all,
+    sources_config, sources_type_errors, sources_with_tag, sources_yaml_error,
+    AddressCollisionDiagnostic, EmissionBodyAnalysis, EmittedModelDef, EmittedModelsResult,
+    EmittedNameCollisionDiagnostic, EvaluatedGenerator, SourceDiagnostic, SourceTypeError,
+    YamlParseError,
 };
 pub use queries::schema::{
     add_source_info_to_type_context, apply_outer_join_nullability, available_columns,
@@ -1272,6 +1273,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
         }
+        R::PartitionGrainForbidsMetrics => DiagnosticCode::PartitionGrainForbidsMetrics,
     }
 }
 
@@ -1701,22 +1703,13 @@ fn ref_model_edge(
     let sources = model_own_source_facts(db, workspace, project, &sql);
     let declared_unique_key = meta.unique_key.clone().unwrap_or_default();
     let partition_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
-    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+    let output_shape = own_output_delta_shape(
         &sql,
         &declared_unique_key,
         partition_col.as_deref(),
+        &sources,
+        model_verdicts,
     );
-    let output_shape =
-        smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
-            &sql,
-            &smelt_logical::analysis::join_shape::JoinContext::new(),
-            &sources,
-            &skeleton,
-            model_verdicts,
-        )
-        .into_iter()
-        .map(|(_, shape)| shape)
-        .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
@@ -1724,6 +1717,81 @@ fn ref_model_edge(
         unique_key,
         output_shape,
     })
+}
+
+/// A model's own derived output-delta shape: the meet across whatever
+/// per-column-group verdicts its own SQL derives, given the cross-model
+/// verdict map its own model-references should resolve against. Pure
+/// (Salsa purity rule) — extracted out of [`ref_model_edge`] so
+/// [`model_output_delta_for`] computes a model's own shape through the SAME
+/// derivation a downstream's edge view of that model already uses; the two
+/// call sites differ only in which model's SQL/sources/verdict-map they
+/// pass in, never in what this function does with them.
+fn own_output_delta_shape(
+    sql: &str,
+    unique_key: &[String],
+    partition_col: Option<&str>,
+    sources: &[smelt_logical::analysis::output_delta::SourceFacts],
+    model_verdicts: &std::collections::BTreeMap<
+        String,
+        smelt_logical::analysis::output_delta::OutputDeltaFacts,
+    >,
+) -> Option<smelt_logical::analysis::output_delta::OutputDelta> {
+    let skeleton =
+        smelt_logical::maintenance::skeleton::skeleton_columns(sql, unique_key, partition_col);
+    smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+        sources,
+        &skeleton,
+        model_verdicts,
+    )
+    .into_iter()
+    .map(|(_, shape)| shape)
+    .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet)
+}
+
+/// This model's own emitted output-delta shape (`incremental_models.md`
+/// §Surface "CLI" headline — the delta signature `smelt explain` prints
+/// first): the SAME derivation [`ref_model_edge`] applies when some
+/// downstream reports this model as an upstream edge, single-owned via
+/// [`own_output_delta_shape`] so `smelt explain`'s own-model headline and a
+/// downstream's edge view of this same model can never disagree
+/// (`docs/outcomes/20260904-delta-signature-front-door/outcome.md` phase
+/// 1). `None` for a generator/multi-model file (only a `Single`-model file
+/// has one address to report a shape for), a file with no frontmatter, or a
+/// model whose own SQL yields no output column groups.
+pub fn model_output_delta_for(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Option<smelt_logical::analysis::output_delta::OutputDelta> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single {
+        metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    else {
+        return None;
+    };
+    let sql = &text[sql_offset..];
+    let unique_key = metadata.unique_key.clone().unwrap_or_default();
+    let partition_col = metadata
+        .timeseries
+        .as_ref()
+        .map(|t| t.partition_column.clone());
+    let project = find_project(db, workspace, file.project_root(db));
+    let sources = model_own_source_facts(db, workspace, project, sql);
+    let model_verdicts = smelt_logical::analysis::output_delta::derive_workspace_output_deltas(
+        &model_delta_inputs(db, workspace, file),
+    );
+    own_output_delta_shape(
+        sql,
+        &unique_key,
+        partition_col.as_deref(),
+        &sources,
+        &model_verdicts,
+    )
 }
 
 /// Per-source clamp observability (`docs/specs/incremental_shapes.md`
@@ -1896,6 +1964,15 @@ pub fn maintenance_plan(
         .and_then(|p| project_active_backends(db, p))
         .unwrap_or_default();
 
+    // `state.warehouse_tables` (`docs/specs/state.md` §"Opting out of
+    // warehouse bookkeeping") — the other availability-resolution input,
+    // threaded alongside `active_backends` above. Absent/unparseable config
+    // resolves to the default posture (`Allowed`), same as an absent
+    // `state:` block.
+    let warehouse_tables = project
+        .and_then(|p| project_warehouse_tables(db, p))
+        .unwrap_or_default();
+
     // The deployed-schema snapshot (`docs/specs/definition_deltas.md`
     // §"Detection"): a Salsa world-fact input the CLI and LSP both register
     // at workspace load (`workspace_ingest::register_deployed_schemas_from_disk`).
@@ -1939,6 +2016,7 @@ pub fn maintenance_plan(
         project_scan_bounds.as_ref(),
         &extra_model_sources,
         &active_backends,
+        warehouse_tables,
         &deployed_column_names,
         deployed_model_sql.as_deref(),
         deployed_partition_column.as_deref(),
@@ -2569,6 +2647,46 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
+        // Contract-lattice `frozen_horizon` driving-source posture check
+        // (`docs/specs/incremental_models.md` §"The contract lattice":
+        // declaring `frozen_horizon` on a model whose driving source has any
+        // other *declared* mutation profile is refused, since the late-
+        // arrival probe's row-count comparison is blind under any posture
+        // other than `append_only`). Resolves the model's driving relation
+        // from the FROM clause's first entry, the same parse pattern
+        // `smelt_logical::maintenance::locality::resolve_driving_source`
+        // uses, and shares the same diagnostic code (single-owner rule: the
+        // oracle/validator, not this Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if contract.frozen_horizon.is_some() {
+                let driving_source =
+                    smelt_parser::File::cast(smelt_parser::parse(sql_body).syntax())
+                        .and_then(|f| f.select_stmt())
+                        .and_then(|s| s.from_clause())
+                        .map(|fc| {
+                            smelt_logical::analysis::source_bounds::from_clause_alias_sources(&fc)
+                        })
+                        .and_then(|sources| sources.into_iter().next());
+                if let Some((_, source_name)) = driving_source {
+                    let profile =
+                        ref_source_info(db, workspace, project, &format!("smelt.{source_name}"))
+                            .and_then(|info| info.mutation_profile.map(|m| m.kind));
+                    if let Err(why) =
+                        smelt_logical::validate_frozen_horizon_posture(&source_name, profile)
+                    {
+                        DiagnosticAcc(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!("ContractFrozenHorizonInvalid: {why}"),
+                            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                            code: Some(DiagnosticCode::ContractFrozenHorizonInvalid),
+                            data: None,
+                        })
+                        .accumulate(db);
+                    }
+                }
+            }
+        }
+
         // Contract-lattice `deferral` clock-admissibility check
         // (`docs/specs/incremental_models.md` §"Contract relaxations
         // (`contract:`)"). Format validity was already checked at
@@ -2926,6 +3044,34 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message,
                 range: rowan::TextRange::empty(body_start),
                 code: Some(code),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for downgrade in &plan_diags.state_downgrades {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "MaintenanceStateDowngraded: cell {} downgraded from {} to its \
+                     recompute-family equivalent — {}",
+                    downgrade.cell, downgrade.original_technique, downgrade.reason
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceStateDowngraded),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for refusal in &plan_diags.contract_state_refusals {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "DeclaredContractRequiresState: {} requires the {}, which is unavailable \
+                     on backend '{}'",
+                    refusal.declaration, refusal.missing_structure, refusal.backend
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::DeclaredContractRequiresState),
                 data: None,
             })
             .accumulate(db);

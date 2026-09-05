@@ -33,7 +33,16 @@ pub async fn history(args: HistoryArgs, scope: Option<&str>) -> Result<()> {
         .with_context(|| "Failed to load run history")?;
 
     if manifests.is_empty() {
-        println!("No run history found.");
+        if config.state.mode == smelt_core::config::StateMode::Stateless {
+            println!(
+                "No run history: target '{}' is running with state.mode: stateless, which \
+                 writes no run history. Set state.mode to intervals or environments to enable \
+                 history tracking.",
+                args.target
+            );
+        } else {
+            println!("No run history found.");
+        }
         return Ok(());
     }
 

@@ -1658,6 +1658,7 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name",
+            "smelt.models.consumer_a",
             "v1:cols:name:sha256:deadbeef",
             digest_select,
         );
@@ -1665,6 +1666,7 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name",
+            "smelt.models.consumer_a",
             digest_select,
         );
 
@@ -1714,6 +1716,7 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name",
+            "smelt.models.consumer_a",
             "v1:cols:name:sha256:deadbeef",
             digest_select,
         );
@@ -1721,6 +1724,7 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name",
+            "smelt.models.consumer_a",
             digest_select,
         );
 

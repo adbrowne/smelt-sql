@@ -453,8 +453,8 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         }
     }
 
-    // 2e: Non-deterministic functions — flow/taint check (incremental_models.md
-    // §"Non-determinism and the payload rule"): a non-deterministic
+    // 2e: Non-deterministic functions — flow/taint check (incremental_shapes.md
+    // §"Safety checks (per-cell admission for recompute-a-region)"): a non-deterministic
     // value is admitted only when it flows exclusively into a column
     // declared `columns.<c>.contract: plausible`, and never into the
     // event_time_column/partition_column/unique_key roles or a row-set

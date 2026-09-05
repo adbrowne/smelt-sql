@@ -1,7 +1,7 @@
 # Outcome: Decided-gap residue — close the spec bullets whose target behaviour is already written
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows IM-25, IS-13 ("implementation gap in an already-decided design"); `docs/TODO.md` bullets "Frozen-horizon append-only gate", "Deferral oracle restatement", "Sidecar per-consuming-edge audit"
 **Spec anchors:** `docs/specs/incremental_models.md` §"The contract lattice", §Known Divergences "Conditional-maintenance gaps"; `docs/specs/incremental_shapes.md` §"The column-family catalogue" (once-write), §Known Divergences; `docs/specs/sources.md` §Known Divergences (sidecar per-consumer comparandum)
 
@@ -47,22 +47,180 @@ than the current residue.
   tracks that deserve their own outcome.
 - Widening once-write nullability to key-derived expressions (named out of scope by the
   keyed-grain residue outcome).
+- Orphaned-partition GC for the fingerprint sidecar (a deleted/redefined consumer's stale
+  rows): phase 4 rewrote the `sources.md` bullet to name it as the residual gap, which is what
+  criterion 4 asks for — closing it is a lifecycle feature, not this outcome's residue.
 
 ## Phases
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | pending |
-| 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | pending |
+| 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
+| 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
-| 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
-| 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
-| 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
+| 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
+| 5 | `supports_fingerprint_sidecar` residue closed against its stated target | done |
+| 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | done |
 
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
+- 2026-09-05: Phase 1 planned with no reshape (no prior summaries). Settled the ambiguous case
+  in the spec sentence "any other **declared** mutation profile": an *undeclared* driving-source
+  profile is admitted, since nothing declared contradicts the probe and the undeclared case is
+  already policed at run time by `SourceMutationProfileViolated`.
+- 2026-09-05: Phase 1 implemented and closed — `ContractFrozenHorizonInvalid` now refuses a
+  `frozen_horizon` declaration on a model whose driving source declares a non-`append_only`
+  mutation profile, surfaced through `check_file_diagnostics`, LSP-published, and covered by a
+  new `examples/broken` fixture. See `phases/01-summary.md`.
+- 2026-09-05: Phase 2 planned with no reshape. Named the vacuity precisely: the gate's
+  `Bracketed` obligation holds vacuously on its lower leg whenever the settled cutoff precedes
+  all recorded event time, so the upper leg alone admits any subset of `full_refresh(S)`. The
+  restatement is the spec's own two obligations — strict equality over the processed set plus a
+  lag bound on `L \ S` — which additionally requires `STracker` to split *landed* from
+  *processed* (the current fixture records a run for a window the deferred model never folded).
+
+- 2026-09-05: Phase 2 implemented and closed — `OracleObligation::Bracketed`
+  replaced by `ExactOverProcessedSWithLagBound` (strict equality over `S` plus
+  `deferral::settled_lag_bound` over landed-but-unprocessed event times);
+  `STracker` gained `record_landing`/`landed_at`/`landed_not_processed`; the
+  conformance fixture's run B is now recorded as a landing, not a run
+  (deferred_model never folded that window); a new metamorphic test proves
+  the restated comparator rejects a maintained state the superseded bracket
+  admitted. See `phases/02-summary.md`.
+
+- 2026-09-05: Phase 3 planned with no reshape (phase 2's summary surfaced no new residue).
+  Scoped the nullability route to non-nullness proven from the model's own `unique_key` — the
+  fact `classify_once_write` already holds, and spec route 1's own argument. A driving-clock-
+  derived payload stays on the decomposed-state route because `derive_fold_spec` resolves no
+  driving source, so admitting it would need a new plan-layer input and risk CLI↔runtime
+  admission divergence; the `incremental_shapes.md` divergence bullet is therefore narrowed to
+  that residual clause rather than deleted.
+
+- 2026-09-05: Phase 3 implemented the classifier route, unit tests, and plan-layer parity test
+  (all green), then hit a structural wall trying to add generative-pool coverage: the route
+  needs a declared FD naming the `unique_key` candidate, but a single-column `unique_key` can
+  only self-determine (`key -> key`, rejected by `validate_functional_dependencies` as
+  self-contradictory), and widening the model's `GROUP BY` to a second, distinct key column
+  fails too when that column is the driving source's clock/partition column
+  (`KeyedGroupByContainsPartitionColumn`) — the only other column `KeyedRecipe`'s three-column
+  source shape offers. Reverted the recipe/render/gate.rs wiring attempt (dead code with no
+  legal path to exercise it) and rewrote the `incremental_shapes.md` Known Divergences bullet to
+  name this precisely rather than deleting it. See `phases/03-summary.md`.
+
+- 2026-09-05: Phase 4 planned with no reshape (phase 3's blocked clause is already recorded under
+  ## Blocked; no new residue surfaced). Audited the built sidecar on paper first: rows are keyed
+  `(source_address, projection_identity, source_key)` with no consumer discriminator, so the only
+  thing separating two consumers of one source is the `stamp`'s model-SQL hash — which is unsound
+  for two consuming models with byte-identical bodies (a sibling's refresh satisfies this edge's
+  next diff) and merely useless otherwise (distinct bodies mutually invalidate, so neither
+  consumer ever narrows). Decided the fix is a fourth namespace/PK column `consumer_address`
+  rather than folding the consumer into the stamp: stamp-folding fixes the unsoundness but keeps
+  the clobber-thrash. `sources.md` §"Naming and namespace" therefore gets a spec delta — sharing
+  digests across consuming edges is deliberately not taken (it would need per-consumer consumption
+  cursors), rather than admitted-but-conditioned.
+
+- 2026-09-05: Phase 4 implemented and closed — `_smelt_fingerprint_sidecar`'s row key gained a
+  fourth PK column, `consumer_address`, threaded through `smelt-state`'s DDL/DML,
+  `smelt-logical`'s diff emitter, and every `smelt-runtime` sidecar entry point; live call sites
+  in `execute.rs` now pass the real consuming model's address. 3 new tests in
+  `fingerprint_sidecar.rs` prove byte-identical-body consumers no longer share a comparandum,
+  each edge's changed-key set survives interleaved runs independently, and a sibling's refresh
+  never mutates this edge's own stored rows. `sources.md` updated per the spec delta; the
+  `docs/TODO.md` bullet removed. See `phases/04-summary.md`.
+
+- 2026-09-05: Phase 6 implemented and closed — rewrote `incremental_models.md` §Known
+  Divergences "Conditional-maintenance gaps" and the `docs-site` guide's fingerprint-sidecar
+  paragraph to the capability-flag, two-leg framing phase 5 shipped. `residue_grep` sweep found
+  no remaining `SqlDialect::DuckDB`-gated sidecar site outside the already-excluded ledger/
+  observed-delta bookkeeping gates. `docs/TODO.md`'s three owned bullets were already absent
+  (removed by phases 1/2/4). A targeted drift check scoped to the five closed bullets found no
+  drift. All gates green (`verify-phase.sh`'s four legs run separately since the bundled script
+  again exceeded the foreground timeout, plus `maintenance_conformance` and
+  `statement_parity`/`fingerprint_sidecar`). See `phases/06-summary.md`. The outcome cannot yet
+  flip to `done`: phase 3's blocked generative-pool clause still needs a human decision.
+
+- 2026-09-05: Phase 5 planned with no phase-table reshape. Located the residue precisely: the
+  spec makes `BackendCapabilities::supports_fingerprint_sidecar` the decider and says it is
+  "never re-derived by a consumer", but only `resolve_live_external_delta_restriction_facts`
+  reads it — the other six sidecar gates in `maintenance_driver.rs` re-derive it as
+  `dialect != SqlDialect::DuckDB`. Also settled that the bullet's "keeps the widened-scan
+  recompute" describes only the external-delta-restriction leg: the repair-family / model-edge
+  group-grain leg must keep refusing with `UnsupportedOnBackend`, because a clamped current-
+  source scan over a `mutable_snapshot` is unsound rather than merely wider. `multi_backend.md`
+  §"The fingerprint sidecar capability" therefore gets a spec delta naming both legs. Recorded
+  phase 4's orphaned-partition GC hand-off under ## Out of scope rather than as a new row — the
+  criterion it serves (4) explicitly admits a rewritten residual-gap bullet, which phase 4 wrote.
+
+- 2026-09-05: Phase 5 implemented and closed — `resolve_live_per_group_recompute_cell` and
+  `resolve_live_key_addressed_model_edge_cell` gained a `supports_fingerprint_sidecar: bool`
+  parameter replacing their dialect gate; the four async sidecar entry points in
+  `maintenance_driver.rs` now gate on `backend.capabilities().supports_fingerprint_sidecar`
+  instead of `backend.dialect() != SqlDialect::DuckDB`; `execute.rs`'s two call sites pass the
+  real capability. `multi_backend.md` §"The fingerprint sidecar capability" now names both legs'
+  consequences for a flagless target. 5 new tests (2 in `repair_lowering.rs`, 2 in
+  `key_addressed_model_edge_lowering.rs`, 1 new `SidecarLessBackend`-driven test in
+  `fingerprint_sidecar.rs` covering all four entry points) prove the gate is the flag, not the
+  dialect. See `phases/05-summary.md`.
+
+- 2026-09-05: Phase 6 planned with no reshape. Phases 1/2/4 already removed their `docs/TODO.md`
+  bullets and phases 3/4 already rewrote their spec bullets, so the residue phase 6 actually
+  owns narrowed to two writes — the `incremental_models.md` "Conditional-maintenance gaps"
+  bullet phase 5 deliberately left stale (it still says the flag is DuckDB-set and names only
+  the widened-scan leg, omitting the `UnsupportedOnBackend` repair/model-edge leg) and the
+  `docs-site` guide sentence that still frames the sidecar as dialect-gated — plus the validate
+  and gate sweep. No new phase row: nothing the summaries surfaced serves a success criterion
+  without already having a home.
+
+- 2026-09-05: Outcome terminated `blocked` at the plan step. No workable `pending` row remains
+  (phases 1, 2, 4, 5, 6 `done`; phase 3 `blocked`). Success criteria judged against the phase
+  summaries: 1 met (`phases/01-summary.md`), 2 met (`phases/02-summary.md`), 4 met
+  (`phases/04-summary.md`), 5 met (`phases/05-summary.md`), 6 met (`phases/06-summary.md` —
+  targeted drift check on the five closed bullets found none; `verify-phase.sh`'s four legs,
+  `maintenance_conformance`, `statement_parity` and `fingerprint_sidecar` all green). Criterion 3
+  is met only in part: the classifier route, its unit tests and the plan-layer parity test
+  landed, and the `incremental_shapes.md` bullet was narrowed to the residual clause rather than
+  deleted, but the generative-pool once-write NULL-schedule witness has no legal path through
+  `KeyedRecipe`'s current source shape. That clause is what blocks the outcome.
+
+- 2026-09-05: **Human decision recorded, outcome unblocked.** Of the three candidate options in
+  `phases/03-summary.md` "For the next planner", the answer is **(c)**: `classify_once_write`'s
+  route-2 loop skips the declared-FD requirement when the candidate column is already a member of
+  the model's `unique_key`. Rationale — `unique_key` membership already proves the non-null/
+  distinct guarantee the FD was there to establish, and route 1 (bare reference) already accepts
+  a `unique_key` column with zero FD, so this is the same argument extended to route 2 rather than
+  a new one. (a) (widen `SourceRecipe`/`KeyedRecipe` with a fourth identity column) and (b)
+  (relax `validate_functional_dependencies`'s self-contradiction check for trivial `key -> key`)
+  were both rejected: (a) is a bigger structural change than this gap needs, and (b) would loosen
+  FD-validation semantics generally rather than just this route. Phase 3 reopened (`pending`);
+  outcome flipped back to `active`. The next plan step should: implement the `unique_key`-member
+  skip in `classify_once_write`, add the generative-pool recipe/render/gate.rs wiring the phase-3
+  revert backed out, and rewrite `incremental_shapes.md`'s Known Divergences bullet to describe
+  the now-closed gap (or delete it if nothing residual remains).
+
 ## Blocked
 
+- 2026-09-05: Phase 3 (once-write fallback-case nullability route), generative-pool coverage
+  clause only — the classifier route, unit tests, and plan-layer parity test are done and
+  committed; only the end-to-end DuckDB generative-pool witness is blocked. Reason: no legal way
+  to declare the required FD or reach a composite `unique_key` through `KeyedRecipe`'s existing
+  source shape (see `phases/03-summary.md` "For the next planner" for the two validation walls
+  hit and three candidate options). A human/planner call is needed on which option to take
+  before this can proceed: (a) widen `SourceRecipe`/`KeyedRecipe` with a fourth identity column,
+  (b) reconsider `validate_functional_dependencies`'s self-contradiction check for the trivial
+  `key = determines` case, or (c) drop the FD requirement in `classify_once_write` for a
+  candidate that is already a `unique_key` member.
+
 <!-- Dated entries; each names the phase, what blocked it, and what a human must decide. -->
+
+- 2026-09-05: **Outcome-level block.** The only open work is phase 3's generative-pool clause
+  (see the phase-level entry above and `phases/03-summary.md` "For the next planner"). A human
+  must pick one of three options before any further phase can be planned: (a) widen
+  `SourceRecipe`/`KeyedRecipe` with a fourth identity column so a composite `unique_key` and a
+  non-self-referential FD are both declarable; (b) relax
+  `validate_functional_dependencies`'s self-contradiction check for the trivial
+  `key -> key` case; or (c) drop the declared-FD requirement in `classify_once_write` when the
+  candidate column is already a `unique_key` member. Each changes user-visible validation
+  surface, so it is a spec-first product call this outcome cannot answer. Everything else the
+  outcome set out to close is done and gated.

@@ -19,9 +19,10 @@ pub mod text;
 pub mod workspace;
 
 pub use config::{
-    parse_active_backends, parse_unstable_schema_flag, BackendType, Config, ConfigError,
-    DataLatency, Grain, Granularity, IncrementalStrategy, Materialization, ModelConfig,
-    PartitionGrainConfig, PartitionGrainSafetyOverrides, RefreshStrategy, Target, Weekday,
+    parse_active_backends, parse_unstable_schema_flag, parse_warehouse_tables, BackendType, Config,
+    ConfigError, DataLatency, Grain, Granularity, IncrementalStrategy, Materialization,
+    ModelConfig, PartitionGrainConfig, PartitionGrainSafetyOverrides, RefreshStrategy, Target,
+    WarehouseTables, Weekday,
 };
 pub use discovery::{
     discover_function_file_paths, parse_sql_file, ModelDiscovery, ModelFile, ModelKind,

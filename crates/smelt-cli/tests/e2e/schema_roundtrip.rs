@@ -29,6 +29,8 @@ targets:
     type: duckdb
     database: test.duckdb
     schema: main
+state:
+  mode: intervals
 "#,
     )
     .unwrap();
@@ -184,6 +186,8 @@ targets:
     type: duckdb
     database: test.duckdb
     schema: main
+state:
+  mode: intervals
 "#,
     )
     .unwrap();

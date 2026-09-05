@@ -75,6 +75,7 @@ fn region_path_honours_prefer_recompute() {
         &[],
         IncrementalStrategy::DeleteInsert,
         false,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("prefer: recompute resolves to RegionRecompute, mapped to backend_default");
     assert_eq!(
@@ -114,6 +115,7 @@ fn region_path_refuses_unadmitted_technique_pin() {
         &[],
         IncrementalStrategy::DeleteInsert,
         false,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect_err("technique: fold is not in this cell's resolvable set — must refuse, not silently pick DeleteInsert");
     let message = err.to_string();
@@ -139,6 +141,7 @@ fn region_path_unchanged_without_overrides() {
         &[],
         IncrementalStrategy::DeleteInsert,
         false,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("no overrides must not refuse");
     assert_eq!(strategy, IncrementalStrategy::DeleteInsert);
@@ -172,6 +175,7 @@ fn region_path_unchanged_without_overrides() {
         &model_edges,
         IncrementalStrategy::DeleteInsert,
         false,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("a clocked model edge with no overrides must not refuse");
     assert_eq!(edge_strategy, IncrementalStrategy::DeleteInsert);

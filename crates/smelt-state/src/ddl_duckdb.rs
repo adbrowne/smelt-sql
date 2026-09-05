@@ -494,6 +494,52 @@ pub fn generate_ledger_exists_sql(
     )
 }
 
+/// `DELETE` + `INSERT` implementing the ledger's region-recompute reset
+/// (`docs/specs/incremental_models.md` §"The reconciliation ledger": "a
+/// region recompute resets every intersecting entry to exactly the input it
+/// read"). This is the region-recompute half of the ledger, kept beside the
+/// fold-side builders above under the same bookkeeping exclusion from the
+/// maintenance-plan-purity invariant (`CLAUDE.md` §"Maintenance-plan
+/// purity" — "ledger DDL/DML in `smelt-state` excluded as bookkeeping"),
+/// same precedent as [`generate_ledger_insert_sql`]. The `DELETE` removes
+/// every existing `(model_name, grp)` row whose stored `[region_start,
+/// region_end)` intersects the caller's `[region_start, region_end)` as
+/// half-open intervals; the paired `INSERT` then records exactly the input
+/// state this recompute read. Run together (in this order) inside one
+/// backend transaction alongside the recompute's own write — see
+/// `smelt_backend::Backend::execute_write_with_bookkeeping`.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_ledger_recompute_reset_sqls(
+    schema: &str,
+    model: &str,
+    group: &str,
+    region_start: &str,
+    region_end: &str,
+    input: &str,
+    delta_id: &str,
+) -> Vec<String> {
+    let delete_sql = format!(
+        "DELETE FROM {}.{} WHERE model_name = '{}' AND grp = '{}' \
+         AND region_start < '{}' AND region_end > '{}'",
+        quote_identifier(schema),
+        LEDGER_TABLE_NAME,
+        escape_sql_literal(model),
+        escape_sql_literal(group),
+        escape_sql_literal(region_end),
+        escape_sql_literal(region_start),
+    );
+    let insert_sql = generate_ledger_insert_sql(
+        schema,
+        model,
+        group,
+        input,
+        delta_id,
+        region_start,
+        region_end,
+    );
+    vec![delete_sql, insert_sql]
+}
+
 fn escape_sql_literal(s: &str) -> String {
     s.replace('\'', "''")
 }
@@ -657,11 +703,17 @@ impl ObservedDelta {
 // handed this DuckDB-flavored SQL.
 //
 // A row is namespaced by `(source_address, projection_identity,
-// source_key)` — projection identity, not consumer identity: a canonical
+// consumer_address, source_key)` — projection identity is a canonical
 // identifier of the P4 fingerprint projection's column set
-// (`smelt_logical::analysis::fingerprint::projection_identity`). The
-// synthesized DIFF query that compares current source content against this
-// table is emitter-authored
+// (`smelt_logical::analysis::fingerprint::projection_identity`);
+// consumer_address is the CONSUMING model's own address, added so two
+// consumers of the same source under the same projection identity each get
+// their own comparandum partition (`docs/specs/sources.md` §"The
+// fingerprint sidecar" — "Naming and namespace"): without it, a sibling
+// consumer's refresh silently narrows (or, for byte-identical bodies,
+// unsoundly satisfies) this edge's next diff. The synthesized DIFF query
+// that compares current source content against this table is
+// emitter-authored
 // (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`) —
 // unlike this table's own storage DDL/DML, the diff is a maintenance-
 // relevant derived comparison, not a record of smelt's own run history.
@@ -678,11 +730,11 @@ pub const FINGERPRINT_SIDECAR_TABLE_NAME: &str = "_smelt_fingerprint_sidecar";
 /// (`smelt_runtime::maintenance_driver::compute_fingerprint_sidecar_stamp`
 /// — digest-construction version, P4 projection identity, and the
 /// consuming model's own SQL provenance combined). It is a plain value
-/// column, not part of the primary key: the partition key stays
-/// `(source_address, projection_identity, source_key)`, but a row's stamp
-/// can go stale in place (a model-definition edit that leaves the
-/// projection's column set unchanged still changes the stamp) — the diff
-/// query filters on it (`smelt_logical::maintenance::emit::
+/// column, not part of the primary key: the partition key is
+/// `(source_address, projection_identity, consumer_address, source_key)`,
+/// but a row's stamp can go stale in place (a model-definition edit that
+/// leaves the projection's column set unchanged still changes the stamp) —
+/// the diff query filters on it (`smelt_logical::maintenance::emit::
 /// emit_fingerprint_sidecar_diff`) so a stale-stamped row is excluded from
 /// the comparison entirely, structurally identical to an absent sidecar,
 /// never trusted as a valid prior digest.
@@ -691,10 +743,11 @@ pub fn generate_fingerprint_sidecar_table_ddl(schema: &str) -> String {
         "CREATE TABLE IF NOT EXISTS {}.{} (\
          source_address VARCHAR NOT NULL, \
          projection_identity VARCHAR NOT NULL, \
+         consumer_address VARCHAR NOT NULL, \
          source_key VARCHAR NOT NULL, \
          digest VARCHAR NOT NULL, \
          stamp VARCHAR NOT NULL, \
-         PRIMARY KEY (source_address, projection_identity, source_key))",
+         PRIMARY KEY (source_address, projection_identity, consumer_address, source_key))",
         quote_identifier(schema),
         FINGERPRINT_SIDECAR_TABLE_NAME,
     )
@@ -728,19 +781,22 @@ pub fn generate_fingerprint_sidecar_refresh_sql(
     schema: &str,
     source_address: &str,
     projection_identity: &str,
+    consumer_address: &str,
     stamp: &str,
     digest_select_sql: &str,
 ) -> String {
     format!(
-        "INSERT INTO {schema}.{table} (source_address, projection_identity, source_key, digest, \
-         stamp) SELECT '{source_address}', '{projection_identity}', __smelt_digest.delta_key, \
-         __smelt_digest.delta_digest, '{stamp}' FROM ({digest_select_sql}) AS __smelt_digest \
-         ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET \
-         digest = excluded.digest, stamp = excluded.stamp",
+        "INSERT INTO {schema}.{table} (source_address, projection_identity, consumer_address, \
+         source_key, digest, stamp) SELECT '{source_address}', '{projection_identity}', \
+         '{consumer_address}', __smelt_digest.delta_key, __smelt_digest.delta_digest, '{stamp}' \
+         FROM ({digest_select_sql}) AS __smelt_digest ON CONFLICT (source_address, \
+         projection_identity, consumer_address, source_key) DO UPDATE SET digest = \
+         excluded.digest, stamp = excluded.stamp",
         schema = quote_identifier(schema),
         table = FINGERPRINT_SIDECAR_TABLE_NAME,
         source_address = escape_sql_literal(source_address),
         projection_identity = escape_sql_literal(projection_identity),
+        consumer_address = escape_sql_literal(consumer_address),
         stamp = escape_sql_literal(stamp),
         digest_select_sql = digest_select_sql,
     )
@@ -762,15 +818,18 @@ pub fn generate_fingerprint_sidecar_stale_check_sql(
     schema: &str,
     source_address: &str,
     projection_identity: &str,
+    consumer_address: &str,
     stamp: &str,
 ) -> String {
     format!(
         "SELECT 1 FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
-         projection_identity = '{projection_identity}' AND stamp <> '{stamp}' LIMIT 1",
+         projection_identity = '{projection_identity}' AND consumer_address = \
+         '{consumer_address}' AND stamp <> '{stamp}' LIMIT 1",
         schema = quote_identifier(schema),
         table = FINGERPRINT_SIDECAR_TABLE_NAME,
         source_address = escape_sql_literal(source_address),
         projection_identity = escape_sql_literal(projection_identity),
+        consumer_address = escape_sql_literal(consumer_address),
         stamp = escape_sql_literal(stamp),
     )
 }
@@ -792,14 +851,17 @@ pub fn generate_fingerprint_sidecar_partition_exists_sql(
     schema: &str,
     source_address: &str,
     projection_identity: &str,
+    consumer_address: &str,
 ) -> String {
     format!(
         "SELECT 1 FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
-         projection_identity = '{projection_identity}' LIMIT 1",
+         projection_identity = '{projection_identity}' AND consumer_address = \
+         '{consumer_address}' LIMIT 1",
         schema = quote_identifier(schema),
         table = FINGERPRINT_SIDECAR_TABLE_NAME,
         source_address = escape_sql_literal(source_address),
         projection_identity = escape_sql_literal(projection_identity),
+        consumer_address = escape_sql_literal(consumer_address),
     )
 }
 
@@ -815,16 +877,19 @@ pub fn generate_fingerprint_sidecar_gc_sql(
     schema: &str,
     source_address: &str,
     projection_identity: &str,
+    consumer_address: &str,
     digest_select_sql: &str,
 ) -> String {
     format!(
         "DELETE FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
-         projection_identity = '{projection_identity}' AND source_key NOT IN \
-         (SELECT __smelt_digest.delta_key FROM ({digest_select_sql}) AS __smelt_digest)",
+         projection_identity = '{projection_identity}' AND consumer_address = \
+         '{consumer_address}' AND source_key NOT IN (SELECT __smelt_digest.delta_key FROM \
+         ({digest_select_sql}) AS __smelt_digest)",
         schema = quote_identifier(schema),
         table = FINGERPRINT_SIDECAR_TABLE_NAME,
         source_address = escape_sql_literal(source_address),
         projection_identity = escape_sql_literal(projection_identity),
+        consumer_address = escape_sql_literal(consumer_address),
         digest_select_sql = digest_select_sql,
     )
 }
@@ -1429,6 +1494,55 @@ mod tests {
         assert!(sql.contains("delta_id = '2026-01-01'"));
     }
 
+    #[test]
+    fn ledger_recompute_reset_deletes_intersecting_and_records_read() {
+        let sqls = generate_ledger_recompute_reset_sqls(
+            "main",
+            "device_stats",
+            "{*}",
+            "2026-01-01",
+            "2026-01-02",
+            "self",
+            "2026-01-02",
+        );
+        assert_eq!(sqls.len(), 2);
+        let delete_sql = &sqls[0];
+        assert!(delete_sql.starts_with("DELETE FROM main._smelt_ledger"));
+        assert!(delete_sql.contains("model_name = 'device_stats'"));
+        assert!(delete_sql.contains("grp = '{*}'"));
+        assert!(delete_sql.contains("region_start < '2026-01-02'"));
+        assert!(delete_sql.contains("region_end > '2026-01-01'"));
+
+        let insert_sql = &sqls[1];
+        assert_eq!(
+            insert_sql,
+            &generate_ledger_insert_sql(
+                "main",
+                "device_stats",
+                "{*}",
+                "self",
+                "2026-01-02",
+                "2026-01-01",
+                "2026-01-02",
+            )
+        );
+    }
+
+    #[test]
+    fn ledger_recompute_reset_escapes_literals() {
+        let sqls = generate_ledger_recompute_reset_sqls(
+            "main",
+            "model's_name",
+            "{*}",
+            "2026-01-01",
+            "2026-01-02",
+            "self",
+            "2026-01-02",
+        );
+        assert!(sqls[0].contains("model_name = 'model''s_name'"));
+        assert!(sqls[1].contains("'model''s_name'"));
+    }
+
     // ── warehouse-resident observed-output-delta DDL/DML (T5) ──────────
 
     #[test]
@@ -1533,10 +1647,13 @@ mod tests {
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS main._smelt_fingerprint_sidecar"));
         assert!(ddl.contains("source_address VARCHAR NOT NULL"));
         assert!(ddl.contains("projection_identity VARCHAR NOT NULL"));
+        assert!(ddl.contains("consumer_address VARCHAR NOT NULL"));
         assert!(ddl.contains("source_key VARCHAR NOT NULL"));
         assert!(ddl.contains("digest VARCHAR NOT NULL"));
         assert!(ddl.contains("stamp VARCHAR NOT NULL"));
-        assert!(ddl.contains("PRIMARY KEY (source_address, projection_identity, source_key)"));
+        assert!(ddl.contains(
+            "PRIMARY KEY (source_address, projection_identity, consumer_address, source_key)"
+        ));
     }
 
     #[test]
@@ -1545,15 +1662,18 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name,tier",
+            "smelt.models.consumer_a",
             "v1:cols:name,tier:sha256:deadbeef",
             "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
         );
         assert!(sql.contains("INSERT INTO main._smelt_fingerprint_sidecar"));
         assert!(sql.contains("'smelt.sources.dim_users'"));
         assert!(sql.contains("'cols:name,tier'"));
+        assert!(sql.contains("'smelt.models.consumer_a'"));
         assert!(sql.contains("'v1:cols:name,tier:sha256:deadbeef'"));
         assert!(sql.contains(
-            "ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET"
+            "ON CONFLICT (source_address, projection_identity, consumer_address, source_key) DO \
+             UPDATE SET"
         ));
         assert!(sql.contains("digest = excluded.digest, stamp = excluded.stamp"));
         assert!(sql.contains("SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users"));
@@ -1565,10 +1685,12 @@ mod tests {
             "main",
             "smelt.sources.dim's_users",
             "cols:name",
+            "smelt.models.consumer's_a",
             "stamp's",
             "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
         );
         assert!(sql.contains("'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("'smelt.models.consumer''s_a'"));
         assert!(sql.contains("'stamp''s'"));
     }
 
@@ -1578,11 +1700,13 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name,tier",
+            "smelt.models.consumer_a",
             "v1:cols:name,tier:sha256:deadbeef",
         );
         assert!(sql.contains("SELECT 1 FROM main._smelt_fingerprint_sidecar"));
         assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
         assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer_a'"));
         assert!(sql.contains("stamp <> 'v1:cols:name,tier:sha256:deadbeef'"));
     }
 
@@ -1592,9 +1716,11 @@ mod tests {
             "main",
             "smelt.sources.dim's_users",
             "cols:name",
+            "smelt.models.consumer's_a",
             "stamp's",
         );
         assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer''s_a'"));
         assert!(sql.contains("stamp <> 'stamp''s'"));
     }
 
@@ -1604,10 +1730,12 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "repair:group=customer_id:digest=amount",
+            "smelt.models.consumer_a",
         );
         assert!(sql.contains("SELECT 1 FROM main._smelt_fingerprint_sidecar"));
         assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
         assert!(sql.contains("projection_identity = 'repair:group=customer_id:digest=amount'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer_a'"));
         assert!(
             !sql.contains("stamp"),
             "existence must not filter on stamp — a stale-stamped row still proves the \
@@ -1621,8 +1749,10 @@ mod tests {
             "main",
             "smelt.sources.dim's_users",
             "cols:name",
+            "smelt.models.consumer's_a",
         );
         assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer''s_a'"));
     }
 
     #[test]
@@ -1631,11 +1761,13 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name,tier",
+            "smelt.models.consumer_a",
             "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
         );
         assert!(sql.contains("DELETE FROM main._smelt_fingerprint_sidecar"));
         assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
         assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer_a'"));
         assert!(sql.contains("source_key NOT IN"));
         assert!(sql.contains("SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users"));
     }
@@ -1646,8 +1778,10 @@ mod tests {
             "main",
             "smelt.sources.dim's_users",
             "cols:name",
+            "smelt.models.consumer's_a",
             "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
         );
         assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("consumer_address = 'smelt.models.consumer''s_a'"));
     }
 }

@@ -12,6 +12,7 @@
 //! Spec: `docs/specs/incremental_shapes.md` §"The column-family catalogue",
 //! §"Statement emission (single owner)".
 
+use smelt_core::config::FunctionalDependency;
 use smelt_db::queries::maintenance::derive_fold_spec;
 use smelt_types::SqlFunction;
 
@@ -412,4 +413,25 @@ fn avg_distinct_is_not_admitted_into_fold_spec() {
     let sql = "SELECT device_id, AVG(DISTINCT amount) AS avg_amount \
                FROM smelt.sources.events GROUP BY device_id";
     assert!(derive_fold_spec(sql, &[]).is_none());
+}
+
+/// The plan layer admits the once-write not-null fallback spelling
+/// (`COALESCE(MAX(id), 0)` over the model's own `unique_key`) exactly as
+/// `rules::cumulative::classify_once_write` does — plan-layer/runtime
+/// admission parity for `docs/outcomes/20260904-decided-gap-residue`
+/// phase 3's new route.
+#[test]
+fn fold_spec_admits_the_not_null_fallback_spelling() {
+    let sql = "SELECT id, COALESCE(MAX(id), 0) AS first_id \
+               FROM smelt.sources.events GROUP BY id";
+    let fds = vec![FunctionalDependency {
+        key: vec!["id".to_string()],
+        determines: "id".to_string(),
+    }];
+    let spec =
+        derive_fold_spec(sql, &fds).expect("the not-null fallback spelling must be admitted");
+    assert!(spec
+        .add_columns
+        .iter()
+        .any(|(alias, f)| alias == "first_id" && *f == SqlFunction::Coalesce));
 }

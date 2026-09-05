@@ -185,11 +185,9 @@ fn scratch_project(project: &LinkCProject, scratch_name: &str) -> (LinkCProject,
     let target_name = format!("scratch_{scratch_name}");
     cfg.targets.insert(target_name.clone(), scratch_target);
     (
-        LinkCProject {
-            project_dir: project.project_dir.clone(),
-            db_path: project.db_path.clone(),
-            config: std::sync::Arc::new(cfg),
-        },
+        LinkCProject::load(project.project_dir.clone(), project.db_path.clone())
+            .expect("reload LinkCProject for scratch target")
+            .with_config(std::sync::Arc::new(cfg)),
         target_name,
     )
 }

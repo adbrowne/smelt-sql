@@ -89,6 +89,8 @@ async fn a_run_over_unchanged_data_leaves_the_region_untouched() {
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("suppressed region recompute executes");
@@ -162,6 +164,8 @@ async fn a_departed_key_is_deleted_a_changed_value_is_updated_a_new_key_is_inser
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
         &smelt_runtime::probes::ProbePolicy::per_run(),
+        &[],
+        &[],
     )
     .await
     .expect("suppressed region recompute executes");

@@ -2,15 +2,50 @@
 
 Incremental materialization lets you process only new or changed data instead of rebuilding an entire table from scratch. For large datasets, this can reduce run times from hours to seconds.
 
-## How it works
+## What a model emits
 
-smelt uses a **DELETE+INSERT** strategy on time partitions. For each incremental run:
+Between one run and the next, something changed upstream — new rows arrived, an existing row was
+corrected. That change is a **delta**, and every relation in your pipeline — a source or a
+model — has a **delta signature**: the shape of change it emits when it changes.
 
-1. **DELETE** rows in the output table where the partition column falls within the requested time range.
-2. **Run the query** with a WHERE filter restricting source data to that time range.
-3. **INSERT** the results into the output table.
+Not every delta is equally hard to absorb. smelt grades the shape of a change on a three-point
+scale, from easiest to hardest:
 
-This approach is idempotent -- running the same time range twice produces the same result, because the DELETE step clears any previous output before inserting.
+`append-only within a window` ⊑ `keyed upsert` ⊑ `general`
+
+- **append-only within a window** — only new rows, landing inside a bounded, recent time window.
+  An event feed is the canonical case.
+- **keyed upsert** — rows are added or replaced, addressed by a key. The output of a keyed
+  aggregation is the canonical case.
+- **general** — anything: inserts, updates, deletes, anywhere. The least that can be assumed,
+  and the most expensive to absorb.
+
+A signature's **addressing** says how the changed rows are located: by time **window**, by
+**key set**, or only as **whole-table**. Run `smelt explain <model>` to see the derived
+signature for one of the timeseries example project's models:
+
+```
+$ smelt explain user_daily_spend
+model user_daily_spend  (emits: keyed upsert over [user_id, spend_date], key-addressed, slice-bounded by spend_date under key temporal locality (settle bound: After { margin: Seconds(0) }); grain: partition)
+```
+
+That headline is the model's own delta signature — a keyed upsert over `[user_id, spend_date]`,
+narrowed to the `spend_date` window a given run touches. **A model's signature is derived from
+its SQL and its inputs' signatures — you never declare it.** A keyed `GROUP BY` over an
+append-only feed emits keyed upserts; a row-multiplying join degrades what flows through it
+toward `general`. `smelt explain` names the construct responsible whenever a model degrades:
+run it against `daily_events_enriched` in the same project and the headline reads
+`emits: general (degraded by: join proven OneToMany (row-multiplying) degrades output-delta
+shape to General), not delta-addressable` — the plain inner join is exactly the shape that
+can't be proven row-preserving (more on this in
+[Enrichment joins and dimension updates](#enrichment-joins-and-dimension-updates) below).
+
+What you actually declare are two shape-defining facts about the *output* — a clock, an
+identity, or both — covered next in [Configuration](#configuration). From there: the
+[composed shape](#the-composed-shape-key-time) when you declare both facts together,
+[contract relaxations](#contract-relaxations) if a column doesn't need strict equivalence,
+[Rebuilding](#rebuilding) for backfills and definition changes, and
+[Schema Evolution](schema-evolution.md) for adding or removing columns.
 
 ## Configuration
 
@@ -97,6 +132,24 @@ model's recorded snapshot at `.smelt/targets/<target>/schemas/<model>.json` and 
 next run addresses the table under the new column and records a fresh snapshot.
 
 ## Running incremental models
+
+### What a partition-shaped run does
+
+For a partition-shaped model (a declared clock, no declared identity — the shape this guide
+covers), the maintenance plan derives to the region-recompute technique on the model's own
+`NewData` trigger: **DELETE**+**INSERT** on time partitions. For each run touching a partition:
+
+1. **DELETE** rows in the output table where the partition column falls within the requested time range.
+2. **Run the query** with a WHERE filter restricting source data to that time range.
+3. **INSERT** the results into the output table.
+
+This is idempotent -- running the same time range twice produces the same result, because the
+DELETE step clears any previous output before inserting. It is the technique the derived plan
+assigns to this trigger for this shape, not a strategy you choose: a keyed or composed model,
+or a mutation triggered by an upstream dimension change, can derive a different technique for a
+different cell of the same plan (see [Enrichment joins](#enrichment-joins-and-dimension-updates)
+and [The composed shape](#the-composed-shape-key-time)). Run `smelt explain <model>` on your own
+model to see which technique its own plan actually assigned.
 
 ### Explicit time range
 
@@ -600,7 +653,7 @@ contract:
 
 Two relaxations are available:
 
-- **`frozen_horizon`** — partitions older than `end - frozen_horizon` are never revisited by maintenance. Admitted only on a partition-grain model (`grain: partition`), since a key-grain model has no write-eligibility clamp to narrow. A genuinely late arrival outside the frozen horizon is diagnosed (`ContractLateArrivalOutsideHorizon`), never silently dropped. An unparseable or negative interval, or declaring it on a key-grain model, is `ContractFrozenHorizonInvalid`.
+- **`frozen_horizon`** — partitions older than `end - frozen_horizon` are never revisited by maintenance. Admitted only on a partition-grain model (`grain: partition`), since a key-grain model has no write-eligibility clamp to narrow, and only when the model's driving source is `append_only` — the late-arrival probe's row-count comparison is blind under any other declared mutation profile. A genuinely late arrival outside the frozen horizon is diagnosed (`ContractLateArrivalOutsideHorizon`), never silently dropped. An unparseable or negative interval, declaring it on a key-grain model, or declaring it on a model whose driving source has a declared mutation profile other than `append_only`, is `ContractFrozenHorizonInvalid`.
 - **`deferral`** — the maintained state may lag its inputs by up to the declared window, licensing a run to be skipped while the pending work stays inside that window, and a later catch-up run to prove it subsumed the skipped work. Admitted on either grain, model-level or per cell, but only where there is a clock to measure lag against — a model-level `deferral` needs a `timeseries:` clock, and a `cells[]` entry's `deferral` needs its `on:` trigger to be a clocked, interval-representable source. A cell whose measured lag exceeds its declared window raises `ContractDeferralExceeded`. An unparseable/negative interval, or a `deferral` with no clock to measure against, is `ContractDeferralInvalid`.
 
 Model-level values are the default for every cell; a `contract.cells[]` entry — addressed the same way as `maintenance.cells[].columns` / `.on` — refines one cell's `deferral`. `frozen_horizon` is model-level only. A per-cell `deferral` refinement validates and prints as declared, but is not yet scheduled — it needs a per-cell maintained frontier the interval ledger does not track yet.
@@ -724,7 +777,7 @@ The `+` prefix means "include upstream dependencies." smelt will:
 
 Rebuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
-Rebuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
+Rebuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Migrations](migrations.md).
 
 ## Incremental strategies
 
@@ -746,20 +799,22 @@ smelt derives a **maintenance plan** for every `refresh: incremental` model: a m
 
 ```
 $ smelt explain daily_events_enriched
+model daily_events_enriched  (emits: general (degraded by: join proven OneToMany (row-multiplying) degrades output-delta shape to General), not delta-addressable; grain: partition)
+
 Maintenance plan: daily_events_enriched
 
-Cells (4):
+Cells (5):
   - group {*} on trigger NewData { source: "raw.events" }
       corner:    RecomputeRegion
       technique: DeleteInsert
       ...
   - group {user_name} on trigger UpstreamMutation { source: "raw.users" }
-      corner:    ColumnMerge
-      technique: ColumnScopedMerge
+      corner:    RecomputeRegion
+      technique: DeleteInsert
       ...
 ```
 
-The `UpstreamMutation` cell for `raw.users` shows that a dimension change only needs a **column-scoped `MERGE`** touching `{user_name}` — not a rebuild of the whole partition. That targeted repair is only available when the join cannot change *which* fact rows exist: a `LEFT JOIN` against a dimension that declares its own `unique_key` proves this (the join can only ever change a value, never admit or drop a fact row), so only the dimension-derived column group repairs column-scoped while everything else the dimension's `ON` predicate might otherwise gate stays untouched. A plain (inner) `JOIN`, or a `LEFT JOIN` against a dimension with no declared `unique_key`, cannot be proven this way — every column group the join touches falls back to the region `DELETE`+`INSERT` recompute instead, since a row-admitting join can change which rows exist, not just their values. Declare the dimension's mutability explicitly on its source YAML so smelt derives a mutation cell at all instead of assuming worst-case immutability:
+This model's plain inner `JOIN` is exactly the shape that *cannot* be proven row-preserving — its `ON` predicate makes row membership sensitive to the dimension, so no column group of the `SELECT` can be proven value-only — and the `{user_name}` cell falls back to the region `DELETE`+`INSERT` recompute rather than a **column-scoped `MERGE`**. That targeted repair is only available when the join cannot change *which* fact rows exist: a `LEFT JOIN` against a dimension that declares its own `unique_key` proves this (the join can only ever change a value, never admit or drop a fact row), so only the dimension-derived column group repairs column-scoped while everything else the dimension's `ON` predicate might otherwise gate stays untouched. A plain (inner) `JOIN`, or a `LEFT JOIN` against a dimension with no declared `unique_key`, cannot be proven this way — every column group the join touches falls back to the region `DELETE`+`INSERT` recompute instead, since a row-admitting join can change which rows exist, not just their values. Declare the dimension's mutability explicitly on its source YAML so smelt derives a mutation cell at all instead of assuming worst-case immutability:
 
 ```yaml
 # models/sources/raw/users.yml
@@ -781,7 +836,7 @@ Once the cell is admitted (and the target table already exists), a plain `smelt 
 
 Declaring the dimension's [referential integrity](sources.md#declaring-referential-integrity) narrows the enrichment `MERGE`'s recompute further, down to a point lookup: renaming exactly one user out of a million-row dimension only ever needs to touch the fact rows for that one user, not the fact table's whole event-time window. smelt derives this from two facts together — the enrichment join provably preserves every driving row (licensed by a `LEFT JOIN`, or by a declared `referential_integrity:` on an inner join), and the dimension's own current-vs-previously-seen content diff names exactly which key(s) changed. `smelt explain` reports the row-preservation verdict for the join; the count-preservation check the declaration is paired with re-verifies it against every touched region on each run, and fails the run loudly rather than silently trusting a declaration a data change has since made false.
 
-That content diff is the **fingerprint sidecar**: for a `mutation_profile: mutable_snapshot` source with no native change feed, smelt maintains a per-row content digest alongside the table it reads, and diffs each run's current digests against the previous run's to synthesize exactly which keys changed — the same "which key(s) changed" a real change-data-capture feed would hand you, derived instead of declared. You never configure it directly; it's a byproduct of the mutable-dimension declaration above, refreshed transactionally alongside the write it rides with. If its stored identity stamp ever mismatches what a fresh computation expects — the enrichment projection changed, or the model that consumes it was redefined — that partition's diff degrades to the same whole-table delta an absent sidecar would produce, logged loudly rather than silently trusted. The same sidecar diff also narrows a region `DELETE`+`INSERT` recompute (in place of the column-scoped `MERGE` above, when that technique isn't available) to just the changed dimension rows — DuckDB-only today (`BackendCapabilities::supports_fingerprint_sidecar`); a Spark or BigQuery target keeps the widened-scan recompute for that cell.
+That content diff is the **fingerprint sidecar**: for a `mutation_profile: mutable_snapshot` source with no native change feed, smelt maintains a per-row content digest alongside the table it reads, and diffs each run's current digests against the previous run's to synthesize exactly which keys changed — the same "which key(s) changed" a real change-data-capture feed would hand you, derived instead of declared. You never configure it directly; it's a byproduct of the mutable-dimension declaration above, refreshed transactionally alongside the write it rides with. If its stored identity stamp ever mismatches what a fresh computation expects — the enrichment projection changed, or the model that consumes it was redefined — that partition's diff degrades to the same whole-table delta an absent sidecar would produce, logged loudly rather than silently trusted. The same sidecar diff also narrows a region `DELETE`+`INSERT` recompute (in place of the column-scoped `MERGE` above, when that technique isn't available) to just the changed dimension rows, gated on the target declaring `BackendCapabilities::supports_fingerprint_sidecar` (DuckDB alone today). A target that doesn't declare the capability falls back differently depending on which cell is asking: the dimension-recompute cell above keeps the widened-scan recompute over the whole region, while the repair-family and model-edge group-grain cells refuse the run outright rather than fall back, since a clamped scan would be unsound there rather than merely wider.
 
 ### The reconciliation ledger
 
@@ -796,12 +851,16 @@ double-count), and recomputing a region — a full `DELETE`+`INSERT` of that reg
 ledger entry, since the recompute already incorporates everything up to that point.
 
 This project-wide bookkeeping is the frontier's **reconciliation ledger** realization (see
-[State — The reconciliation ledger](../reference/state.md#the-reconciliation-ledger)). A
-window-forward keyed model's own `MERGE` writes a second realization, the **transactional
-frontier write**, directly into the target table alongside the row data it accompanies, in the
-same transaction: it lives backend-resident, not in a separate smelt-managed store. You don't
-declare or configure either realization directly; `smelt explain <model>` shows whether a given
-cell routes through the reconciliation ledger via the `ledger_catch_up` flag on that cell.
+[State — The reconciliation ledger](../reference/state.md#the-reconciliation-ledger)) — itself
+backend-resident (a per-model table in the target backend, folded in the same transaction as the
+write it protects), not `.smelt/`-resident. A window-forward keyed model's own `MERGE` writes a
+second realization, the **transactional frontier write**, directly into the target table
+alongside the row data it accompanies, in the same transaction: it too lives backend-resident,
+not in a separate smelt-managed store. You don't declare or configure either realization
+directly; `smelt explain <model>` shows whether a given cell routes through the reconciliation
+ledger via the `ledger_catch_up` flag on that cell, and prints a recorded `MaintenanceStateDowngraded`
+downgrade for any cell whose ideal technique needed a ledger realisation the target backend or
+`state.warehouse_tables: none` doesn't supply.
 
 ## grain: partition vs grain: key
 

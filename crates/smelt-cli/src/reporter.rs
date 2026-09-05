@@ -133,26 +133,6 @@ impl RunReporter for CliReporter {
     fn run_cancelled(&self, _run_id: &str) {
         eprintln!("smelt: run cancelled");
     }
-
-    fn state_structure_unavailable(
-        &self,
-        _run_id: &str,
-        model: &str,
-        structure: &str,
-        dialect: &str,
-        consequence: &str,
-    ) {
-        tracing::warn!(
-            model,
-            structure,
-            dialect,
-            "{} skipped for model '{}' on {} — {}",
-            structure,
-            model,
-            dialect,
-            consequence
-        );
-    }
 }
 
 /// Coarse classification of why a model failed, inferred from its recorded

@@ -1331,3 +1331,76 @@ async fn test_column_rename_rooted_at_definition_site() {
 
     client.shutdown().await;
 }
+
+/// `docs/outcomes/20260904-decided-gap-residue/phases/01-plan.md`: the
+/// `ContractFrozenHorizonInvalid` posture check (declaring
+/// `contract.frozen_horizon` on a model driven by a non-`append_only`
+/// source) reaches the real LSP's published diagnostics with the expected
+/// code slug, not just `smelt_db::file_diagnostics()` directly.
+#[tokio::test]
+async fn lsp_publishes_contract_frozen_horizon_posture_diagnostic() {
+    let ws = TestWorkspaceDir::new();
+    std::fs::create_dir_all(ws.path().join("models/sources")).unwrap();
+    std::fs::write(
+        ws.path().join("models/sources/contract_mutable_orders.yml"),
+        r#"
+description: Orders, mutable snapshot.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: TIMESTAMP, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#,
+    )
+    .unwrap();
+
+    let sql = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      contract_mutable_orders:
+        allow_full_scan: true
+contract:
+  frozen_horizon: '90 days'
+---
+SELECT
+    date_trunc('day', o.order_date) AS order_date,
+    SUM(o.amount) AS total
+FROM smelt.sources.contract_mutable_orders o
+GROUP BY 1
+"#;
+    ws.add_model("revenue", sql);
+    let mut client = TestClient::new(ws.path()).await;
+
+    let uri = ws.model_uri("revenue");
+    client.open_file(&uri, sql).await;
+
+    let diags = client.collect_diagnostics(2000).await;
+
+    let has_expected_code = diags.iter().any(|(u, ds)| {
+        u.contains("revenue")
+            && ds.iter().any(|d| {
+                d.code.as_ref().is_some_and(|c| {
+                    matches!(
+                        c,
+                        lsp_types::NumberOrString::String(s)
+                            if s == "contract-frozen-horizon-invalid"
+                    )
+                })
+            })
+    });
+    assert!(
+        has_expected_code,
+        "Expected a published diagnostic with code 'contract-frozen-horizon-invalid', got: {:?}",
+        diags
+    );
+
+    client.shutdown().await;
+}

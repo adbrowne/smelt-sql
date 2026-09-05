@@ -30,6 +30,35 @@ pub fn validate_frozen_horizon(grain: Grain) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates that `frozen_horizon:`'s driving source has a posture the
+/// late-arrival probe can actually observe: the probe is a baseline-vs-
+/// current row-count comparison ([`late_arrivals`]), which is sound only
+/// when the driving source's row count is non-decreasing —
+/// `append_only` (`incremental_models.md` §"The contract lattice": "declaring
+/// `frozen_horizon` on a model whose driving source has any other declared
+/// mutation profile is refused at declaration time").
+///
+/// An **undeclared** mutation profile (`profile: None`) is admitted: the
+/// spec refuses on "any other *declared* mutation profile", and an
+/// undeclared profile declares nothing to contradict the probe — the
+/// undeclared case is already policed at run time by
+/// `SourceMutationProfileViolated`.
+///
+/// Returns `Err` naming the offending source and its declared posture when
+/// `profile` is `Some` and not `AppendOnly`.
+pub fn validate_frozen_horizon_posture(
+    driving_source: &str,
+    profile: Option<smelt_core::sources::MutationProfile>,
+) -> Result<(), String> {
+    match profile {
+        Some(smelt_core::sources::MutationProfile::AppendOnly) | None => Ok(()),
+        Some(other) => Err(format!(
+            "contract.frozen_horizon is admitted only when the driving source is append_only; \
+             driving source '{driving_source}' declares mutation_profile {other:?}"
+        )),
+    }
+}
+
 /// The frozen-band floor `end - h`: partitions strictly before this point
 /// are frozen — a run's write-eligibility clamp never touches them
 /// ([`clamp_write_range`]), and the late-arrival probe treats them as
@@ -167,6 +196,42 @@ mod tests {
     #[test]
     fn partition_grain_declaration_is_admitted() {
         assert!(validate_frozen_horizon(Grain::Partition).is_ok());
+    }
+
+    #[test]
+    fn posture_refuses_mutable_snapshot() {
+        let err = validate_frozen_horizon_posture(
+            "orders",
+            Some(smelt_core::sources::MutationProfile::Mutable),
+        )
+        .unwrap_err();
+        assert!(err.contains("orders"), "{err}");
+        assert!(err.contains("Mutable"), "{err}");
+    }
+
+    #[test]
+    fn posture_refuses_change_feed() {
+        let err = validate_frozen_horizon_posture(
+            "orders",
+            Some(smelt_core::sources::MutationProfile::ChangeFeed),
+        )
+        .unwrap_err();
+        assert!(err.contains("orders"), "{err}");
+        assert!(err.contains("ChangeFeed"), "{err}");
+    }
+
+    #[test]
+    fn posture_admits_append_only() {
+        assert!(validate_frozen_horizon_posture(
+            "orders",
+            Some(smelt_core::sources::MutationProfile::AppendOnly)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn posture_admits_undeclared_profile() {
+        assert!(validate_frozen_horizon_posture("orders", None).is_ok());
     }
 
     #[test]

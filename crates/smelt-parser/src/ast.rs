@@ -1376,6 +1376,10 @@ impl SelectList {
             }
         })
     }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
 }
 
 /// SELECT item (column or expression with optional alias)
@@ -1813,6 +1817,24 @@ impl TableRef {
             .filter_map(|e| e.into_token())
             .find(|t| t.kind() == IDENT || (t.kind() == STRING && t.text().starts_with('"')))
             .map(|t| strip_ident_quotes(t.text()).to_string())
+    }
+
+    /// The nested `TABLE_REF` child of a parenthesised table primary
+    /// (`FROM (a JOIN b ON …)`, `FROM (a)`) — the parser recurses
+    /// `parse_table_ref` through the `LPAREN` branch for this shape (see
+    /// `parser/select.rs`'s comment on that branch), so the group's first
+    /// member is a direct `TABLE_REF` child rather than a `SUBQUERY`,
+    /// `FUNCTION_CALL`, or bare identifier. `None` for every other
+    /// `TableRef` shape.
+    pub fn nested_table_ref(&self) -> Option<TableRef> {
+        self.0.children().find_map(TableRef::cast)
+    }
+
+    /// The `JOIN_CLAUSE` children of a parenthesised join group — the
+    /// members joined to [`Self::nested_table_ref`] inside the same
+    /// parentheses, in source order.
+    pub fn nested_joins(&self) -> impl Iterator<Item = JoinClause> + '_ {
+        self.0.children().filter_map(JoinClause::cast)
     }
 
     /// Raw text of the primary table/schema-name path when it begins with a

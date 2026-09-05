@@ -126,6 +126,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             smelt_core::config::ProbeCadence::PerRun,
             &edge_delta_types,
             None,
+            None,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -940,6 +941,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        state_downgrade: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -970,6 +972,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
         None,
     )
     .expect("build_maintenance_plan_report");
@@ -1039,6 +1042,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        state_downgrade: None,
     };
     let sibling_cell = PlanCell {
         group: "{event_type, user_id}".to_string(),
@@ -1060,6 +1064,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        state_downgrade: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -1097,6 +1102,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
         None,
     )
     .expect("build_maintenance_plan_report");
@@ -1259,6 +1265,7 @@ mod write_variant_explain_surface {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            state_downgrade: None,
         }
     }
 
@@ -1307,6 +1314,7 @@ mod write_variant_explain_surface {
             &[],
             smelt_core::config::ProbeCadence::PerRun,
             &[],
+            None,
             None,
         )
     }

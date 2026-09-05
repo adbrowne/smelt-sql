@@ -81,6 +81,13 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
     let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
 
+    // This model's own delta signature — the SAME single-owner derivation
+    // `commands::explain::explain_maintenance_plan` calls
+    // (`docs/outcomes/20260904-delta-signature-front-door/outcome.md` phase
+    // 1), so this test helper exercises the real production wiring rather
+    // than a stubbed `None`.
+    let own_output_delta = smelt_db::model_output_delta_for(&db, ws, file);
+
     // Mirrors `commands::explain::explain_maintenance_plan`'s own
     // `edge_delta_types` assembly (`docs/outcomes/20260809-output-delta-
     // typing/outcome.md` phase 10) so this test helper exercises the real
@@ -131,6 +138,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             smelt_core::config::ProbeCadence::PerRun,
             &edge_delta_types,
             None,
+            own_output_delta.as_ref(),
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -196,6 +204,184 @@ fn explain_prints_cells_clamps_locality() {
         "expected the admissible write-pattern registry listing, leading with `region` (the \
          only structural fact this cell's declared facts satisfy first in registry order): \
          {report}"
+    );
+}
+
+/// The model's own delta signature (`incremental_models.md` §Surface "CLI",
+/// Headline bullet) is the report's first line: `examples/timeseries`'
+/// `user_spend_rollup` is a bare `grain: key` model (no key-temporal-
+/// locality slice bound) whose own SQL keyed-aggregates its clocked
+/// upstream — own headline `keyed upsert over [user_id, spend_date],
+/// key-addressed`.
+#[test]
+fn headline_is_the_reports_first_line() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "user_spend_rollup")
+        .expect("user_spend_rollup has a maintenance plan");
+
+    let first_line = report.lines().next().expect("report has a first line");
+    assert!(
+        first_line.starts_with("model user_spend_rollup  (emits: keyed upsert over ["),
+        "expected the delta-signature headline as the report's first line: {first_line}"
+    );
+    assert!(
+        first_line.contains("key-addressed"),
+        "expected the key-addressed claim in the headline: {first_line}"
+    );
+}
+
+/// A partition-grain model whose own SQL is a straightforward passthrough
+/// of a clocked append-only source's columns (no aggregation, no
+/// `unique_key:`) derives `AppendOnlyWindow` — its headline must read
+/// `append-only within a window, window-addressed by <axis>`.
+#[test]
+fn partition_grain_headline_is_window_addressed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_delta_type_project(&tmp);
+
+    let report = build_report_for(&project_dir, "plain_passthrough")
+        .expect("plain_passthrough has a maintenance plan");
+
+    let first_line = report.lines().next().expect("report has a first line");
+    assert!(
+        first_line.contains("append-only within a window, window-addressed by d"),
+        "expected a window-addressed headline naming the clock axis: {first_line}"
+    );
+}
+
+/// A composed model (`grain: key` + `timeseries:`, key temporal locality
+/// admitted) additionally prints its slice bound and settle bound —
+/// `examples/timeseries`' `user_daily_spend` is the worked composed-shape
+/// example (mirrors `incremental_models.md`'s `order_facts` illustration).
+#[test]
+fn composed_headline_appends_slice_bound() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "user_daily_spend")
+        .expect("user_daily_spend has a maintenance plan");
+
+    let first_line = report.lines().next().expect("report has a first line");
+    assert!(
+        first_line.contains("slice-bounded by spend_date under key temporal locality"),
+        "expected a slice-bound clause in the composed headline: {first_line}"
+    );
+    assert!(
+        first_line.contains("settle bound:"),
+        "expected a settle bound in the composed headline: {first_line}"
+    );
+}
+
+/// A model whose own SQL degrades to `General` (a window-function output
+/// column the walk cannot classify) names the degrading construct and
+/// claims no addressing — `daily_events` (`COUNT(*)` with no column
+/// reference) exercises the same fail-closed default.
+#[test]
+fn general_headline_names_the_degrading_construct() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "daily_events")
+        .expect("daily_events has a maintenance plan");
+
+    let first_line = report.lines().next().expect("report has a first line");
+    assert!(
+        first_line.contains("general (degraded by:")
+            && first_line.contains("not delta-addressable"),
+        "expected a general, non-addressable headline: {first_line}"
+    );
+}
+
+/// The headline's `grain:` clause is the SAME string the report's own
+/// `derived grain:` row prints under "Relation contract:" — never a second
+/// label.
+#[test]
+fn headline_grain_label_matches_derived_grain_row() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "user_spend_rollup")
+        .expect("user_spend_rollup has a maintenance plan");
+
+    let first_line = report.lines().next().expect("report has a first line");
+    let headline_grain = first_line
+        .rsplit("grain: ")
+        .next()
+        .and_then(|s| s.strip_suffix(')'))
+        .expect("headline has a grain: clause");
+    let derived_grain_row = report
+        .lines()
+        .find(|l| l.trim_start().starts_with("derived grain:"))
+        .expect("report has a derived grain: row");
+    let row_grain = derived_grain_row
+        .trim_start()
+        .strip_prefix("derived grain: ")
+        .expect("derived grain row has a value");
+    assert_eq!(
+        headline_grain, row_grain,
+        "headline grain must match the derived grain: row exactly: {report}"
+    );
+}
+
+/// A model whose own SQL yields no output-delta shape at all still gets a
+/// (degraded) headline rather than crashing or omitting it — `general`
+/// covers the None case, never a fabricated shape.
+#[test]
+fn explain_json_delta_signature_matches_text_headline() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .args([
+            "explain",
+            "user_spend_rollup",
+            "--project-dir",
+            project_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("run smelt explain --json");
+    assert!(
+        output.status.success(),
+        "smelt explain --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid JSON output");
+    let delta_signature = &json["delta_signature"];
+    assert_eq!(delta_signature["shape"], "keyed_upsert");
+    assert_eq!(delta_signature["addressing"], "key");
+    let keys = delta_signature["keys"]
+        .as_array()
+        .expect("keys is an array");
+    let keys: Vec<&str> = keys.iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(keys, vec!["user_id", "spend_date"]);
+
+    let text_output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .args([
+            "explain",
+            "user_spend_rollup",
+            "--project-dir",
+            project_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run smelt explain");
+    let text = String::from_utf8_lossy(&text_output.stdout);
+    let first_line = text.lines().next().expect("report has a first line");
+    assert!(
+        first_line.contains("keyed upsert over [user_id, spend_date]"),
+        "expected the text headline to name the same keys as --json: {first_line}"
     );
 }
 
@@ -810,6 +996,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        state_downgrade: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -840,6 +1027,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
         None,
     )
     .expect("build_maintenance_plan_report");
@@ -1015,6 +1203,18 @@ fn stage_delta_type_project(tmp: &tempfile::TempDir) -> std::path::PathBuf {
         format!("{ts_frontmatter}SELECT d, id, val\nFROM smelt.view_upstream\n"),
     )
     .expect("write view_consumer.sql");
+
+    // A straightforward passthrough of a clocked append-only source's own
+    // columns, no aggregation and no `unique_key:` — the transfer-rule
+    // table's "passthrough of an append-only relation" row, own headline
+    // `AppendOnlyWindow` (`docs/outcomes/20260904-delta-signature-front-
+    // door/outcome.md` phase 1's `partition_grain_headline_is_window_
+    // addressed` test).
+    std::fs::write(
+        project_dir.join("models/plain_passthrough.sql"),
+        format!("{ts_frontmatter}SELECT d, id, val\nFROM smelt.sources.events\n"),
+    )
+    .expect("write plain_passthrough.sql");
 
     project_dir
 }
@@ -1262,5 +1462,219 @@ fn explain_json_carries_refusals() {
             .as_str()
             .is_some_and(|t| t.contains("ScanUnbounded") && t.contains("unclocked"))),
         "expected the refusal text to name the unclocked source: {refusals:?}"
+    );
+}
+
+// --- Phase 6 (`docs/outcomes/20260904-state-residency/outcome.md`): the
+// recorded `state_downgrade` becomes visible `smelt explain` surface. ---
+
+const KEYED_FOLD_SMELT_YML_TEMPLATE: &str = "name: state_downgrade_fixture\n\
+    version: 1\n\
+    paths:\n  - models\n\
+    targets:\n  dev:\n    type: {TYPE}\n    schema: main\n\
+    default_materialization: view\n{STATE_BLOCK}";
+
+const KEYED_FOLD_PAYMENTS_SOURCE: &str = "description: payments\n\
+    mutation_profile: append_only\n\
+    timeseries:\n  event_time_column: pay_date\n  partition_column: pay_date\n  granularity: day\n\
+    columns:\n\
+    - name: user_id\n  type: INTEGER\n\
+    - name: pay_date\n  type: DATE\n\
+    - name: amount\n  type: DOUBLE\n";
+
+const KEYED_FOLD_MODEL_SQL: &str =
+    "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+     SELECT user_id, SUM(amount) AS lifetime_spend\n\
+     FROM smelt.sources.payments\nGROUP BY user_id\n";
+
+/// Stage a fixture project with a keyed-fold model (`Technique::KeyedFold`,
+/// which needs the reconciliation ledger) whose target dialect is `dialect`
+/// and whose `state.warehouse_tables` is `state_block` (empty string for the
+/// default `allowed`).
+fn stage_keyed_fold_project(dialect: &str, state_block: &str) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+    let smelt_yml = KEYED_FOLD_SMELT_YML_TEMPLATE
+        .replace("{TYPE}", dialect)
+        .replace("{STATE_BLOCK}", state_block);
+    std::fs::write(tmp.path().join("smelt.yml"), smelt_yml).unwrap();
+    std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
+    std::fs::write(
+        tmp.path().join("models/sources/payments.yml"),
+        KEYED_FOLD_PAYMENTS_SOURCE,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/lifetime_spend.sql"),
+        KEYED_FOLD_MODEL_SQL,
+    )
+    .unwrap();
+    tmp
+}
+
+/// A keyed-fold model targeting a ledger-less dialect (Spark) prints a
+/// `state downgrade:` row under the downgraded cell's `technique:` row,
+/// naming the original technique and the missing structure.
+#[test]
+fn explain_text_prints_state_downgrade() {
+    let tmp = stage_keyed_fold_project("spark", "");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("lifetime_spend")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain lifetime_spend");
+
+    assert!(
+        output.status.success(),
+        "smelt explain lifetime_spend failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("technique: PerGroupRecompute"),
+        "expected the downgraded technique to be printed: {stdout}"
+    );
+    assert!(
+        stdout.contains("state downgrade:")
+            && stdout.contains("KeyedFold")
+            && stdout.contains("reconciliation ledger"),
+        "expected a state-downgrade row naming the original technique and missing structure: \
+         {stdout}"
+    );
+}
+
+/// The same model's `--json` output carries `cells[0].state_downgrade` with
+/// `original`, `missing`, `reason`.
+#[test]
+fn explain_json_carries_state_downgrade() {
+    let tmp = stage_keyed_fold_project("spark", "");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("lifetime_spend")
+        .arg("--json")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain lifetime_spend --json");
+
+    assert!(
+        output.status.success(),
+        "smelt explain lifetime_spend --json failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("explain --json output must parse: {e}\n{stdout}"));
+
+    let cells = json["cells"].as_array().expect("cells array");
+    let downgraded = cells
+        .iter()
+        .find(|c| c.get("state_downgrade").is_some())
+        .unwrap_or_else(|| panic!("expected a cell carrying state_downgrade: {stdout}"));
+    let downgrade = &downgraded["state_downgrade"];
+    assert_eq!(downgrade["original"], "KeyedFold");
+    assert!(downgrade["missing"]
+        .as_str()
+        .unwrap()
+        .contains("reconciliation ledger"));
+    assert!(downgrade["reason"].as_str().unwrap().contains("KeyedFold"));
+}
+
+/// A DuckDB target realises the reconciliation ledger, so no downgrade
+/// occurs: no `state downgrade:` row in text, no `state_downgrade` key in
+/// any JSON cell.
+#[test]
+fn explain_omits_state_downgrade_on_duckdb() {
+    let tmp = stage_keyed_fold_project("duckdb", "");
+
+    let text_output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("lifetime_spend")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain lifetime_spend");
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8_lossy(&text_output.stdout);
+    assert!(
+        !stdout.contains("state downgrade:"),
+        "a DuckDB target must not print a downgrade row: {stdout}"
+    );
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("lifetime_spend")
+        .arg("--json")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain lifetime_spend --json");
+    assert!(json_output.status.success());
+    let json_stdout = String::from_utf8_lossy(&json_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_stdout)
+        .unwrap_or_else(|e| panic!("explain --json output must parse: {e}\n{json_stdout}"));
+    let cells = json["cells"].as_array().expect("cells array");
+    assert!(
+        cells.iter().all(|c| c.get("state_downgrade").is_none()),
+        "a DuckDB target must carry no state_downgrade key on any cell: {json_stdout}"
+    );
+}
+
+/// `state.warehouse_tables: none` forces the downgrade even on DuckDB
+/// (criterion 5's observable consequence — `state.md` §"Opting out of
+/// warehouse bookkeeping").
+#[test]
+fn warehouse_tables_none_downgrades_on_duckdb() {
+    let tmp = stage_keyed_fold_project("duckdb", "state:\n  warehouse_tables: none\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("lifetime_spend")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain lifetime_spend");
+
+    assert!(
+        output.status.success(),
+        "smelt explain lifetime_spend failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("state downgrade:"),
+        "warehouse_tables: none must force a downgrade even on DuckDB: {stdout}"
+    );
+}
+
+/// Doc-sync guard (`docs/outcomes/20260904-delta-signature-front-door/
+/// outcome.md` phase 1): `docs-site/docs/reference/cli.md`'s `smelt explain`
+/// section must document the `emits:` headline and the `delta_signature`
+/// JSON object, not just the pre-existing per-cell/per-edge surface.
+#[test]
+fn docs_reference_documents_the_headline() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let cli_md = std::fs::read_to_string(repo_root.join("docs-site/docs/reference/cli.md"))
+        .expect("read docs-site/docs/reference/cli.md");
+
+    let explain_section_start = cli_md
+        .find("## smelt explain")
+        .expect("cli.md has a `## smelt explain` section");
+    let explain_section = &cli_md[explain_section_start..];
+
+    assert!(
+        explain_section.contains("emits:"),
+        "expected the `emits:` headline documented in the `smelt explain` section"
+    );
+    assert!(
+        explain_section.contains("delta_signature"),
+        "expected the `delta_signature` JSON object documented in the `smelt explain` section"
     );
 }

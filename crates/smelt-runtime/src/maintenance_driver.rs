@@ -26,6 +26,7 @@ use smelt_logical::analysis::fingerprint::Projection as FingerprintProjection;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::maintenance::availability::StateAvailability;
 use smelt_logical::maintenance::choice::{
     effective_override, enrichment_restrict_column, resolve_cell_choice,
     resolve_cell_write_suppression, resolve_recompute_restriction, resolve_region_write_variant,
@@ -638,12 +639,15 @@ pub async fn run_windowed_keyed_maintenance(
                 // is never the `(None, Suppressed)` pattern the first arm
                 // matches). The ledger substrate is DuckDB-only today (same
                 // posture as the `Additive` arm and the observed-delta
-                // record below); on any other dialect the record is skipped
-                // and the omission is reported as a named fact on the run's
-                // reporter channel — never silently dropped (`docs/specs/
-                // incremental_shapes.md` §"The transactional frontier write
-                // (merge ledger)") — this is bookkeeping, not a correctness
-                // gate, so the run itself proceeds.
+                // record below); on any other dialect the record is
+                // skipped — never silently, but the channel is no longer a
+                // reporter event (the old `RunReporter` stand-in method was
+                // retired, `docs/outcomes/20260904-state-residency/
+                // outcome.md` phase 6): the affected cell's own recorded
+                // `state_downgrade` (`smelt-logical`'s `resolve_availability`)
+                // is now the user-visible channel, surfaced by `smelt
+                // explain` — this is bookkeeping, not a correctness gate, so
+                // the run itself proceeds.
                 let ledger_bookkeeping = if backend.dialect() == SqlDialect::DuckDB {
                     let ledger_ensure = ddl_duckdb::generate_ledger_table_ddl(schema);
                     let ledger_upsert = ddl_duckdb::generate_ledger_upsert_sql(
@@ -657,15 +661,13 @@ pub async fn run_windowed_keyed_maintenance(
                     );
                     Some((ledger_ensure, ledger_upsert))
                 } else {
-                    retry.reporter.state_structure_unavailable(
-                        retry.run_id,
-                        model_name,
-                        "merge ledger",
-                        backend.dialect().name(),
+                    tracing::debug!(
+                        model = model_name,
+                        run_id = retry.run_id,
+                        dialect = backend.dialect().name(),
                         "re-run-tolerant keyed model merge-ledger bookkeeping record skipped: \
-                         the ledger substrate is DuckDB-only today (docs/specs/\
-                         incremental_shapes.md §\"The transactional frontier write (merge \
-                         ledger)\")",
+                         the ledger substrate is DuckDB-only today — the affected cell's own \
+                         recorded state_downgrade is the user-visible channel"
                     );
                     None
                 };
@@ -834,9 +836,10 @@ pub fn resolve_incremental_strategy(
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     backend_default: IncrementalStrategy,
     backend_supports_column_scoped_merge: bool,
+    availability: &StateAvailability,
 ) -> Result<IncrementalStrategy> {
     let result = if model_edges.is_empty() {
-        smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        crate::maintenance_availability::derive_resolved(
             sql,
             table,
             metadata,
@@ -857,11 +860,12 @@ pub fn resolve_incremental_strategy(
             &SourceReferentialIntegrity::new(),
             None,
             None,
+            availability,
         )
     } else {
         // Edge-aware derivation — the SAME derivation
         // `resolve_live_delta_restriction_facts` uses, never a second one.
-        smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+        crate::maintenance_availability::derive_resolved_with_edges(
             sql,
             table,
             metadata,
@@ -874,6 +878,7 @@ pub fn resolve_incremental_strategy(
             &SourceReferentialIntegrity::new(),
             None,
             None,
+            availability,
         )
     };
     let Some(result) = result else {
@@ -1038,6 +1043,7 @@ pub fn resolve_fold_deferral(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     cell_decisions: &[crate::contract_probes::CellDeferralDecision],
+    availability: &StateAvailability,
 ) -> (
     smelt_logical::contract::deferral::FoldDeferralVerdict,
     Vec<String>,
@@ -1069,7 +1075,7 @@ pub fn resolve_fold_deferral(
         return no_deferral;
     }
 
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1081,6 +1087,7 @@ pub fn resolve_fold_deferral(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return no_deferral;
     };
@@ -1306,6 +1313,7 @@ pub fn resolve_cell_technique_with_write_pin(
 /// mapped here to a real `Err` — the fail-loud discipline (root
 /// `CLAUDE.md`) forbids silently falling back to region recompute for a
 /// pin the derived plan does not admit.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_column_scoped_cell(
     sql: &str,
     table: &str,
@@ -1314,8 +1322,9 @@ pub fn resolve_live_column_scoped_cell(
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    availability: &StateAvailability,
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1342,6 +1351,7 @@ pub fn resolve_live_column_scoped_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -1524,11 +1534,12 @@ pub fn resolve_live_in_place_update_cell(
     metadata: &smelt_core::ModelMetadata,
     sources: &[SourceFacts],
     deployed_column_names: &[String],
+    availability: &StateAvailability,
 ) -> Option<(PlanCell, Vec<(String, String)>)> {
     if deployed_column_names.is_empty() {
         return None;
     }
-    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let result = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1540,6 +1551,7 @@ pub fn resolve_live_in_place_update_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     )?;
     let cell = result
         .plan
@@ -1651,8 +1663,9 @@ pub fn resolve_live_membership_recompute_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    availability: &StateAvailability,
 ) -> Result<Option<LiveMembershipRecomputeCell>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -1667,6 +1680,7 @@ pub fn resolve_live_membership_recompute_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -2214,12 +2228,14 @@ pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
 /// (maintenance-plan purity, root `CLAUDE.md`); nothing downstream
 /// re-derives admission.
 ///
-/// `dialect` gates [`RepairDiscovery::SidecarDiff`]: a
+/// `supports_fingerprint_sidecar` gates [`RepairDiscovery::SidecarDiff`]: a
 /// [`smelt_logical::maintenance::MutationProfile::MutableSnapshot`] source routes to the group-grain
-/// sidecar diff, which is DuckDB-only (matching the per-row sidecar's own
-/// posture, `diff_fingerprint_sidecar_changed_keys`) — a non-DuckDB target
-/// fails loud here, before any backend call, rather than silently falling
-/// back to the unsound current-source scan.
+/// sidecar diff, which needs a target declaring the capability (matching the
+/// per-row sidecar's own posture, `diff_fingerprint_sidecar_changed_keys`) —
+/// a target that does not declare it fails loud here, before any backend
+/// call, rather than silently falling back to the unsound current-source
+/// scan. `dialect` still supplies `.name()` for the refusal message.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_per_group_recompute_cell(
     sql: &str,
     table: &str,
@@ -2228,8 +2244,10 @@ pub fn resolve_live_per_group_recompute_cell(
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
     dialect: SqlDialect,
+    supports_fingerprint_sidecar: bool,
+    availability: &StateAvailability,
 ) -> Result<Option<LiveRepairCell>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    let Some(result) = crate::maintenance_availability::derive_resolved(
         sql,
         table,
         metadata,
@@ -2245,6 +2263,7 @@ pub fn resolve_live_per_group_recompute_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -2410,7 +2429,7 @@ pub fn resolve_live_per_group_recompute_cell(
                     );
                 };
                 let discovery = if posture == RepairDiscoveryPosture::SidecarDiff {
-                    if dialect != SqlDialect::DuckDB {
+                    if !supports_fingerprint_sidecar {
                         return Err(BackendError::unsupported(
                             dialect.name(),
                             "group-grain fingerprint-sidecar affected-key discovery for a \
@@ -2565,6 +2584,7 @@ pub struct RepairSidecarRefresh<'a> {
     pub group_key: &'a [String],
     pub digest_columns: &'a [String],
     pub model_sql: &'a str,
+    pub consumer_address: &'a str,
 }
 
 /// Execute a live `Technique::PerGroupRecompute` cell
@@ -2625,6 +2645,7 @@ pub async fn execute_per_group_recompute(
                     refresh.group_key,
                     refresh.digest_columns,
                     refresh.model_sql,
+                    refresh.consumer_address,
                     &group,
                 )
             })
@@ -2727,6 +2748,7 @@ pub async fn execute_diff_patch(
                     refresh.group_key,
                     refresh.digest_columns,
                     refresh.model_sql,
+                    refresh.consumer_address,
                     &group,
                 )
             })
@@ -2784,15 +2806,16 @@ pub type LiveKeyAddressedModelEdgeCell = (
 ///
 /// Two fail-loud legs run BEFORE any backend call
 /// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`):
-/// - a non-DuckDB target dialect — the group-grain sidecar diff this cell's
-///   execution needs is DuckDB-only, matching every other sidecar consumer
-///   in this module;
+/// - a target that does not declare `supports_fingerprint_sidecar` — the
+///   group-grain sidecar diff this cell's execution needs requires the
+///   capability, matching every other sidecar consumer in this module;
 /// - a `key_scope.keys` column the upstream relation does not actually
 ///   carry — checked against the upstream edge's own declared
 ///   `ModelEdge::unique_key` (the upstream's real output-table column
 ///   names), never against the downstream's own guess. A mismatch (the
 ///   downstream renamed the key column it read) is refused by name rather
 ///   than silently querying a column the upstream table does not have.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_key_addressed_model_edge_cell(
     sql: &str,
     table: &str,
@@ -2801,8 +2824,10 @@ pub fn resolve_live_key_addressed_model_edge_cell(
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     dialect: SqlDialect,
+    supports_fingerprint_sidecar: bool,
+    availability: &StateAvailability,
 ) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
         sql,
         table,
         metadata,
@@ -2815,6 +2840,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -2852,7 +2878,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
                 edge.name
             );
         };
-        if dialect != SqlDialect::DuckDB {
+        if !supports_fingerprint_sidecar {
             return Err(BackendError::unsupported(
                 dialect.name(),
                 "key-addressed model-edge affected-key discovery over a KeyedUpsert upstream \
@@ -2959,9 +2985,10 @@ pub fn resolve_live_key_addressed_model_edge_cell(
 /// [`KeyDiscovery::DownstreamGrainOverUpstream`] (whose diff's own
 /// changed-key set already **is** the downstream's affected-key set, so no
 /// forward-projection `SELECT` runs — [`repair_keys_literal_select`] wraps
-/// the resolved literals directly). A DuckDB-only discovery route —
-/// `resolve_live_key_addressed_model_edge_cell` already refused a
-/// non-DuckDB dialect before any backend call is reached.
+/// the resolved literals directly). A sidecar-capability-gated discovery
+/// route — `resolve_live_key_addressed_model_edge_cell` already refused a
+/// target lacking `supports_fingerprint_sidecar` before any backend call is
+/// reached.
 ///
 /// Returns an empty resolved key list when the sidecar diff discovers no
 /// changed keys — the caller reports a no-op rather than executing an
@@ -2978,6 +3005,7 @@ pub async fn resolve_key_addressed_affected_keys(
     downstream_keys: &[String],
     discovery: KeyDiscovery,
     model_sql: &str,
+    consumer_address: &str,
 ) -> std::result::Result<(Vec<String>, String), BackendError> {
     let changed_keys = diff_repair_group_sidecar_changed_keys(
         backend,
@@ -2988,6 +3016,7 @@ pub async fn resolve_key_addressed_affected_keys(
         group_key,
         digest_columns,
         model_sql,
+        consumer_address,
     )
     .await?;
     let dialect = maintenance_dialect(backend.dialect());
@@ -3041,6 +3070,7 @@ pub async fn execute_key_addressed_model_edge_cell(
     compiled_model_sql: &str,
     write: &RepairWrite,
     retry: &crate::execute::RetryPolicy<'_>,
+    consumer_address: &str,
 ) -> Result<Option<ExecutionResult>> {
     let full_table = format!("{schema}.{table}");
     let (changed_keys, affected_keys_select) = resolve_key_addressed_affected_keys(
@@ -3054,6 +3084,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         downstream_keys,
         discovery,
         clean_model_sql,
+        consumer_address,
     )
     .await
     .map_err(|e| {
@@ -3074,6 +3105,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         group_key,
         digest_columns,
         model_sql: clean_model_sql,
+        consumer_address,
     };
     let result = match write {
         RepairWrite::TargetedDeleteInsert => {
@@ -3709,15 +3741,19 @@ pub fn compute_fingerprint_sidecar_stamp(projection_identity: &str, model_sql: &
 /// diff query's own `FULL OUTER JOIN` produces that result against an
 /// empty (or not-yet-created) sidecar partition.
 ///
-/// DuckDB-only, matching every other `_smelt_fingerprint_sidecar`/
-/// `_smelt_observed_delta` consumer in this module. Unlike
-/// `read_observed_delta_changed_keys`'s read-side fallback (a missing
-/// delta is always a legal widen-never-narrow trigger, so it reads back
-/// `None` on a non-DuckDB backend), a caller asking for a sidecar diff at
-/// all has already chosen the sidecar-backed path — a non-DuckDB backend
-/// here fails loudly (`docs/specs/sources.md` §"The fingerprint sidecar" —
-/// "DuckDB-scoped today ... a non-DuckDB target fails loud rather than
-/// silently skipping the sidecar").
+/// Gated on a target declaring `supports_fingerprint_sidecar`, matching
+/// every other `_smelt_fingerprint_sidecar`/`_smelt_observed_delta` consumer
+/// in this module. Unlike `read_observed_delta_changed_keys`'s read-side
+/// fallback (a missing delta is always a legal widen-never-narrow trigger,
+/// so it reads back `None` for a target lacking the capability), a caller
+/// asking for a sidecar diff at all has already chosen the sidecar-backed
+/// path — a target without the capability here fails loudly
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "DuckDB-scoped
+/// today ... a target lacking the capability fails loud rather than
+/// silently skipping the sidecar"). The DDL owner
+/// (`ddl_duckdb::generate_fingerprint_sidecar_table_ddl`) is still
+/// DuckDB-shaped, so a second backend declaring the capability needs its
+/// own DDL first.
 ///
 /// `model_sql` is the consuming model's own SQL text — folded into the
 /// partition's identity stamp ([`compute_fingerprint_sidecar_stamp`]) so a
@@ -3739,8 +3775,9 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
     projection: &FingerprintProjection,
     all_source_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
 ) -> std::result::Result<Vec<String>, BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "fingerprint-sidecar diff for a mutable_snapshot external source (F3)",
@@ -3757,6 +3794,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
     );
     let stale_rows = backend.execute_sql(&stale_check_sql).await?;
@@ -3764,6 +3802,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         tracing::warn!(
             source_address,
             projection_identity = %identity,
+            consumer_address,
             "fingerprint sidecar stamp mismatch detected (model definition, P4 projection, or \
              digest version changed — or the stored stamp was corrupted); treating the stale \
              partition as absent and rebuilding via the whole-table delta"
@@ -3779,6 +3818,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         &sidecar_table,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         dialect,
     );
@@ -3819,9 +3859,11 @@ fn extract_delta_keys(batches: &[arrow::record_batch::RecordBatch]) -> Vec<Strin
 /// make a subsequent diff compare the source against itself and observe no
 /// changes.
 ///
-/// DuckDB-only, matching [`diff_fingerprint_sidecar_changed_keys`]'s own
-/// posture; a non-DuckDB backend fails loudly rather than being handed
-/// DuckDB-flavored SQL it cannot run.
+/// Gated on `supports_fingerprint_sidecar`, matching
+/// [`diff_fingerprint_sidecar_changed_keys`]'s own posture; a target lacking
+/// the capability fails loudly rather than being handed DuckDB-flavored SQL
+/// it cannot run. The DDL owner is still DuckDB-shaped — see that
+/// function's doc comment.
 ///
 /// `model_sql` must be the SAME consuming-model SQL text passed to the
 /// paired [`diff_fingerprint_sidecar_changed_keys`] call this refresh
@@ -3841,9 +3883,10 @@ pub async fn refresh_fingerprint_sidecar(
     projection: &FingerprintProjection,
     all_source_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
     write_group: &StatementGroup,
 ) -> std::result::Result<(), BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "fingerprint-sidecar refresh for a mutable_snapshot external source (F3)",
@@ -3860,6 +3903,7 @@ pub async fn refresh_fingerprint_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         &digest_select,
     );
@@ -3867,6 +3911,7 @@ pub async fn refresh_fingerprint_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &digest_select,
     );
     backend
@@ -3894,8 +3939,9 @@ pub async fn refresh_fingerprint_sidecar(
 
 /// The repair-scoped sidecar partition identity for a group-grain digest:
 /// `model` (via the caller's own `source_address`, unchanged — the
-/// partition key stays `(source_address, projection_identity, source_key)`)
-/// plus the group-key and digest-column sets, so two different repair cells
+/// partition key stays `(source_address, projection_identity,
+/// consumer_address, source_key)`) plus the group-key and digest-column
+/// sets, so two different repair cells
 /// over the SAME source (a different group key, or a different digest
 /// column set) land in different, non-colliding partitions, and neither
 /// collides with the per-row [`fingerprint::projection_identity`] partition
@@ -3971,9 +4017,10 @@ fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_cor
 /// whole-table repair for that one run and self-heals once
 /// [`refresh_repair_group_sidecar`] populates a trustworthy comparandum.
 ///
-/// DuckDB-only, matching every other sidecar consumer in this module — a
-/// non-DuckDB backend fails loud (`BackendError::unsupported`) rather than
-/// silently falling back to the unsound current-source scan.
+/// Gated on `supports_fingerprint_sidecar`, matching every other sidecar
+/// consumer in this module — a target lacking the capability fails loud
+/// (`BackendError::unsupported`) rather than silently falling back to the
+/// unsound current-source scan.
 #[allow(clippy::too_many_arguments)]
 pub async fn diff_repair_group_sidecar_changed_keys(
     backend: &dyn Backend,
@@ -3984,8 +4031,9 @@ pub async fn diff_repair_group_sidecar_changed_keys(
     group_key: &[String],
     digest_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
 ) -> std::result::Result<Vec<String>, BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "group-grain fingerprint-sidecar diff for a mutable_snapshot repair source (P9)",
@@ -4001,6 +4049,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         schema,
         source_address,
         &identity,
+        consumer_address,
     );
     let exists_rows = backend.execute_sql(&exists_sql).await?;
     let partition_absent = !exists_rows.iter().any(|batch| batch.num_rows() > 0);
@@ -4009,6 +4058,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
     );
     let stale_rows = backend.execute_sql(&stale_check_sql).await?;
@@ -4017,6 +4067,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         tracing::warn!(
             source_address,
             projection_identity = %identity,
+            consumer_address,
             "group-grain fingerprint sidecar stamp mismatch detected (model definition or \
              digest inputs changed, or the stored stamp was corrupted); treating the stale \
              partition as absent and widening the affected set to every currently-observed \
@@ -4033,6 +4084,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         &sidecar_table,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         dialect,
     );
@@ -4082,9 +4134,10 @@ pub async fn refresh_repair_group_sidecar(
     group_key: &[String],
     digest_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
     write_group: &StatementGroup,
 ) -> std::result::Result<(), BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "group-grain fingerprint-sidecar refresh for a mutable_snapshot repair source (P9)",
@@ -4100,6 +4153,7 @@ pub async fn refresh_repair_group_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         &digest_select,
     );
@@ -4107,6 +4161,7 @@ pub async fn refresh_repair_group_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &digest_select,
     );
     backend
@@ -4226,6 +4281,7 @@ pub enum RestrictionDeltaSource<'a> {
         projection: &'a FingerprintProjection,
         all_source_columns: &'a [String],
         model_sql: &'a str,
+        consumer_address: &'a str,
     },
 }
 
@@ -4254,6 +4310,19 @@ pub enum RestrictionDeltaSource<'a> {
 /// ([`RestrictionDeltaSource`]) — the acquisition step is the only part of
 /// this function that varies by source; the probe dispatch and emitter path
 /// below are shared unconditionally.
+///
+/// `ensure_sqls`/`pre_write_sqls` are the same reconciliation-ledger
+/// bookkeeping `execute.rs`'s plain DeleteInsert branch attaches
+/// (`docs/specs/incremental_models.md` §"The reconciliation ledger";
+/// `docs/outcomes/20260904-state-residency/outcome.md`) — empty by default
+/// for callers with no ledger reset to attach (e.g. the probe-driven tests
+/// in `statement_parity.rs` that call this function directly). When either
+/// is non-empty the terminal write routes through
+/// [`Backend::execute_write_with_bookkeeping`] so the reset and the write
+/// share one backend transaction where the backend can provide one (DuckDB
+/// does); when both are empty the call is byte-identical to the pre-phase-3
+/// `execute_statement_group` path, so every existing direct caller is
+/// unaffected.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_delete_insert_with_delta_restriction(
     backend: &dyn Backend,
@@ -4270,6 +4339,8 @@ pub async fn execute_delete_insert_with_delta_restriction(
     dialect: MaintenanceDialect,
     retry: &crate::execute::RetryPolicy<'_>,
     probe_policy: &crate::probes::ProbePolicy,
+    ensure_sqls: &[String],
+    pre_write_sqls: &[String],
 ) -> std::result::Result<StatementGroup, BackendError> {
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
@@ -4296,6 +4367,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
                 projection,
                 all_source_columns,
                 model_sql,
+                consumer_address,
             } => Some(
                 diff_fingerprint_sidecar_changed_keys(
                     backend,
@@ -4306,6 +4378,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
                     projection,
                     all_source_columns,
                     model_sql,
+                    consumer_address,
                 )
                 .await?,
             ),
@@ -4441,7 +4514,15 @@ pub async fn execute_delete_insert_with_delta_restriction(
         region_write,
         dialect,
     );
-    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group)).await?;
+    if ensure_sqls.is_empty() && pre_write_sqls.is_empty() {
+        crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+            .await?;
+    } else {
+        crate::execute::retry_backend_call(retry, || {
+            backend.execute_write_with_bookkeeping(ensure_sqls, pre_write_sqls, &group)
+        })
+        .await?;
+    }
     Ok(group)
 }
 
@@ -4511,11 +4592,12 @@ pub fn resolve_live_delta_restriction_facts(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+    availability: &StateAvailability,
 ) -> Result<Option<DeltaRestrictionFacts>, ChoiceRefusal> {
     let Some(driving_edge) = model_edges.first() else {
         return Ok(None);
     };
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
         sql,
         table,
         metadata,
@@ -4536,6 +4618,7 @@ pub fn resolve_live_delta_restriction_facts(
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -4651,6 +4734,7 @@ pub struct ExternalDeltaRestrictionFacts {
 /// ([`enrichment_restrict_column`] returns `None`), or no P4 fingerprint
 /// projection resolved for it — every `None` case is the caller's safe
 /// default of falling back to the ordinary widened scan.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_external_delta_restriction_facts(
     sql: &str,
     table: &str,
@@ -4659,6 +4743,7 @@ pub fn resolve_live_external_delta_restriction_facts(
     explicitly_mutable: &HashSet<String>,
     source_referential_integrity: &SourceReferentialIntegrity,
     supports_fingerprint_sidecar: bool,
+    availability: &StateAvailability,
 ) -> Result<Option<ExternalDeltaRestrictionFacts>, ChoiceRefusal> {
     if !supports_fingerprint_sidecar {
         tracing::debug!(
@@ -4676,7 +4761,7 @@ pub fn resolve_live_external_delta_restriction_facts(
     let Some(source_facts) = sources.iter().find(|s| &s.name == source_name) else {
         return Ok(None);
     };
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
         sql,
         table,
         metadata,
@@ -4689,6 +4774,7 @@ pub fn resolve_live_external_delta_restriction_facts(
         source_referential_integrity,
         None,
         None,
+        availability,
     ) else {
         return Ok(None);
     };
@@ -5015,33 +5101,6 @@ mod tests {
         }
     }
 
-    /// Captures `RunReporter::state_structure_unavailable` calls so a test
-    /// can assert on the reported model/structure/dialect without a real
-    /// transport.
-    #[derive(Default)]
-    struct CapturingReporter {
-        events: Mutex<Vec<(String, String, String, String)>>,
-    }
-
-    impl crate::reporter::RunReporter for CapturingReporter {
-        fn state_structure_unavailable(
-            &self,
-            run_id: &str,
-            model: &str,
-            structure: &str,
-            dialect: &str,
-            consequence: &str,
-        ) {
-            self.events.lock().unwrap().push((
-                run_id.to_string(),
-                model.to_string(),
-                structure.to_string(),
-                dialect.to_string(),
-            ));
-            let _ = consequence;
-        }
-    }
-
     // ── 27e: resolve_live_external_delta_restriction_facts ────────────────
     // (`docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`)
 
@@ -5113,6 +5172,7 @@ mod tests {
             &explicitly_mutable,
             &external_facts_source_ri(),
             true,
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver does not refuse")
         .expect("facts resolve for a declared-RI mutable dimension");
@@ -5147,6 +5207,7 @@ mod tests {
             &explicitly_mutable,
             &external_facts_source_ri(),
             true,
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver does not refuse");
         assert!(
@@ -5171,6 +5232,7 @@ mod tests {
             &explicitly_mutable,
             &external_facts_source_ri(),
             false,
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver does not refuse");
         assert!(
@@ -5612,25 +5674,21 @@ mod tests {
 
     /// A re-run-tolerant (`Grade::Idempotent`) keyed model on a dialect with
     /// no merge-ledger substrate (Spark) skips the bookkeeping record but
-    /// still succeeds — this is bookkeeping, not a correctness gate — and
-    /// the omission is reported as a named fact on the run's reporter
-    /// channel rather than silently dropped (`docs/specs/
-    /// incremental_shapes.md` §"The transactional frontier write (merge
-    /// ledger)").
+    /// still succeeds — this is bookkeeping, not a correctness gate. The
+    /// omission is no longer surfaced via the old `RunReporter` stand-in
+    /// method (retired — `docs/outcomes/20260904-state-residency/
+    /// outcome.md` phase 6): the affected cell's own recorded
+    /// `state_downgrade` is now the user-visible channel, surfaced by
+    /// `smelt explain` (`crates/smelt-cli/tests/explain_maintenance.rs`).
+    /// This test proves only the mechanical half the driver itself owns:
+    /// no `RunReporter` event fires and no ledger statement is issued.
     #[tokio::test]
-    async fn idempotent_ledger_skip_on_non_duckdb_is_reported() {
+    async fn keyed_ledger_skip_reports_no_reporter_event() {
         let backend = RecordingBackend {
             dialect: SqlDialect::SparkSQL,
             ..Default::default()
         };
-        let reporter = CapturingReporter::default();
-        let retry = crate::execute::RetryPolicy {
-            retry_max: 0,
-            base_backoff_ms: 0,
-            run_id: "run-1",
-            model_name: "model.under.test",
-            reporter: &reporter,
-        };
+        let retry = no_retry_policy();
         let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
         run_windowed_keyed_maintenance(
             &backend,
@@ -5654,19 +5712,6 @@ mod tests {
         .await
         .expect("a skipped ledger record must not fail the run");
 
-        let events = reporter.events.lock().unwrap();
-        assert_eq!(
-            events.len(),
-            1,
-            "exactly one state-structure-unavailable event, got {:?}",
-            events
-        );
-        let (run_id, model, structure, dialect) = &events[0];
-        assert_eq!(run_id, "run-1");
-        assert_eq!(model, "model.under.test");
-        assert_eq!(structure, "merge ledger");
-        assert_eq!(dialect, "Spark SQL");
-
         let calls = backend.calls.lock().unwrap();
         assert!(
             !calls.iter().any(|c| c.contains("_smelt_ledger")),
@@ -5676,19 +5721,11 @@ mod tests {
     }
 
     /// The negative direction of the test above: on DuckDB (which has the
-    /// ledger substrate) the bookkeeping record is written and no
-    /// `state_structure_unavailable` event fires.
+    /// ledger substrate) the bookkeeping record is written.
     #[tokio::test]
-    async fn idempotent_ledger_on_duckdb_reports_no_unavailability() {
+    async fn idempotent_ledger_on_duckdb_writes_the_record() {
         let backend = RecordingBackend::default();
-        let reporter = CapturingReporter::default();
-        let retry = crate::execute::RetryPolicy {
-            retry_max: 0,
-            base_backoff_ms: 0,
-            run_id: "run-1",
-            model_name: "model.under.test",
-            reporter: &reporter,
-        };
+        let retry = no_retry_policy();
         let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
         run_windowed_keyed_maintenance(
             &backend,
@@ -5712,7 +5749,6 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(reporter.events.lock().unwrap().is_empty());
         let calls = backend.calls.lock().unwrap();
         assert!(
             calls.iter().any(|c| c.contains("_smelt_ledger")),
@@ -5929,6 +5965,7 @@ mod tests {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            state_downgrade: None,
         }
     }
 
@@ -5953,6 +5990,7 @@ mod tests {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            state_downgrade: None,
         }
     }
 

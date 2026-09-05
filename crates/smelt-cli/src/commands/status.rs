@@ -29,7 +29,16 @@ pub async fn status(args: StatusArgs, scope: Option<&str>) -> Result<()> {
 
     let file_store = FileStore::new(&project_dir, &args.target);
     if !file_store.exists() {
-        println!("No state directory found. Run `smelt run` with a time range first.");
+        if config.state.mode == smelt_core::config::StateMode::Stateless {
+            println!(
+                "No state directory: target '{}' is running with state.mode: stateless, which \
+                 writes no interval history. Set state.mode to intervals or environments to \
+                 enable status tracking.",
+                args.target
+            );
+        } else {
+            println!("No state directory found. Run `smelt run` with a time range first.");
+        }
         return Ok(());
     }
 

@@ -309,6 +309,9 @@ pub trait Backend: Send + Sync {
     /// Execute a model with incremental materialization support.
     ///
     /// Dispatches to the appropriate strategy (DELETE+INSERT, MERGE, APPEND, INSERT OVERWRITE).
+    /// Thin call into [`Backend::execute_model_incremental_with_bookkeeping`] with no
+    /// bookkeeping statements — kept so every existing caller that has no reset/ledger
+    /// record to attach is unaffected.
     async fn execute_model_incremental(
         &self,
         schema: &str,
@@ -317,6 +320,47 @@ pub trait Backend: Send + Sync {
         materialization: Materialization,
         strategy: MaterializationStrategy,
         show_preview: bool,
+    ) -> Result<ExecutionResult, BackendError> {
+        self.execute_model_incremental_with_bookkeeping(
+            schema,
+            name,
+            sql,
+            materialization,
+            strategy,
+            show_preview,
+            &[],
+            &[],
+        )
+        .await
+    }
+
+    /// Execute a model with incremental materialization support, running
+    /// `ensure_sqls` (idempotent DDL) and `pre_write_sqls` (bookkeeping
+    /// records — e.g. the reconciliation ledger's region-recompute reset,
+    /// `docs/specs/incremental_models.md` §"The reconciliation ledger")
+    /// alongside the write. For the `(Table, Incremental{DeleteInsert})`
+    /// case on an existing table, the delete+insert group is built via the
+    /// shared emitter and routed through
+    /// [`Backend::execute_write_with_bookkeeping`] so the reset and the
+    /// write share one backend transaction where the backend can provide
+    /// one (DuckDB does). Every other arm has no write group to attach
+    /// bookkeeping to in the same transaction — it runs `ensure_sqls`/
+    /// `pre_write_sqls` as standalone statements first, then falls through
+    /// to today's logic, unchanged.
+    ///
+    /// No DuckDB override is needed: `execute_write_with_bookkeeping`
+    /// already has DuckDB's real transactional override.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_model_incremental_with_bookkeeping(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+        materialization: Materialization,
+        strategy: MaterializationStrategy,
+        show_preview: bool,
+        ensure_sqls: &[String],
+        pre_write_sqls: &[String],
     ) -> Result<ExecutionResult, BackendError> {
         let start = std::time::Instant::now();
 
@@ -338,6 +382,12 @@ pub trait Backend: Send + Sync {
                 });
             }
             (Materialization::Table, MaterializationStrategy::FullRefresh) => {
+                for ensure_sql in ensure_sqls {
+                    self.execute_sql(ensure_sql).await?;
+                }
+                for pre_write_sql in pre_write_sqls {
+                    self.execute_sql(pre_write_sql).await?;
+                }
                 self.drop_table_if_exists(schema, name).await?;
                 self.create_table_as(schema, name, sql).await?;
             }
@@ -352,13 +402,31 @@ pub trait Backend: Send + Sync {
                 let table_exists = self.table_exists(schema, name).await?;
 
                 if !table_exists {
+                    for ensure_sql in ensure_sqls {
+                        self.execute_sql(ensure_sql).await?;
+                    }
+                    for pre_write_sql in pre_write_sqls {
+                        self.execute_sql(pre_write_sql).await?;
+                    }
                     self.create_table_as(schema, name, sql).await?;
                 } else {
                     let _ = unique_key; // unused since the cumulative path owns merge_into
                     match inc_strategy {
                         IncrementalStrategy::DeleteInsert => {
-                            self.delete_and_insert_transactional(schema, name, &partition, sql)
-                                .await?;
+                            let group = build_delete_insert_group(
+                                schema,
+                                name,
+                                &partition,
+                                sql,
+                                self.dialect(),
+                            )
+                            .map_err(|message| BackendError::ConfigurationError { message })?;
+                            self.execute_write_with_bookkeeping(
+                                ensure_sqls,
+                                pre_write_sqls,
+                                &group,
+                            )
+                            .await?;
                         }
                     }
                 }

@@ -49,7 +49,7 @@ fn downstream_partition_grain_model_gets_pushdown_against_a_composed_upstream() 
     let downstream = ModelInfo {
         name: "gold.daily_active_devices".to_string(),
         sql: "SELECT device_id, first_seen_date, COUNT(*) AS n \
-              FROM silver.events_deduped \
+              FROM smelt.silver.events_deduped \
               WHERE first_seen_date >= CAST(first_seen_date AS DATE) - INTERVAL '2 days' \
               GROUP BY device_id, first_seen_date"
             .to_string(),
@@ -91,7 +91,7 @@ fn downstream_partition_grain_model_sees_composed_upstream_even_with_no_lookback
     let downstream = ModelInfo {
         name: "gold.daily_active_devices".to_string(),
         sql: "SELECT device_id, first_seen_date, COUNT(*) AS n \
-              FROM silver.events_deduped GROUP BY device_id, first_seen_date"
+              FROM smelt.silver.events_deduped GROUP BY device_id, first_seen_date"
             .to_string(),
         refs: vec!["silver.events_deduped".to_string()],
         timeseries_config: Some(TimeseriesConfig {

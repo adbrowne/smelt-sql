@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -380,10 +381,26 @@ impl Backend for RecordingBackendHandle {
 /// mutation (append/update staged by the caller) is picked up — the whole point
 /// of the run-schedule driver (design §3b): the source must be able to change
 /// between runs, not be fully pre-populated up front.
+/// Whether [`LinkCProject::run`] removes `project_dir/.smelt` before each
+/// run — the state-residency outcome's headline claim made executable
+/// (`docs/outcomes/20260904-state-residency/phases/09-plan.md`): under
+/// [`Self::BetweenRuns`] the equivalence oracle must still hold with no
+/// on-disk `.smelt/` continuity between run steps, since the reconciliation
+/// ledger and every other correctness structure now live in the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StateDeletion {
+    #[default]
+    Retain,
+    BetweenRuns,
+}
+
 pub struct LinkCProject {
     pub project_dir: PathBuf,
     pub db_path: PathBuf,
     pub config: Arc<Config>,
+    pub state_deletion: StateDeletion,
+    deletions: Arc<AtomicUsize>,
+    nonempty_deletions: Arc<AtomicUsize>,
 }
 
 impl LinkCProject {
@@ -395,7 +412,59 @@ impl LinkCProject {
             project_dir,
             db_path,
             config,
+            state_deletion: StateDeletion::Retain,
+            deletions: Arc::new(AtomicUsize::new(0)),
+            nonempty_deletions: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// Builder: opt this project into removing `project_dir/.smelt` before
+    /// every [`Self::run`] call.
+    pub fn with_state_deletion(mut self, mode: StateDeletion) -> Self {
+        self.state_deletion = mode;
+        self
+    }
+
+    /// Builder: point this project at a different [`Config`] — used by
+    /// callers that clone a loaded project's config to synthesize a
+    /// scratch target (e.g. `smelt-cli/tests/bakeoff_seam.rs`).
+    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Total number of runs that found (and removed) an on-disk `.smelt/`
+    /// directory, empty or not.
+    pub fn deletions_observed(&self) -> usize {
+        self.deletions.load(Ordering::SeqCst)
+    }
+
+    /// Number of removed `.smelt/` directories that were non-empty — the
+    /// anti-vacuity signal: a leg that only ever deletes empty directories
+    /// is not exercising state-residency at all.
+    pub fn nonempty_deletions_observed(&self) -> usize {
+        self.nonempty_deletions.load(Ordering::SeqCst)
+    }
+
+    /// If `state_deletion == BetweenRuns`, remove `project_dir/.smelt` now,
+    /// recording whether it existed and was non-empty. Called from
+    /// [`Self::run`] before `execute_project`, so every post-run manifest
+    /// read-back in the harness still observes the run that just happened.
+    fn maybe_delete_state_dir(&self) -> Result<()> {
+        if self.state_deletion != StateDeletion::BetweenRuns {
+            return Ok(());
+        }
+        let state_dir = self.project_dir.join(".smelt");
+        let existed = state_dir.exists();
+        if existed {
+            let nonempty = std::fs::read_dir(&state_dir)?.next().is_some();
+            std::fs::remove_dir_all(&state_dir)?;
+            self.deletions.fetch_add(1, Ordering::SeqCst);
+            if nonempty {
+                self.nonempty_deletions.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Ok(())
     }
 
     fn build_db_and_graph(
@@ -434,6 +503,7 @@ impl LinkCProject {
         request: ExecuteRequest,
         reporter: &dyn RunReporter,
     ) -> Result<RunOutcome> {
+        self.maybe_delete_state_dir()?;
         let (db, graph) = self.build_db_and_graph();
         let outcome = execute_project(
             run_id.to_string(),
@@ -876,5 +946,79 @@ pub fn base_request(target: &str) -> ExecuteRequest {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recipe::{arb_recipe, RecipePool};
+    use crate::render;
+    use crate::verdict::{classify, Verdict};
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+
+    /// `state_deletion_removes_a_populated_state_dir_before_each_run`
+    /// (`docs/outcomes/20260904-state-residency/phases/09-plan.md` test 1):
+    /// with `StateDeletion::BetweenRuns`, a second `run` finds no `.smelt/`
+    /// left by the first — the toggle removes it before `execute_project`
+    /// runs again — and the deletion counter records that the removed
+    /// directory was non-empty.
+    #[test]
+    fn state_deletion_removes_a_populated_state_dir_before_each_run() {
+        let mut runner = TestRunner::deterministic();
+        let strat = arb_recipe(RecipePool::partition_append_only());
+
+        // Draw the first recipe the deterministic sequence admits — this is
+        // a harness unit test, not the generative gate, so one admitted
+        // case is all it needs.
+        let (_tmp, project) = loop {
+            let recipe = strat.new_tree(&mut runner).unwrap().current();
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let project_dir = tmp.path().join("project");
+            std::fs::create_dir_all(&project_dir).expect("create project dir");
+            let db_path = tmp.path().join("db.duckdb");
+            let project = render::stage(&recipe, &project_dir, &db_path).expect("stage recipe");
+            match classify(&project, &recipe).expect("classify") {
+                Verdict::Refused(_) => continue,
+                Verdict::Admitted(_) => break (tmp, project),
+            }
+        };
+
+        let project = project.with_state_deletion(StateDeletion::BetweenRuns);
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        let state_dir = project.project_dir.join(".smelt");
+
+        // Run 1: no `.smelt/` predates this project, so nothing is deleted
+        // yet; the run populates it (`state.mode: intervals`, the fixture
+        // default — `render.rs`).
+        let mut request = base_request("dev");
+        request.full_refresh = true;
+        rt.block_on(project.run_quiet("run-0", request))
+            .expect("run 0");
+        assert!(
+            state_dir.exists(),
+            ".smelt/ should exist after the first run under state.mode: intervals"
+        );
+        assert_eq!(project.deletions_observed(), 0);
+
+        // Run 2: `maybe_delete_state_dir` fires before `execute_project`,
+        // removing the directory run 1 just populated.
+        let mut request = base_request("dev");
+        request.full_refresh = true;
+        rt.block_on(project.run_quiet("run-1", request))
+            .expect("run 1");
+
+        assert_eq!(
+            project.deletions_observed(),
+            1,
+            "run 2 should have deleted the .smelt/ dir run 1 left behind"
+        );
+        assert_eq!(
+            project.nonempty_deletions_observed(),
+            1,
+            "the deleted .smelt/ dir was non-empty (run 1 wrote manifests into it)"
+        );
     }
 }

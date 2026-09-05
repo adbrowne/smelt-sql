@@ -31,9 +31,11 @@ use crate::analysis::functional_dependency::{
     functional_dependency_verdict, FunctionalDependencyVerdict,
 };
 use crate::analysis::join_shape::JoinContext;
-use crate::analysis::monotonicity::NONDETERMINISTIC_FUNCTIONS;
 use crate::analysis::source_bounds::{resolve_single_anchor, AnchorAmbiguity};
-use crate::analysis::walk::{model_property_vector, PropertyVector};
+use crate::analysis::walk::{
+    first_scope_hit, model_property_vector, scope_has_window_function, scope_nondeterministic_fn,
+    PropertyVector,
+};
 use crate::analysis::{analyze_select, SelectItemKind};
 use smelt_types::SqlFunction;
 
@@ -478,6 +480,21 @@ pub fn classify_once_write(
     // with no fallback is the direct `COALESCE(target, delta)` fold it
     // always was — nothing about it needs hidden state.
     if candidates.len() == 1 && fallback_expr.is_none() {
+        return OnceWriteAdmission::Admitted { state: None };
+    }
+
+    // A single candidate whose payload is provably non-null within its own
+    // group (a `unique_key` column) can never actually invoke its
+    // fallback — the fallback is dead, so the spelling stays the plain
+    // `COALESCE(target, delta)` fold with no decomposed state
+    // (`docs/specs/incremental_shapes.md` §"The column-family catalogue").
+    // This proves non-nullness only from the model's own `unique_key`; a
+    // driving-clock-derived payload still takes the decomposed-state route
+    // below because this function resolves no driving source.
+    if candidates.len() == 1
+        && fallback_expr.is_some()
+        && crate::analysis::not_null::column_provably_not_null(unique_key, &candidates[0].1)
+    {
         return OnceWriteAdmission::Admitted { state: None };
     }
 
@@ -1093,6 +1110,12 @@ pub fn classify_cumulative(
     // itself can't classify this SQL shape; the once-write route then fails
     // closed rather than guess (`analysis::functional_dependency`'s
     // documented consumer seam).
+    // join-context: excluded (the once-write FD-backed route's own
+    // `has_fan_out_join` read is a real fail-closed default here, not a
+    // model-edge/repair admission route in criterion 3's sense — out of
+    // scope for `docs/outcomes/20260904-walk-migration-residue/outcome.md`
+    // phase 5; a future widening would need this classifier's own caller to
+    // hold declared source facts, which it does not today)
     let property_vector = model_property_vector(sql, &JoinContext::new());
 
     // Rule: GROUP BY required.
@@ -1469,33 +1492,22 @@ pub fn classify_cumulative(
         }
     }
 
-    // Rule: no window functions in the outer body.
-    //
-    // Known walk-invariant violation: this is a raw whole-SQL text scan in an
-    // admission path, not a leaf classifier invoked by the shared
-    // composition walk (`docs/specs/architecture.md` §"Property composition
-    // walk rule"). It predates that walk and is excluded from the
-    // `walk_coverage` structural gate (`crates/smelt-logical/tests/walk_coverage.rs`'s
-    // `KNOWN_NONCOMPLIANT` skip-list) rather than mislabeled with a
-    // classification tag it doesn't actually carry. Migrating this admission
-    // check onto the walk is tracked as deferred work in
-    // `docs/plans/20260707-property-composition-walk.md` (see "Deferred
-    // during implementation") and `docs/specs/model_properties.md` §Known
-    // Divergences ("Heuristic text-scanning layer").
-    let upper_sql = sql.to_uppercase();
-    if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
+    // Rule: no window functions in any scope. Leaf classifier
+    // (`walk::scope_has_window_function`) folded across every scope of the
+    // model as parallel OR (`walk::first_scope_hit`) — see
+    // `docs/specs/model_properties.md` §"The composition walk" "Keyed-admission
+    // presence verdicts": the keyed state *is* the window, so an `OVER`
+    // anywhere in the scope tree refuses, not only in the outer body.
+    if first_scope_hit(sql, &|s| scope_has_window_function(s).then_some(())).is_some() {
         diagnostics.push(KeyedDiagnostic::KeyedForbidsWindowFunctions);
     }
 
-    // Rule: no non-deterministic functions in the outer body.
-    for nd in NONDETERMINISTIC_FUNCTIONS {
-        let pattern = format!("{}(", nd);
-        if upper_sql.contains(&pattern) {
-            diagnostics.push(KeyedDiagnostic::KeyedForbidsNondeterministic {
-                offending: nd.to_string(),
-            });
-            break;
-        }
+    // Rule: no non-deterministic functions in any scope. Same shared
+    // scope-presence fold, over `walk::scope_nondeterministic_fn`.
+    if let Some(offending) = first_scope_hit(sql, &scope_nondeterministic_fn) {
+        diagnostics.push(KeyedDiagnostic::KeyedForbidsNondeterministic {
+            offending: offending.to_string(),
+        });
     }
 
     // Rule: GROUP BY must not contain the driving source's partition column
@@ -2006,6 +2018,152 @@ GROUP BY device_id"#;
         );
     }
 
+    /// A string literal containing `OVER (` is not a window function — the
+    /// leaf classifier reads a parsed `WINDOW_SPEC` node, not a substring, so
+    /// the old whole-SQL scan's false positive is gone.
+    #[test]
+    fn over_inside_a_string_literal_does_not_forbid_windows() {
+        let sql = r#"SELECT
+    device_id,
+    'flagged OVER (x)' AS note,
+    COUNT(*) AS n
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        if let Err(diagnostics) = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+        {
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
+                "a string literal containing 'OVER (' must not trip the window-function \
+                 refusal; diagnostics: {:?}",
+                diagnostics
+            );
+        }
+    }
+
+    /// A window function tucked inside a CTE body still refuses — the walk
+    /// fold reaches every scope, not just the outer body.
+    #[test]
+    fn window_in_a_cte_still_forbids_windows() {
+        let sql = r#"WITH ranked AS (
+    SELECT
+        device_id,
+        ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY event_ts) AS rn
+    FROM smelt.silver.events_parsed
+)
+SELECT
+    device_id,
+    COUNT(*) AS n
+FROM ranked
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
+    /// A window function inside an expression-position (scalar) subquery
+    /// still refuses — the phase-1/2 walk nodes are covered by the same
+    /// scope-presence fold.
+    #[test]
+    fn window_in_an_expression_position_subquery_forbids_windows() {
+        let sql = r#"SELECT
+    device_id,
+    COUNT(*) AS n
+FROM smelt.silver.events_parsed
+WHERE event_ts > (
+    SELECT MAX(event_ts) OVER (ORDER BY event_ts)
+    FROM smelt.silver.events_parsed
+    LIMIT 1
+)
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
+    /// A function name that merely ends in a listed nondeterministic name
+    /// (`SNOW` vs `NOW`) must not trip the refusal — the leaf classifier
+    /// matches a parsed call name exactly, not a substring.
+    #[test]
+    fn nondeterministic_name_suffix_does_not_forbid_nondeterministic() {
+        let sql = r#"SELECT
+    device_id,
+    SNOW(event_ts) AS flake,
+    COUNT(*) AS n
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        if let Err(diagnostics) = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+        {
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
+                "'SNOW(...)' must not trip the NOW nondeterminism refusal; diagnostics: {:?}",
+                diagnostics
+            );
+        }
+    }
+
+    /// A non-deterministic call tucked inside a CTE body still refuses.
+    #[test]
+    fn random_in_a_cte_still_forbids_nondeterministic() {
+        let sql = r#"WITH tagged AS (
+    SELECT device_id, RANDOM() AS r FROM smelt.silver.events_parsed
+)
+SELECT
+    device_id,
+    COUNT(*) AS n
+FROM tagged
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
+    /// A shape the tree normalization cannot model (a `RECURSIVE` CTE) still
+    /// refuses on a window function — proving the CST flat-enumeration
+    /// fallback (`walk::first_scope_hit`) is load-bearing, mirroring
+    /// `model_has_trajectory_column`'s fallback.
+    #[test]
+    fn unparseable_scope_shape_still_refuses_via_flat_enumeration() {
+        let sql = r#"WITH RECURSIVE r AS (
+    SELECT device_id, 1 AS n FROM smelt.silver.events_parsed
+    UNION ALL
+    SELECT device_id, n + 1 FROM r WHERE n < 3
+)
+SELECT
+    device_id,
+    COUNT(*) OVER (PARTITION BY device_id) AS n
+FROM r
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
+            "diagnostics: {:?}",
+            err
+        );
+    }
+
     /// A SELECT from a single unclocked source now derives the
     /// snapshot-reconcile run shape (Phase 3, `docs/plans/20260809-keyed-
     /// frontier.md`) instead of refusing the whole model outright — but a
@@ -2382,5 +2540,97 @@ GROUP BY device_id, user_id"#;
             "admission is not yet widened onto decomposed state: {:?}",
             classification.aggregator_columns
         );
+    }
+
+    /// Drives [`classify_once_write`] directly over `sql`'s single
+    /// `GroupByKey` projection named `output_name`, the same inputs
+    /// `classify_cumulative`/`derive_fold_spec` assemble for it.
+    fn once_write_admission_for(
+        sql: &str,
+        unique_key: &[String],
+        fds: &[FunctionalDependency],
+        output_name: &str,
+    ) -> OnceWriteAdmission {
+        let analysis = analyze_select(sql).expect("sql must analyze");
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::File::cast(parse.syntax()).expect("must cast to File");
+        let select = file.select_stmt().expect("must have select stmt");
+        let items = crate::analysis::select_stmt_items(&select).expect("must extract items");
+        let (text, expr) = items
+            .iter()
+            .find_map(|item| match item {
+                SelectItemKind::GroupByKey { alias, text, expr }
+                    if alias.eq_ignore_ascii_case(output_name) =>
+                {
+                    Some((text.clone(), expr.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no GroupByKey projection aliased {output_name}"));
+        let vector = model_property_vector(sql, &JoinContext::new());
+        classify_once_write(
+            &text,
+            &expr,
+            unique_key,
+            &analysis.group_by_exprs,
+            fds,
+            vector.as_ref(),
+            output_name,
+        )
+    }
+
+    /// `COALESCE(MAX(id), 0)` with `unique_key = [id]` and a declared
+    /// `id -> id` FD: the fallback is dead by construction (`id` is
+    /// non-null within its own group), so the spelling admits without
+    /// decomposed state (`docs/specs/incremental_shapes.md` §"The
+    /// column-family catalogue").
+    #[test]
+    fn once_write_fallback_over_a_not_null_key_payload_admits_without_state() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(id), 0) AS first_id
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let fds = vec![FunctionalDependency {
+            key: vec!["id".to_string()],
+            determines: "id".to_string(),
+        }];
+        let admission = once_write_admission_for(sql, &["id".to_string()], &fds, "first_id");
+        assert_eq!(admission, OnceWriteAdmission::Admitted { state: None });
+    }
+
+    /// Regression guard: an ordinary nullable payload (`val`, not a
+    /// `unique_key` column) with the same fallback shape still decomposes
+    /// to hidden state — the not-null route must not swallow it.
+    #[test]
+    fn once_write_fallback_over_a_nullable_payload_still_decomposes() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(val), 0) AS first_val
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let fds = vec![FunctionalDependency {
+            key: vec!["id".to_string()],
+            determines: "val".to_string(),
+        }];
+        let admission = once_write_admission_for(sql, &["id".to_string()], &fds, "first_val");
+        assert!(matches!(
+            admission,
+            OnceWriteAdmission::Admitted { state: Some(_) }
+        ));
+    }
+
+    /// The not-null route never substitutes for the required functional
+    /// dependency proof: the same not-null (`id`) payload with NO declared
+    /// FD stays `Unproven`.
+    #[test]
+    fn once_write_not_null_route_still_requires_the_functional_dependency() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(id), 0) AS first_id
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let admission = once_write_admission_for(sql, &["id".to_string()], &[], "first_id");
+        assert!(matches!(admission, OnceWriteAdmission::Unproven { .. }));
     }
 }

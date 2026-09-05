@@ -120,6 +120,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            state_downgrade: None,
         }],
         refusals: vec![],
         key_locality: None,
@@ -577,6 +578,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
+        state_downgrade: None,
     };
 
     let dispatch = decide_column_merge_dispatch(
@@ -2159,6 +2161,7 @@ mod keyed_membership_recompute_e2e {
             &sources,
             &explicitly_mutable,
             &[],
+            &smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("resolver must not error")
         .expect("a live membership-recompute cell must resolve for raw.users");
@@ -2308,6 +2311,17 @@ mod keyed_membership_recompute_e2e {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let project_dir = tmp.path().join("project");
         copy_dir_recursive(&source_dir, &project_dir);
+        // `examples/timeseries/smelt.yml` declares no `state:` key, so it
+        // defaults to `state.mode: stateless`; this fixture's third run
+        // needs the source-mutation baseline run 2 recorded
+        // (`docs/specs/state.md` §"`state.mode` and what each posture
+        // provides").
+        {
+            let smelt_yml_path = project_dir.join("smelt.yml");
+            let mut smelt_yml = std::fs::read_to_string(&smelt_yml_path).unwrap();
+            smelt_yml.push_str("\nstate:\n  mode: intervals\n");
+            std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
+        }
         std::fs::write(
             project_dir.join("models/user_lifetime_status.sql"),
             model_file_text(),
@@ -2563,6 +2577,17 @@ mod keyed_membership_recompute_e2e {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let project_dir = tmp.path().join("project");
         copy_dir_recursive(&source_dir, &project_dir);
+        // `examples/timeseries/smelt.yml` declares no `state:` key, so it
+        // defaults to `state.mode: stateless`; this fixture's third run
+        // needs the source-mutation baseline run 2 recorded
+        // (`docs/specs/state.md` §"`state.mode` and what each posture
+        // provides").
+        {
+            let smelt_yml_path = project_dir.join("smelt.yml");
+            let mut smelt_yml = std::fs::read_to_string(&smelt_yml_path).unwrap();
+            smelt_yml.push_str("\nstate:\n  mode: intervals\n");
+            std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
+        }
         std::fs::write(
             project_dir.join("models/user_lifetime_status.sql"),
             model_file_text_diff_patch(),
@@ -3050,6 +3075,7 @@ mod write_pattern_registry_pin {
                 skeleton_source_closure: None,
                 fingerprint_projections: std::collections::BTreeMap::new(),
                 key_scope: None,
+                state_downgrade: None,
             }],
             refusals: vec![],
             key_locality: None,
@@ -3844,6 +3870,7 @@ mod external_source_point_lookup_recompute {
         // Populate the sidecar against the ORIGINAL (pre-rename) content —
         // the baseline every subsequent diff compares against.
         let (_, sql_body) = model_sql_body();
+        let consumer_address = "smelt.models.daily_events_enriched";
         refresh_fingerprint_sidecar(
             &backend,
             "main",
@@ -3853,6 +3880,7 @@ mod external_source_point_lookup_recompute {
             &projection(),
             &all_users_columns(),
             &sql_body,
+            consumer_address,
             &empty_write_group(),
         )
         .await
@@ -3873,6 +3901,7 @@ mod external_source_point_lookup_recompute {
             &projection(),
             &all_users_columns(),
             &sql_body,
+            consumer_address,
         )
         .await
         .expect("diff sidecar");
@@ -4159,6 +4188,8 @@ mod external_source_point_lookup_recompute {
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await;
 
@@ -4246,6 +4277,8 @@ mod external_source_point_lookup_recompute {
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await
         .expect("conforming data must not fail the tripwire");
@@ -4328,6 +4361,8 @@ mod external_source_point_lookup_recompute {
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
             &smelt_runtime::probes::ProbePolicy::per_run(),
+            &[],
+            &[],
         )
         .await
         .expect("an unbuildable probe must fall back, never fail the run");
@@ -4417,6 +4452,7 @@ mod in_place_update_lowering {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            state_downgrade: None,
         }
     }
 

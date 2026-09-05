@@ -1,7 +1,7 @@
 ---
 feature: model_properties
 status: experimental
-last_reviewed: 2026-09-04
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -282,6 +282,8 @@ For a **partition-addressed** output the axis is always the output's own partiti
 
 A `Closed` verdict names **which route** proved conjunct 4 (row preservation): `JoinShape` for a provably outer join, needing no further runtime check, or `DeclaredReferentialIntegrity { source }` for a declaration-licensed inner/equi-join. The route is not cosmetic — it carries an obligation. A `Closed { DeclaredReferentialIntegrity { .. } }` verdict may license a narrowing consumer (a delta-restricted recompute) **only** paired with that consumer dispatching the count-preservation probe (§"Probe obligation") over the touched region *before* trusting the narrowing; an unbuildable probe drops the narrowing back to the widened scan rather than proceeding on an unverified declaration. A `Closed { JoinShape }` verdict carries no such obligation — the join's own shape, not a declared world-fact, is what proves the row-preservation leg.
 
+A model-edge creation cell's own P1 verdict is not one join's closure but an **AND over every enrichment relation actually joined in the scope** — each upstream model edge *and* each external source joined there, every one judged with its own declared facts (a model edge's declared `unique_key` for conjunct 3; an external source's declared `unique_key` for conjunct 3 and its declared `referential_integrity` for conjunct 4). The shared verdict is `Closed` only when every joined relation's own closure is `Closed`; an unproven join against any one of them — a model edge or an external source — fails the whole AND to `Open`, naming that relation, exactly as an unproven model edge already did before external sources joined the same AND.
+
 ### Fingerprint projection
 
 `fingerprint_projection(model_sql, source_ref, ctx)` derives, for a consuming model reading an
@@ -315,6 +317,56 @@ Every **composition-relevant** verdict — any verdict that can differ between a
   fold's fixed point.
 
 A property implementation must not re-derive composition by scanning the query text or a single clause in isolation: a flat scan cannot express series composition (stacked frames must *add* reach — merging with max under-derives the scan) and cannot see scope nesting (a scope inside a CTE body must be judged by the same rule as the same scope at the top level). Per-clause and substring classifiers remain admissible only as **leaf-level classifiers invoked by the walk** (e.g. the interval parser, the function-name determinism predicate) or as **advisory heuristics that never feed admission** (e.g. batch-size estimation). Fail-closure is preserved by construction: an operator with no registered transfer rule for a property yields that property's reject verdict for the subtree above it.
+
+A node of the operator tree is: a CTE body, a set-operation arm, a derived table (including a redundantly-parenthesized one, `FROM ((SELECT …)) AS t`), the members of a parenthesised join group (`FROM (a JOIN b ON …)`, flattened into the enclosing scope's join inputs), and the body of an expression-position subquery — a scalar subquery, an `EXISTS (…)`, an `IN (…)`, or a quantified `ANY`/`ALL`/`SOME (…)` — appearing in the enclosing scope's own select list, `WHERE`, `HAVING`, `QUALIFY`, or `ORDER BY`. An expression-position scope composes as a scope of its own: its verdict is folded and made available to every transfer function like any other child, with the per-property consumption rule (what a property does with that verdict) specified in that property's own section.
+
+Two properties' consumption rules are stated here since they share the same shape rather than
+belonging to either property's own section:
+
+- **Bound/reach.** An expression-position scope is a *read* of its sources: its verdict merges into
+  the enclosing node's per-source map exactly like an input's (parallel max-merge), so a source
+  read only through a scalar subquery or an `EXISTS`/`IN`/quantified filter is reachable, and a
+  window frame inside the subquery body contributes reach the same way a frame in the outer scope
+  would. It does **not**, however, participate in the enclosing node's join-sibling slack
+  computation (the chained-band carry between two relations tied by *this scope's own FROM join
+  graph*): an expression-position scope is not joined into that graph at this node — a correlated
+  one is a per-outer-row computation, not a join partner sharing row cardinality with the FROM
+  inputs — so folding it in would spread its own reach onto an unrelated FROM input's margin. This
+  makes the verdict equal by construction to the same subquery rewritten as an *uncorrelated*
+  cross-joined derived table (the shape criterion 1's oracle test uses); a correlated subquery's
+  only valid literal rewrite is a `LATERAL` join, which the walk does not model as a distinct
+  input shape, so equality with that form is not claimed.
+- **Grain (key set, per-column determinism, per-column change-comparability).** An expression-position
+  scope contributes **no key, no output columns, and no fan-out** to the enclosing scope — a filter
+  subquery cannot establish a key, and a scalar subquery yields one value, not a joined row. It
+  contributes two things: its `has_set_op_barrier` bit (a `UNION`-bodied subquery body propagates
+  the barrier, matching the inlined derived-table form), and, for the select item whose expression
+  embeds it, per-column determinism/comparability: that item's verdict is the max of its own
+  syntactic verdict — computed excluding the subquery's own subtree, since that subtree is a walk
+  node judged on its own — and the worst per-column verdict of the matching expression scope's own
+  property vector.
+- **Partition skew and footprint-trajectory.** An expression-position scope composes into both
+  exactly as any other child does. Skew folds the scope's verdict into the enclosing node's fold by
+  `Skew::union` (max before, max after) — a Form B relation living inside a scalar/`EXISTS`/`IN`/
+  quantified subquery body can push rows into a neighbouring partition just as one in a
+  `FROM`-position derived table can, so there is no carve-out: unlike bound/reach this transfer has
+  no join-sibling slack computation to protect from an unrelated scope's contribution. Footprint
+  trajectory folds by parallel OR, but only for a scope whose value **flows into a stored output
+  column** — a running fold over the output axis inside a select-list scalar subquery still makes
+  the model a trajectory, but the same fold inside a `WHERE`/`HAVING`/`QUALIFY`/`ORDER BY` scalar,
+  `EXISTS`, `IN`, or quantified subquery never becomes a stored column of the enclosing scope, so it
+  contributes no trajectory (only filters rows or orders them). Both folds are widening — the
+  conservative direction is *more* skew / *more* trajectory — so admitting either only over-approximates,
+  never under-derives.
+- **Keyed-admission presence verdicts (window-function presence, non-deterministic-call
+  presence).** The two `grain: key` admission checks (`incremental_shapes.md` §"Key-grain
+  codes" `KeyedForbidsWindowFunctions`/`KeyedForbidsNondeterministic`) compose as **parallel OR
+  over the whole children slice** (`ctes ++ inputs ++ expr_scopes`) — an `OVER` clause or a
+  non-deterministic call anywhere in the model's scope tree refuses, since the keyed state is
+  the window and row identity must not be time-of-run-dependent regardless of which scope the
+  construct sits in. Each node is classified over its own region only — the leaf classifier
+  never descends into a child that is itself a walk node — so a scope's contribution is counted
+  exactly once.
 
 ## Design
 
@@ -356,24 +408,19 @@ recorded here — history lives in git and §References → Plans.
   identity has no write emitter or admission rule consuming it; the whole-model property vector
   (`model_property_vector`) has no consumer. Tracked: `docs/plans/20260704-model-updates-l3-declarations.md`,
   `docs/plans/20260707-property-composition-walk.md`.
-- **The composition walk is not yet the sole source of every property.** Scopes inside
-  expression-position (scalar/`EXISTS`) subqueries are not enumerated as walk nodes, so their
-  window/`LIMIT`/reach/`DISTINCT`/`HAVING` content is judged only in the owning scope's region;
-  the `temporal` proof and the driving-fact/anchor join resolution still run their own traversal
-  rather than the shared walk; a redundantly-parenthesized derived table
-  (`FROM ((SELECT …)) AS t`) falls back to the legacy whole-text derivation, same-scope chained
-  bands still max-merge, and an absorbing verdict rejects every context source. Tracked:
-  `docs/plans/20260707-property-composition-walk.md`.
+- **The join driving-fact/anchor resolution the event-time monotonicity trace consumes is not
+  migrated onto the composition walk.** `resolve_join_driving_fact` runs its own single-level
+  FROM-clause traversal rather than the shared walk, and its verdict feeds admission (unlike the
+  deliberately separate, advisory-only `EffectiveWindow` walk in `analysis/temporal.rs`,
+  `architecture.md` §"Property composition walk rule"). Expression-position subquery bodies,
+  by contrast, are enumerated as walk nodes and bound/reach, grain (key set, determinism,
+  comparability), partition skew, and footprint-trajectory all consume their verdicts
+  (§"The composition walk"). Tracked: `docs/plans/20260707-property-composition-walk.md`.
 - **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints
   "Declared lateness is orchestration-only" forbids any proof from reading it; the summation
   survives (its output feeds batch fields no execute path consumes, so it is inert today) and
   must be removed rather than wired further. Scheduled:
   `docs/outcomes/20260904-decision-residue/outcome.md`.
-- **`cumulative.rs`'s whole-SQL window-function admission scan is not yet classified onto the
-  walk** (`classify_cumulative`'s `OVER(`/`OVER (` check) — remaining debt for a future
-  property-discovery pass, not silently mislabeled. Tracked:
-  `docs/plans/20260707-property-composition-walk.md` (standing gate:
-  `cargo test -p smelt-logical --test walk_coverage`).
 - **`INTERSECT`/`EXCEPT` are unclassified for filter distribution** — their arm scopes are judged
   by the admission walk only; this is independent of the per-arm mutation-sensitivity combination
   rule (§"Per-column mutation-sensitivity / column provenance" "Across set-operation arms"), which
@@ -383,11 +430,14 @@ recorded here — history lives in git and §References → Plans.
   — whether an existing column's meaning changed is not derivable from the column/dependency-set
   diff alone; falls to a declared migration intent whose exact surface is open. Cross-ref
   `models.md` §Known Divergences.
-- **Only one maintenance-cell route consults a declared-RI closure today** — the source-enrichment
-  `UpstreamMutation` route derives one; a model-edge creation cell's closure is always derived
-  with an empty referential-integrity map. Tracked:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
-  `docs/outcomes/20260809-probe-backed-facts/outcome.md`.
+- **Two FD-backed readers build their `JoinContext` empty because their callers hold no declared
+  source facts to populate it with.** `rules/cumulative.rs`'s once-write route and
+  `maintenance/locality.rs`'s key-temporal-locality route 2 each call
+  `model_property_vector`/`functional_dependency_verdict_over_vector` with a literal
+  `JoinContext::new()`; this is a correct fail-closed default today (neither is a
+  model-edge/repair admission route), not a live admission gap, but widening either needs its
+  caller to gain declared-fact access first. Tracked:
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Fingerprint projection (P4) has no consumer yet** — the sidecar build and digest compare are a
   later phase's scope. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **The append-only posture probe does not yet distinguish a late append from a violation** — a
@@ -409,6 +459,15 @@ recorded here — history lives in git and §References → Plans.
   contract, plan, and graph layer".
 - **The grammar boundary between `columns.<c>.contract` and a future column `tests:` block is
   deliberately deferred (Open Question)** — cross-ref `models.md` §Known Divergences decision 8.
+- **A source read only as an argument to a table-valued function call is invisible to the
+  composition walk.** `smelt.functions.<fn>(source => smelt.silver.x, …)` normalizes to a single
+  opaque leaf named after the call itself; the walk never descends into the call's argument list,
+  so a source passed that way (the real shape `examples/web_analytics/models/silver/sessions.sql`
+  reads its upstream through) never becomes a walk leaf under any tree shape. Bound derivation
+  (`derive_model_bounds`) covers the gap with a per-source whole-text fallback classified as a leaf
+  classifier (`docs/specs/architecture.md` §"Property composition walk rule"); every other walk
+  consumer (grain, footprint, cross-axis links, the driving-fact/anchor resolution) does not.
+  Tracked: `docs/outcomes/20260904-walk-migration-residue/outcome.md`.
 
 ## Future Extensions
 

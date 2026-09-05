@@ -60,6 +60,12 @@ pub enum RuleDiagnosticCode {
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
     /// clause is a subquery that does not project the column. Error severity.
     EventTimeColumnNotVisibleAtOuterSelect,
+    /// A `grain: partition` model's body calls `smelt.metric(...)`. The
+    /// composition of metric expansion with time-filter injection is
+    /// deliberately unspecified (`incremental_shapes.md` §"Functions inside
+    /// partition-grain bodies"), so the combination refuses ahead of
+    /// execution rather than composing unpredictably. Error severity.
+    PartitionGrainForbidsMetrics,
 }
 
 /// A diagnostic produced by a planner rule's `detect` phase, in rule-native
@@ -157,6 +163,14 @@ impl PlannerRule for IncrementalRule {
             return Vec::new();
         };
 
+        // An unspecified composition (metric expansion × time-filter
+        // injection) must refuse loudly before any other check runs — no
+        // point classifying batch-safety or event-time injectability on a
+        // query whose behaviour is undefined.
+        if let Some(diag) = check_partition_grain_forbids_metrics(ctx) {
+            return vec![diag];
+        }
+
         // Check event-time injectability first. If the event_time_column is not
         // reachable at the outermost SELECT (UNION query or subquery-FROM that
         // doesn't project it), return an Error immediately — no point running
@@ -238,6 +252,68 @@ fn check_batched_bound_derivable(ctx: &RuleContext) -> Option<RuleDiagnostic> {
             message: format!("Model '{}': {message}", ctx.model_name),
         }),
     }
+}
+
+/// Leaf classifier over the model's own body (per the property composition
+/// walk rule): parses `ctx.sql` and walks **every** descendant `FUNCTION_CALL`
+/// node — the outer SELECT, any CTE, any derived table — for a namespaced
+/// `smelt.metric(...)` call. Returns `Some(Error)` naming the model and the
+/// metric argument (if a literal) on the first match; `None` when the body is
+/// unparseable (conservative — no other check in this rule can classify it
+/// either) or contains no such call.
+///
+/// `incremental_shapes.md` §"Functions inside partition-grain bodies": the
+/// composition of metric expansion with time-filter injection is deliberately
+/// unspecified, so the combination refuses outright rather than executing
+/// undefined behaviour.
+fn check_partition_grain_forbids_metrics(ctx: &RuleContext) -> Option<RuleDiagnostic> {
+    let stripped = crate::types::Frontmatter::strip(ctx.sql);
+    let parse_result = parse(stripped);
+    let root = parse_result.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != smelt_parser::SyntaxKind::FUNCTION_CALL {
+            continue;
+        }
+        let Some(func) = smelt_parser::FunctionCall::cast(node) else {
+            continue;
+        };
+        let is_smelt_metric = func
+            .namespace()
+            .is_some_and(|ns| ns.eq_ignore_ascii_case("smelt"))
+            && func
+                .name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("metric"));
+        if !is_smelt_metric {
+            continue;
+        }
+        let arg_text = func
+            .arguments()
+            .first()
+            .map(|arg| arg.syntax().text().to_string());
+        let message = match arg_text {
+            Some(arg) => format!(
+                "Model '{}': `smelt.metric({arg})` is not allowed in a `grain: partition` \
+                 model's body — the composition of metric expansion with time-filter injection \
+                 is deliberately unspecified (see `incremental_shapes.md` §\"Functions inside \
+                 partition-grain bodies\").",
+                ctx.model_name
+            ),
+            None => format!(
+                "Model '{}': `smelt.metric(...)` is not allowed in a `grain: partition` \
+                 model's body — the composition of metric expansion with time-filter injection \
+                 is deliberately unspecified (see `incremental_shapes.md` §\"Functions inside \
+                 partition-grain bodies\").",
+                ctx.model_name
+            ),
+        };
+        return Some(RuleDiagnostic {
+            code: RuleDiagnosticCode::PartitionGrainForbidsMetrics,
+            severity: RuleSeverity::Error,
+            message,
+        });
+    }
+    None
 }
 
 /// Returns `Some(Error)` when the `event_time_column` cannot be injected at
@@ -1386,6 +1462,126 @@ mod tests {
                 .iter()
                 .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
             "a plain table FROM (no CTE) must be unaffected by the CTE case; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn partition_grain_metric_call_refuses() {
+        let sql = "SELECT event_date, smelt.metric('revenue') AS revenue FROM smelt.orders";
+        let refs = collect_path_refs(sql);
+        let ts: SourceTimeseriesMap = HashMap::new();
+        let tsc = day_ts();
+        let inc = inc_config();
+        let ctx = RuleContext {
+            model_name: "partition_metric",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts,
+            timeseries_config: Some(&tsc),
+            incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == RuleDiagnosticCode::PartitionGrainForbidsMetrics)
+                .count(),
+            1,
+            "expected exactly one PartitionGrainForbidsMetrics; got: {diags:?}"
+        );
+        let hit = diags
+            .iter()
+            .find(|d| d.code == RuleDiagnosticCode::PartitionGrainForbidsMetrics)
+            .unwrap();
+        assert_eq!(hit.severity, RuleSeverity::Error);
+    }
+
+    #[test]
+    fn partition_grain_metric_call_in_cte_refuses() {
+        let sql = "WITH derived AS (SELECT event_date, smelt.metric('revenue') AS revenue \
+                       FROM smelt.orders) \
+                   SELECT event_date, revenue FROM derived";
+        let refs = collect_path_refs(sql);
+        let ts: SourceTimeseriesMap = HashMap::new();
+        let tsc = day_ts();
+        let inc = inc_config();
+        let ctx = RuleContext {
+            model_name: "partition_metric_cte",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts,
+            timeseries_config: Some(&tsc),
+            incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::PartitionGrainForbidsMetrics),
+            "a smelt.metric() call nested in a CTE must be found by the descendant walk; \
+             got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn partition_grain_without_metric_is_clean() {
+        let sql = "SELECT event_date, SUM(amount) AS total, smelt.other_model AS x \
+                   FROM smelt.orders GROUP BY event_date";
+        let refs = collect_path_refs(sql);
+        let ts: SourceTimeseriesMap = HashMap::new();
+        let tsc = day_ts();
+        let inc = inc_config();
+        let ctx = RuleContext {
+            model_name: "partition_no_metric",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts,
+            timeseries_config: Some(&tsc),
+            incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::PartitionGrainForbidsMetrics),
+            "a partition-grain model with no smelt.metric() call must be clean of this \
+             diagnostic; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn keyed_model_metric_call_is_unaffected() {
+        let sql = "SELECT device_id, smelt.metric('revenue') AS revenue FROM smelt.events_ts \
+                   GROUP BY device_id";
+        let refs = collect_path_refs(sql);
+        let ts = ts_map();
+        let ctx = RuleContext {
+            model_name: "keyed_metric",
+            materialization: "cumulative_aggregate",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts,
+            timeseries_config: None,
+            incremental_config: None,
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::PartitionGrainForbidsMetrics),
+            "a keyed (non-partition-grain) model must never surface \
+             PartitionGrainForbidsMetrics; got: {diags:?}"
         );
     }
 }

@@ -68,6 +68,8 @@ fn key_addressed_cell_resolves_live_from_the_real_plan() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        true,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolution must not error")
     .expect("a live key-addressed cell must resolve");
@@ -134,6 +136,8 @@ fn partition_grain_downstream_resolves_the_key_addressed_cell() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        true,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolution must not error")
     .expect(
@@ -183,6 +187,8 @@ fn grain_route_groups_sidecar_at_downstream_grain() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        true,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolution must not error")
     .expect("a grain-over-upstream cell must resolve");
@@ -231,6 +237,8 @@ fn missing_key_scope_column_on_the_upstream_fails_loud() {
         &HashSet::new(),
         &edges,
         SqlDialect::DuckDB,
+        true,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     );
     match result {
         Ok(None) => {}
@@ -249,7 +257,7 @@ fn missing_key_scope_column_on_the_upstream_fails_loud() {
 
 // ── 3 ────────────────────────────────────────────────────────────────────
 #[test]
-fn non_duckdb_dialect_refuses_key_addressed_discovery() {
+fn key_addressed_edge_refuses_without_the_sidecar_capability() {
     let text = format!("{DOWNSTREAM_MODEL_FILE}{DOWNSTREAM_MODEL_SQL}\n");
     let (metadata, sql) = metadata_and_sql(&text);
     let edges = vec![keyed_edge("agg", &["user_id"])];
@@ -262,12 +270,39 @@ fn non_duckdb_dialect_refuses_key_addressed_discovery() {
         &HashSet::new(),
         &edges,
         SqlDialect::SparkSQL,
+        smelt_dialect::BackendCapabilities::spark_delta().supports_fingerprint_sidecar,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
-    .expect_err("a non-DuckDB dialect must refuse before any backend call");
+    .expect_err("a target lacking the sidecar capability must refuse before any backend call");
     assert!(
         err.to_string().contains("not supported") || err.to_string().contains("Spark SQL"),
-        "expected an unsupported-dialect refusal, got: {err}"
+        "expected an unsupported-capability refusal, got: {err}"
     );
+}
+
+// ── 3b ───────────────────────────────────────────────────────────────────
+/// Proves the gate is the flag, not the dialect: a non-DuckDB dialect WITH
+/// `supports_fingerprint_sidecar: true` still resolves the cell.
+#[test]
+fn key_addressed_edge_admits_when_the_capability_is_declared() {
+    let text = format!("{DOWNSTREAM_MODEL_FILE}{DOWNSTREAM_MODEL_SQL}\n");
+    let (metadata, sql) = metadata_and_sql(&text);
+    let edges = vec![keyed_edge("agg", &["user_id"])];
+
+    let resolved = resolve_live_key_addressed_model_edge_cell(
+        &sql,
+        "downstream",
+        &metadata,
+        &[],
+        &HashSet::new(),
+        &edges,
+        SqlDialect::SparkSQL,
+        true,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
+    )
+    .expect("resolution must not error")
+    .expect("a non-DuckDB dialect declaring the capability must still resolve the cell");
+    assert_eq!(resolved.0, "agg");
 }
 
 // ── 4 ────────────────────────────────────────────────────────────────────

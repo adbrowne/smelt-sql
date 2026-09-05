@@ -32,32 +32,15 @@ Spec: `docs/specs/multi_backend.md` §"Template emission", §"Operand-conditiona
 The spec set (`incremental_models.md` + `incremental_shapes.md` + `definition_deltas.md`) is
 committed; these are the loose ends the redraft deliberately left for follow-up work:
 
-- **docs-site sync**: user docs still describe the four-corners framing;
-  a docs-site pass should follow the new front door (delta signatures) once a wiring plan
-  exists. `docs-site` was deliberately untouched by the spec redraft. (The `smelt backbuild` →
-  `smelt rebuild` verb rename itself landed via
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 4.)
 - **`/smelt:validate` run** over the three new specs to baseline drift.
 - **`smelt migrate` / `smelt rebuild` wiring plan** (research §6 step 2): wire the backbuild
   layer behind plan-and-approve; extend the conformance harness with a definition-edit step
   kind; build the approval (plan-hash) store.
-- **Sidecar per-consuming-edge audit** (`sources.md` §Known Divergences, new entry): verify
-  the built fingerprint sidecar upholds the per-consumer comparandum requirement under a
-  shared projection-identity partition.
-- **Frozen-horizon append-only gate**: the spec now refuses `frozen_horizon` on a
-  non-append-only driving source (`ContractFrozenHorizonInvalid`); the implementation does not
-  yet check this leg.
-- **Deferral oracle restatement**: the conformance gate's oracle transform should be checked
-  against the restated landed-vs-processed form (`incremental_models.md` §"The contract
-  lattice") — the previous spec text was vacuous and a comparator built from it checks
-  nothing.
-- **Stale citations flagged by the sweep** (could not be confidently re-pointed; each names a
-  heading that no longer exists anywhere): `materialized_view.md` §"The composition contract"
-  (×2), `run_state.md` §"Failure mode", `timeseries.md` §"Granularity values", `models.md` +
-  `rules/incremental.rs:708` + one e2e test §"Non-determinism and the payload rule",
-  `maintenance_conformance/gate.rs` §"Per-slice…" (×2), `propagate.rs` §"Row movement",
-  `propagation.rs` §"The clamp both directions", `refresh_axis.rs` §"The declared shape axis".
-  These pre-date the redraft; fix opportunistically.
+- **Dangling "What the composed shape uniquely enables" citations**: `docs/specs/models.md:134`
+  and `crates/smelt-logical/src/maintenance/propagate.rs` (two sites) cite this heading in
+  `incremental_models.md`/`incremental_shapes.md`; it does not exist in either spec today. Not
+  covered by the 2026-09-04 programme-hygiene sweep (it wasn't on that sweep's site list); needs
+  its own re-point-or-drop pass.
 
 
 ## `ColumnScopedMerge` reachability gap on membership-sensitive `grain: partition` cells — RESOLVED (2026-08-09)
@@ -83,10 +66,7 @@ itself remains unpinned even though the technique's normal admission path is now
 The bare inner-join fixture `examples/timeseries/models/daily_events_enriched.sql` (this item's
 original repro) is unaffected by the fix — it derives `Technique::DeleteInsert` for its
 `{user_name}` cell today, same as before, because its join is an inner `JOIN` with no dimension
-`unique_key` proving closure; that fixture was never the shape the fix targets. Its own doc
-comment (predating this resolution) still claims a live column-scoped `MERGE` for that cell — a
-pre-existing inaccuracy in the fixture's comments, not touched by this docs-only pass since
-`examples/` is out of scope for a docs sweep; worth a follow-up correction.
+`unique_key` proving closure; that fixture was never the shape the fix targets.
 
 ### Original entry (2026-08-08, corrected same day)
 
@@ -518,3 +498,14 @@ planner surface:
   model-edge-only; source-level enrichment joins get no delta restriction.
   Fix the guide or wire the source-level route (flagged 2026-08-09 during the
   sensitivity-precision docs sweep).
+
+## `docs/specs/state.md` freshness gap (flagged 2026-09-04, programme-hygiene phase 6)
+
+`/smelt:validate state` flags `docs/specs/state.md` (`last_reviewed: 2026-08-16`) as stale
+against its own Reference → Code paths (`crates/smelt-state/src/`, `smelt-core/src/config.rs`,
+`smelt-runtime/src/execute.rs`): the most recent commit touching those paths is `6bb11ffc`
+(2026-09-04, "refuse a partition_column rename with a named diagnostic"), unrelated to this
+spec's subject matter. Likely a false positive — the touching commit doesn't concern state
+residency — but a `/smelt:spec state` pass should confirm and bump `last_reviewed` rather than
+leaving the mismatch standing. Not fixed here: `docs/outcomes/20260904-programme-hygiene` is
+docs-only and scoped to specific stale citations, not general spec-review.

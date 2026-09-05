@@ -10,13 +10,12 @@ timeseries:
 # (`models/sources/raw/events.yml`) — but a `grain: partition` output has no
 # top-level `unique_key:` slot of its own (declaring one makes an output
 # key-shaped, `docs/specs/models.md` §"The Relation Contract"), so this
-# cell's own row identity resolves `WholeRow`. That is still what the
-# regular incremental execution loop's column-scoped `MERGE` (MP11) keys on
-# when a `raw.users` mutation drives the `{user_name}` cell, in place of the
-# default region-recompute `DELETE`+`INSERT` — the retired
-# `batched.unique_key: [event_id]` sub-block spelling (now `merge_key:` in
-# smelt.yml) this model used to carry here never fed row-identity derivation
-# for a partition-grain output either
+# cell's own row identity resolves `WholeRow`. That is what every cell's
+# derived technique, `{user_name}` included, is keyed by: a region
+# `DELETE`+`INSERT` (`Technique::DeleteInsert`) — the retired
+# `batched.unique_key: [event_id]` sub-block spelling (now
+# `merge_key:` in smelt.yml) this model used to carry here never fed
+# row-identity derivation for a partition-grain output either
 # (`derive::ModelInputs::declared_unique_key` is empty for every
 # `Grain::Partition`), so dropping it changes nothing.
 maintenance:
@@ -25,13 +24,15 @@ maintenance:
       raw.users:
         allow_full_scan: true
 ---
--- Fact (events) enriched with the dimension (users) — the fact+dimension
--- enrichment shape MP11 wires a live column-scoped MERGE for
--- (docs/specs/incremental_models.md §"Per-cell admission"; the
--- `smelt-runtime::maintenance_driver` "first live cell" story). `raw.users`
--- is an unclocked, explicitly `mutation_profile: mutable_snapshot`
--- dimension: renaming a user broadcasts to every fact row that references
--- them — the `{user_name}` column group's `UpstreamMutation` cell.
+-- Fact (events) enriched with the dimension (users). `raw.users` is an
+-- unclocked, explicitly `mutation_profile: mutable_snapshot` dimension:
+-- renaming a user broadcasts to every fact row that references them — the
+-- `{user_name}` column group's `UpstreamMutation` cell. But the enrichment
+-- reads `raw.users` in an inner `JOIN`'s own `ON` predicate, a row-admission
+-- read: membership sensitivity is row-scoped, so no column group of this
+-- `SELECT` can be proven value-only, and the cell falls back to the region
+-- recompute `DELETE`+`INSERT`, not a narrower per-column write
+-- (docs/specs/incremental_models.md §"Per-cell admission").
 --
 -- `event_date` is a `CAST`, not `date_trunc(...)`: the P1 skeleton-source-
 -- closure proof's per-column provenance conjunct (`model_properties.md`

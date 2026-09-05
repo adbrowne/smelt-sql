@@ -75,7 +75,13 @@ pub enum RepairRefusal {
 }
 
 /// Admit (or fail-closed refuse) the per-group recompute technique for
-/// `source`'s `delta` against `sql`.
+/// `source`'s `delta` against `sql`. `join` is the caller's own declared
+/// unique-key facts (mirroring [`admit_key_addressed_recompute`]'s `join`
+/// parameter) — the affected-key discovery proof's fan-out gate sees the
+/// SAME declared facts a model-edge cell's row-identity/closure proofs do,
+/// rather than an always-empty context (`docs/outcomes/
+/// 20260904-walk-migration-residue/outcome.md` phase 5).
+#[allow(clippy::too_many_arguments)]
 pub fn admit_per_group_recompute(
     sql: &str,
     declared_unique_key: &[String],
@@ -84,10 +90,11 @@ pub fn admit_per_group_recompute(
     keyed_time_axis: Option<&str>,
     loc: &LocalityInputs<'_>,
     delta: &DeltaShape,
+    join: &JoinContext,
 ) -> Result<AdmittedRepair, RepairRefusal> {
     let affected_ctx = AffectedKeyContext {
         unique_key: declared_unique_key.to_vec(),
-        join: crate::analysis::join_shape::JoinContext::new(),
+        join: join.clone(),
     };
     let key = match derive_affected_keys(delta, sql, &affected_ctx) {
         AffectedKeys::Keys { cols } => cols,
@@ -263,6 +270,7 @@ pub fn derive_repair_cell(admitted: &AdmittedRepair, trigger: Trigger, group: St
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
+        state_downgrade: None,
     }
 }
 

@@ -553,7 +553,6 @@ struct BakeoffArgs {
 
     /// Print the winning technique per measured cell as ready-to-paste
     /// `cells[]` YAML. Emit-only — never writes the model's `.sql` file.
-    /// Not yet implemented (`docs/plans/20260719-prod-w7-bakeoff.md` Phase 5).
     #[arg(long)]
     pin: bool,
 }

@@ -1,7 +1,7 @@
 # Outcome: Close the key grain's implementation-only residues
 
 **Created:** 2026-08-15
-**Status:** blocked
+**Status:** done
 **Source:** `docs/specs/incremental_shapes.md` §"The key grain" §Known Divergences;
 `docs/outcomes/20260815-definition-delta-migrate/outcome.md` §"Out of scope"
 **Spec anchors:** `docs/specs/incremental_shapes.md`, `docs/specs/incremental_models.md`
@@ -32,9 +32,9 @@ gap against a family (once-write) whose NULL-preservation obligation is already 
 2. A re-run-tolerant (non-additive) window-forward model writes a frontier record, matching
    §"The transactional frontier write (merge ledger)"'s unqualified "every window-forward keyed
    model" statement; `--auto` staleness can consult it.
-3. The reconciliation ledger's fold is transactional on every shipped backend (matching the
-   already-stated "backend-resident and transactional with the write it describes" guarantee), not
-   DuckDB-only.
+3. On a backend with no ledger realisation the cell takes a recorded, explain-visible downgrade to
+   its recompute-family equivalent (`state.md` §"The degradation contract"); the fold is
+   transactional wherever it happens.
 4. Order-independence (and the other derived execution postures already defined in §"Derived
    execution postures") is computed as a real verdict, not assumed sequential by default, and
    `smelt explain` prints it alongside the run shape.
@@ -69,7 +69,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 |---|-------|--------|
 | 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
-| 3 | Transactional ledger fold on every shipped backend | blocked |
+| 3 | Ledger-structure availability resolution: a backend/posture with no ledger realisation downgrades the cell to its recompute-family equivalent, recorded and explain-visible | done |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
 | 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | done |
@@ -231,6 +231,15 @@ six success criteria — criterion 1 is already met end-to-end without it.
   decision among three candidate options — and phase 8's summary states that per-criterion verdict
   explicitly so the close-out step can judge the Success criteria on evidence.
 
+- 2026-09-05 — Option 1 of the 2026-09-03 Blocked entry was chosen on 2026-09-04
+  (`docs/outcomes/20260904-state-residency/outcome.md` decision log, scaffold entry) and
+  discharged by that outcome's phases 4-7: availability resolution (a pure `smelt-logical` step),
+  the `MaintenanceStateDowngraded` recorded downgrade replacing the driver's silent skip /
+  `RunReporter::state_structure_unavailable` call, and `smelt explain` printing the downgrade
+  (text + `--json`) all landed there. Criterion 3 is amended above to the decided wording and its
+  phase row flipped to `done`; this outcome's Status is now `done` — all eight phases are closed
+  and all six success criteria are met.
+
 ## Blocked
 
 <!-- Dated entries: phase, reason, candidate options. -->
@@ -280,3 +289,10 @@ six success criteria — criterion 1 is already met end-to-end without it.
   `Grade::Idempotent` arm on non-DuckDB backends. Whatever is decided, a silent skip of a
   correctness structure conflicts with `CLAUDE.md` §"Fail-loud discipline" and should become a
   recorded, visible fact.
+
+- 2026-09-05 — **Resolved.** Option 1 was chosen (2026-09-04, recorded in
+  `docs/outcomes/20260904-state-residency/outcome.md` decision log) and fully discharged by that
+  outcome's phases 4-7 (availability resolution in `smelt-logical`, the `MaintenanceStateDowngraded`
+  recorded downgrade, and `smelt explain` surfacing it). The minimum fix (silent skip → recorded
+  fact) was also subsumed by that work. Criterion 3 is amended to match; phase 3 and this outcome
+  are both `done`.

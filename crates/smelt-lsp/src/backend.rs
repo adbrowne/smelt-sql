@@ -377,6 +377,7 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::EventTimeColumnNotVisibleAtOuterSelect => {
             "event-time-column-not-visible-at-outer-select"
         }
+        DbCode::PartitionGrainForbidsMetrics => "partition-grain-forbids-metrics",
         DbCode::StateModeWidening => "state-mode-widening",
         DbCode::CteRefOutsideTest => "cte-ref-outside-test",
         DbCode::CheckHasTestClause => "check-has-test-clause",
@@ -409,6 +410,8 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::KeyedRetractableContribution => "keyed-retractable-contribution",
         DbCode::PropertyDowngrade => "property-downgrade",
         DbCode::PropertyDiffBaselineUnavailable => "property-diff-baseline-unavailable",
+        DbCode::MaintenanceStateDowngraded => "maintenance-state-downgraded",
+        DbCode::DeclaredContractRequiresState => "declared-contract-requires-state",
     }
 }
 

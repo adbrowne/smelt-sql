@@ -50,7 +50,7 @@ fn stage_workspace(parent: &Path) -> PathBuf {
         "smelt.yml",
         "name: explain_definition_delta_ws\nversion: 1\npaths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
-         default_materialization: view\n",
+         default_materialization: view\nstate:\n  mode: intervals\n",
     );
     write(
         &root,

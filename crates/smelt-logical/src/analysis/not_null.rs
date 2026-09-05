@@ -23,6 +23,15 @@
 
 use crate::analysis::{select_stmt_items, SelectItemKind};
 
+/// A `unique_key` column is non-null within its own group by construction —
+/// the key never changes across merges (the same fact `classify_once_write`
+/// route 1 already leans on for the bare key-derived spelling). Leaf
+/// classifier: a case-insensitive membership check over the model's own
+/// declared `unique_key`, nothing more.
+pub fn column_provably_not_null(unique_key: &[String], column: &str) -> bool {
+    unique_key.iter().any(|k| k.eq_ignore_ascii_case(column))
+}
+
 /// Two cases are recognised:
 /// - `partition_column` is itself a `unique_key` column (route 1's own
 ///   fact — a key component is never meaningfully NULL).
@@ -56,7 +65,7 @@ pub fn partition_column_provably_not_null(
     partition_column: &str,
     driving_source_partition_column: Option<&str>,
 ) -> bool {
-    if unique_key.iter().any(|k| k == partition_column) {
+    if column_provably_not_null(unique_key, partition_column) {
         return true;
     }
     let Some(driving_col) = driving_source_partition_column else {
@@ -143,6 +152,16 @@ fn expr_is_driving_clock_or_wrapper(expr: &smelt_parser::Expr, driving_col: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_provably_not_null_true_for_key_member() {
+        assert!(column_provably_not_null(&["id".to_string()], "ID"));
+    }
+
+    #[test]
+    fn column_provably_not_null_false_for_non_key() {
+        assert!(!column_provably_not_null(&["id".to_string()], "val"));
+    }
 
     #[test]
     fn key_column_is_provably_not_null() {

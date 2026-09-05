@@ -31,7 +31,6 @@ use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
-use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, RunReport, TimeRangeRecord};
 
 use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
@@ -159,11 +158,6 @@ enum ReporterEvent {
         retry_max: u32,
         error: String,
     },
-    StateStructureUnavailable {
-        structure: String,
-        dialect: String,
-        consequence: String,
-    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -244,17 +238,6 @@ impl EventSink {
                     retry_max,
                     error,
                 } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
-                ReporterEvent::StateStructureUnavailable {
-                    structure,
-                    dialect,
-                    consequence,
-                } => reporter.state_structure_unavailable(
-                    run_id,
-                    model,
-                    structure,
-                    dialect,
-                    consequence,
-                ),
             }
         }
     }
@@ -337,21 +320,6 @@ impl RunReporter for EventSink {
             attempt,
             retry_max,
             error: error.to_string(),
-        });
-    }
-
-    fn state_structure_unavailable(
-        &self,
-        _run_id: &str,
-        _model: &str,
-        structure: &str,
-        dialect: &str,
-        consequence: &str,
-    ) {
-        self.push(ReporterEvent::StateStructureUnavailable {
-            structure: structure.to_string(),
-            dialect: dialect.to_string(),
-            consequence: consequence.to_string(),
         });
     }
 }
@@ -552,6 +520,29 @@ pub async fn execute_project(
     let selected = selection.ordered_models;
     let target_assignments = selection.target_assignments;
     let cross_edges = selection.cross_engine_edges;
+
+    // The run's availability-resolution input (`docs/specs/state.md` §"The
+    // degradation contract" step 2): one `StateAvailability` per target this
+    // run touches, built once here (never rebuilt per model) from the
+    // target's declared dialect and the project-wide `state.warehouse_tables`
+    // — both pure `Config` facts, so this needs no live backend and is
+    // reused by the dry-run statement preview, the pre-loop deferral pass,
+    // and the real per-model execute loop alike.
+    let state_availability: HashMap<
+        String,
+        smelt_logical::maintenance::availability::StateAvailability,
+    > = target_assignments
+        .values()
+        .cloned()
+        .collect::<HashSet<String>>()
+        .into_iter()
+        .map(|target| {
+            let dialect = sql_dialect_for_target(&config, &target);
+            let availability =
+                crate::maintenance_availability::availability_for_run(dialect, &config);
+            (target, availability)
+        })
+        .collect();
     if !cross_edges.is_empty() {
         tracing::info!(
             "Cross-engine references detected ({} transfer(s) via Parquet)",
@@ -910,6 +901,11 @@ pub async fn execute_project(
                                 &sources,
                                 &explicitly_mutable,
                                 &model_edges_dry,
+                                &availability_for_target(
+                                    &state_availability,
+                                    &model_target,
+                                    &config,
+                                ),
                             )
                             .map_err(|e| anyhow::anyhow!("{}", e))?
                         }
@@ -1152,7 +1148,10 @@ pub async fn execute_project(
         HashMap::new()
     };
 
-    let file_store = FileStore::new(project_dir, &request.target);
+    // The run pipeline's store is posture-gated (`docs/specs/state.md`
+    // §"`state.mode` and what each posture provides"): under `stateless`
+    // every save/load below is a no-op and `.smelt/` is never created.
+    let file_store = FileStore::with_state_mode(project_dir, &request.target, config.state.mode);
 
     // Legacy `sources.yml` — best-effort input to the definition-delta gate's
     // upstream-facts map (`docs/specs/definition_deltas.md` §"The migration
@@ -1239,6 +1238,18 @@ pub async fn execute_project(
     // project can't be mistaken for "nothing needed doing".
     let current_selection: HashSet<&str> = model_plans.iter().map(|p| p.name.as_str()).collect();
     let resume_manifest: Option<RunManifest> = if request.resume {
+        // `docs/specs/state.md` §"The optionality rule": `stateless` has no
+        // manifest to resume from *by posture*, not by accident — refuse by
+        // name rather than falling through to the generic "no partially-
+        // failed run" message a missing manifest would otherwise produce.
+        if config.state.mode == smelt_core::config::StateMode::Stateless {
+            anyhow::bail!(
+                "--resume: target '{}' is running with state.mode: stateless, which writes no \
+                 run history — there is nothing to resume from. Set state.mode to intervals or \
+                 environments to enable --resume.",
+                request.target
+            );
+        }
         let latest_candidate = file_store
             .load_runs(None)
             .context("--resume: failed to load run history")?
@@ -1430,6 +1441,8 @@ pub async fn execute_project(
                     if !declared_addresses.is_empty() {
                         fold_addresses.insert(plan.name.clone(), declared_addresses);
                     }
+                    let plan_target =
+                        config.get_target(&plan.name, Some(metadata), &request.target);
                     let (verdict, addresses) = crate::maintenance_driver::resolve_fold_deferral(
                         &plan.sql,
                         &plan.model_file.db_name_owned(),
@@ -1437,6 +1450,7 @@ pub async fn execute_project(
                         &source_facts,
                         &explicitly_mutable,
                         &cell_decisions,
+                        &availability_for_target(&state_availability, &plan_target, &config),
                     );
                     if let smelt_logical::contract::deferral::FoldDeferralVerdict::SkipFold {
                         ..
@@ -1523,6 +1537,7 @@ pub async fn execute_project(
     let selected = &selected;
     let file_store = &file_store;
     let config = &config;
+    let state_availability = &state_availability;
     let prior_runs = &prior_runs;
     let target_assignments = &target_assignments;
     let backends = &backends;
@@ -1720,6 +1735,7 @@ pub async fn execute_project(
         let model_target = &target_assignments[&plan.name];
         let backend = backends[model_target].as_ref();
         let schema = &config.targets[model_target].schema;
+        let availability = availability_for_target(state_availability, model_target, config);
 
         // The deployed-schema snapshot's column names, captured BEFORE the
         // schema-evolution gate below runs `check_and_migrate` (which, on
@@ -1761,6 +1777,7 @@ pub async fn execute_project(
                     metadata,
                     &in_place_sources,
                     &deployed_column_names,
+                    &availability,
                 )
             })
         } else {
@@ -2073,6 +2090,7 @@ pub async fn execute_project(
                     &explicitly_mutable,
                     backend.capabilities().supports_column_scoped_merge,
                     &request.technique_overrides,
+                    &availability,
                 )?,
                 None => None,
             };
@@ -2094,6 +2112,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         &request.technique_overrides,
+                        &availability,
                     )?
                 }
                 None => None,
@@ -2130,6 +2149,8 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         &request.technique_overrides,
                         backend.dialect(),
+                        backend.capabilities().supports_fingerprint_sidecar,
+                        &availability,
                     )?
                 }
                 None => None,
@@ -2160,6 +2181,7 @@ pub async fn execute_project(
                 resolver,
                 run_id,
                 reporter,
+                &availability,
             )
             .await?;
 
@@ -2282,6 +2304,8 @@ pub async fn execute_project(
                             // leg constructs — the format is only ever
                             // consumed on that leg.
                             let source_address = format!("smelt.sources.{source}");
+                            let consumer_address =
+                                format!("smelt.models.{}", plan.model_file.canonical_path());
                             // P9 (`docs/specs/incremental_models.md` §"The
                             // repair family" — "Obligation 7 over a
                             // `mutable_snapshot` source"): a
@@ -2332,6 +2356,7 @@ pub async fn execute_project(
                                             key,
                                             digest_columns,
                                             &clean_sql_for_merge,
+                                            &consumer_address,
                                         )
                                         .await?;
                                     let select =
@@ -2346,6 +2371,7 @@ pub async fn execute_project(
                                         group_key: key,
                                         digest_columns,
                                         model_sql: &clean_sql_for_merge,
+                                        consumer_address: &consumer_address,
                                     };
                                     (select, Some(refresh))
                                 }
@@ -2576,6 +2602,8 @@ pub async fn execute_project(
                     }) {
                         let source_table = source_info.db_name_for_target(model_target, schema);
                         let source_address = format!("smelt.sources.{source}");
+                        let consumer_address =
+                            format!("smelt.models.{}", plan.model_file.canonical_path());
                         let empty_group = smelt_logical::maintenance::emit::StatementGroup {
                             statements: vec![],
                             transactional: false,
@@ -2588,6 +2616,7 @@ pub async fn execute_project(
                             group_key,
                             digest_columns,
                             &clean_sql_for_merge,
+                            &consumer_address,
                             &empty_group,
                         )
                         .await?;
@@ -3118,6 +3147,7 @@ pub async fn execute_project(
                         &model_edges,
                         backend_default_strategy.clone(),
                         backend.capabilities().supports_column_scoped_merge,
+                        &availability,
                     )?,
                     None => backend_default_strategy,
                 };
@@ -3134,6 +3164,7 @@ pub async fn execute_project(
                                 &maint_source_facts,
                                 &explicitly_mutable,
                                 &model_edges,
+                                &availability,
                             )
                             .map_err(|e| anyhow::anyhow!("{}", e))?
                         }
@@ -3184,6 +3215,7 @@ pub async fn execute_project(
                                 &explicitly_mutable,
                                 &source_ri,
                                 backend.capabilities().supports_fingerprint_sidecar,
+                                &availability,
                             )
                             .map_err(|e| anyhow::anyhow!("{}", e))?
                         }
@@ -3236,6 +3268,7 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         backend.capabilities().supports_column_scoped_merge,
                         &request.technique_overrides,
+                        &availability,
                     )?,
                     None => None,
                 };
@@ -3265,6 +3298,7 @@ pub async fn execute_project(
                             &maint_source_facts,
                             &explicitly_mutable,
                             &request.technique_overrides,
+                            &availability,
                         )?
                         .filter(|(_, cell, _, write)| {
                             matches!(
@@ -3459,6 +3493,7 @@ pub async fn execute_project(
                     &ephemeral_resolvers[model_target],
                     run_id,
                     reporter,
+                    &availability,
                 )
                 .await?;
                 // Mutual exclusion with `column_scoped_cell`/`delta_restriction_
@@ -3922,6 +3957,69 @@ pub async fn execute_project(
                         axis: batch.partition_start.axis(),
                     };
 
+                    // Reconciliation ledger (`docs/specs/incremental_models.md`
+                    // §"The reconciliation ledger"): every DuckDB DeleteInsert-family
+                    // write for this batch — the plain widened-scan recompute, the
+                    // model-edge-restricted recompute, or the external-sidecar-
+                    // restricted recompute — resets this batch's own
+                    // `[partition.start, partition.end)` slice in `_smelt_ledger`
+                    // (whole-row group `{*}`, nominal input `self`, watermarked to
+                    // the region's own end), run in the SAME backend transaction as
+                    // the write it protects via `Backend::execute_write_with_
+                    // bookkeeping` (state-residency: `.smelt/reconciliation.json`
+                    // no longer exists — this table IS the ledger). Hoisted above
+                    // the three DeleteInsert dispatch arms below (model-edge
+                    // restricted, external-sidecar restricted, plain) so all three
+                    // build the SAME reset from `generate_ledger_recompute_reset_
+                    // sqls`, instead of each constructing (or omitting) its own.
+                    // Not built when a live `ColumnScopedMerge` cell dispatches
+                    // (`column_merge_dispatch.is_some()`) — that technique is not a
+                    // region DeleteInsert and its own MP12 ledger interaction is
+                    // unrelated to this reset. Whether the ledger is available at
+                    // all is now this run's own resolved
+                    // `StateAvailability` (`docs/outcomes/20260904-state-residency/
+                    // outcome.md` phase 5), not a raw dialect check — on a
+                    // ledger-less target this is no longer a silent skip: the
+                    // per-cell technique already carries a recorded
+                    // `state_downgrade` (`smelt-logical`'s
+                    // `resolve_availability`), which `smelt explain` and the
+                    // warning diagnostic surface (phase 6). No reporter
+                    // event is emitted for the skip anymore — that stand-in
+                    // channel is retired.
+                    let ledger_reset_sqls = if column_merge_dispatch.is_none()
+                        && availability.contains(
+                            smelt_logical::maintenance::availability::StateStructure::ReconciliationLedger,
+                        )
+                    {
+                        Some(smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
+                            schema,
+                            &plan.name,
+                            "{*}",
+                            &partition.start,
+                            &partition.end,
+                            "self",
+                            &partition.end,
+                        ))
+                    } else {
+                        if column_merge_dispatch.is_none() {
+                            tracing::debug!(
+                                model = %plan.name,
+                                dialect = backend.dialect().name(),
+                                "region-recompute reset skipped: the reconciliation ledger is \
+                                 unavailable for this target — the affected cell's own \
+                                 recorded state_downgrade is the user-visible channel"
+                            );
+                        }
+                        None
+                    };
+                    let ledger_ensure_sqls: Vec<String> = if ledger_reset_sqls.is_some() {
+                        vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema)]
+                    } else {
+                        Vec::new()
+                    };
+                    let ledger_pre_write_sqls: Vec<String> =
+                        ledger_reset_sqls.clone().unwrap_or_default();
+
                     // T3: re-checked per batch (not hoisted with
                     // `use_delta_restricted_dispatch` above) because
                     // `table_exists` genuinely varies across batches of the
@@ -4096,6 +4194,8 @@ pub async fn execute_project(
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &ledger_ensure_sqls,
+                                &ledger_pre_write_sqls,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -4149,6 +4249,8 @@ pub async fn execute_project(
                             })?;
                         let source_table = source_info.db_name_for_target(model_target, schema);
                         let source_address = format!("smelt.sources.{}", facts.source_name);
+                        let consumer_address =
+                            format!("smelt.models.{}", plan.model_file.canonical_path());
                         let all_source_columns: Vec<String> = source_info
                             .columns
                             .iter()
@@ -4183,11 +4285,14 @@ pub async fn execute_project(
                                     projection: &facts.projection,
                                     all_source_columns: &all_source_columns,
                                     model_sql: &compiled.body_sql,
+                                    consumer_address: &consumer_address,
                                 },
                                 Some(&facts.region_write),
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &ledger_ensure_sqls,
+                                &ledger_pre_write_sqls,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -4207,6 +4312,7 @@ pub async fn execute_project(
                             &facts.projection,
                             &all_source_columns,
                             &compiled.body_sql,
+                            &consumer_address,
                             &group,
                         )
                         .await
@@ -4282,6 +4388,11 @@ pub async fn execute_project(
                             );
                         }
 
+                        // Reconciliation ledger: this batch's own
+                        // `ledger_ensure_sqls`/`ledger_pre_write_sqls`, hoisted above
+                        // the T3/27e dispatch fork (see the comment there), record
+                        // the SAME region-recompute reset this plain widened-scan
+                        // branch used to build itself.
                         let strategy = MaterializationStrategy::Incremental {
                             partition,
                             strategy: resolved_strategy.clone(),
@@ -4290,13 +4401,15 @@ pub async fn execute_project(
 
                         let db_name = plan.model_file.db_name_owned();
                         retry_statement_group(request, run_id, &plan.name, reporter, || {
-                            backend.execute_model_incremental(
+                            backend.execute_model_incremental_with_bookkeeping(
                                 schema,
                                 &db_name,
                                 &compiled.sql,
                                 Materialization::Table,
                                 strategy.clone(),
                                 false,
+                                &ledger_ensure_sqls,
+                                &ledger_pre_write_sqls,
                             )
                         })
                         .await
@@ -4493,41 +4606,15 @@ pub async fn execute_project(
                     }
                 }
 
-                // Reconciliation ledger: this batch loop performed a region
-                // recompute of `[start_str, end_str)` (DELETE the write
-                // window, INSERT its recompute — write window = output
-                // window; or, for a column-scoped MERGE cell, MERGE that
-                // SAME window's freshly-recomputed rows in by `unique_key` —
-                // the row VALUES are still a from-scratch recompute of the
-                // window, only the physical write op differs).
-                // `docs/specs/incremental_models.md` §"The reconciliation
-                // ledger": a region recompute resets every intersecting
-                // entry to exactly the input it read. This records the
-                // whole-row group `{*}` (matching
-                // `smelt_logical::maintenance::PlanCell::group`'s
-                // whole-row-trigger convention) read from a single nominal
-                // `self` input, watermarked to the region's own end. This
-                // subsumes `IntervalStore`'s role for the region-recompute
-                // shape without regressing it — both stores are written
-                // side by side. Per-cell (not whole-row) ledger grading for
-                // the column-scoped-merge technique is MP12's job
-                // (`incremental_models.md` §"The reconciliation ledger").
-                if !start_str.is_empty() && !end_str.is_empty() {
-                    // Same whole-store critical section rationale as the
-                    // interval store above — `reconciliation.json`.
-                    let _io_guard = state_io_lock.lock().await;
-                    if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
-                        let region = Region::new(start_str.clone(), end_str.clone());
-                        let mut read = std::collections::BTreeMap::new();
-                        read.insert("self".to_string(), end_str.clone());
-                        reconciliation.get_or_create(&plan.name).recompute_reset(
-                            &region,
-                            "{*}",
-                            Processed::Frontier(read),
-                        );
-                        let _ = file_store.save_reconciliation_store(&reconciliation);
-                    }
-                }
+                // Reconciliation ledger: engine-resident now
+                // (`docs/specs/incremental_models.md` §"The reconciliation
+                // ledger"; `docs/outcomes/20260904-state-residency/
+                // outcome.md`). Each DuckDB DeleteInsert batch's own region
+                // recompute records its recompute-reset in `_smelt_ledger`,
+                // in the SAME transaction as its write — see the
+                // `ledger_reset_sqls`/`execute_model_incremental_with_bookkeeping`
+                // call inside the batch loop above. `.smelt/reconciliation.json`
+                // no longer exists.
                 } // 'run_dispatch_or_batches
 
                 Ok(())
@@ -5723,6 +5810,45 @@ fn maintenance_dialect_for_target(
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
 }
 
+/// `target`'s declared [`smelt_backend::SqlDialect`], purely from `Config`
+/// (no live backend needed) — the same `BackendType` match
+/// [`maintenance_dialect_for_target`] uses, stopping one step earlier so
+/// availability resolution (which needs `SqlDialect`, not
+/// `MaintenanceDialect`) can share it.
+fn sql_dialect_for_target(config: &Config, target: &str) -> smelt_backend::SqlDialect {
+    config
+        .targets
+        .get(target)
+        .and_then(|t| t.backend_type().ok())
+        .map(|bt| match bt {
+            smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
+            smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+            smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
+        })
+        .unwrap_or(smelt_backend::SqlDialect::DuckDB)
+}
+
+/// `state_availability`'s value for `target`, falling back to a fresh
+/// (pure, cheap) derivation for a target the run's own
+/// `target_assignments` did not cover — defensive only; every production
+/// call site's `target` is itself sourced from `target_assignments` or
+/// `config.get_target`, which agree by construction.
+fn availability_for_target(
+    state_availability: &HashMap<
+        String,
+        smelt_logical::maintenance::availability::StateAvailability,
+    >,
+    target: &str,
+    config: &Config,
+) -> smelt_logical::maintenance::availability::StateAvailability {
+    state_availability.get(target).cloned().unwrap_or_else(|| {
+        crate::maintenance_availability::availability_for_run(
+            sql_dialect_for_target(config, target),
+            config,
+        )
+    })
+}
+
 /// Build `model_file`'s upstream **maintained-model** edge list
 /// (`docs/specs/incremental_models.md` §"Upstream model edges") — the input
 /// T3 delta restriction (`docs/plans/20260715-composed-axes-conditional-
@@ -5945,6 +6071,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
     resolver: &EphemeralResolver,
     run_id: &str,
     reporter: &dyn RunReporter,
+    availability: &smelt_logical::maintenance::availability::StateAvailability,
 ) -> Result<Option<KeyAddressedEdgeDispatch>> {
     if model_edges.is_empty() || !table_exists_before_run {
         return Ok(None);
@@ -5961,6 +6088,8 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
             explicitly_mutable,
             model_edges,
             backend.dialect(),
+            backend.capabilities().supports_fingerprint_sidecar,
+            availability,
         )?
     else {
         return Ok(None);
@@ -5992,6 +6121,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
     let upstream_source_address = format!("smelt.models.{edge_name}");
     let compiled =
         compiler.compile_with_sql_and_ephemerals(model_file, schema, clean_sql, resolver)?;
+    let consumer_address = format!("smelt.models.{}", model_file.canonical_path());
     let result = match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
         backend,
         schema,
@@ -6006,6 +6136,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
         &compiled.sql,
         &write,
         &retry_policy,
+        &consumer_address,
     )
     .await?
     {
@@ -6451,8 +6582,6 @@ pub fn build_source_key_recurrence_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reporter::RunReporter;
-    use std::sync::Mutex;
 
     /// `docs/outcomes/20260815-partition-grain-residue/phases/05a-plan.md`
     /// §Tests — `parse_run_window_in_axis` (the generalization of
@@ -6521,70 +6650,6 @@ mod tests {
         assert!(
             err.to_string().contains("bare integer"),
             "error must explain the axis mismatch, got: {err}"
-        );
-    }
-
-    /// `(run_id, model, structure, dialect, consequence)` — one captured
-    /// `state_structure_unavailable` call.
-    type CapturedEvent = (String, String, String, String, String);
-
-    /// Captures `RunReporter::state_structure_unavailable` calls so the
-    /// replay test can assert exactly what reached the downstream reporter.
-    #[derive(Default)]
-    struct CapturingReporter {
-        events: Mutex<Vec<CapturedEvent>>,
-    }
-
-    impl RunReporter for CapturingReporter {
-        fn state_structure_unavailable(
-            &self,
-            run_id: &str,
-            model: &str,
-            structure: &str,
-            dialect: &str,
-            consequence: &str,
-        ) {
-            self.events.lock().unwrap().push((
-                run_id.to_string(),
-                model.to_string(),
-                structure.to_string(),
-                dialect.to_string(),
-                consequence.to_string(),
-            ));
-        }
-    }
-
-    /// `EventSink` buffers per-model reporter callbacks under a `--jobs > 1`
-    /// wavefront run and replays them onto the real reporter in
-    /// `execution_order` sequence — `state_structure_unavailable` must
-    /// survive that buffer/replay round-trip like every other event, so a
-    /// concurrent run does not silently lose the fact that a state
-    /// structure was skipped.
-    #[test]
-    fn buffered_state_structure_unavailable_replays_to_reporter() {
-        let sink = EventSink::default();
-        sink.state_structure_unavailable(
-            "run-1",
-            "model-a",
-            "merge ledger",
-            "Spark SQL",
-            "re-run-tolerant keyed model merge-ledger bookkeeping record skipped",
-        );
-
-        let reporter = CapturingReporter::default();
-        sink.replay(&reporter, "run-1", "model-a");
-
-        let events = reporter.events.lock().unwrap();
-        assert_eq!(events.len(), 1, "exactly one replayed event: {:?}", events);
-        assert_eq!(
-            events[0],
-            (
-                "run-1".to_string(),
-                "model-a".to_string(),
-                "merge ledger".to_string(),
-                "Spark SQL".to_string(),
-                "re-run-tolerant keyed model merge-ledger bookkeeping record skipped".to_string(),
-            )
         );
     }
 }

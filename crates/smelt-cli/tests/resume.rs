@@ -70,7 +70,10 @@ fn make_config(db_path: &Path) -> Arc<Config> {
         models: HashMap::<String, ModelConfig>::new(),
         python: None,
         target: None,
-        state: Default::default(),
+        state: smelt_core::config::StateConfig {
+            mode: smelt_core::config::StateMode::Intervals,
+            ..Default::default()
+        },
         maintenance: None,
         probes: Default::default(),
     })

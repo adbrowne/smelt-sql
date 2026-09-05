@@ -733,6 +733,8 @@ pub fn derive_model_maintenance_plan_with_edges(
         output_partition_col,
         model_edges,
         metadata.unique_key.as_deref().unwrap_or(&[]),
+        sources,
+        source_referential_integrity,
     );
     Some(result)
 }
@@ -1090,6 +1092,41 @@ pub enum WritePinDiagnostic {
     },
 }
 
+/// One cell's recorded availability downgrade
+/// ([`smelt_logical::maintenance::availability::StateDowngrade`]), rendered
+/// for `MaintenanceStateDowngraded` (`state.md` §Diagnostics). Salsa-safe
+/// (`PartialEq`) projection — mirrors [`MaintenanceRefusal`]'s own reason
+/// for existing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDowngradeDiagnostic {
+    /// The cell's trigger, rendered the same way [`write_pin_diagnostics`]
+    /// labels a cell (`format!("{:?}", trigger)`).
+    pub cell: String,
+    /// The technique ideal derivation chose, before the downgrade.
+    pub original_technique: String,
+    /// The state structure that was unavailable.
+    pub missing_structure: String,
+    /// The first declared backend the downgrade was observed against
+    /// (`write_pin_diagnostics`'s own one-per-cell posture).
+    pub backend: String,
+    /// [`smelt_logical::maintenance::availability::StateDowngrade::reason`].
+    pub reason: String,
+}
+
+/// A declared contract-lattice point whose semantics require a state
+/// structure unavailable on a declared backend — `DeclaredContractRequiresState`
+/// (`state.md` §Diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractStateRefusalDiagnostic {
+    /// Names the declaration (`contract.deferral` or `contract.cells[].deferral`
+    /// for the cell it addresses).
+    pub declaration: String,
+    /// The state structure the declaration's semantics require.
+    pub missing_structure: String,
+    /// The first declared backend the refusal was observed against.
+    pub backend: String,
+}
+
 /// The result `maintenance_plan` (the Salsa query) returns: every admission
 /// refusal from the derived plan, mapped to a Salsa-safe shape, plus the
 /// `maintenance.cells[]` column-group-span violations. `file_diagnostics`
@@ -1119,6 +1156,18 @@ pub struct MaintenancePlanDiagnostics {
     /// `MaintenanceScanUnbounded` diagnostic at `Warning` severity rather
     /// than the `Error` a bare refusal maps to.
     pub scan_bounds_warnings: Vec<String>,
+    /// Every plan cell whose ideal technique was downgraded by availability
+    /// resolution (`smelt_logical::maintenance::availability::
+    /// resolve_availability`) against at least one declared backend —
+    /// folded into a `MaintenanceStateDowngraded` Warning diagnostic per
+    /// cell (`state.md` §Diagnostics).
+    pub state_downgrades: Vec<StateDowngradeDiagnostic>,
+    /// Every declared contract-lattice point (model-level `contract.deferral`
+    /// or a `contract.cells[].deferral` entry) whose required state
+    /// structure is unavailable on at least one declared backend — folded
+    /// into a `DeclaredContractRequiresState` Error diagnostic
+    /// (`state.md` §Diagnostics).
+    pub contract_state_refusals: Vec<ContractStateRefusalDiagnostic>,
 }
 
 /// The open write-pattern registry's [`smelt_logical::maintenance::
@@ -1147,6 +1196,25 @@ pub fn backend_write_capabilities_for(
     smelt_logical::maintenance::BackendWriteCapabilities {
         supports_merge: caps.supports_merge,
         supports_column_scoped_merge: caps.supports_column_scoped_merge,
+    }
+}
+
+/// The [`smelt_dialect::SqlDialect`] a declared backend name (`smelt.yml`
+/// `targets.*.type`, lower-cased) prints as — the availability-resolution
+/// input `maintenance_plan_diagnostics` feeds
+/// [`smelt_logical::maintenance::availability::realisable_state_structures`],
+/// mirroring [`backend_write_capabilities_for`]'s own name vocabulary. An
+/// unrecognised backend name resolves to `None`, which callers treat as no
+/// state structure realisable at all — the same conservative-refusal
+/// posture `backend_write_capabilities_for` takes for an unrecognised name,
+/// never a silently-assumed dialect.
+pub fn backend_dialect_for(backend_name: &str) -> Option<smelt_dialect::SqlDialect> {
+    match backend_name.to_ascii_lowercase().as_str() {
+        "duckdb" => Some(smelt_dialect::SqlDialect::DuckDB),
+        "spark" | "databricks" => Some(smelt_dialect::SqlDialect::SparkSQL),
+        "postgres" | "postgresql" => Some(smelt_dialect::SqlDialect::PostgreSQL),
+        "bigquery" => Some(smelt_dialect::SqlDialect::BigQuery),
+        _ => None,
     }
 }
 
@@ -1401,6 +1469,7 @@ pub fn maintenance_plan_diagnostics(
     project_scan_bounds: Option<&ScanBoundsConfig>,
     extra_model_sources: &[(SourceFacts, Granularity)],
     active_backends: &[String],
+    warehouse_tables: smelt_core::config::WarehouseTables,
     deployed_column_names: &[String],
     deployed_model_sql: Option<&str>,
     deployed_partition_column: Option<&str>,
@@ -1604,12 +1673,99 @@ pub fn maintenance_plan_diagnostics(
         active_backends,
         &result.comparability,
     );
+    // Availability resolution for the two state-residency diagnostics
+    // (`state.md` §Diagnostics `MaintenanceStateDowngraded` /
+    // `DeclaredContractRequiresState`). Runs over a CLONE of the derived
+    // cells — `result.plan` itself must stay ideal-derivation output, since
+    // `smelt-runtime` and `smelt explain` resolve availability themselves
+    // against the actual target dialect (plan 05/06's own posture: analysis
+    // time has no single declared target). Checked against every declared
+    // backend, the same all-declared-backends posture `write_pin_diagnostics`
+    // uses; an empty `active_backends` (config unparseable) falls back to
+    // `duckdb`, mirroring that function's own fallback.
+    let availability_backends: Vec<String> = if active_backends.is_empty() {
+        vec!["duckdb".to_string()]
+    } else {
+        active_backends.to_vec()
+    };
+    let realisable_for =
+        |backend_name: &str| -> Vec<smelt_logical::maintenance::availability::StateStructure> {
+            backend_dialect_for(backend_name)
+                .map(smelt_logical::maintenance::availability::realisable_state_structures)
+                .unwrap_or_default()
+        };
+    let mut state_downgrades: Vec<StateDowngradeDiagnostic> = Vec::new();
+    for backend_name in &availability_backends {
+        let realisable = realisable_for(backend_name);
+        let availability = smelt_logical::maintenance::availability::StateAvailability::resolve(
+            warehouse_tables,
+            &realisable,
+        );
+        let mut cells = result.plan.cells.clone();
+        smelt_logical::maintenance::availability::resolve_availability(&mut cells, &availability);
+        for cell in &cells {
+            let Some(downgrade) = &cell.state_downgrade else {
+                continue;
+            };
+            let cell_label = format!("{:?}", cell.trigger);
+            if state_downgrades.iter().any(|d| d.cell == cell_label) {
+                continue;
+            }
+            state_downgrades.push(StateDowngradeDiagnostic {
+                cell: cell_label,
+                original_technique: format!("{:?}", downgrade.original),
+                missing_structure: downgrade.missing.as_str().to_string(),
+                backend: backend_name.clone(),
+                reason: downgrade.reason.clone(),
+            });
+        }
+    }
+    let mut contract_state_refusals: Vec<ContractStateRefusalDiagnostic> = Vec::new();
+    if let Some(contract) = metadata.contract.as_ref() {
+        let mut declarations: Vec<String> = Vec::new();
+        if contract.deferral.is_some() {
+            declarations.push("contract.deferral".to_string());
+        }
+        for cell_cfg in &contract.cells {
+            if cell_cfg.deferral.is_some() {
+                declarations.push(format!("contract.cells[].deferral (on: {})", cell_cfg.on));
+            }
+        }
+        if !declarations.is_empty() {
+            // The concrete `d` value never changes which structure a
+            // `Deferral` point requires (`required_state_structure` dispatches
+            // on the variant, not its payload) — `0` is a placeholder.
+            let point = smelt_logical::contract::ContractPoint::Deferral { d: 0 };
+            if let Some(required) = smelt_logical::contract::required_state_structure(&point) {
+                for declaration in declarations {
+                    for backend_name in &availability_backends {
+                        let realisable = realisable_for(backend_name);
+                        let availability =
+                            smelt_logical::maintenance::availability::StateAvailability::resolve(
+                                warehouse_tables,
+                                &realisable,
+                            );
+                        if !availability.contains(required) {
+                            contract_state_refusals.push(ContractStateRefusalDiagnostic {
+                                declaration: declaration.clone(),
+                                missing_structure: required.as_str().to_string(),
+                                backend: backend_name.clone(),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
     MaintenancePlanDiagnostics {
         refusals,
         cell_column_group_violations,
         granularity_mismatch,
         write_pin_refusals,
         scan_bounds_warnings,
+        state_downgrades,
+        contract_state_refusals,
     }
 }
 

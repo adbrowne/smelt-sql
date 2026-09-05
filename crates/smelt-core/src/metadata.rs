@@ -1229,7 +1229,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // column that governs windowing, partition placement, or dedup identity
     // — those roles must stay deterministic regardless of any opt-in
     // (`incremental_shapes.md` §"Partition-grain constraints" #12;
-    // §"Non-determinism and the payload rule"). Ports the bar the retired
+    // §"Safety checks (per-cell admission for recompute-a-region)"). Ports the bar the retired
     // `batched.nondeterministic_columns` list form used to enforce.
     let declared_unique_key = metadata.unique_key.as_deref().unwrap_or(&[]);
     for (col, col_meta) in &metadata.columns {

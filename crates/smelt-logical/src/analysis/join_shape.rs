@@ -67,6 +67,20 @@ impl JoinContext {
             .push(columns.iter().map(|c| c.to_string()).collect());
         self
     }
+
+    /// Union `self` with `other`'s declared key-sets — every key-set either
+    /// side declares for a source is kept (never dropped, never
+    /// deduplicated beyond the `HashSet` identity `fan_out` already relies
+    /// on). Used to combine two independently-built contexts covering
+    /// disjoint declaration sources (e.g. model edges' own `unique_key`
+    /// alongside external sources' `unique_key`) into the single shared
+    /// context a route's proofs must all see.
+    pub fn union(mut self, other: Self) -> Self {
+        for (source, key_sets) in other.unique_keys {
+            self.unique_keys.entry(source).or_default().extend(key_sets);
+        }
+        self
+    }
 }
 
 /// Prove the cardinality of `join` against `ctx`'s declared unique keys.

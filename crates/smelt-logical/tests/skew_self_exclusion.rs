@@ -200,6 +200,36 @@ fn string_literal_shaped_like_a_self_qualifier_does_not_exclude_a_genuine_bound(
     );
 }
 
+/// The self-edge exclusion resolves per scope even when the self-referential
+/// relation sits inside an expression-position subquery (`docs/outcomes/
+/// 20260904-walk-migration-residue` phase 3 — `SkewTransfer` now folds the
+/// whole children tail, so the exclusion must keep working at that new
+/// depth): the subquery body's own self-edge bound must not anchor, while a
+/// genuine Form B relation sharing the same scope's `WHERE` clause survives.
+#[test]
+fn skew_self_exclusion_applies_inside_expr_scope() {
+    let sql = "SELECT e.event_date AS event_date, e.amt AS amt, \
+        ( \
+            SELECT bal.balance \
+            FROM smelt.marts.running_balance bal \
+            JOIN smelt.silver.ledger led ON led.acct_id = bal.acct_id \
+            WHERE bal.event_date >= e.event_date - INTERVAL '3 days' \
+              AND bal.event_date < e.event_date \
+              AND led.event_date >= e.event_date - INTERVAL '1 day' \
+              AND led.event_date < e.event_date \
+        ) AS m \
+        FROM smelt.sources.events e";
+    assert_eq!(
+        model_partition_skew_excluding_self(sql, "event_date", Some(SELF)),
+        Skew {
+            before: Seconds::days(1),
+            after: Seconds::ZERO,
+        },
+        "the self-edge's (3-day) bound inside the expr scope must not anchor, but the genuine \
+         (1-day) Form B relation in the same scope must survive"
+    );
+}
+
 #[test]
 fn no_exclusion_requested_derives_identically_to_model_partition_skew() {
     for sql in [

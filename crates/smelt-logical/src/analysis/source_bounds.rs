@@ -419,53 +419,85 @@ impl BoundContext {
 /// Returns a map from source name → bound. Only entries for timeseries sources in
 /// `ctx` are produced; lookup sources (not in ctx) are absent from the result.
 pub fn derive_model_bounds(sql: &str, ctx: &BoundContext) -> HashMap<String, BoundResult> {
+    derive_model_bounds_inner(sql, ctx, true)
+}
+
+/// [`derive_model_bounds`]'s body. The whole-text fallback for an
+/// `Unsupported` *tree* is gated behind `unsupported_fallback` so tests can
+/// compare the walk-only derivation against the fallback-covered one
+/// (`docs/outcomes/20260904-walk-migration-residue/phases/06-plan.md`); the
+/// separate per-*source* top-up below (a context source absent from the
+/// walked map on an otherwise-supported tree) is not gated by it — see its
+/// own doc comment. Production code always calls the `true` form via
+/// [`derive_model_bounds`]; only `mod tests` below calls this directly with
+/// `false`.
+fn derive_model_bounds_inner(
+    sql: &str,
+    ctx: &BoundContext,
+    unsupported_fallback: bool,
+) -> HashMap<String, BoundResult> {
     // The composition walk (`model_properties.md` §"The composition walk"):
     // each query-tree node derives reach from its OWN region only, children
     // compose in parallel (max, `BoundResult::merge`) across set-op arms and
-    // join inputs, and a node's own reach composes in series (add,
-    // `BoundResult::then`) onto every source beneath it — a stacked window
-    // frame or a chained join band widens the sources it reads over, where a
-    // whole-text scan would under-derive them by max-merging.
-    // A tree with any `Unsupported` normalization (e.g. the redundantly-
-    // parenthesized derived table function expansion emits, which the parser
-    // does not nest) keeps the legacy whole-text derivation for every source
-    // — the series composition applies only where the walk models the whole
-    // tree, and never degrades coverage below the flat scan.
-    let mut result: HashMap<String, BoundResult> =
-        match crate::analysis::walk::QueryTree::from_sql(sql) {
-            Some(tree) if !tree.root.has_unsupported() => {
-                crate::analysis::walk::walk(&tree, &ReachTransfer { ctx })
+    // join inputs (including the `expr_scopes` tail, so a source read only
+    // inside an expression-position subquery is visible), and a node's own
+    // reach composes in series (add, `BoundResult::then`) onto every source
+    // beneath it — a stacked window frame or a chained join band widens the
+    // sources it reads over, where a whole-text scan would under-derive them
+    // by max-merging.
+    let tree = crate::analysis::walk::QueryTree::from_sql(sql);
+    let walked: Option<HashMap<String, BoundResult>> = match &tree {
+        Some(tree) if !tree.root.has_unsupported() => {
+            let mut walked = crate::analysis::walk::walk(tree, &ReachTransfer { ctx });
+            // Leaf classifier (`docs/specs/architecture.md` §"Property
+            // composition walk rule"), independent of `unsupported_fallback`
+            // (applied to both the walk-only and the fallback-covered call —
+            // it is not part of the retired per-source floor
+            // `docs/outcomes/20260904-walk-migration-residue`'s phase 6
+            // removed): a context source the walk never found as a FROM leaf
+            // *anywhere* in the tree. The one live shape is a source passed
+            // only as an argument to a table-valued function call
+            // (`smelt.functions.sessionize(source => smelt.silver.x, …)`,
+            // `examples/web_analytics/models/silver/sessions.sql`'s real
+            // shape) — `normalize_table_ref` surfaces the call itself as an
+            // opaque `Table` leaf (named after the call's own path), never
+            // descending into its argument list, so the argument's source is
+            // structurally invisible to the walk. The walk's own rule (never
+            // narrow a whole-text derivation, only widen it) means an absent
+            // leaf gets the flat-text fallback for that one source, rather
+            // than silently dropping out of the map (and failing closed to
+            // `NotDerivable` at every consumer that defaults a missing key).
+            for (source_name, partition_col) in &ctx.source_partition_cols {
+                if !walked.contains_key(source_name) {
+                    if let Some(bound) = derive_bound_for_source(sql, partition_col) {
+                        walked.insert(source_name.clone(), bound);
+                    }
+                }
             }
-            _ => HashMap::new(),
-        };
-
-    // Floor: merge every context source's walk verdict with its whole-text
-    // flat-scan derivation. The walk models reach only along a source's FROM-
-    // leaf paths, so a source referenced *both* as a plain FROM leaf and inside
-    // an expression-position subquery (which is not a walk node) would carry
-    // only its leaf-path reach — the subquery region's band would be dropped,
-    // and the injected scan filter would under-cover that reference site. The
-    // flat scan reads every textual occurrence, so merging it in restores the
-    // dropped band. `merge` takes max on margins and gives rejection precedence
-    // (`Unbounded`/`NotDerivable` absorbing), so the walk may only WIDEN the
-    // flat scan, never narrow it: series-added margins (SC-4: max(10d walk, 7d
-    // flat) = 10d) and global symbolic/bare-LAG absorption both survive, and no
-    // source ever falls below the flat-scan floor. This also covers sources
-    // with no walk leaf at all (referenced only inside an expression subquery),
-    // subsuming the old `!contains_key` fallback.
-    for (source_name, partition_col) in &ctx.source_partition_cols {
-        if let Some(flat) = derive_bound_for_source(sql, partition_col) {
-            result
-                .entry(source_name.clone())
-                .and_modify(|existing| {
-                    *existing =
-                        std::mem::replace(existing, BoundResult::Unbounded).merge(flat.clone());
-                })
-                .or_insert(flat);
+            Some(walked)
         }
-    }
+        _ => None,
+    };
 
-    result
+    match walked {
+        Some(walked) => walked,
+        // A tree with any `Unsupported` normalization (a construct the walk
+        // does not model at all — see `derive_bound_for_source`'s doc
+        // comment for the surviving shapes) has no walk verdict for any
+        // source; fall back to the whole-text flat-scan derivation for every
+        // context source rather than silently returning an empty map. Gated
+        // behind `unsupported_fallback` so tests can compare the walk-only
+        // derivation against the fallback-covered one.
+        None if unsupported_fallback => ctx
+            .source_partition_cols
+            .iter()
+            .filter_map(|(source_name, partition_col)| {
+                derive_bound_for_source(sql, partition_col)
+                    .map(|bound| (source_name.clone(), bound))
+            })
+            .collect(),
+        None => HashMap::new(),
+    }
 }
 
 /// One region's contribution to the series composition: the reach the
@@ -560,8 +592,13 @@ impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
     ) -> Self::Verdict {
         // Context keys vary by caller: the planner keys sources by their
         // segment path (`sources.metrics`), the runtime by the full smelt
-        // reference (`smelt.sources.metrics`). The walk leaf carries the
-        // segment path; resolve either form, and key the verdict by the
+        // reference (`smelt.sources.metrics`), and the maintenance-plan
+        // subsystem (`maintenance::derive::ModelInputs::bound_context`) by
+        // the "sources."-stripped bare name (`resolve_table_ref_source_name`
+        // + `.strip_prefix("sources.")`'s convention, shared by
+        // `join_shape::find_join_for_source` and every other bare-name
+        // resolver in this codebase). The walk leaf carries the segment
+        // path; resolve any of the three forms, and key the verdict by the
         // CONTEXT's own key so every caller's downstream lookups match.
         let mut map = HashMap::new();
         let entry = self
@@ -572,6 +609,11 @@ impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
                 self.ctx
                     .source_partition_cols
                     .get_key_value(&format!("smelt.{}", leaf.name))
+            })
+            .or_else(|| {
+                leaf.name
+                    .strip_prefix("sources.")
+                    .and_then(|bare| self.ctx.source_partition_cols.get_key_value(bare))
             });
         if let Some((ctx_key, partition_col)) = entry {
             map.insert(
@@ -609,9 +651,29 @@ impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
                 // Skip the CTE-definition children — each reference site's
                 // child already carries the definition's verdict, so repeated
                 // references merge in parallel like any other pair of inputs.
-                let input_children = &children[sn.ctes.len()..];
+                // An expr_scopes tail is a read too (`model_properties.md`
+                // §"The composition walk": an expression-position scope's
+                // verdict merges into the enclosing node exactly like an
+                // input's), so `read_children` runs to the end of the slice
+                // rather than stopping at `sn.inputs.len()` — this is what
+                // makes a source read only via a scalar/EXISTS/IN subquery
+                // visible in the map at all (criterion 1's headline claim).
+                let read_children = &children[sn.ctes.len()..];
+                // `join_siblings`, by contrast, stays bounded to the actual
+                // FROM inputs. The sibling-slack loop below models a chained
+                // *join* band — two relations tied by this scope's own join
+                // graph, where a frame/filter on one column can carry into a
+                // co-joined row of the other. An expr-scope subquery is not
+                // joined into that graph at this node (a correlated one is a
+                // per-outer-row computation, not a join partner sharing row
+                // cardinality with the FROM inputs), so folding it into the
+                // sibling scan would spread its own reach onto an unrelated
+                // FROM input's margin — the tracer-propagation integration
+                // fixtures caught exactly this cross-contamination when
+                // `join_siblings` was first widened to `read_children`.
+                let join_siblings = &children[sn.ctes.len()..sn.ctes.len() + sn.inputs.len()];
                 let mut out = HashMap::new();
-                for child in input_children {
+                for child in read_children {
                     Self::merge_child(&mut out, child);
                 }
                 if out.is_empty() {
@@ -664,12 +726,12 @@ impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
                         BoundResult::Bounded { before, after, .. }
                             if before == Seconds::ZERO && after == Seconds::ZERO
                     );
-                    let sibling = if is_zero || input_children.len() < 2 {
+                    let sibling = if is_zero || join_siblings.len() < 2 {
                         (Seconds::ZERO, Seconds::ZERO)
                     } else {
                         let mut max_before = Seconds::ZERO;
                         let mut max_after = Seconds::ZERO;
-                        for child in input_children {
+                        for child in join_siblings {
                             if child.contains_key(source) {
                                 continue;
                             }
@@ -731,7 +793,17 @@ pub fn derive_and_classify_bounds(
 /// fallback role it treats the whole model SQL as a single region, the same
 /// extraction [`derive_region_reach`] runs per walk node; it never widens
 /// coverage beyond what the walk-backed path derives, only substitutes for it
-/// when the walk cannot see the tree.
+/// when the walk cannot see the tree. As of
+/// `docs/outcomes/20260904-walk-migration-residue`'s phase 1, that no longer
+/// includes a redundantly-parenthesised derived table (`FROM ((SELECT …))`,
+/// which nests as a `Derived` node) or a parenthesised join group
+/// (`FROM (a JOIN b ON …)`, which flattens into the enclosing scope's
+/// inputs) — both are walk nodes now. The shapes that still normalize to
+/// `Unsupported`, and so still take this fallback, are: a table function in
+/// `FROM` (`FROM generate_series(1, 10)`, not a recognised leaf source), a
+/// `RECURSIVE` CTE, a CTE with no name or a non-`SELECT` body, a derived
+/// table whose body is not a `SELECT` (e.g. `VALUES`), and a set operation
+/// whose operator token the parser cannot recognise.
 ///
 /// Derive a bound for a single source given its partition column.
 ///
@@ -2295,7 +2367,7 @@ mod tests {
     fn test_range_between_interval_preceding() {
         let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW) AS prev_x \
-                   FROM source_table";
+                   FROM smelt.silver.events_parsed";
         let ctx = BoundContext::new().with_source("silver.events_parsed", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
         let bound = bounds.get("silver.events_parsed").unwrap();
@@ -2321,7 +2393,7 @@ mod tests {
     fn test_range_between_interval_following() {
         let sql = "SELECT id, ts, LEAD(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN CURRENT ROW AND INTERVAL '2 hours' FOLLOWING) AS next_x \
-                   FROM source_table";
+                   FROM smelt.silver.events_parsed";
         let ctx = BoundContext::new().with_source("silver.events_parsed", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
         let bound = bounds.get("silver.events_parsed").unwrap();
@@ -2347,7 +2419,7 @@ mod tests {
     fn test_unbounded_following_is_unbounded() {
         let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN INTERVAL '1 day' PRECEDING AND UNBOUNDED FOLLOWING) AS x \
-                   FROM source_table";
+                   FROM smelt.silver.events_parsed";
         let ctx = BoundContext::new().with_source("silver.events_parsed", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
         let bound = bounds.get("silver.events_parsed").unwrap();
@@ -2365,7 +2437,7 @@ mod tests {
     fn test_following_with_no_interval_is_unbounded() {
         let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN INTERVAL '1 day' PRECEDING AND 5 FOLLOWING) AS x \
-                   FROM source_table";
+                   FROM smelt.silver.events_parsed";
         let ctx = BoundContext::new().with_source("silver.events_parsed", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
         let bound = bounds.get("silver.events_parsed").unwrap();
@@ -2380,7 +2452,7 @@ mod tests {
     /// '30 days'` (no backward offset) derives `Bounded(event_ts, 0, 30d)`.
     #[test]
     fn test_form_b_forward_only() {
-        let sql = "SELECT * FROM events e \
+        let sql = "SELECT * FROM smelt.silver.events e \
                    WHERE e.event_ts BETWEEN m.conversion_ts AND m.conversion_ts + INTERVAL '30 days'";
         let ctx = BoundContext::new().with_source("silver.events", "event_ts");
         let bounds = derive_model_bounds(sql, &ctx);
@@ -2403,7 +2475,7 @@ mod tests {
     /// derives `Bounded(event_date, 1d, 0)`.
     #[test]
     fn test_explicit_between_filter() {
-        let sql = "SELECT * FROM sessions s \
+        let sql = "SELECT * FROM smelt.silver.sessions s \
                    WHERE s.event_date BETWEEN m.partition_date - INTERVAL '1 day' AND m.partition_date";
         let ctx = BoundContext::new().with_source("silver.sessions", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
@@ -2427,7 +2499,7 @@ mod tests {
     /// derives `Bounded(event_ts_utc, 1d, 1d)`.
     #[test]
     fn test_cross_column_tz_rebase() {
-        let sql = "SELECT * FROM bronze.events b \
+        let sql = "SELECT * FROM smelt.bronze.events b \
                    JOIN users u ON b.user_id = u.user_id \
                    WHERE b.event_ts_utc BETWEEN m.event_date_local - INTERVAL '1 day' \
                      AND m.event_date_local + INTERVAL '1 day'";
@@ -2452,8 +2524,8 @@ mod tests {
     #[test]
     fn test_aggregation_max() {
         // SQL has two BETWEEN clauses for the same source with different intervals.
-        let sql = "SELECT * FROM events e1 \
-                   JOIN events e2 ON e1.id = e2.id \
+        let sql = "SELECT * FROM smelt.silver.events e1 \
+                   JOIN smelt.silver.events e2 ON e1.id = e2.id \
                    WHERE e1.event_date BETWEEN m.date - INTERVAL '1 day' AND m.date \
                    AND e2.event_date BETWEEN m.date - INTERVAL '3 days' AND m.date + INTERVAL '1 day'";
         let ctx = BoundContext::new().with_source("silver.events", "event_date");
@@ -2516,7 +2588,7 @@ mod tests {
     /// A source without `timeseries:` produces no bound entry.
     #[test]
     fn test_lookup_source_no_bound() {
-        let sql = "SELECT * FROM events e JOIN users u ON e.user_id = u.user_id";
+        let sql = "SELECT * FROM smelt.silver.events e JOIN users u ON e.user_id = u.user_id";
         // users is NOT in the context (it's a lookup), events IS
         let ctx = BoundContext::new().with_source("silver.events", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
@@ -2530,7 +2602,7 @@ mod tests {
     #[test]
     fn test_bare_lag_not_derivable() {
         let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts) AS prev_x \
-                   FROM source_table";
+                   FROM smelt.silver.events";
         let ctx = BoundContext::new().with_source("silver.events", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
         let bound = bounds.get("silver.events").unwrap();
@@ -2595,10 +2667,10 @@ mod tests {
     #[test]
     fn test_form_b_does_not_leak_bound_to_unrelated_source() {
         let sql = "SELECT e.event_date, e.user_id, EXISTS( \
-                   SELECT 1 FROM conversions c \
+                   SELECT 1 FROM smelt.silver.conversions c \
                    WHERE c.user_id = e.user_id \
                      AND c.conversion_date BETWEEN e.event_date AND e.event_date + INTERVAL '7 days' \
-                   ) AS converted FROM events e";
+                   ) AS converted FROM smelt.silver.events e";
         let ctx = BoundContext::new()
             .with_source("silver.events", "event_date")
             .with_source("silver.conversions", "conversion_date");
@@ -2903,7 +2975,7 @@ mod tests {
     /// span (2 days back, 1 day forward) converted to seconds.
     #[test]
     fn test_day_granular_backfill_window_matches_former_effective_window() {
-        let sql = "SELECT * FROM sessions s \
+        let sql = "SELECT * FROM smelt.silver.sessions s \
                    WHERE s.event_date BETWEEN m.partition_date - INTERVAL '2 days' \
                      AND m.partition_date + INTERVAL '1 days'";
         let ctx = BoundContext::new().with_source("silver.sessions", "event_date");
@@ -2933,7 +3005,7 @@ mod tests {
     fn test_unified_parser_month_is_symbolic_not_approximate_days() {
         let sql_month = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW) AS x \
-                   FROM source_table";
+                   FROM smelt.silver.events";
         let ctx = BoundContext::new().with_source("silver.events", "event_date");
         let bounds = derive_model_bounds(sql_month, &ctx);
         assert_eq!(
@@ -2948,10 +3020,10 @@ mod tests {
     fn test_unified_parser_minutes_and_hours_fold_to_same_seconds_magnitude() {
         let sql_minutes = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN INTERVAL '120 minutes' PRECEDING AND CURRENT ROW) AS x \
-                   FROM source_table";
+                   FROM smelt.silver.events";
         let sql_hours = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN INTERVAL '2 hours' PRECEDING AND CURRENT ROW) AS x \
-                   FROM source_table";
+                   FROM smelt.silver.events";
         let ctx = BoundContext::new().with_source("silver.events", "event_date");
 
         let bounds_minutes = derive_model_bounds(sql_minutes, &ctx);
@@ -2973,7 +3045,7 @@ mod tests {
     #[test]
     fn test_not_derivable_still_fail_closed_after_unification() {
         let sql = "SELECT id, ts, LEAD(x) OVER (PARTITION BY id ORDER BY ts) AS next_x \
-                   FROM source_table";
+                   FROM smelt.silver.events";
         let ctx = BoundContext::new().with_source("silver.events", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
         assert_eq!(
@@ -2995,7 +3067,7 @@ mod tests {
     /// shape).
     #[test]
     fn test_integer_key_bare_constant_offset_form_b() {
-        let sql = "SELECT * FROM events e \
+        let sql = "SELECT * FROM smelt.silver.events e \
                    WHERE e.batch_id >= m.batch_id - 5 AND e.batch_id < m.batch_id";
         let ctx = BoundContext::new().with_source("silver.events", "batch_id");
         let bounds = derive_model_bounds(sql, &ctx);
@@ -3028,7 +3100,7 @@ mod tests {
     fn test_integer_key_bare_offset_inert_when_interval_present_elsewhere() {
         let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS prev_x \
-                   FROM events e \
+                   FROM smelt.silver.events e \
                    WHERE e.batch_id >= m.batch_id - 200000 AND e.batch_id < m.batch_id";
         let ctx = BoundContext::new().with_source("silver.events", "batch_id");
         let bounds = derive_model_bounds(sql, &ctx);
@@ -3051,7 +3123,7 @@ mod tests {
     fn test_unbounded_still_forbids_pushed_filter_after_unification() {
         let sql = "SELECT id, ts, SUM(x) OVER (PARTITION BY id ORDER BY ts \
                    RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running \
-                   FROM source_table";
+                   FROM smelt.silver.events";
         let ctx = BoundContext::new().with_source("silver.events", "event_date");
         let bounds = derive_model_bounds(sql, &ctx);
         let bound = bounds.get("silver.events").unwrap();
@@ -3114,6 +3186,182 @@ mod tests {
                 start: "100".to_string(),
                 end: "108".to_string(),
             }
+        );
+    }
+
+    // ---- Phase 6 (walk-migration-residue): the flat-scan floor's corpus ----
+
+    /// `20e74879`'s motivating shape: a source read both as a plain FROM leaf
+    /// (zero-margin) and inside an expression-position subquery carrying a
+    /// window frame's band. Before phase 2 wired `expr_scopes` into the
+    /// walk's read set, the walk-only path saw only the leaf-path (zero)
+    /// reach and dropped the subquery region's band; the floor merged the
+    /// flat scan back in to restore it. Phase 2 made the subquery a walk
+    /// node whose reach merges into the same source in parallel with the
+    /// leaf read (`ReachTransfer::operator`'s `read_children` loop), so the
+    /// walk-only derivation must now already carry the band — this asserts
+    /// walk-only == floored for exactly the shape the floor was written for.
+    #[test]
+    fn expression_subquery_reference_site_reach_needs_no_flat_floor() {
+        let sql = "SELECT a, (SELECT SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL '1 day' \
+                   PRECEDING AND CURRENT ROW) FROM events) AS m FROM events";
+        let ctx = BoundContext::new().with_source("events", "event_date");
+        let floored = derive_model_bounds_inner(sql, &ctx, true);
+        let walk_only = derive_model_bounds_inner(sql, &ctx, false);
+        assert_eq!(
+            walk_only, floored,
+            "the walk-only derivation must already carry the subquery region's band, \
+             matching the floored derivation: walk_only={walk_only:?} floored={floored:?}"
+        );
+        assert_eq!(
+            walk_only.get("events"),
+            Some(&BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: Seconds::days(1),
+                after: Seconds::ZERO,
+            }),
+            "the leaf read and the subquery region's band must merge onto the one source: \
+             {walk_only:?}"
+        );
+    }
+
+    /// Table-driven: every SQL shape already exercised by this module's bound
+    /// tests, plus the `Unsupported`-adjacent shapes phase 1 turned into walk
+    /// nodes (parenthesised join group, redundantly-parenthesised derived
+    /// table), must derive an identical bound map whether or not the
+    /// whole-text flat-scan floor runs. Any divergence here is exactly the
+    /// signal that the floor is still doing live work — a walk gap to fix,
+    /// not a floor to keep.
+    #[test]
+    fn walk_only_equals_floored_across_reach_corpus() {
+        let events = || BoundContext::new().with_source("events", "event_date");
+        let cases: Vec<(&str, BoundContext)> = vec![
+            (
+                "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                 RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW) AS prev_x \
+                 FROM events",
+                events(),
+            ),
+            (
+                "SELECT id, ts, LEAD(x) OVER (PARTITION BY id ORDER BY ts \
+                 RANGE BETWEEN CURRENT ROW AND INTERVAL '2 hours' FOLLOWING) AS next_x \
+                 FROM events",
+                events(),
+            ),
+            (
+                "SELECT * FROM events e \
+                 WHERE e.event_date BETWEEN m.conversion_ts AND m.conversion_ts + INTERVAL '30 days'",
+                events(),
+            ),
+            (
+                "SELECT a FROM (events JOIN other ON events.id = other.id)",
+                BoundContext::new()
+                    .with_source("events", "event_date")
+                    .with_source("other", "other_date"),
+            ),
+            (
+                "SELECT a FROM ((SELECT * FROM events)) AS t",
+                events(),
+            ),
+            (
+                "SELECT a, (SELECT max(b) FROM events) AS m FROM events",
+                events(),
+            ),
+            (
+                "SELECT a FROM events WHERE EXISTS \
+                 (SELECT 1 FROM events e2 WHERE e2.id = events.id)",
+                events(),
+            ),
+            ("SELECT a, b FROM events", events()),
+        ];
+        for (sql, ctx) in cases {
+            let floored = derive_model_bounds_inner(sql, &ctx, true);
+            let walk_only = derive_model_bounds_inner(sql, &ctx, false);
+            assert_eq!(
+                walk_only, floored,
+                "walk-only must equal floored for `{sql}`: walk_only={walk_only:?} \
+                 floored={floored:?}"
+            );
+        }
+    }
+
+    /// The *other* whole-text path — `derive_bound_for_source` as the
+    /// `Unsupported`-tree fallback — is untouched by retiring the per-source
+    /// floor loop: a shape the normalizer still cannot see through (a table
+    /// function in `FROM`, which `normalize_table_ref` maps to
+    /// `InputItem::Unsupported`) falls back to the whole-text derivation
+    /// rather than losing coverage entirely.
+    #[test]
+    fn unsupported_normalization_still_falls_back_to_the_flat_derivation() {
+        let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS prev_x \
+                   FROM generate_series(1, 10) AS t, events";
+        let ctx = BoundContext::new().with_source("events", "event_date");
+        let tree = crate::analysis::walk::QueryTree::from_sql(sql).expect("parses");
+        assert!(
+            tree.root.has_unsupported(),
+            "a table function in FROM must still normalize to Unsupported: {sql}"
+        );
+        let bounds = derive_model_bounds(sql, &ctx);
+        assert_eq!(
+            bounds.get("events"),
+            Some(&BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: Seconds::days(1),
+                after: Seconds::ZERO,
+            }),
+            "an Unsupported tree must still fall back to the whole-text derivation: {bounds:?}"
+        );
+    }
+
+    /// The one shape that survives retiring the per-source floor
+    /// (`docs/outcomes/20260904-walk-migration-residue` phase 6): a context
+    /// source passed only as an argument to a table-valued function call
+    /// (`smelt.functions.<fn>(source => smelt.silver.x, …)`, the real shape
+    /// `examples/web_analytics/models/silver/sessions.sql` reads its
+    /// `smelt.silver.events_deduped` upstream through). `normalize_table_ref`
+    /// resolves a `smelt_path_call` FROM item to a single `Table` leaf named
+    /// after the *call's own path* (`functions.sessionize`), never
+    /// descending into its argument list — the argument's own `smelt.<path>`
+    /// reference is structurally invisible to the walk, so it can never
+    /// become a leaf under any tree shape, not just an `Unsupported` one.
+    /// This asserts the walk fails to see it walk-only, and that
+    /// `derive_model_bounds`'s per-source top-up still recovers a bound for
+    /// it. If the walk ever learns to trace into call arguments, this test
+    /// must fail (the `walk_only` map would gain the entry) — that is the
+    /// signal to delete the leaf classifier and this test together.
+    #[test]
+    fn flat_floor_survives_for_source_hidden_in_a_function_call_argument() {
+        let sql = "SELECT * FROM smelt.functions.sessionize(source => smelt.silver.events, \
+                   partition_col => id, ts_col => ts, platform_col => platform) \
+                   WHERE ts BETWEEN d - INTERVAL '2 days' AND d + INTERVAL '1 day'";
+        let ctx = BoundContext::new().with_source("silver.events", "ts");
+        let tree = crate::analysis::walk::QueryTree::from_sql(sql).expect("parses");
+        assert!(
+            !tree.root.has_unsupported(),
+            "a smelt_path_call FROM item normalizes cleanly (as an opaque Table leaf), \
+             not to Unsupported: {sql}"
+        );
+        // Bypass `derive_model_bounds_inner`'s own per-source top-up (it
+        // applies unconditionally, unlike the `Unsupported`-tree fallback) to
+        // inspect the walk's raw verdict directly.
+        let walk_only = crate::analysis::walk::walk(&tree, &ReachTransfer { ctx: &ctx });
+        assert!(
+            !walk_only.contains_key("silver.events"),
+            "the walk must not see a source hidden inside a function-call argument as a leaf \
+             (if it now does, delete this test and the leaf classifier that compensates for it): \
+             {walk_only:?}"
+        );
+        let floored = derive_model_bounds(sql, &ctx);
+        assert_eq!(
+            floored.get("silver.events"),
+            Some(&BoundResult::Bounded {
+                source_partition_col: "ts".to_string(),
+                before: Seconds::days(2),
+                after: Seconds::days(1),
+            }),
+            "the per-source leaf classifier must recover the bound the walk cannot see: \
+             {floored:?}"
         );
     }
 }

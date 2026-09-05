@@ -30,6 +30,15 @@ fn scaffold(tmp: &TempDir) -> PathBuf {
         "smelt init should succeed.\nstderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
+    // `smelt init`'s scaffold declares no `state:` key, so it defaults to
+    // `state.mode: stateless` (`docs/specs/state.md` §"`state.mode` and
+    // what each posture provides") — the failure summary reads the just-
+    // written run report back from `.smelt/`, which needs a posture that
+    // actually writes it (mirrors `tests/run_report.rs::scaffold`).
+    let smelt_yml_path = project_dir.join("smelt.yml");
+    let mut smelt_yml = std::fs::read_to_string(&smelt_yml_path).unwrap();
+    smelt_yml.push_str("state:\n  mode: intervals\n");
+    std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
     project_dir
 }
 

@@ -280,7 +280,7 @@ fn probe_partition_column_rename_refusal() {
          version: 1\n\
          paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
-         default_materialization: table\n",
+         default_materialization: table\nstate:\n  mode: intervals\n",
     );
     // Two date columns are both already projected and grouped on in v1, so
     // repointing `partition_column` from one to the other in v2 changes
@@ -421,7 +421,9 @@ fn probe_partition_column_rename_refusal() {
 /// partition-grain Known Divergences bullets (phases 2-7; two folded into phase 2), and the
 /// 2026-09-04 decision track (`3e9c1a4a`) closed two more — non-deterministic row-set membership
 /// became a permanent refusal, and per-column `data_latency` was retired in favour of
-/// orchestration-only lateness. This test pins the bullet set the spec's §"The partition grain"
+/// orchestration-only lateness — and phase 1 of `docs/outcomes/20260904-decision-residue` closed
+/// the `PartitionGrainForbidsMetrics`-is-unimplemented bullet by implementing the refusal.
+/// This test pins the bullet set the spec's §"The partition grain"
 /// Known Divergences is allowed to carry going forward, so a future edit cannot quietly
 /// reintroduce a closed residue without the change being visible here. The count ratchets DOWN
 /// only: adding a lead back requires the spec to have genuinely reopened the divergence.
@@ -449,7 +451,6 @@ fn partition_grain_residues_stay_closed() {
 
     let expected_leads = [
         "Schema evolution on the partition grain is largely a definition delta now",
-        "The `PartitionGrainForbidsMetrics` refusal is unimplemented",
         "The sub-`g_part` rejection does not yet name the coarsened window",
         "`NOW()`/`CURRENT_*` are still compile-time-pinned",
     ];
@@ -457,8 +458,10 @@ fn partition_grain_residues_stay_closed() {
     assert_eq!(
         bullets.len(),
         expected_leads.len(),
-        "expected exactly {} partition-grain Known Divergences bullets (the ones no closed \
-         outcome or decision owns), found {}:\n{}",
+        "expected exactly {} partition-grain Known Divergences bullets (the three this outcome \
+         does not own — phase 1 of `docs/outcomes/20260904-decision-residue` closed the \
+         `PartitionGrainForbidsMetrics`-is-unimplemented bullet, and the decision track \
+         retired `data_latency` and the row-set-membership bullet separately), found {}:\n{}",
         expected_leads.len(),
         bullets.len(),
         bullets.join("\n")

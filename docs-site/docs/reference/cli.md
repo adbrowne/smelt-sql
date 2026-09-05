@@ -60,7 +60,7 @@ See `docs/specs/run_state.md` §"Locking" for the full semantics.
 
 ## State isolation per target
 
-Run state lives under `.smelt/targets/<target>/`, keyed by the `--target` a command ran against (default `dev`). A run against `dev` and a run against `prod` never share interval coverage, reconciliation ledgers, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. This means:
+Run state lives under `.smelt/targets/<target>/`, keyed by the `--target` a command ran against (default `dev`). A run against `dev` and a run against `prod` never share interval coverage, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. (The reconciliation ledger is separately isolated per target by virtue of living in that target's own backend schema, not `.smelt/`.) This means:
 
 - `smelt run --target prod` and `smelt run --target dev` can each be resumed, inspected, and reasoned about independently; a `dev` backfill can never mask a coverage gap in `prod`.
 - `smelt status`, `smelt history`, and `smelt diff` accept `--target` (default `dev`) and report on that target's state only — pass the target you actually care about, especially in CI where the default `dev` is rarely the one that matters.
@@ -208,7 +208,7 @@ over a pending, non-eclipsed, unapproved definition delta — a redefined column
 `smelt migrate` hasn't reviewed yet — rather than silently maintaining a table whose definition
 no longer matches its contents. The run exits `3` naming `DefinitionDeltaPending` and the fix:
 `smelt migrate <model>` to review the plan, then `--apply`, or run with `--full-refresh`. See
-[Backbuild synthesis](../guide/backbuild-synthesis.md).
+[Migrations](../guide/migrations.md).
 
 ### Parallel execution with `--jobs`
 
@@ -837,7 +837,7 @@ smelt diff --json || echo "Schema changes detected!"
 
 Derive, approve, and apply a **definition-delta** migration plan: a targeted script that
 migrates a model's stored table in place after its SQL changed, instead of a full rebuild. See
-the [migration guide](../guide/backbuild-synthesis.md) for the full walkthrough of when each
+the [migration guide](../guide/migrations.md) for the full walkthrough of when each
 verdict (eclipsed, backfill in place, rederive, skeleton change) applies.
 
 **Usage:**
@@ -1203,13 +1203,25 @@ smelt explain [MODEL_NAME] [OPTIONS]
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
-With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: every
-cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
-the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
-derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-the model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
-contract block per **inbound edge**. This only applies to incremental models (`refresh:
+With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: the
+model's own **delta signature** as the report's first line (an `emits:` headline — see below),
+every cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes
+through the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)),
+the derived per-source scan clamps, each source's partition-locality verdict, any admission
+refusals, the model's own **Relation Contract** (its clock, identity, and derived `grain` label),
+and one contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
+
+The headline reads `model <name>  (emits: <shape>; grain: <label>)`: `keyed upsert over
+[<keys>], key-addressed` for a bare keyed model, the same with `, slice-bounded by <axis> under
+key temporal locality (settle bound: <bound>)` appended for a composed (key + time) model,
+`append-only within a window, window-addressed by <axis>` for a partition-grain model, or
+`general (degraded by: <reason>), not delta-addressable` when the model's own SQL degrades —
+naming the construct or world-fact responsible, never a silent fallback. The `grain:` clause is
+the same label the report's own `derived grain:` row prints. `--json` carries the identical
+fields as a top-level `delta_signature` object: `shape` (`keyed_upsert` | `append_only_window` |
+`general`), `addressing` (`key` | `window` | `none`), `keys`/`axis`/`degraded_by` (present per
+shape), and `slice_bound`/`settle_bound` (present when key temporal locality is admitted).
 
 Each cell also prints a `contract:` row — its effective [contract relaxation](../guide/incremental-models.md#contract-relaxations)
 (`default`, or `frozen_horizon`/`deferral` with their declared intervals); `--json` carries the
@@ -1340,6 +1352,8 @@ smelt explain daily_events --show-sql --technique keyed_fold
 
 ```text
 $ smelt explain daily_events
+model daily_events  (emits: general (degraded by: expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call)), not delta-addressable; grain: partition)
+
 Maintenance plan: daily_events
 
 Cells (2):
@@ -1347,14 +1361,22 @@ Cells (2):
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
+      region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+      write pin: (none)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
+      region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+      write pin: (none)
 
 Refusals: (none)
 
@@ -1369,6 +1391,8 @@ Inbound edges: sources.raw.events
       identity: event_id
       derived grain: key
       delta type: general (degraded by: source 'raw.events' is append_only but declares no clock/axis column)
+
+Probes (0):
 ```
 
 ---

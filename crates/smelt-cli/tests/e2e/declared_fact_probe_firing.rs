@@ -164,6 +164,8 @@ targets:
     database: target/dev.duckdb
     schema: main
 default_materialization: table
+state:
+  mode: intervals
 {probes_block}"#
         ),
     );
@@ -331,6 +333,8 @@ targets:
     database: target/dev.duckdb
     schema: main
 default_materialization: table
+state:
+  mode: intervals
 {probes_block}"#
         ),
     );
