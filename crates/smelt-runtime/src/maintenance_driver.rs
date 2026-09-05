@@ -2582,6 +2582,7 @@ pub struct RepairSidecarRefresh<'a> {
     pub group_key: &'a [String],
     pub digest_columns: &'a [String],
     pub model_sql: &'a str,
+    pub consumer_address: &'a str,
 }
 
 /// Execute a live `Technique::PerGroupRecompute` cell
@@ -2642,6 +2643,7 @@ pub async fn execute_per_group_recompute(
                     refresh.group_key,
                     refresh.digest_columns,
                     refresh.model_sql,
+                    refresh.consumer_address,
                     &group,
                 )
             })
@@ -2744,6 +2746,7 @@ pub async fn execute_diff_patch(
                     refresh.group_key,
                     refresh.digest_columns,
                     refresh.model_sql,
+                    refresh.consumer_address,
                     &group,
                 )
             })
@@ -2998,6 +3001,7 @@ pub async fn resolve_key_addressed_affected_keys(
     downstream_keys: &[String],
     discovery: KeyDiscovery,
     model_sql: &str,
+    consumer_address: &str,
 ) -> std::result::Result<(Vec<String>, String), BackendError> {
     let changed_keys = diff_repair_group_sidecar_changed_keys(
         backend,
@@ -3008,6 +3012,7 @@ pub async fn resolve_key_addressed_affected_keys(
         group_key,
         digest_columns,
         model_sql,
+        consumer_address,
     )
     .await?;
     let dialect = maintenance_dialect(backend.dialect());
@@ -3061,6 +3066,7 @@ pub async fn execute_key_addressed_model_edge_cell(
     compiled_model_sql: &str,
     write: &RepairWrite,
     retry: &crate::execute::RetryPolicy<'_>,
+    consumer_address: &str,
 ) -> Result<Option<ExecutionResult>> {
     let full_table = format!("{schema}.{table}");
     let (changed_keys, affected_keys_select) = resolve_key_addressed_affected_keys(
@@ -3074,6 +3080,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         downstream_keys,
         discovery,
         clean_model_sql,
+        consumer_address,
     )
     .await
     .map_err(|e| {
@@ -3094,6 +3101,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         group_key,
         digest_columns,
         model_sql: clean_model_sql,
+        consumer_address,
     };
     let result = match write {
         RepairWrite::TargetedDeleteInsert => {
@@ -3759,6 +3767,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
     projection: &FingerprintProjection,
     all_source_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
 ) -> std::result::Result<Vec<String>, BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
         return Err(BackendError::unsupported(
@@ -3777,6 +3786,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
     );
     let stale_rows = backend.execute_sql(&stale_check_sql).await?;
@@ -3784,6 +3794,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         tracing::warn!(
             source_address,
             projection_identity = %identity,
+            consumer_address,
             "fingerprint sidecar stamp mismatch detected (model definition, P4 projection, or \
              digest version changed — or the stored stamp was corrupted); treating the stale \
              partition as absent and rebuilding via the whole-table delta"
@@ -3799,6 +3810,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         &sidecar_table,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         dialect,
     );
@@ -3861,6 +3873,7 @@ pub async fn refresh_fingerprint_sidecar(
     projection: &FingerprintProjection,
     all_source_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
     write_group: &StatementGroup,
 ) -> std::result::Result<(), BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
@@ -3880,6 +3893,7 @@ pub async fn refresh_fingerprint_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         &digest_select,
     );
@@ -3887,6 +3901,7 @@ pub async fn refresh_fingerprint_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &digest_select,
     );
     backend
@@ -3914,8 +3929,9 @@ pub async fn refresh_fingerprint_sidecar(
 
 /// The repair-scoped sidecar partition identity for a group-grain digest:
 /// `model` (via the caller's own `source_address`, unchanged — the
-/// partition key stays `(source_address, projection_identity, source_key)`)
-/// plus the group-key and digest-column sets, so two different repair cells
+/// partition key stays `(source_address, projection_identity,
+/// consumer_address, source_key)`) plus the group-key and digest-column
+/// sets, so two different repair cells
 /// over the SAME source (a different group key, or a different digest
 /// column set) land in different, non-colliding partitions, and neither
 /// collides with the per-row [`fingerprint::projection_identity`] partition
@@ -4004,6 +4020,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
     group_key: &[String],
     digest_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
 ) -> std::result::Result<Vec<String>, BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
         return Err(BackendError::unsupported(
@@ -4021,6 +4038,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         schema,
         source_address,
         &identity,
+        consumer_address,
     );
     let exists_rows = backend.execute_sql(&exists_sql).await?;
     let partition_absent = !exists_rows.iter().any(|batch| batch.num_rows() > 0);
@@ -4029,6 +4047,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
     );
     let stale_rows = backend.execute_sql(&stale_check_sql).await?;
@@ -4037,6 +4056,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         tracing::warn!(
             source_address,
             projection_identity = %identity,
+            consumer_address,
             "group-grain fingerprint sidecar stamp mismatch detected (model definition or \
              digest inputs changed, or the stored stamp was corrupted); treating the stale \
              partition as absent and widening the affected set to every currently-observed \
@@ -4053,6 +4073,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
         &sidecar_table,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         dialect,
     );
@@ -4102,6 +4123,7 @@ pub async fn refresh_repair_group_sidecar(
     group_key: &[String],
     digest_columns: &[String],
     model_sql: &str,
+    consumer_address: &str,
     write_group: &StatementGroup,
 ) -> std::result::Result<(), BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
@@ -4120,6 +4142,7 @@ pub async fn refresh_repair_group_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &stamp,
         &digest_select,
     );
@@ -4127,6 +4150,7 @@ pub async fn refresh_repair_group_sidecar(
         schema,
         source_address,
         &identity,
+        consumer_address,
         &digest_select,
     );
     backend
@@ -4246,6 +4270,7 @@ pub enum RestrictionDeltaSource<'a> {
         projection: &'a FingerprintProjection,
         all_source_columns: &'a [String],
         model_sql: &'a str,
+        consumer_address: &'a str,
     },
 }
 
@@ -4331,6 +4356,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
                 projection,
                 all_source_columns,
                 model_sql,
+                consumer_address,
             } => Some(
                 diff_fingerprint_sidecar_changed_keys(
                     backend,
@@ -4341,6 +4367,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
                     projection,
                     all_source_columns,
                     model_sql,
+                    consumer_address,
                 )
                 .await?,
             ),

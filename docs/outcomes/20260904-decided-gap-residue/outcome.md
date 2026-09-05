@@ -55,7 +55,7 @@ than the current residue.
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
-| 4 | Sidecar per-consuming-edge audit test; fix if it fails | planned |
+| 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
 
@@ -117,6 +117,15 @@ than the current residue.
   the clobber-thrash. `sources.md` §"Naming and namespace" therefore gets a spec delta — sharing
   digests across consuming edges is deliberately not taken (it would need per-consumer consumption
   cursors), rather than admitted-but-conditioned.
+
+- 2026-09-05: Phase 4 implemented and closed — `_smelt_fingerprint_sidecar`'s row key gained a
+  fourth PK column, `consumer_address`, threaded through `smelt-state`'s DDL/DML,
+  `smelt-logical`'s diff emitter, and every `smelt-runtime` sidecar entry point; live call sites
+  in `execute.rs` now pass the real consuming model's address. 3 new tests in
+  `fingerprint_sidecar.rs` prove byte-identical-body consumers no longer share a comparandum,
+  each edge's changed-key set survives interleaved runs independently, and a sibling's refresh
+  never mutates this edge's own stored rows. `sources.md` updated per the spec delta; the
+  `docs/TODO.md` bullet removed. See `phases/04-summary.md`.
 
 ## Blocked
 

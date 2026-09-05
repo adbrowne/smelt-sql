@@ -36,9 +36,6 @@ committed; these are the loose ends the redraft deliberately left for follow-up 
 - **`smelt migrate` / `smelt rebuild` wiring plan** (research §6 step 2): wire the backbuild
   layer behind plan-and-approve; extend the conformance harness with a definition-edit step
   kind; build the approval (plan-hash) store.
-- **Sidecar per-consuming-edge audit** (`sources.md` §Known Divergences, new entry): verify
-  the built fingerprint sidecar upholds the per-consumer comparandum requirement under a
-  shared projection-identity partition.
 - **Dangling "What the composed shape uniquely enables" citations**: `docs/specs/models.md:134`
   and `crates/smelt-logical/src/maintenance/propagate.rs` (two sites) cite this heading in
   `incremental_models.md`/`incremental_shapes.md`; it does not exist in either spec today. Not

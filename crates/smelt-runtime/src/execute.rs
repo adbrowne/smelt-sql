@@ -2303,6 +2303,8 @@ pub async fn execute_project(
                             // leg constructs — the format is only ever
                             // consumed on that leg.
                             let source_address = format!("smelt.sources.{source}");
+                            let consumer_address =
+                                format!("smelt.models.{}", plan.model_file.canonical_path());
                             // P9 (`docs/specs/incremental_models.md` §"The
                             // repair family" — "Obligation 7 over a
                             // `mutable_snapshot` source"): a
@@ -2353,6 +2355,7 @@ pub async fn execute_project(
                                             key,
                                             digest_columns,
                                             &clean_sql_for_merge,
+                                            &consumer_address,
                                         )
                                         .await?;
                                     let select =
@@ -2367,6 +2370,7 @@ pub async fn execute_project(
                                         group_key: key,
                                         digest_columns,
                                         model_sql: &clean_sql_for_merge,
+                                        consumer_address: &consumer_address,
                                     };
                                     (select, Some(refresh))
                                 }
@@ -2597,6 +2601,8 @@ pub async fn execute_project(
                     }) {
                         let source_table = source_info.db_name_for_target(model_target, schema);
                         let source_address = format!("smelt.sources.{source}");
+                        let consumer_address =
+                            format!("smelt.models.{}", plan.model_file.canonical_path());
                         let empty_group = smelt_logical::maintenance::emit::StatementGroup {
                             statements: vec![],
                             transactional: false,
@@ -2609,6 +2615,7 @@ pub async fn execute_project(
                             group_key,
                             digest_columns,
                             &clean_sql_for_merge,
+                            &consumer_address,
                             &empty_group,
                         )
                         .await?;
@@ -4241,6 +4248,8 @@ pub async fn execute_project(
                             })?;
                         let source_table = source_info.db_name_for_target(model_target, schema);
                         let source_address = format!("smelt.sources.{}", facts.source_name);
+                        let consumer_address =
+                            format!("smelt.models.{}", plan.model_file.canonical_path());
                         let all_source_columns: Vec<String> = source_info
                             .columns
                             .iter()
@@ -4275,6 +4284,7 @@ pub async fn execute_project(
                                     projection: &facts.projection,
                                     all_source_columns: &all_source_columns,
                                     model_sql: &compiled.body_sql,
+                                    consumer_address: &consumer_address,
                                 },
                                 Some(&facts.region_write),
                                 smelt_backend::maintenance_dialect(backend.dialect()),
@@ -4301,6 +4311,7 @@ pub async fn execute_project(
                             &facts.projection,
                             &all_source_columns,
                             &compiled.body_sql,
+                            &consumer_address,
                             &group,
                         )
                         .await
@@ -6108,6 +6119,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
     let upstream_source_address = format!("smelt.models.{edge_name}");
     let compiled =
         compiler.compile_with_sql_and_ephemerals(model_file, schema, clean_sql, resolver)?;
+    let consumer_address = format!("smelt.models.{}", model_file.canonical_path());
     let result = match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
         backend,
         schema,
@@ -6122,6 +6134,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
         &compiled.sql,
         &write,
         &retry_policy,
+        &consumer_address,
     )
     .await?
     {

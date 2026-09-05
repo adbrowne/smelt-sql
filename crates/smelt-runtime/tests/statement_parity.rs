@@ -4826,6 +4826,9 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
     // Phase F4 — the consuming model's SQL text, folded into the sidecar's
     // identity stamp (`compute_fingerprint_sidecar_stamp`).
     let model_sql = "SELECT id, name, tier FROM smelt.sources.dim_users";
+    // Phase 4 (`docs/outcomes/20260904-decided-gap-residue`) — the sidecar
+    // namespace also includes the CONSUMING model's own address.
+    let consumer_address = "smelt.models.consumer_a";
 
     // Run 1: absent sidecar — every source row is "changed" (whole-table
     // delta), and this diff also creates the sidecar table.
@@ -4838,6 +4841,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &projection,
         &all_source_columns,
         model_sql,
+        consumer_address,
     )
     .await
     .expect("first diff against an absent sidecar");
@@ -4861,6 +4865,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main._smelt_fingerprint_sidecar",
         "smelt.sources.dim_users",
         &identity,
+        consumer_address,
         &stamp,
         MaintenanceDialect::DuckDb,
     );
@@ -4887,6 +4892,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &projection,
         &all_source_columns,
         model_sql,
+        consumer_address,
         &empty_write_group,
     )
     .await
@@ -4902,6 +4908,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main",
         "smelt.sources.dim_users",
         &identity,
+        consumer_address,
         &stamp,
         &expected_digest_select,
     );
@@ -4909,6 +4916,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main",
         "smelt.sources.dim_users",
         &identity,
+        consumer_address,
         &expected_digest_select,
     );
     let recorded_sql = backend.recorded_sql();
@@ -4942,6 +4950,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
             &projection,
             &all_source_columns,
             model_sql,
+            consumer_address,
         )
         .await
         .expect("second diff after a targeted edit");
@@ -4964,6 +4973,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &projection,
         &all_source_columns,
         model_sql,
+        consumer_address,
         &empty_write_group,
     )
     .await
@@ -4982,6 +4992,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
             &projection,
             &all_source_columns,
             model_sql,
+            consumer_address,
         )
         .await
         .expect("third diff after an out-of-projection edit");

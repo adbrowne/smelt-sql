@@ -3870,6 +3870,7 @@ mod external_source_point_lookup_recompute {
         // Populate the sidecar against the ORIGINAL (pre-rename) content —
         // the baseline every subsequent diff compares against.
         let (_, sql_body) = model_sql_body();
+        let consumer_address = "smelt.models.daily_events_enriched";
         refresh_fingerprint_sidecar(
             &backend,
             "main",
@@ -3879,6 +3880,7 @@ mod external_source_point_lookup_recompute {
             &projection(),
             &all_users_columns(),
             &sql_body,
+            consumer_address,
             &empty_write_group(),
         )
         .await
@@ -3899,6 +3901,7 @@ mod external_source_point_lookup_recompute {
             &projection(),
             &all_users_columns(),
             &sql_body,
+            consumer_address,
         )
         .await
         .expect("diff sidecar");
