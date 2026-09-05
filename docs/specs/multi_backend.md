@@ -403,10 +403,13 @@ unresolved type can cost a diagnostic or a loud engine error, never a quiet wron
 
 **The audit probes every arm.** The fixture carries one typed column per class, so an arm guarded
 on a class is probed with that class's column, an arm guarded on an arity with a call of that
-arity, and the `otherwise` arm with whichever class no earlier arm names. Coverage totality counts
-arms, not entries: an arm no probe reaches is named by the gate, never skipped. The ledger keys a row
-on the arm it describes, and the coverage table renders a conditional cell as the set of its arms'
-verdicts, as it already does for a cell whose positions differ.
+arity, and the `otherwise` arm with whichever class no earlier arm names. No typed fixture column
+can classify as `Unresolved` — a NULL-bearing column still has a declared type — so an arm guarded
+on that class is probed with a bare `NULL` literal instead, which is what the class means at a call
+site. Coverage totality counts arms, not entries: an arm no probe reaches is named by the gate,
+never skipped. The ledger keys a row on the arm it describes, and the coverage table renders a
+conditional cell as the set of its arms' verdicts, as it already does for a cell whose positions
+differ.
 
 ### Statement-level lowering
 Some built-ins cannot be lowered by substituting one expression for another, because the backend

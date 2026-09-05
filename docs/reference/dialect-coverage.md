@@ -28,6 +28,12 @@ Cell vocabulary:
   author wrote.
 - `unsupported` — the compiler refuses the model (`UnsupportedOnBackend`) rather
   than emitting SQL the engine would reject or misread.
+- `conditional(guard→verdict | ... | otherwise→verdict)` — the verdict depends on
+  the call's own arity and/or operand types; the first arm whose guard the call
+  satisfies wins, and `otherwise` always matches last. Settled once per call on
+  the compile path by `Signature::settle_at`; the printer only ever sees the
+  settled verdict. Every arm is probed by the audit — never claimed from
+  documentation.
 - `(gap #N)` — a live sweep found this pair does not work as claimed, tracked by
   issue #N. The count ratchets down only
   (`.claude/dialect-gaps-baseline.txt`).

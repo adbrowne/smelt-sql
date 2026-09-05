@@ -77,7 +77,7 @@ audit before it is claimed — never from documentation.
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
-| 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | planned |
+| 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
 | 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
 | 8 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
@@ -226,6 +226,22 @@ audit before it is claimed — never from documentation.
   green-but-vacuous because no production row is `Conditional` yet; the mechanism is proven
   red-green on synthetic signatures, and the gate must exist before phase 7's rows or those arms
   land unprobed. `.claude/dialect-gaps-baseline.txt` must be unchanged by this phase.
+
+- 2026-09-06 (implement 06) — phase 6 done. `fixture.rs` gained `iv_interval`/`bin_blob` columns
+  (14-cell rows, one NULL each); `probe.rs` gained `arg_for_class` (the arm-guard-class→fixture-arg
+  mapping, distinct from `column_for`), `Probe.arm`/`Probe.facts`, and `conditional_arm_probes`
+  (one probe per distinct arm guard across dialects, proven reachable by an exhaustive
+  `OperandClass` search rather than trusted from list position; an unreachable arm is named, never
+  dropped) — wired into `derive_probes()` so a future `Conditional` row is probed with no further
+  harness work. `main.rs`'s declared-unsupported exemption now settles through
+  `Signature::settle_at` with the probe's own facts, so an arm-specific `Unsupported` exempts only
+  that arm; `every_conditional_arm_is_covered_by_a_probe` is a new registry-wide totality gate
+  (green-but-vacuous today, by design — no production entry is `Conditional` yet). `ledger.rs`
+  rows are now keyed by arm too (`arm_at`, `find`/`row_matches` re-keyed). `report.rs` renders a
+  conditional cell as its arm set. Spec sentence on `Unresolved`'s bare-`NULL` probe landed.
+  `.claude/dialect-gaps-baseline.txt` unchanged. `verify-phase.sh` green except one pre-existing,
+  unrelated flaky `smelt-runtime` test (`python::tests::non_convergent_set_errors`, a temp-file
+  race under parallel execution; passes in isolation). See `phases/06-summary.md`.
 
 ## Blocked
 

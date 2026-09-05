@@ -66,6 +66,13 @@ pub struct LedgerRow {
     /// function, and a whole-entry exemption would have stopped covering the
     /// position that works.
     pub position: Option<Position>,
+    /// The `Emission::Conditional` arm this row scopes to. `None` means
+    /// every arm — the right default for a non-conditional entry, and for a
+    /// conditional one whose gap really does affect every arm alike.
+    /// Scoping matters the same way `position` does: an arm-specific
+    /// `Unsupported` must not silently exempt a sibling arm the engine
+    /// actually gets right.
+    pub arm: Option<usize>,
     /// Which leg this row exempts.
     pub leg: Leg,
     pub verdict: Verdict,
@@ -82,6 +89,7 @@ const fn gap(
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Schema,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -99,6 +107,7 @@ const fn type_gap(
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Type,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -117,6 +126,7 @@ const fn value_gap(
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Value,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -134,6 +144,7 @@ const fn gap_at(
         name,
         dialect,
         position: Some(position),
+        arm: None,
         leg: Leg::Schema,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -153,6 +164,7 @@ const fn value_gap_at(
         name,
         dialect,
         position: Some(position),
+        arm: None,
         leg: Leg::Value,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -163,8 +175,18 @@ const fn divergent(name: &'static str, dialect: DialectId, reason: &'static str)
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Value,
         verdict: Verdict::Divergent { reason },
+    }
+}
+
+/// Scope an existing row to one `Emission::Conditional` arm — every other
+/// field is unaffected; only the arm narrows.
+const fn arm_at(row: LedgerRow, arm: usize) -> LedgerRow {
+    LedgerRow {
+        arm: Some(arm),
+        ..row
     }
 }
 
@@ -173,25 +195,47 @@ pub fn dialect_divergences() -> &'static [LedgerRow] {
     ROWS
 }
 
-/// The row covering `(name, dialect, position)` on `leg`, if one exists.
+/// Whether `r` covers `(name, dialect, position, arm)` on `leg` — the pure
+/// predicate [`find`] applies to the real [`ROWS`], pulled out so it can be
+/// exercised against a synthetic row directly rather than requiring a real
+/// entry to carry an arm before the matching logic can be tested at all (no
+/// production entry is `Conditional` yet).
 ///
 /// A `Schema` row also exempts the type and value legs: a probe the engine
 /// refuses has neither a type nor a value to compare. The reverse is not true.
+///
+/// `arm` mirrors `position`'s own None-means-every convention: a row with no
+/// arm of its own (`r.arm == None`) exempts every arm, including a probe
+/// that names one; a row scoped to arm `k` exempts only a probe naming that
+/// same arm.
+fn row_matches(
+    r: &LedgerRow,
+    name: &str,
+    dialect: DialectId,
+    position: Position,
+    arm: Option<usize>,
+    leg: Leg,
+) -> bool {
+    r.name == name
+        && r.dialect == dialect
+        && r.position.map(|p| p == position).unwrap_or(true)
+        && r.arm.map(|a| Some(a) == arm).unwrap_or(true)
+        // A `Schema` row exempts every downstream leg: a probe the engine
+        // refuses has neither a type nor a value to compare. The reverse
+        // does not hold.
+        && (r.leg == leg || r.leg == Leg::Schema)
+}
+
+/// The row covering `(name, dialect, position, arm)` on `leg`, if one exists.
 pub fn find(
     name: &str,
     dialect: DialectId,
     position: Position,
+    arm: Option<usize>,
     leg: Leg,
 ) -> Option<&'static LedgerRow> {
-    ROWS.iter().find(|r| {
-        r.name == name
-            && r.dialect == dialect
-            && r.position.map(|p| p == position).unwrap_or(true)
-            // A `Schema` row exempts every downstream leg: a probe the engine
-            // refuses has neither a type nor a value to compare. The reverse
-            // does not hold.
-            && (r.leg == leg || r.leg == Leg::Schema)
-    })
+    ROWS.iter()
+        .find(|r| row_matches(r, name, dialect, position, arm, leg))
 }
 
 /// Every accepted `(entry, dialect)` divergence, found by sweeping the derived
@@ -573,3 +617,51 @@ static ROWS: &[LedgerRow] = &[
         "Spark returns NULL for a degenerate regression where DuckDB returns NaN.",
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test 8: a row scoped to one arm does not exempt a sibling arm of the
+    /// same entry.
+    #[test]
+    fn a_ledger_row_scoped_to_an_arm_does_not_exempt_another_arm() {
+        let row = arm_at(
+            gap("TEST_ARM_LEDGER", DialectId::SparkSql, "#0", "test row"),
+            0,
+        );
+        assert!(
+            row_matches(
+                &row,
+                "TEST_ARM_LEDGER",
+                DialectId::SparkSql,
+                Position::Scalar,
+                Some(0),
+                Leg::Schema,
+            ),
+            "sanity: the row must match its own arm"
+        );
+        assert!(
+            !row_matches(
+                &row,
+                "TEST_ARM_LEDGER",
+                DialectId::SparkSql,
+                Position::Scalar,
+                Some(1),
+                Leg::Schema,
+            ),
+            "a row scoped to arm 0 must not exempt arm 1"
+        );
+        // An unscoped query (`arm: None`) does not implicitly widen a
+        // scoped row into matching every arm either — only a row with no
+        // arm of its own does that.
+        assert!(!row_matches(
+            &row,
+            "TEST_ARM_LEDGER",
+            DialectId::SparkSql,
+            Position::Scalar,
+            None,
+            Leg::Schema,
+        ));
+    }
+}

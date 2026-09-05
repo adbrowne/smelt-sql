@@ -34,6 +34,8 @@ pub const COLUMNS: &[(&str, &str)] = &[
     ("ts_ts", "TIMESTAMP, one NULL"),
     ("arr_int", "ARRAY<BIGINT>"),
     ("j_json", "JSON-shaped VARCHAR"),
+    ("iv_interval", "INTERVAL, one NULL"),
+    ("bin_blob", "BLOB, one NULL"),
 ];
 
 /// A column's per-dialect type name.
@@ -103,6 +105,22 @@ fn ty(dialect: DialectId, col: &str) -> &'static str {
                 "BIGINT[]"
             }
         }
+        "iv_interval" => {
+            if spark {
+                "INTERVAL DAY"
+            } else {
+                "INTERVAL"
+            }
+        }
+        "bin_blob" => {
+            if bq {
+                "BYTES"
+            } else if spark {
+                "BINARY"
+            } else {
+                "BLOB"
+            }
+        }
         other => unreachable!("unknown fixture column {other}"),
     }
 }
@@ -116,7 +134,7 @@ fn array_lit(dialect: DialectId, elems: &str) -> String {
 }
 
 /// One cell's literal text, before the cast wrap. `None` is SQL NULL.
-type Row = [Option<&'static str>; 12];
+type Row = [Option<&'static str>; 14];
 
 /// Eight rows. Read down a column to see its NULL placement; every column that
 /// the doc table above calls nullable has exactly one.
@@ -134,6 +152,8 @@ const ROWS: &[Row] = &[
         Some("TIMESTAMP '2026-01-01 00:00:00'"),
         Some("1, 2"),
         Some(r#"'{"k": 1}'"#),
+        Some("'1 day'"),
+        Some("'alpha'"),
     ],
     [
         Some("2"),
@@ -148,6 +168,8 @@ const ROWS: &[Row] = &[
         Some("TIMESTAMP '2026-01-02 01:00:00'"),
         Some("3"),
         Some(r#"'{"k": 2}'"#),
+        Some("'2 day'"),
+        Some("'beta'"),
     ],
     [
         Some("3"),
@@ -162,6 +184,8 @@ const ROWS: &[Row] = &[
         Some("TIMESTAMP '2026-01-03 02:00:00'"),
         Some("4, 5, 6"),
         Some(r#"'{"k": 3}'"#),
+        Some("'3 day'"),
+        Some("'gamma'"),
     ],
     [
         Some("4"),
@@ -176,6 +200,8 @@ const ROWS: &[Row] = &[
         Some("TIMESTAMP '2026-01-04 03:00:00'"),
         Some("7"),
         Some(r#"'{"k": 4}'"#),
+        None,
+        Some("'delta'"),
     ],
     [
         Some("5"),
@@ -190,6 +216,8 @@ const ROWS: &[Row] = &[
         Some("TIMESTAMP '2026-01-05 04:00:00'"),
         Some("8, 9"),
         Some(r#"'{"k": 5}'"#),
+        Some("'5 day'"),
+        None,
     ],
     [
         Some("6"),
@@ -204,6 +232,8 @@ const ROWS: &[Row] = &[
         Some("TIMESTAMP '2026-01-06 05:00:00'"),
         Some("10"),
         Some(r#"'{"k": 6}'"#),
+        Some("'6 day'"),
+        Some("'zeta'"),
     ],
     [
         Some("7"),
@@ -218,6 +248,8 @@ const ROWS: &[Row] = &[
         None,
         Some("11"),
         Some(r#"'{"k": 7}'"#),
+        Some("'7 day'"),
+        Some("'eta'"),
     ],
     [
         Some("8"),
@@ -232,6 +264,8 @@ const ROWS: &[Row] = &[
         Some("TIMESTAMP '2026-01-08 07:00:00'"),
         Some("12, 13"),
         Some(r#"'{"k": 8}'"#),
+        Some("'8 day'"),
+        Some("'theta'"),
     ],
 ];
 
@@ -334,6 +368,8 @@ pub fn column_types() -> Vec<(&'static str, DataType)> {
         ),
         ("arr_int", DataType::Array(Box::new(DataType::BigInt))),
         ("j_json", DataType::Varchar { max_length: None }),
+        ("iv_interval", DataType::Interval),
+        ("bin_blob", DataType::Blob),
     ]
 }
 

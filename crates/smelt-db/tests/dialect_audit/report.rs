@@ -8,7 +8,10 @@
 //! verification-tier section says which dialects a live leg actually visits.
 
 use smelt_types::signatures::{Position, Signature};
-use smelt_types::{BuiltinRegistry, DialectId, Emission, ExprKind, SyntaxForm};
+use smelt_types::{
+    BuiltinRegistry, ConditionalArm, DialectId, Emission, ExprKind, OperandClass, SettledEmission,
+    SyntaxForm,
+};
 
 use crate::ledger::{self, Verdict};
 
@@ -40,6 +43,51 @@ fn position_label(position: Position) -> &'static str {
     }
 }
 
+/// The class name an arm guard names, in the coverage table's own
+/// lowercase vocabulary — a rendering concern separate from the `Debug`
+/// derive `OperandClass` otherwise uses.
+fn operand_class_label(class: OperandClass) -> &'static str {
+    match class {
+        OperandClass::Integral => "integral",
+        OperandClass::Decimal => "decimal",
+        OperandClass::Floating => "floating",
+        OperandClass::String => "string",
+        OperandClass::Boolean => "boolean",
+        OperandClass::Temporal => "temporal",
+        OperandClass::Interval => "interval",
+        OperandClass::Composite => "composite",
+        OperandClass::Binary => "binary",
+        OperandClass::Unresolved => "unresolved",
+    }
+}
+
+fn settled_label(verdict: SettledEmission) -> String {
+    match verdict {
+        SettledEmission::Native => "native".to_string(),
+        SettledEmission::Rename(to) => format!("rename:{to}"),
+        SettledEmission::Template(t) => format!("template:{t}"),
+        SettledEmission::Rewrite(id) => format!("rewrite:{id:?}"),
+        SettledEmission::Restructure(id) => format!("restructure:{id:?}"),
+        SettledEmission::Unsupported { .. } => "unsupported".to_string(),
+    }
+}
+
+/// One arm's guard and verdict, rendered `a0:class,a1:class→verdict` or
+/// `otherwise→verdict` for the mandatory trailing arm.
+fn arm_label(arm: &ConditionalArm) -> String {
+    if arm.arity.is_none() && arm.classes.is_empty() {
+        return format!("otherwise→{}", settled_label(arm.verdict));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(arity) = arm.arity {
+        parts.push(format!("arity={arity}"));
+    }
+    for (idx, class) in arm.classes {
+        parts.push(format!("a{idx}:{}", operand_class_label(*class)));
+    }
+    format!("{}→{}", parts.join(","), settled_label(arm.verdict))
+}
+
 fn emission_label(emission: Emission) -> String {
     match emission {
         Emission::Native => "native".to_string(),
@@ -48,11 +96,13 @@ fn emission_label(emission: Emission) -> String {
         Emission::Template(t) => format!("template:{t}"),
         Emission::Restructure(id) => format!("restructure:{id:?}"),
         Emission::Unsupported { .. } => "unsupported".to_string(),
-        // Arm-set rendering (`docs/outcomes/20260904-dialect-emission-vocabulary`
-        // phase 6) lands with the audit-probe-per-arm work; until then this
-        // is a placeholder label, never a claim the audit has verified —
-        // no production entry is `Conditional` yet.
-        Emission::Conditional(_) => "conditional".to_string(),
+        // Test 11: a conditional cell renders its arm set, not a bare
+        // "conditional" placeholder — the audit now probes every arm
+        // (phase 6), so the table can say which arms exist.
+        Emission::Conditional(arms) => {
+            let rendered: Vec<String> = arms.iter().map(arm_label).collect();
+            format!("conditional({})", rendered.join(" | "))
+        }
     }
 }
 
@@ -163,6 +213,12 @@ pub fn render() -> String {
          \x20 author wrote.\n\
          - `unsupported` — the compiler refuses the model (`UnsupportedOnBackend`) rather\n\
          \x20 than emitting SQL the engine would reject or misread.\n\
+         - `conditional(guard→verdict | ... | otherwise→verdict)` — the verdict depends on\n\
+         \x20 the call's own arity and/or operand types; the first arm whose guard the call\n\
+         \x20 satisfies wins, and `otherwise` always matches last. Settled once per call on\n\
+         \x20 the compile path by `Signature::settle_at`; the printer only ever sees the\n\
+         \x20 settled verdict. Every arm is probed by the audit — never claimed from\n\
+         \x20 documentation.\n\
          - `(gap #N)` — a live sweep found this pair does not work as claimed, tracked by\n\
          \x20 issue #N. The count ratchets down only\n\
          \x20 (`.claude/dialect-gaps-baseline.txt`).\n\
@@ -228,4 +284,33 @@ pub fn render() -> String {
          silent hole this audit was built to close.\n",
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test 11: a conditional cell renders its arm set, not a bare
+    /// "conditional" placeholder.
+    #[test]
+    fn a_conditional_cell_renders_its_arm_set() {
+        const ARMS: &[ConditionalArm] = &[
+            ConditionalArm {
+                arity: None,
+                classes: &[(0, OperandClass::Integral), (1, OperandClass::Integral)],
+                verdict: SettledEmission::Native,
+            },
+            ConditionalArm {
+                arity: None,
+                classes: &[],
+                verdict: SettledEmission::Unsupported {
+                    reason: "otherwise",
+                },
+            },
+        ];
+        assert_eq!(
+            emission_label(Emission::Conditional(ARMS)),
+            "conditional(a0:integral,a1:integral→native | otherwise→unsupported)"
+        );
+    }
 }

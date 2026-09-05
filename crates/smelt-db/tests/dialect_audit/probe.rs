@@ -11,8 +11,8 @@ use smelt_dialect::{plan_restructure, print, BackendCapabilities, PrintContext, 
 use smelt_parser::ast::File;
 pub use smelt_types::signatures::Position;
 use smelt_types::{
-    BuiltinRegistry, DataType, DialectId, ExprKind, SigParam, Signature, SyntaxForm,
-    TypeConstraint, TypedColumn,
+    BuiltinRegistry, CallFacts, ConditionalArm, DataType, DialectId, Emission, ExprKind,
+    OperandClass, SigParam, Signature, SyntaxForm, TypeConstraint, TypedColumn,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -40,10 +40,20 @@ pub struct Probe {
     pub position: Position,
     /// The expression in smelt SQL, before dialect lowering.
     pub expr: String,
-    /// Deterministic alias: `p_<sanitised name>_<position>`.
+    /// Deterministic alias: `p_<sanitised name>_<position>`, with an
+    /// `_a{k}` suffix when `arm` is set.
     pub alias: String,
     /// When set, this probe runs the schema leg only, for the recorded reason.
     pub schema_only: Option<&'static str>,
+    /// The `Emission::Conditional` arm index this probe was derived to
+    /// reach, or `None` for an ordinary (non-conditional) probe.
+    pub arm: Option<usize>,
+    /// The call-site facts this probe's own arguments imply, for
+    /// [`Signature::settle_at`] — the arm-derivation's own resolved classes
+    /// for a conditional-arm probe, or `CallFacts::unresolved(arity)` for an
+    /// ordinary probe (whose exact operand classes are not otherwise
+    /// tracked, and do not affect a non-`Conditional` verdict anyway).
+    pub facts: CallFacts,
 }
 
 impl Probe {
@@ -93,6 +103,10 @@ pub enum NotProbed {
     /// The signature's params/form give no type-correct spelling and no
     /// override exists.
     Underivable { detail: String },
+    /// An `Emission::Conditional` arm no operand-class assignment reaches —
+    /// shadowed by an earlier arm's broader guard. Named by index, never
+    /// silently dropped from the arm enumeration.
+    UnreachableArm { index: usize, detail: String },
 }
 
 /// The fixture column that satisfies `constraint`.
@@ -119,6 +133,171 @@ fn column_for(constraint: &TypeConstraint) -> Option<&'static str> {
         // override rather than a wrong-typed argument.
         TypeConstraint::Concrete(_) => return None,
     })
+}
+
+/// The fixture column — or the bare `NULL` literal for [`OperandClass::Unresolved`]
+/// — that models a call-site argument of `class`.
+///
+/// A separate mapping from [`column_for`]: that one answers "what satisfies
+/// this declared parameter type", this one answers "what does an arm guard
+/// on this class need at the call site". Merging them would perturb the
+/// existing (non-conditional) probe set and pull gaps that belong to a later
+/// phase into this one. No typed fixture column can classify as
+/// `Unresolved` — a NULL-bearing column still has a declared type — so that
+/// class is probed with a bare `NULL` literal instead
+/// (`docs/specs/multi_backend.md` §"Operand-conditional verdicts").
+pub fn arg_for_class(class: OperandClass) -> &'static str {
+    match class {
+        OperandClass::Integral => "n_bigint",
+        OperandClass::Decimal => "n_dec",
+        OperandClass::Floating => "n_double",
+        OperandClass::String => "s_text",
+        OperandClass::Boolean => "b_bool",
+        OperandClass::Temporal => "ts_ts",
+        OperandClass::Interval => "iv_interval",
+        OperandClass::Composite => "arr_int",
+        OperandClass::Binary => "bin_blob",
+        OperandClass::Unresolved => "NULL",
+    }
+}
+
+/// Every `OperandClass`, searched exhaustively when deriving an arm probe.
+const ALL_OPERAND_CLASSES: &[OperandClass] = &[
+    OperandClass::Integral,
+    OperandClass::Decimal,
+    OperandClass::Floating,
+    OperandClass::String,
+    OperandClass::Boolean,
+    OperandClass::Temporal,
+    OperandClass::Interval,
+    OperandClass::Composite,
+    OperandClass::Binary,
+    OperandClass::Unresolved,
+];
+
+/// The cartesian product of `classes` taken `n` at a time. Small and
+/// test-only, so clarity wins over avoiding the `Vec<Vec<_>>` allocation.
+fn cartesian(classes: &[OperandClass], n: usize) -> Vec<Vec<OperandClass>> {
+    if n == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for rest in cartesian(classes, n - 1) {
+        for class in classes {
+            let mut v = rest.clone();
+            v.push(*class);
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Find an operand-class assignment of length `arity` that makes
+/// `sig.settle_at(dialect, position, _)` resolve to `arms[target].verdict` —
+/// proof that arm `target` is actually *reached* by the ordered-arm walk,
+/// never merely asserted from its position in the list. The indices
+/// `arms[target]` guards on are fixed to their required class; every other
+/// index is searched exhaustively over every [`OperandClass`] (bounded: real
+/// conditional arities are small). An earlier arm with a broader guard that
+/// always wins first makes this search exhaustively fail, which is exactly
+/// the "unreachable arm" finding.
+fn find_assignment(
+    sig: &Signature,
+    dialect: DialectId,
+    position: Position,
+    arms: &'static [ConditionalArm],
+    target: usize,
+    arity: usize,
+) -> Option<Vec<OperandClass>> {
+    let arm = &arms[target];
+    let fixed: HashMap<usize, OperandClass> = arm.classes.iter().copied().collect();
+    let free: Vec<usize> = (0..arity).filter(|i| !fixed.contains_key(i)).collect();
+
+    for combo in cartesian(ALL_OPERAND_CLASSES, free.len()) {
+        let mut classes = vec![OperandClass::Unresolved; arity];
+        for (idx, class) in &fixed {
+            classes[*idx] = *class;
+        }
+        for (free_idx, class) in free.iter().zip(&combo) {
+            classes[*free_idx] = *class;
+        }
+        let facts = CallFacts::new(classes.clone());
+        if sig.settle_at(dialect, position, &facts) == arm.verdict {
+            return Some(classes);
+        }
+    }
+    None
+}
+
+/// The call expression for a synthetic arm probe: fixture args chosen per
+/// operand class, spelled the same way an ordinary probe is spelled — an
+/// override's fixed spelling first, else the derived shape.
+fn expr_for_classes(name: &str, sig: &Signature, classes: &[OperandClass]) -> Option<String> {
+    let args: Vec<String> = classes
+        .iter()
+        .map(|c| arg_for_class(*c).to_string())
+        .collect();
+    let ov = overrides::find(name);
+    match ov.and_then(|o| o.spelling) {
+        Some(template) => Some(apply_template(template, &args)),
+        None => spell(name, sig.syntax_form, &args),
+    }
+}
+
+/// Every arm of every `Emission::Conditional` entry `sig` carries, one probe
+/// per distinct arm guard across dialects — deduplicated by the arm list's
+/// own value, since the same static arms table is routinely shared by
+/// several dialects — proven reachable by [`find_assignment`] rather than
+/// merely read off the arm's position in the list. An arm no assignment
+/// reaches is named by index, never silently dropped
+/// (`docs/specs/multi_backend.md` §"Operand-conditional verdicts").
+pub fn conditional_arm_probes(name: &'static str, sig: &Signature) -> (Vec<Probe>, Vec<NotProbed>) {
+    let mut probes = Vec::new();
+    let mut failures = Vec::new();
+    let mut seen_arm_sets: Vec<&'static [ConditionalArm]> = Vec::new();
+
+    for (dialect, position, emission) in sig.emission {
+        let Emission::Conditional(arms) = emission else {
+            continue;
+        };
+        if seen_arm_sets.contains(arms) {
+            continue;
+        }
+        seen_arm_sets.push(arms);
+
+        for (index, arm) in arms.iter().enumerate() {
+            let arity = arm.arity.unwrap_or(sig.params.len());
+            match find_assignment(sig, *dialect, *position, arms, index, arity) {
+                Some(classes) => match expr_for_classes(name, sig, &classes) {
+                    Some(expr) => probes.push(Probe {
+                        name,
+                        position: *position,
+                        expr,
+                        alias: format!("p_{}_{}_a{index}", sanitise(name), suffix(*position)),
+                        schema_only: None,
+                        arm: Some(index),
+                        facts: CallFacts::new(classes),
+                    }),
+                    None => failures.push(NotProbed::Underivable {
+                        detail: format!(
+                            "{name} arm {index}: classes {classes:?} have no derivable spelling"
+                        ),
+                    }),
+                },
+                None => failures.push(NotProbed::UnreachableArm {
+                    index,
+                    detail: format!(
+                        "{name} arm {index} on {}/{:?}: no operand-class assignment makes it the \
+                         first matching arm — shadowed by an earlier arm's broader guard",
+                        dialect.slug(),
+                        position
+                    ),
+                }),
+            }
+        }
+    }
+
+    (probes, failures)
 }
 
 /// Resolve one parameter slot to fixture column expressions.
@@ -260,6 +439,7 @@ pub fn probe_or_reason(sig: &Signature) -> Result<Vec<Probe>, NotProbed> {
     };
 
     let schema_only = ov.and_then(|o| o.schema_only);
+    let facts = CallFacts::unresolved(args.len());
     Ok(positions(sig)
         .into_iter()
         .map(|position| Probe {
@@ -268,20 +448,31 @@ pub fn probe_or_reason(sig: &Signature) -> Result<Vec<Probe>, NotProbed> {
             expr: expr.clone(),
             alias: format!("p_{}_{}", sanitise(name), suffix(position)),
             schema_only,
+            arm: None,
+            facts: facts.clone(),
         })
         .collect())
 }
 
-/// Every probe the registry implies.
+/// Every probe the registry implies: one ordinary probe per entry, plus one
+/// probe per reachable `Emission::Conditional` arm. An arm the mechanism
+/// cannot reach is `every_conditional_arm_is_covered_by_a_probe`'s finding to
+/// report, not this function's to swallow.
 pub fn derive_probes() -> Vec<Probe> {
     let mut names: Vec<&'static str> = BuiltinRegistry::names().collect();
     names.sort_unstable();
-    names
-        .into_iter()
-        .filter_map(|name| BuiltinRegistry::resolve(name))
-        .filter_map(|sig| probe_or_reason(sig).ok())
-        .flatten()
-        .collect()
+    let mut probes = Vec::new();
+    for name in names {
+        let Some(sig) = BuiltinRegistry::resolve(name) else {
+            continue;
+        };
+        if let Ok(base) = probe_or_reason(sig) {
+            probes.extend(base);
+        }
+        let (arm_probes, _unreachable) = conditional_arm_probes(name, sig);
+        probes.extend(arm_probes);
+    }
+    probes
 }
 
 /// Parse one smelt-SQL statement, plan any statement-level restructure it
@@ -386,4 +577,183 @@ pub fn infer_types(smelt_sql: &str) -> Vec<(String, DataType)> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_types::{SettledEmission, TypeExpr};
+
+    fn two_arg_signature() -> Signature {
+        Signature::new(
+            "TEST_TWO_ARG",
+            vec![],
+            vec![
+                SigParam::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+                SigParam::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+            ],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+        )
+    }
+
+    /// Test 1: every `OperandClass` except `Unresolved` resolves to a
+    /// fixture column whose `column_types()` entry classifies back to that
+    /// same class; `Unresolved` resolves to the `NULL` literal.
+    #[test]
+    fn the_fixture_has_a_column_for_every_operand_class() {
+        let types: HashMap<&str, DataType> = fixture::column_types().into_iter().collect();
+        for class in [
+            OperandClass::Integral,
+            OperandClass::Decimal,
+            OperandClass::Floating,
+            OperandClass::String,
+            OperandClass::Boolean,
+            OperandClass::Temporal,
+            OperandClass::Interval,
+            OperandClass::Composite,
+            OperandClass::Binary,
+        ] {
+            let col = arg_for_class(class);
+            let dt = types
+                .get(col)
+                .unwrap_or_else(|| panic!("{class:?}: column {col} not in the fixture"));
+            assert_eq!(
+                OperandClass::of(dt),
+                class,
+                "{class:?}: column {col} classifies as {:?}, not {class:?}",
+                OperandClass::of(dt)
+            );
+        }
+        assert_eq!(arg_for_class(OperandClass::Unresolved), "NULL");
+    }
+
+    /// Test 3: a synthetic two-argument conditional yields two scalar probes
+    /// with distinct aliases.
+    #[test]
+    fn a_conditional_entry_is_probed_once_per_arm() {
+        const ARMS: &[ConditionalArm] = &[
+            ConditionalArm {
+                arity: None,
+                classes: &[(0, OperandClass::Integral), (1, OperandClass::Integral)],
+                verdict: SettledEmission::Native,
+            },
+            ConditionalArm {
+                arity: None,
+                classes: &[],
+                verdict: SettledEmission::Unsupported {
+                    reason: "otherwise",
+                },
+            },
+        ];
+        let sig = two_arg_signature().with_emission(&[(
+            DialectId::DuckDb,
+            Position::Scalar,
+            Emission::Conditional(ARMS),
+        )]);
+
+        let (probes, failures) = conditional_arm_probes("TEST_TWO_ARG", &sig);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(probes.len(), 2, "{probes:#?}");
+        assert!(probes.iter().all(|p| p.position == Position::Scalar));
+        let mut aliases: Vec<&str> = probes.iter().map(|p| p.alias.as_str()).collect();
+        let total = aliases.len();
+        aliases.sort_unstable();
+        aliases.dedup();
+        assert_eq!(
+            aliases.len(),
+            total,
+            "expected distinct aliases: {probes:#?}"
+        );
+    }
+
+    /// Test 4: the arguments chosen for arm `k` produce `CallFacts` that
+    /// `settle_at` resolves to arm `k`'s verdict, for every arm of the
+    /// synthetic entry.
+    #[test]
+    fn an_arm_probe_selects_the_arm_it_was_derived_for() {
+        const ARMS: &[ConditionalArm] = &[
+            ConditionalArm {
+                arity: None,
+                classes: &[(0, OperandClass::Integral), (1, OperandClass::Integral)],
+                verdict: SettledEmission::Native,
+            },
+            ConditionalArm {
+                arity: None,
+                classes: &[(0, OperandClass::String)],
+                verdict: SettledEmission::Rename("STR_ARM"),
+            },
+            ConditionalArm {
+                arity: None,
+                classes: &[],
+                verdict: SettledEmission::Unsupported {
+                    reason: "otherwise",
+                },
+            },
+        ];
+        let sig = two_arg_signature().with_emission(&[(
+            DialectId::DuckDb,
+            Position::Scalar,
+            Emission::Conditional(ARMS),
+        )]);
+
+        for (index, arm) in ARMS.iter().enumerate() {
+            let arity = arm.arity.unwrap_or(sig.params.len());
+            let classes = find_assignment(
+                &sig,
+                DialectId::DuckDb,
+                Position::Scalar,
+                ARMS,
+                index,
+                arity,
+            )
+            .unwrap_or_else(|| panic!("arm {index} unreachable"));
+            let facts = CallFacts::new(classes);
+            assert_eq!(
+                sig.settle_at(DialectId::DuckDb, Position::Scalar, &facts),
+                arm.verdict,
+                "arm {index}"
+            );
+        }
+    }
+
+    /// Test 5: an arm no assignment reaches is named by index, rather than
+    /// yielding one fewer probe silently.
+    #[test]
+    fn an_unreachable_arm_is_named_never_skipped() {
+        const ARMS: &[ConditionalArm] = &[
+            ConditionalArm {
+                arity: None,
+                classes: &[(0, OperandClass::Integral)],
+                verdict: SettledEmission::Native,
+            },
+            // Shadowed: arm 0 already matches whenever argument 0 is
+            // Integral, regardless of argument 1, so this arm's narrower
+            // guard is never reached.
+            ConditionalArm {
+                arity: None,
+                classes: &[(0, OperandClass::Integral), (1, OperandClass::String)],
+                verdict: SettledEmission::Rename("SHADOWED"),
+            },
+            ConditionalArm {
+                arity: None,
+                classes: &[],
+                verdict: SettledEmission::Unsupported {
+                    reason: "otherwise",
+                },
+            },
+        ];
+        let sig = two_arg_signature().with_emission(&[(
+            DialectId::DuckDb,
+            Position::Scalar,
+            Emission::Conditional(ARMS),
+        )]);
+
+        let (probes, failures) = conditional_arm_probes("TEST_TWO_ARG", &sig);
+        assert_eq!(probes.len(), 2, "arms 0 and 2 are reachable: {probes:#?}");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        match &failures[0] {
+            NotProbed::UnreachableArm { index, .. } => assert_eq!(*index, 1),
+            other => panic!("expected UnreachableArm, got {other:?}"),
+        }
+    }
 }
