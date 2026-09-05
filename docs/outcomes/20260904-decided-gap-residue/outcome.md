@@ -1,7 +1,7 @@
 # Outcome: Decided-gap residue — close the spec bullets whose target behaviour is already written
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows IM-25, IS-13 ("implementation gap in an already-decided design"); `docs/TODO.md` bullets "Frozen-horizon append-only gate", "Deferral oracle restatement", "Sidecar per-consuming-edge audit"
 **Spec anchors:** `docs/specs/incremental_models.md` §"The contract lattice", §Known Divergences "Conditional-maintenance gaps"; `docs/specs/incremental_shapes.md` §"The column-family catalogue" (once-write), §Known Divergences; `docs/specs/sources.md` §Known Divergences (sidecar per-consumer comparandum)
 
@@ -52,7 +52,7 @@ than the current residue.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | pending |
+| 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | planned |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | pending |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
@@ -62,6 +62,11 @@ than the current residue.
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-09-05: Phase 1 planned with no reshape (no prior summaries). Settled the ambiguous case
+  in the spec sentence "any other **declared** mutation profile": an *undeclared* driving-source
+  profile is admitted, since nothing declared contradicts the probe and the undeclared case is
+  already policed at run time by `SourceMutationProfileViolated`.
 
 ## Blocked
 
