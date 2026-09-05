@@ -746,9 +746,11 @@ smelt derives a **maintenance plan** for every `refresh: incremental` model: a m
 
 ```
 $ smelt explain daily_events_enriched
+model daily_events_enriched  (emits: general (degraded by: join proven OneToMany (row-multiplying) degrades output-delta shape to General), not delta-addressable; grain: partition)
+
 Maintenance plan: daily_events_enriched
 
-Cells (4):
+Cells (5):
   - group {*} on trigger NewData { source: "raw.events" }
       corner:    RecomputeRegion
       technique: DeleteInsert

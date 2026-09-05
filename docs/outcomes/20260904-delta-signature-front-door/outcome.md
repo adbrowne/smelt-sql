@@ -47,7 +47,7 @@ the tutorial pages in step.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `smelt explain` delta-signature headline: text + `--json`, tests, divergence bullet deleted | done |
-| 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | planned |
+| 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | done |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | pending |
 | 4 | Rename `guide/backbuild-synthesis.md` to the rebuild verb; nav + cross-links | pending |
 | 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | pending |
@@ -83,6 +83,11 @@ the tutorial pages in step.
   and one tutorial-doc excerpt (`deduplication.md`) to keep `verify-phase.sh` green — both
   2-line diffs, the new headline only. `verify-phase.sh` ALL GREEN; see
   `phases/01-summary.md`.
+- 2026-09-05 (implement, phase 2): shipped `crates/smelt-cli/tests/explain_docs_freshness.rs`
+  (3 tests: headline-first gate across all docs-site excerpts, byte-pin for `reference/cli.md`,
+  un-elided-prefix pin for `guide/incremental-models.md`); regenerated both hand-pasted excerpts
+  from real `smelt explain` output; tutorial pages already fresh (no diff). `verify-phase.sh` ALL
+  GREEN; see `phases/02-summary.md`.
 
 ## Blocked
 

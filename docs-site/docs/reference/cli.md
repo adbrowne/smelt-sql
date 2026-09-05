@@ -1352,6 +1352,8 @@ smelt explain daily_events --show-sql --technique keyed_fold
 
 ```text
 $ smelt explain daily_events
+model daily_events  (emits: general (degraded by: expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call)), not delta-addressable; grain: partition)
+
 Maintenance plan: daily_events
 
 Cells (2):
@@ -1359,14 +1361,22 @@ Cells (2):
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
+      region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+      write pin: (none)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
+      region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+      write pin: (none)
 
 Refusals: (none)
 
@@ -1381,6 +1391,8 @@ Inbound edges: sources.raw.events
       identity: event_id
       derived grain: key
       delta type: general (degraded by: source 'raw.events' is append_only but declares no clock/axis column)
+
+Probes (0):
 ```
 
 ---
