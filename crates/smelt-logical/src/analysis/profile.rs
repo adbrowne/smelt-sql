@@ -109,6 +109,14 @@ impl PropertySet {
         declared_unique_key: &[String],
         bound_ctx: &BoundContext,
     ) -> Result<Self, ProfileError> {
+        // The profile must derive exactly what the maintenance plan derives
+        // (`property_diff.md` §Constraints item 4, report/profile parity), so
+        // this site is deliberately not a builder: populating a context here
+        // would make the profile disagree with the plan.
+        // join-context: no-op (the empty whole-model context the canonical
+        // derivation itself passes — `smelt-db`'s
+        // `derive_model_maintenance_plan` calls `model_property_vector(sql,
+        // &JoinContext::new())` the same way)
         let vector = model_property_vector(sql, &JoinContext::new()).ok_or_else(|| {
             ProfileError::PropertyDerivation {
                 model: model_name.to_string(),
