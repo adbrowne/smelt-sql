@@ -20,7 +20,8 @@ use smelt_backend::{Backend, BackendError, MaintenanceDialect};
 use smelt_core::sources::{MutationProfile, SourceInfo};
 use smelt_core::ModelFile;
 use smelt_logical::maintenance::emit::{
-    emit_append_only_baseline_snapshot, emit_append_only_posture_probe, AppendOnlyBaselinePartition,
+    emit_append_only_baseline_snapshot, emit_append_only_posture_probe, late_appends,
+    AppendOnlyBaselinePartition, CurrentPartitionState,
 };
 use smelt_logical::maintenance::{should_dispatch, ProbeDispatch};
 use smelt_state::source_postures::{SourcePosturePartition, SourcePostureStore};
@@ -34,8 +35,15 @@ use crate::probes::{
 pub enum SourcePostureAction {
     /// A recorded baseline exists — verify the source's current
     /// per-partition state against it; refresh the baseline only if the
-    /// verification holds.
-    Verify { sql: String, snapshot_sql: String },
+    /// verification holds. `baseline` is carried alongside `sql` so a held
+    /// verification can also classify late appends
+    /// (`smelt_logical::maintenance::emit::late_appends`) without
+    /// re-deriving the same baseline the SQL was built from.
+    Verify {
+        sql: String,
+        snapshot_sql: String,
+        baseline: Vec<AppendOnlyBaselinePartition>,
+    },
     /// No recorded baseline exists yet — nothing to verify against, so
     /// this source's current per-partition state is unconditionally
     /// established as the baseline (subject to the same cadence gate as a
@@ -158,6 +166,7 @@ pub fn append_only_posture_probes(
             SourcePostureAction::Verify {
                 sql: stmt.sql,
                 snapshot_sql: snapshot.sql,
+                baseline,
             }
         };
 
@@ -228,8 +237,12 @@ async fn read_snapshot(
 /// registry's named diagnostic (`SourceMutationProfileViolated`, carrying
 /// the fact, violation count, sample keys, licensed cell, and remedy). On
 /// `Held`, execute the matching baseline-snapshot SQL to read the source's
-/// CURRENT per-partition state and return it as the refreshed baseline for
-/// that source. A [`SourcePostureAction::Establish`] follows the same
+/// CURRENT per-partition state, classify it against the carried `baseline`
+/// via `late_appends` (a closed partition's row-count increase is a late
+/// append, `tracing::warn!`-logged and recorded on `ProbeRecord.observed` —
+/// never a violation, since the SQL comparison already excluded it), and
+/// return the CURRENT state as the refreshed baseline for that source. A
+/// [`SourcePostureAction::Establish`] follows the same
 /// cadence gate but never compares — a dispatched establish always "holds"
 /// (there is nothing yet to violate) and unconditionally records the
 /// snapshot as the source's first baseline. On cadence `Skip`, the baseline
@@ -249,49 +262,73 @@ pub async fn dispatch_and_record_append_only_postures(
     let mut records = Vec::with_capacity(probes.len());
     for probe in probes {
         match &probe.action {
-            SourcePostureAction::Verify { sql, snapshot_sql } => {
-                match dispatch_probe(backend, policy, &probe.ctx, sql).await? {
-                    ProbeVerdict::Skipped(_) => {
-                        records.push(ProbeRecord {
-                            fact: probe.ctx.fact.clone(),
-                            probe: probe.ctx.probe_code.clone(),
-                            outcome: ProbeRecordOutcome::Skipped,
-                            observed: None,
-                        });
-                    }
-                    ProbeVerdict::Held => {
-                        let partitions =
-                            read_snapshot(backend, &probe.ctx, &probe.source_address, snapshot_sql)
-                                .await?;
-                        refreshed.push(RefreshedBaseline {
-                            source_address: probe.source_address.clone(),
-                            partitions,
-                        });
-                        records.push(ProbeRecord {
-                            fact: probe.ctx.fact.clone(),
-                            probe: probe.ctx.probe_code.clone(),
-                            outcome: ProbeRecordOutcome::Dispatched,
-                            observed: None,
-                        });
-                    }
-                    ProbeVerdict::Violated { count, sample_keys } => {
-                        return Err(BackendError::ExecutionFailed {
-                            model: probe.ctx.model.clone(),
-                            message: format!(
-                                "{}: source '{}' (model '{}') declares `{}`, but {} \
-                                 partition(s) violate it. Sample keys: {}.{}",
-                                probe.ctx.probe_code,
-                                probe.source_address,
-                                probe.ctx.model,
-                                probe.ctx.fact,
-                                count,
-                                sample_keys,
-                                probe_violation_suffix(&probe.ctx)
-                            ),
-                        });
-                    }
+            SourcePostureAction::Verify {
+                sql,
+                snapshot_sql,
+                baseline,
+            } => match dispatch_probe(backend, policy, &probe.ctx, sql).await? {
+                ProbeVerdict::Skipped(_) => {
+                    records.push(ProbeRecord {
+                        fact: probe.ctx.fact.clone(),
+                        probe: probe.ctx.probe_code.clone(),
+                        outcome: ProbeRecordOutcome::Skipped,
+                        observed: None,
+                    });
                 }
-            }
+                ProbeVerdict::Held => {
+                    let partitions =
+                        read_snapshot(backend, &probe.ctx, &probe.source_address, snapshot_sql)
+                            .await?;
+                    let current: Vec<CurrentPartitionState> = partitions
+                        .iter()
+                        .map(|p| CurrentPartitionState {
+                            partition_value: p.partition_value.clone(),
+                            current_count: p.recorded_count,
+                        })
+                        .collect();
+                    let appends = late_appends(baseline, &current);
+                    if !appends.is_empty() {
+                        let sample: Vec<String> = appends
+                            .iter()
+                            .map(|a| format!("{} (+{} row(s))", a.partition_value, a.added_rows))
+                            .collect();
+                        tracing::warn!(
+                            source = %probe.source_address,
+                            model = %probe.ctx.model,
+                            "late append into closed partition(s) of source '{}': {} — the \
+                             next run over the window(s) will re-process it",
+                            probe.source_address,
+                            sample.join(", ")
+                        );
+                    }
+                    refreshed.push(RefreshedBaseline {
+                        source_address: probe.source_address.clone(),
+                        partitions,
+                    });
+                    records.push(ProbeRecord {
+                        fact: probe.ctx.fact.clone(),
+                        probe: probe.ctx.probe_code.clone(),
+                        outcome: ProbeRecordOutcome::Dispatched,
+                        observed: Some(appends.len() as u64),
+                    });
+                }
+                ProbeVerdict::Violated { count, sample_keys } => {
+                    return Err(BackendError::ExecutionFailed {
+                        model: probe.ctx.model.clone(),
+                        message: format!(
+                            "{}: source '{}' (model '{}') declares `{}`, but {} \
+                                 partition(s) violate it. Sample keys: {}.{}",
+                            probe.ctx.probe_code,
+                            probe.source_address,
+                            probe.ctx.model,
+                            probe.ctx.fact,
+                            count,
+                            sample_keys,
+                            probe_violation_suffix(&probe.ctx)
+                        ),
+                    });
+                }
+            },
             SourcePostureAction::Establish { snapshot_sql } => {
                 match should_dispatch(policy.cadence, policy.run_ordinal) {
                     ProbeDispatch::Skip(_) => {

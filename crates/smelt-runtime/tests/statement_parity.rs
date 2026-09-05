@@ -5892,9 +5892,9 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
     )
     .sql;
     let (probe_sql, snapshot_sql) = match &probes[0].action {
-        smelt_runtime::source_probes::SourcePostureAction::Verify { sql, snapshot_sql } => {
-            (sql.clone(), snapshot_sql.clone())
-        }
+        smelt_runtime::source_probes::SourcePostureAction::Verify {
+            sql, snapshot_sql, ..
+        } => (sql.clone(), snapshot_sql.clone()),
         smelt_runtime::source_probes::SourcePostureAction::Establish { .. } => {
             panic!("a recorded baseline must build a Verify action, not Establish")
         }

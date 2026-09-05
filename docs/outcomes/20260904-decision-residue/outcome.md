@@ -78,7 +78,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | done |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | done |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | done |
-| 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | planned |
+| 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | done |
 | 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
 
 ## Decision log
@@ -202,5 +202,21 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   `ConformanceStep::AppendLateRow` schedules — `render_smelt_yml_for` currently sets
   `probes: {cadence: off}` with a comment citing this exact limitation, so closing the
   limitation closes the workaround with it.
+
+- 2026-09-06 — Phase 6 done: `late_appends` pure classifier lands in
+  `smelt-logical`'s maintenance layer; `emit_append_only_posture_probe`'s fingerprint leg now
+  also requires an unchanged row count, so a closed partition's pure count increase never trips
+  it. `dispatch_and_record_append_only_postures` classifies every held verification against the
+  carried baseline, `tracing::warn!`s late appends, and records the count on
+  `ProbeRecord.observed` — both `execute.rs` dispatch sites inherit this from the one shared
+  function. `render_smelt_yml_for` flipped `probes: {cadence: off}` → `cadence: per_run`
+  globally (not pool-scoped): the full 80-test `maintenance_conformance` suite passed unchanged
+  under the flip, so the plan's scoped-fallback escape hatch was not needed. New generative case
+  `probes::late_append_schedule_holds_with_probes_on` drives an `AppendLateRow`-bearing schedule
+  through `execute_project` with probes on. Spec bullet deleted from `model_properties.md`;
+  `sources.md`/`run_state.md` narrowed to match. `partition_residue_probes.rs` ratchet
+  unchanged (still 2 — this bullet isn't one of that file's partition-grain bullets).
+  `verify-phase.sh` ALL GREEN on a clean re-run (one transient `smelt-lsp::example_workspaces`
+  timeout under concurrent load, confirmed a flake by standalone re-run).
 
 ## Blocked

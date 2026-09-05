@@ -1797,10 +1797,16 @@ pub struct AppendOnlyBaselinePartition {
 /// sources.md` §Semantics 4 — "watermark-monotonicity + frontier-checksum"):
 /// a read-only query comparing each partition's CURRENT row count and
 /// row-content fingerprint (over `digest_columns`, the source's skeleton
-/// columns) against a caller-supplied recorded `baseline` — a partition
-/// whose row count decreased (a delete or reload) or whose fingerprint
-/// changed (an in-place update) disproves the declared `append_only`
-/// posture.
+/// columns) against a caller-supplied recorded `baseline`. This is the
+/// *violation* half of the two-verdict posture split
+/// (`docs/specs/model_properties.md` §Constraints "Declared lateness is
+/// orchestration-only"): a partition whose row count decreased (a delete or
+/// reload), or whose fingerprint changed **at an unchanged row count** (an
+/// in-place update), disproves the declared `append_only` posture. A row-count
+/// *increase* in a closed partition is deliberately NOT a violation here —
+/// that is a late append, classified separately by the pure [`late_appends`]
+/// over the same baseline and the caller-executed
+/// [`emit_append_only_baseline_snapshot`] current state.
 ///
 /// Returns the same `violation_count`/`sample_keys` shape every probe in
 /// this module returns: the number of violating partitions, and up to 5
@@ -1878,12 +1884,82 @@ pub fn emit_append_only_posture_probe(
          JOIN {baseline_row_set} \
          ON __current.partition_value = __baseline.partition_value \
          WHERE __current.current_count < __baseline.recorded_count \
-         OR (__baseline.check_fingerprint AND __current.current_fingerprint IS DISTINCT FROM \
-             __baseline.recorded_fingerprint)",
+         OR (__baseline.check_fingerprint AND __current.current_count = __baseline.recorded_count \
+             AND __current.current_fingerprint IS DISTINCT FROM __baseline.recorded_fingerprint)",
         snapshot.sql
     );
     let sql = wrap_violation_probe("__append_only_violations", &violations_select, dialect);
     MaintenanceStatement::new(sql)
+}
+
+/// One partition's current per-partition state, the shape
+/// [`late_appends`] compares against a recorded
+/// [`AppendOnlyBaselinePartition`] — the row shape
+/// [`emit_append_only_baseline_snapshot`]'s `SELECT` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentPartitionState {
+    /// The partition column's value, as text.
+    pub partition_value: String,
+    /// The row count observed for this partition right now.
+    pub current_count: i64,
+}
+
+/// A genuine late append: a closed partition (`check_fingerprint: true` in
+/// the recorded baseline) whose row count increased since that baseline was
+/// recorded — an observed delta the next run re-processes, never a posture
+/// violation (`docs/specs/model_properties.md` §Constraints "Declared
+/// lateness is orchestration-only").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LateAppend {
+    pub partition_value: String,
+    /// The row-count increase since the recorded baseline.
+    pub added_rows: i64,
+}
+
+/// Classifies `current` against `baseline`, mirroring
+/// [`crate::contract::frozen_horizon::late_arrivals`]'s shape: a partition
+/// absent from `baseline` is an ordinary append (nothing recorded yet to
+/// disprove), the still-open frontier partition (`check_fingerprint:
+/// false`) is never reported (it legitimately gains rows every run), and
+/// among the remaining closed partitions only a row-count **increase**
+/// counts — a decrease or an unchanged count (including one with a changed
+/// fingerprint, the in-place-update case) is not a late append; those are
+/// [`emit_append_only_posture_probe`]'s violation predicate's concern
+/// instead, never both. A delete-plus-insert that nets to a count increase
+/// is therefore classified as a late append: one aggregate fingerprint per
+/// partition cannot prove subset-ness, so the count leg governs. Pure — no
+/// I/O; the caller supplies `current` from
+/// [`emit_append_only_baseline_snapshot`]'s executed row set.
+pub fn late_appends(
+    baseline: &[AppendOnlyBaselinePartition],
+    current: &[CurrentPartitionState],
+) -> Vec<LateAppend> {
+    use std::collections::HashMap;
+
+    let recorded: HashMap<&str, &AppendOnlyBaselinePartition> = baseline
+        .iter()
+        .map(|b| (b.partition_value.as_str(), b))
+        .collect();
+
+    let mut late: Vec<LateAppend> = current
+        .iter()
+        .filter_map(|c| {
+            let b = recorded.get(c.partition_value.as_str())?;
+            if !b.check_fingerprint {
+                return None;
+            }
+            if c.current_count > b.recorded_count {
+                Some(LateAppend {
+                    partition_value: c.partition_value.clone(),
+                    added_rows: c.current_count - b.recorded_count,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    late.sort_by(|a, b| a.partition_value.cmp(&b.partition_value));
+    late
 }
 
 /// The per-partition CURRENT-state `SELECT` [`emit_append_only_posture_probe`]
