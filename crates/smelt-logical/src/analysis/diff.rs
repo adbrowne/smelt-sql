@@ -1361,12 +1361,9 @@ mod tests {
             functional_dependencies: Vec::new(),
             // Every mutation test below changes an existing column's
             // *value*, never its presence, so the base carries one
-            // determinism/comparability/discriminant entry for "a" already
-            // — a column disappearing from one of these lists while
-            // staying in `columns` does not happen in a real derivation
-            // (every output column gets an entry), so the per-column diff
-            // loops below are keyed on the union but need not synthesize a
-            // "missing" default.
+            // determinism/comparability/discriminant entry for "a" already;
+            // the per-column diff loops below are keyed on the union but
+            // need not synthesize a "missing" default.
             determinism: vec![crate::analysis::walk::ColumnDeterminism {
                 output: "a".to_string(),
                 level: Det::Clean,

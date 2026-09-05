@@ -352,8 +352,9 @@ fn report_json_matches_profile_encoding() {
          (hence at least one contract_point)"
     );
     // Refusals: only assert non-empty when the underlying data actually
-    // refused something (computed from the profile's own refusals, since
-    // that count is exactly what a real refusal would populate).
+    // refused something. `total_refusals_profile` is counted independently
+    // of `total_refusals_underlying` (they read different structures), so
+    // this checks the two stay in step rather than trivially agreeing.
     if ts.total_refusals_underlying > 0 {
         assert!(
             ts.total_refusals_profile > 0,

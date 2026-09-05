@@ -91,7 +91,7 @@ line.
 | `--json` | off | Emit the diff as JSON (schema below). |
 | `--markdown` | off | Emit the diff as GitHub-flavoured Markdown, ready for `gh pr comment --body-file`. Exclusive with `--json`. |
 | `--fail-on <direction>` | none | `downgrade` exits `1` when any downgrade is present; `any` exits `1` when any model shifted. Without the flag the exit code is `0` whenever the diff was computed. |
-| `--select <selector>` | all models | Restricts the *reported* set, not the compared set: every model is still derived at both versions so that attribution stays correct. |
+| `--select <selector>` | all models | Restricts the *reported* set, not the compared set: every model is still derived at both versions so that attribution stays correct. The summary counts and `--fail-on` are computed over the **reported** set — narrowed by `--select` when given — so the printed counts always match the printed blocks; the compared set (used only for attribution) is unaffected. |
 | `--project-dir <path>` | cwd | The project root. Must be inside a git work tree. |
 
 `--diff` is exclusive with the positional `<model>` argument, `--show-sql`, `--period`, and
@@ -123,7 +123,12 @@ and neutrals. When nothing shifted the whole output is the single line
   "models": [
     {
       "model": "<name>",
-      "cause": { "kind": "edited" | "added" | "removed" | "downstream", "of": ["<model>", ...] },
+      "cause": {
+        "kind": "edited" | "added" | "removed" | "downstream",
+        "of": ["<model>", ...],
+        "reason": "<one line>"          // omitted except for the `of: []` project-configuration
+                                          // case and a derivation failure (see below)
+      },
       "changes": [
         {
           "dimension": "grain" | "row_identity" | "source_bound" | "cell_technique"
@@ -234,7 +239,11 @@ Given the profile maps `P_old` (baseline) and `P_new` (working tree), keyed by m
   regardless of its dimension's ordinary rule — a per-dimension direction is noise for a model
   that is wholly new or gone; the `cause` already says so, and grading it would inflate the
   summary counts and `--fail-on` with a signal the dimension's rule was never meant to answer for
-  this case.
+  this case. When the model is absent from one side not because it is genuinely new or deleted
+  but because its profile could not be *derived* on that side (§Constraints item 6), the entry
+  still carries cause `added`/`removed` as above, but `cause.reason` carries the derivation
+  failure text verbatim, so a reader can distinguish "this model doesn't exist here" from "this
+  model's SQL doesn't derive here".
 - A model in `P_old` but not `P_new` is **removed**, symmetrically (also all `neutral`).
 - A model in both with `P_old[m] == P_new[m]` is **unshifted** and is not reported.
 - Otherwise the model is **shifted**, and its changes are the per-dimension differences, computed

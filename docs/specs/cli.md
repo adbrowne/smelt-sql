@@ -106,6 +106,8 @@ Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly
 
 **`smelt diff` specifics:** exits `0` if no schema changes are detected; exits `1` if any changes are found (including new or removed models). This makes it suitable as a CI gate.
 
+**`smelt explain --diff` specifics:** exits `0` whenever the diff was computed, whether or not any model shifted. Exits `1` only under `--fail-on`: `downgrade` when any downgrade is present, `any` when any model shifted at all. Exits `2` for a usage error — an unresolvable baseline (not a git work tree, an unknown ref, or a ref with no project at the given path) or combining `--diff` with the positional `<model>` argument, `--show-sql`, `--period`, or `--technique`. See `property_diff.md` §Surface for the full flag table.
+
 **`smelt test` specifics:** exits `0` if all tests pass; exits `1` if any test fails.
 
 **`smelt check` specifics:** exits `0` if every `error`-severity check passes (zero violating rows); exits `1` if any `error`-severity check has violations. `warn`-severity checks never affect the exit code — a check with `severity: warn` and violations reports `WARN` and the command still exits `0`. A check whose referenced model is not built in the target fails with `CheckTargetNotBuilt` (exit `1`), never a silent pass.
