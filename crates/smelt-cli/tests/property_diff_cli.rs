@@ -606,3 +606,175 @@ fn fail_on_without_diff_is_a_usage_error() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// --- `--markdown` (`docs/outcomes/20260905-property-diff/phases/06-plan.md`) ---
+
+/// `--markdown` and `--json` together is a usage error — `conflicts_with =
+/// "json"` on the clap declaration. Fails against a flag declared without
+/// that attribute, which would silently print JSON and ignore `--markdown`.
+#[test]
+fn markdown_and_json_together_is_a_usage_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+
+    let output = smelt()
+        .args(["explain", "--diff", "--markdown", "--json", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --markdown --json");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--markdown` without `--diff` is a usage error — `requires = "diff"`.
+/// Fails against a missing `requires`, the exact hole Phase 5's Q4 found on
+/// `--fail-on`.
+#[test]
+fn markdown_without_diff_is_a_usage_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+
+    let output = smelt()
+        .args(["explain", "--markdown", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --markdown");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Apply the join-induced `cell_technique` downgrade edit to
+/// `user_daily_spend.sql`, used by several tests below (re-created from the
+/// criterion-4 fixture already staged elsewhere in this file).
+fn apply_join_downgrade_edit(tmp: &Path) {
+    let model_path = tmp.join("models/user_daily_spend.sql");
+    let original = std::fs::read_to_string(&model_path).expect("read user_daily_spend.sql");
+    let edited = original.replace(
+        "SELECT\n    user_id,\n    CAST(transaction_timestamp AS DATE) AS spend_date,\n    SUM(amount) AS total_amount\nFROM smelt.sources.raw.transactions\nGROUP BY 1, 2",
+        "SELECT\n    t.user_id,\n    CAST(t.transaction_timestamp AS DATE) AS spend_date,\n    SUM(t.amount) AS total_amount\nFROM smelt.sources.raw.transactions t\nJOIN smelt.sources.raw.users u ON t.user_id = u.user_id\nGROUP BY 1, 2",
+    );
+    std::fs::write(&model_path, edited).expect("write edited user_daily_spend.sql");
+}
+
+/// `--markdown` reports the join downgrade in an open `<details>` block for
+/// both the directly-edited model and its downstream dependent. Fails
+/// against a renderer whose open-state or cause string is wrong, and
+/// against a `print!` branch wired after the `--fail-on` early return
+/// (there's no `--fail-on` here, so this alone only covers the render
+/// path — test 10 covers the ordering hazard).
+#[test]
+fn markdown_reports_the_join_downgrade_in_an_open_details() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+    apply_join_downgrade_edit(tmp.path());
+
+    let output = smelt()
+        .args(["explain", "--diff", "--markdown", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --markdown");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("<!-- smelt-property-diff -->"),
+        "expected the marker: {stdout}"
+    );
+    assert!(
+        stdout.contains("<details open>\n<summary>user_daily_spend"),
+        "expected an open details block naming user_daily_spend: {stdout}"
+    );
+    assert!(
+        stdout.contains("<details open>\n<summary>user_spend_running_total"),
+        "expected an open details block naming user_spend_running_total: {stdout}"
+    );
+}
+
+/// `--markdown --fail-on downgrade` exits `1` on the join-downgrade edit
+/// AND stdout still carries the full Markdown body. Fails against the
+/// ordering hazard where the body is printed after the `--fail-on` early
+/// return: the comment body would be empty exactly when it matters most —
+/// a PR carrying a downgrade.
+#[test]
+fn markdown_body_is_printed_even_when_fail_on_exits_1() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+    apply_join_downgrade_edit(tmp.path());
+
+    let output = smelt()
+        .args([
+            "explain",
+            "--diff",
+            "--markdown",
+            "--fail-on",
+            "downgrade",
+            "--project-dir",
+        ])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --markdown --fail-on downgrade");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("<!-- smelt-property-diff -->"),
+        "the body must still be printed on a --fail-on exit: {stdout}"
+    );
+    assert!(
+        stdout.contains("user_daily_spend"),
+        "expected the full body, not an empty one: {stdout}"
+    );
+}
+
+/// A formatting-only edit renders the cleared Markdown body: heading +
+/// `no models shifted` + marker (pairs the unit test through the real
+/// binary).
+#[test]
+fn a_formatting_only_edit_renders_the_cleared_markdown_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+    std::fs::write(
+        tmp.path().join("README.md"),
+        "# edited, but not a model, source, or smelt.yml file\n",
+    )
+    .expect("write README.md");
+
+    let output = smelt()
+        .args(["explain", "--diff", "--markdown", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --markdown");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no models shifted"), "stdout={stdout}");
+    assert!(
+        stdout.trim_end().ends_with("<!-- smelt-property-diff -->"),
+        "expected the marker as the last line: {stdout}"
+    );
+}

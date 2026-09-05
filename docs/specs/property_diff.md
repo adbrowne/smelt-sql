@@ -158,16 +158,45 @@ ordered as in the text form.
 summary counts, one collapsible `<details>` block per shifted model (open by default when it
 contains a downgrade), a table of changes with the same columns as the JSON `changes` entries,
 and a trailing HTML comment marker `<!-- smelt-property-diff -->` so a workflow can find and
-replace its previous comment instead of stacking new ones.
+replace its previous comment instead of stacking new ones. The marker and the heading are
+emitted **even when nothing shifted**: the body is the same `property diff vs <ref>: no models
+shifted` line the text form prints, followed by the marker. This is what lets the documented job
+(below) update a stale downgrade comment to the cleared state once the regression is fixed,
+instead of leaving it standing after the code it warned about no longer exists.
+
+Each `<details>` block's `<summary>` names the model, its cause, and its per-model change counts:
+`<model name> — <cause> — N downgrades, M upgrades, K neutral`, with `<cause>` the same string
+the text form's block header uses (`edited`, `added`, `removed`, or `downstream of <model>[,
+<model>…]`).
+
+GitHub rejects an issue comment body over 65,536 characters. The rendered Markdown body is
+bounded to keep any diff, however large, postable: it renders at most the first 50 shifted
+models in full, and lists any remainder by name only inside one final `<details>` block
+(`… and N more shifted models`). The marker is always the last line, so the workflow can still
+find and update the comment on a capped body. The cap applies to the rendered Markdown body
+only — it never changes `summary`, `--fail-on`, or the JSON form, all of which report every
+shifted model regardless of size.
 
 ### Pull-request comment
 
 smelt ships a documented GitHub Actions job (`docs-site/docs/guide/ci.md`) that runs
 `smelt explain --diff "$BASE_SHA" --markdown` on the pull request's merge commit and posts or
-updates one comment via `gh pr comment`. The job is text, not code: it composes the CLI surface
-above and the `gh` CLI, and its only smelt-specific knowledge is the marker comment. This
+updates one comment via `gh pr comment`/`gh api`. The job is text, not code: it composes the CLI
+surface above and the `gh` CLI, and its only smelt-specific knowledge is the marker comment. This
 repository runs the same job over `examples/` on every pull request as its own dogfood, so the
 Markdown form is exercised in CI.
+
+A `pull_request` event triggered from a fork receives a read-only `GITHUB_TOKEN`, so the
+documented job always writes the rendered body to the job summary (which needs no write
+permission) and posts or updates the PR comment only when the head repository is the base
+repository — the same fork guard `gh` write operations need everywhere in this repository's
+workflows. The job does not gate the build by default: `--fail-on` is documented as an opt-in a
+user's own project can add, with the tradeoff that a repository whose tracked examples shift
+routinely will find a default-on gate goes red on legitimate work and gets bypassed, defeating
+the signal it exists for. This repository's own dogfood job runs without `--fail-on` for exactly
+that reason: its build-failing assertion is that `smelt explain --diff --markdown` exits `0` — a
+broken renderer or an example that fails to derive breaks the job; a legitimate property shift
+does not.
 
 ### Editor
 
@@ -449,6 +478,14 @@ compares verdicts.
   `RepairSliceUnbounded`) raise no diagnostic through the ordinary diagnostics pipeline today, so
   their profile `code` is absent. Whether each deserves its own `DiagnosticCode` catalogue entry
   is open; tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- A source file with no `smelt.` marker that is not actually a model definition (a DDL or setup
+  script, say) is classified as `EntityKind::Model` by the resolver and genuinely fails
+  `PropertySet::derive`. Today this is harmless: it lands in the derivation-failure set
+  symmetrically on both sides of a diff, never enters `diff.models`, and never reaches
+  user-facing output. It would stop being harmless if such a file were edited on only one side of
+  a diff — that would surface as a spurious `added`/`removed` entry carrying the derivation
+  failure text as its reason, rather than being recognised as "not a model." Tracked in
+  `docs/outcomes/20260905-property-diff/outcome.md`.
 
 ## Future Extensions
 

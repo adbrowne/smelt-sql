@@ -1202,6 +1202,7 @@ smelt explain [MODEL_NAME] [OPTIONS]
 | `--technique` | | string | | Requires `--show-sql`. Render a named technique's own preview statements instead of the admitted one's, for every cell — including a cell where the technique is not applicable, whose reason is printed rather than silently skipped. Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute` (`recompute` and `delete_insert` both resolve to the same DELETE+INSERT / region-recompute technique). Doesn't affect `--json`, whose `technique_previews` array always carries every technique regardless of this flag. |
 | `--diff` | | `[<ref>]` | merge-base with `main` | Diff the project's property profile between a git baseline and the working tree instead of printing a graph or a report. See "Property diff" below. Exclusive with `MODEL_NAME`, `--show-sql`, `--period`, and `--technique` (usage error, exit `2`). |
 | `--fail-on` | | `downgrade`\|`any` | | Only with `--diff`. Exit `1` when a downgrade (`downgrade`) or any shift at all (`any`) is present in the reported set. Without this flag, `--diff` always exits `0` once the diff was computed. |
+| `--markdown` | | bool | `false` | Only with `--diff`. Emit the diff as a single GitHub-flavoured Markdown comment body instead of text. Exclusive with `--json`. See "Property diff" below. |
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
@@ -1234,8 +1235,12 @@ property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shif
 whether it was explicit or defaulted), `edited_files`, `summary` (downgrade/upgrade/neutral
 counts and the shifted-model count), and `models` (one entry per shifted model, each with a
 `cause` and its `changes`). See `docs/specs/property_diff.md` §Surface "JSON" for the full
-schema. `--select` narrows the *reported* set only — every model is still compared at both
-versions so attribution stays correct — and the summary counts follow the reported set.
+schema. `--markdown` emits a single GitHub-flavoured Markdown comment body instead, with a
+trailing `<!-- smelt-property-diff -->` marker — see [`smelt explain` §Property
+diff](smelt-explain.md#property-diff) and [Continuous integration](../guide/ci.md) for the
+documented job that posts it. `--select` narrows the *reported* set only — every model is still
+compared at both versions so attribution stays correct — and the summary counts follow the
+reported set.
 
 Exit codes: `0` whenever the diff was computed (whether or not anything shifted); `1` only under
 `--fail-on`; `2` for an unresolvable baseline (not a git work tree, an unknown ref, or a ref with

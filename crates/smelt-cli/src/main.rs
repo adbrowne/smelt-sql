@@ -540,6 +540,14 @@ struct ExplainArgs {
     /// all. Only meaningful with `--diff`.
     #[arg(long = "fail-on", value_parser = ["downgrade", "any"], requires = "diff")]
     fail_on: Option<String>,
+
+    /// Emit the diff as GitHub-flavoured Markdown — a single comment body
+    /// carrying the `<!-- smelt-property-diff -->` marker
+    /// (`docs/specs/property_diff.md` §Surface "Markdown"), ready for
+    /// `gh pr comment --body-file`. Only meaningful with `--diff`;
+    /// exclusive with `--json`.
+    #[arg(long = "markdown", requires = "diff", conflicts_with = "json")]
+    markdown: bool,
 }
 
 #[derive(Parser)]

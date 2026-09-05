@@ -4,7 +4,7 @@ Inspect the logical and physical execution plan for a project, or the derived ma
 
 ```bash
 smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>] [--show-sql] [--period <start>..<end>] [--technique <name>]
-smelt explain --diff [<ref>] [--json] [--fail-on <downgrade|any>] [--select <selector>] [--project-dir <path>]
+smelt explain --diff [<ref>] [--json] [--markdown] [--fail-on <downgrade|any>] [--select <selector>] [--project-dir <path>]
 ```
 
 ## Options
@@ -20,6 +20,7 @@ smelt explain --diff [<ref>] [--json] [--fail-on <downgrade|any>] [--select <sel
 | `--technique` | Requires `--show-sql`. Render a named technique's own preview statements instead of the admitted one's, per cell — including a `NotApplicable` reason where that technique doesn't apply to a given cell. Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute`. |
 | `--diff [<ref>]` | Diff the project's property profile between a git baseline (default: merge-base with `main`) and the working tree, instead of printing a graph or a report. See [Property diff](#property-diff) below. Exclusive with `MODEL_NAME`, `--show-sql`, `--period`, and `--technique` — combining them is a usage error (exit `2`). |
 | `--fail-on` | Only with `--diff`. `downgrade` exits `1` when any downgrade is present; `any` exits `1` when any model shifted at all. Without it, `--diff` exits `0` whenever the diff was computed. |
+| `--markdown` | Only with `--diff`. Emit the diff as a single GitHub-flavoured Markdown comment body instead of text. Exclusive with `--json`. See [Property diff](#property-diff) below. |
 
 ## Human-readable output
 
@@ -281,6 +282,41 @@ When nothing shifted, the whole output is one line: `property diff vs <ref>: no 
 
 The full schema — every `dimension` value, the per-dimension direction rules, and the
 attribution algorithm — is normative in `docs/specs/property_diff.md`.
+
+**Markdown** (`--diff --markdown`): a single comment body suitable for `gh pr comment
+--body-file`, with one collapsible block per shifted model (open by default when it holds a
+downgrade) and a trailing `<!-- smelt-property-diff -->` marker a CI job uses to update its
+previous comment instead of stacking a new one on every push. The marker is emitted even when
+nothing shifted, so a stale downgrade comment can be cleared once the regression is fixed. See
+[Continuous integration](../guide/ci.md) for the documented GitHub Actions job.
+
+```
+$ smelt explain --diff --markdown
+
+### property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+
+1 downgrades, 0 upgrades, 0 neutral.
+
+<details open>
+<summary>user_daily_spend — edited — 1 downgrades, 0 upgrades, 0 neutral</summary>
+
+| dimension | subject | direction | old | new | reason |
+|---|---|---|---|---|---|
+| cell_technique | {total_amount}@NewData { source: "raw.transactions" } | downgrade | KeyedFold | DeleteInsert |  |
+
+</details>
+
+<details open>
+<summary>user_spend_running_total — downstream of user_daily_spend — 1 downgrades, 0 upgrades, 0 neutral</summary>
+
+| dimension | subject | direction | old | new | reason |
+|---|---|---|---|---|---|
+| cell_removed | {running_total}@NewData { source: "user_daily_spend" } | downgrade | {...} | null |  |
+
+</details>
+
+<!-- smelt-property-diff -->
+```
 
 `--select <selector>` narrows the *reported* set only; every model is still compared at both
 versions so a downstream model's `cause` stays correct even when its edited ancestor is filtered

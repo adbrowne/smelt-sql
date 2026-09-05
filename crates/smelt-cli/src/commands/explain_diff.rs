@@ -10,8 +10,8 @@
 //! the edited set) has been read, then dropped — its `Drop` deletes the
 //! scratch directory (`docs/specs/property_diff.md` §Constraints item 8).
 //!
-//! Rendering is delegated entirely to `smelt_logical::analysis::
-//! diff_render` over the `DiffReport` envelope
+//! Rendering (text and Markdown) is delegated entirely to
+//! `smelt_logical::analysis::diff_render` over the `DiffReport` envelope
 //! (`docs/specs/property_diff.md` §Surface "Output forms") — this module
 //! assembles the report's inputs and never formats a change itself. Same
 //! for the §Semantics rules `apply_failure_reasons` (C2) and
@@ -29,7 +29,7 @@ use smelt_core::workspace::load_workspace;
 use smelt_logical::analysis::diff::{
     apply_failure_reasons, diff_profiles, BaselineInfo, DiffGraph, DiffReport,
 };
-use smelt_logical::analysis::diff_render::text_report;
+use smelt_logical::analysis::diff_render::{markdown_report, text_report};
 use smelt_runtime::profile::profiles_for_workspace;
 
 use crate::ExplainArgs;
@@ -114,11 +114,18 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
         report.narrow_to(&selected.into_iter().collect());
     }
 
+    // D6.4: the body is always printed here, BEFORE the `--fail-on` early
+    // return below. A `--markdown` body printed after that return would be
+    // empty exactly when it matters most — a PR carrying a downgrade,
+    // where `--fail-on` exits non-zero
+    // (`docs/outcomes/20260905-property-diff/phases/06-plan.md` R6).
     if args.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&report).with_context(|| "Failed to serialize diff")?
         );
+    } else if args.markdown {
+        print!("{}", markdown_report(&report));
     } else {
         print!("{}", text_report(&report));
     }
