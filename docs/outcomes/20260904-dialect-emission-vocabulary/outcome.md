@@ -73,7 +73,7 @@ audit before it is claimed — never from documentation.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
-| 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | pending |
+| 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | planned |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | pending |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb` | pending |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
@@ -107,6 +107,15 @@ audit before it is claimed — never from documentation.
   added (`no_registry_row_names_a_retired_dialect`, `baseline_names_exactly_the_audited_dialects`);
   coverage doc regenerated; #181 was already closed. `verify-phase.sh` ALL GREEN. No new gaps
   surfaced; the pg_query anchor and ROADMAP are confirmed untouched.
+
+- 2026-09-06 (plan 02) — **No reshape.** Phase 1's summary surfaced nothing outside its task
+  list, so phases 2–8 stand as written. Phase 2's plan fixes three design points the outcome left
+  open, all inside its own scope: `Emission::Template` carries a `&'static str` with zero-based
+  `{n}` placeholders; validation is a pure `validate_template` called from the registry seed
+  (asserting, not `.expect(`, so the hardening ratchet is untouched); and a template on a
+  **variadic** signature is rejected at build time, since a placeholder cannot name a variadic
+  tail. A `PAREN_EXPR` argument counts as an atom on substitution — double-wrapping it would break
+  the byte-identical pins criterion 1 requires.
 
 ## Blocked
 
