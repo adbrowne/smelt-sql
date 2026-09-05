@@ -74,8 +74,8 @@ audit before it is claimed — never from documentation.
 |---|-------|--------|
 | 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
-| 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | pending |
-| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb` | pending |
+| 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | planned |
+| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | pending |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
 | 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
@@ -133,6 +133,15 @@ audit before it is claimed — never from documentation.
   `docs/specs/multi_backend.md`'s stale divergence bullet removed. Full
   `verify-phase.sh` green plus every gate the plan's Verification section
   named. See `phases/02-summary.md` for detail.
+
+- 2026-09-06 (plan 03) — **Small reshape: the end-to-end leg of criterion 3 moves to phase 4.**
+  Every `Emission::Template` row today is an infix operator (`%`, `^`, `**`), and a `BINARY_EXPR`
+  can carry none of the seven modifiers, so phase 3 has no production call site to refuse
+  end-to-end. Phase 3 therefore ships the refusal as a pure detector wired into
+  `unsupported_emissions`, tested one-modifier-per-test against real parsed SQL; phase 4's row
+  gains the compile-path test once it registers the first function-call template. Nothing leaves
+  the outcome. Phase 3 also needs no spec delta — `multi_backend.md` §"Template emission" already
+  states the refusal rule and the per-`RewriteId` justification line normatively.
 
 ## Blocked
 
