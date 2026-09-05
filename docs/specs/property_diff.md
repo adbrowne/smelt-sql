@@ -184,8 +184,11 @@ shifted model regardless of size.
 
 smelt ships a documented GitHub Actions job (`docs-site/docs/guide/ci.md`) that runs
 `smelt explain --diff "$BASE_SHA" --markdown` on the pull request's merge commit and posts or
-updates one comment via `gh pr comment`/`gh api`. The job is text, not code: it composes the CLI
-surface above and the `gh` CLI, and its only smelt-specific knowledge is the marker comment. This
+updates one comment via `gh pr comment`/`gh api`. The comment it updates is found among **that
+pull request's own** comments: the marker identifies which of a PR's comments is the property
+diff's, never which pull request a repository-wide comment listing belongs to. The job is text,
+not code: it composes the CLI surface above and the `gh` CLI, and its only smelt-specific
+knowledge is the marker comment. This
 repository runs the same job over `examples/` on every pull request as its own dogfood, so the
 Markdown form is exercised in CI.
 
