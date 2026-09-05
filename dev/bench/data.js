@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788579414788,
+  "lastUpdate": 1788579418251,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.86886,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "982bcdf84e92b99c6da0e2a93ac6d155daa579f1",
+          "message": "docs(research): assess gaps to using smelt as a production dbt replacement\n\nGap analysis assuming the current outcome backlog is fully complete: only\n3 backend crates exist, no slim-CI/--defer selection, no dbt migration\npath, no package/macro ecosystem, no shipped snapshots (SCD2).\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-05T13:33:03+10:00",
+          "tree_id": "dc07480f42c860c4ad828fe5079e5ccc2e00c005",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/982bcdf84e92b99c6da0e2a93ac6d155daa579f1"
+        },
+        "date": 1788579416876,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.184427050896975,
+            "unit": "MB/s"
           }
         ]
       }
