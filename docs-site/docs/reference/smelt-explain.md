@@ -71,8 +71,9 @@ Refusals (1):
 A model whose plan admitted every cell prints `Refusals: (none)`. With `--json`, the same set
 appears as a top-level `refusals` array: `[{"code": "MaintenanceScanUnbounded", "text":
 "ScanUnbounded { source: \"raw.orders\", why: \"no partition_column declared\" }"}]` — `code`
-names the diagnostic code a refusal of this shape raises, `text` is the report's own rendering of
-the refusal, verbatim. Empty when the model's plan admitted every cell.
+names the diagnostic code a refusal of this shape raises, absent for a refusal that raises no
+diagnostic today; `text` is the report's own rendering of the refusal, verbatim. Empty when the
+model's plan admitted every cell.
 
 ## Probes
 

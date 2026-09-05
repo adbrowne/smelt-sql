@@ -951,6 +951,130 @@ pub enum MaintenanceRefusal {
     },
 }
 
+/// The `(severity, code, message)` a `MaintenanceRefusal` of this shape
+/// raises through the ordinary diagnostics pipeline — the single owner of
+/// that mapping. `crate::lib::check_file_diagnostics` (`smelt-db/src/lib.rs`)
+/// is this function's production caller: it folds every `maintenance_plan`
+/// refusal onto a diagnostic by calling this, never by re-matching
+/// `MaintenanceRefusal` itself. `smelt-db`'s
+/// `refusal_codes::refusal_code_names_are_real_variants` integration test
+/// (`tests/integration/refusal_codes.rs`) is the other caller — driving the
+/// agreement leg (ruling R2) from this function directly, rather than from a
+/// `DiagnosticCode` typed into the test, so a change here cannot drift from
+/// what the test asserts. `None` is not reachable today (`MaintenanceRefusal`
+/// carries no variant this pipeline declines to diagnose — the three
+/// `Refusal` variants with no `DiagnosticCode` of their own are filtered out
+/// before construction, see this module's `Refusal` → `MaintenanceRefusal`
+/// mapping); the `Option` return type future-proofs the signature against a
+/// refusal shape that legitimately raises no diagnostic, matching
+/// `smelt_logical::maintenance::refusal_code`'s own shape.
+///
+/// **Visibility deviation**: the phase-2 fix-round work order specified
+/// `pub(crate)`, but `tests/integration/*.rs` compiles as a separate crate
+/// (a Cargo integration-test binary) that cannot see `pub(crate)` items —
+/// `pub(crate)` here would make the agreement test unable to call this
+/// function at all, defeating F2's whole point. `pub` (not re-exported from
+/// the crate root) is the minimal change that keeps the test able to read
+/// the real mapping.
+pub fn diagnostic_for_refusal(
+    refusal: &MaintenanceRefusal,
+) -> Option<(
+    crate::diagnostics_types::DiagnosticSeverity,
+    crate::diagnostics_types::DiagnosticCode,
+    String,
+)> {
+    use crate::diagnostics_types::{DiagnosticCode, DiagnosticSeverity};
+    Some(match refusal {
+        MaintenanceRefusal::ScanUnbounded { source, why } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenanceScanUnbounded,
+            format!("maintenance scan over '{source}' cannot be partition-bounded: {why}"),
+        ),
+        MaintenanceRefusal::NoAdmissibleTechnique { trigger, why } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenanceNoAdmissibleTechnique,
+            format!("no maintenance technique admits trigger {trigger}: {why}"),
+        ),
+        MaintenanceRefusal::LocalityNotEstablished { message } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::KeyedForbidsTimeseries,
+            message.clone(),
+        ),
+        MaintenanceRefusal::IdentityNotDerivable { message } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::GrainAssertionMismatch,
+            message.clone(),
+        ),
+        MaintenanceRefusal::SkeletonChanged { column } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenanceSkeletonChanged,
+            format!(
+                "column '{column}' occupies a row-membership/identity (skeleton) \
+                 position — a grain change, never a column backfill (EX-39, \
+                 docs/specs/incremental_models.md §\"The definition-change trigger\")",
+            ),
+        ),
+        MaintenanceRefusal::SkeletonClauseChanged { reason } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenanceSkeletonChanged,
+            format!(
+                "the model's skeleton clause changed against its deployed schema \
+                 snapshot: {reason} — a grain change, never a column backfill (EX-39, \
+                 docs/specs/incremental_models.md §\"The definition-change trigger\")",
+            ),
+        ),
+        MaintenanceRefusal::PartitionColumnChanged { from, to } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenancePartitionColumnChanged,
+            format!(
+                "declared timeseries.partition_column changed from '{from}' to '{to}' \
+                 since this model was last deployed — the recorded address every \
+                 partition-grain maintenance write targets no longer matches; this is a \
+                 pre-execution refusal that no run flag bypasses (the analyzer gate \
+                 blocks on any Error-severity diagnostic unconditionally), so delete the \
+                 model's recorded snapshot (.smelt/targets/<target>/schemas/<model>.json) \
+                 and re-run `smelt run` to re-address the table under the new column",
+            ),
+        ),
+        MaintenanceRefusal::UnsupportedGrain {
+            grain,
+            tracking_plan,
+        } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenanceUnsupportedGrain,
+            format!(
+                "grain: {grain} is not yet supported by maintenance-plan derivation \
+                 (tracked in {tracking_plan}); declare a supported grain \
+                 (partition or key) or use refresh: full",
+            ),
+        ),
+        MaintenanceRefusal::DefinitionChangeNotBackfillable { columns, why } => (
+            DiagnosticSeverity::Warning,
+            DiagnosticCode::MaintenanceColumnAddNotBackfillable,
+            format!(
+                "added column(s) {} cannot be backfilled in place: {why} — the run will \
+                 ALTER them in and leave historical rows NULL until `smelt migrate` \
+                 backfills them",
+                columns.join(", "),
+            ),
+        ),
+        MaintenanceRefusal::KeyedRetractableContribution {
+            source,
+            columns,
+            why,
+        } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::KeyedRetractableContribution,
+            format!(
+                "enrichment join against '{source}' feeds a retractable contribution to \
+                 column(s) {}: {why} — use `refresh: materialized_view`, or compose the \
+                 enrichment as a separate model",
+                columns.join(", "),
+            ),
+        ),
+    })
+}
+
 /// A Salsa-friendly (`PartialEq`) projection of a
 /// [`smelt_logical::maintenance::WritePinRefusal`] — mirrors the pure enum's
 /// data exactly, for the same reason [`MaintenanceRefusal`] exists.

@@ -165,6 +165,16 @@ pub fn effective_contract(
 /// and the single-version report share one owner and one serde shape —
 /// `smelt-cli` keeps the old name as a type alias over this struct, sourced
 /// from [`effective_contract`], never re-resolved.
+///
+/// **Not the same type as [`ContractPoint`]** (below, in this same module):
+/// `ContractPoint` is the lattice-oracle enum a contract *point* is drawn
+/// from (`default`/`frozen_horizon`/`deferral`/`retain_departed` as a
+/// closed set of variants, consumed by the conformance oracle transform);
+/// `ContractPointView` is the *rendered* per-cell JSON shape one or more of
+/// those points project onto (a struct of optional fields, consumed by
+/// `smelt explain --json`, the property profile, and their diff). The name
+/// collision (`View` vs. bare) is deliberate friction — the two are
+/// deliberately distinct, and a future reader should not merge them.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct ContractPointView {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,6 +185,14 @@ pub struct ContractPointView {
     /// Omitted along with `deferral` when no deferral applies.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deferral_origin: Option<String>,
+    /// `"true"`, or `"tombstone: <column>"` for the tombstone form —
+    /// mirrors [`EffectiveContract::render_label`]'s own `retain_departed`
+    /// rendering. Fix round 1, F5: this field was missing entirely, so a
+    /// `retain_departed` declaration or change could never be observed
+    /// through [`ContractPointView`] — the shape Phase 3's `contract_point`
+    /// direction rule (`docs/specs/property_diff.md` §Direction) compares.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retain_departed: Option<String>,
 }
 
 impl ContractPointView {
@@ -182,7 +200,7 @@ impl ContractPointView {
     /// mirrors [`EffectiveContract::is_default`] for a caller that only has
     /// the rendered [`ContractPointView`] in hand.
     pub fn is_default(&self) -> bool {
-        self.frozen_horizon.is_none() && self.deferral.is_none()
+        self.frozen_horizon.is_none() && self.deferral.is_none() && self.retain_departed.is_none()
     }
 }
 
@@ -198,10 +216,15 @@ impl From<EffectiveContract> for ContractPointView {
             }
             None => (None, None),
         };
+        let retain_departed = effective.retain_departed.map(|r| match r {
+            RetainDeparted::Bool(_) => "true".to_string(),
+            RetainDeparted::Tombstone { tombstone } => format!("tombstone: {tombstone}"),
+        });
         ContractPointView {
             frozen_horizon: effective.frozen_horizon.map(|h| h.display),
             deferral,
             deferral_origin,
+            retain_departed,
         }
     }
 }

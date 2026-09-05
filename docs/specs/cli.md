@@ -225,8 +225,9 @@ With `--json`, the per-model report gains an append-stable `probes` array (§Con
 With `--json`, the per-model report also gains an append-stable `refusals` array (§Constraints
 item 5) carrying the same admission refusals the text report's "Refusals" section prints:
 `{"code": "<diagnostic code name>", "text": "<refusal text>"}`. `code` names the diagnostic code
-a refusal of this shape raises through the ordinary diagnostics pipeline; `text` is the report's
-own rendering of the refusal, verbatim. Empty when the model's plan admitted every cell.
+a refusal of this shape raises through the ordinary diagnostics pipeline, absent for a refusal
+that raises no diagnostic today; `text` is the report's own rendering of the refusal, verbatim.
+Empty when the model's plan admitted every cell.
 
 **Effective contract.** Each cell's block additionally prints its effective contract lattice point
 (`incremental_models.md` §"The contract lattice") — `default` when no `contract:` applies,
@@ -236,9 +237,10 @@ otherwise the applicable relaxations with their declared intervals: `frozen_hori
 labels its origin `(cell)`). A relaxation is never silent — a model declaring `contract:` always
 shows it here, per cell. A per-cell `deferral` refinement prints as declared even though it is not
 yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each cell in the
-`cells` array carries a `contract_point` object with the same information: `frozen_horizon` and/or
-`deferral` (plus `deferral_origin`: `"model"` or `"cell"`) when a relaxation applies; a default
-cell's `contract_point` is an empty object — absent relaxations are omitted, never rendered `null`.
+`cells` array carries a `contract_point` object with the same information: `frozen_horizon`
+and/or `deferral` (plus `deferral_origin`: `"model"` or `"cell"`) and/or `retain_departed` when a
+relaxation applies; a default cell's `contract_point` is an empty object — absent relaxations are
+omitted, never rendered `null`.
 
 ### `smelt bakeoff <model>` flags
 

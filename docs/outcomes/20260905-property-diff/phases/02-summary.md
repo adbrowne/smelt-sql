@@ -90,3 +90,104 @@
    "no technique admits this trigger" failure, not a 1:1 semantic match. Documented in
    `refusal_code`'s own doc comment; the agreement test does not assert `smelt-db` actually emits
    that code for these three (it doesn't, today).
+
+   **Superseded by fix round 1, F1 below** — deviation 3 above described the original design; it
+   is no longer accurate. `refusal_code` now returns `None` for these three rather than naming a
+   code the pipeline can't produce.
+
+## Fix round 1 (review findings)
+
+Seven findings from the phase-2 review, addressed in commit order F1→F7. None redesign the
+phase's structure (the `smelt-logical` move, `CellVerdict`-driven JSON, and the flatten all
+stand, as instructed).
+
+- **F1 (Critical, blocker) — refusal_code named a diagnostic the pipeline never raises.**
+  `refusal_code` now returns `Option<&'static str>` (exhaustive match, no wildcard arm), `None`
+  for exactly the three variants (`ReachNotDerivable`, `RepairKeysNotDiscoverable`,
+  `RepairSliceUnbounded`) `smelt-db` itself maps to `None`. `ProfileRefusal.code` is now
+  `Option<String>` with `#[serde(skip_serializing_if = "Option::is_none")]`. Spec-first:
+  `docs/specs/property_diff.md` §"The property profile" item 3, `docs/specs/cli.md`, and
+  `docs-site/docs/reference/smelt-explain.md` all now say "absent for a refusal that raises no
+  diagnostic today". Added an Open Question to `property_diff.md` §Known Divergences (whether
+  those three deserve their own `DiagnosticCode` entries) instead of inventing codes, per the
+  ruling. The agreement test now asserts both directions (see F2).
+
+- **F2 (Important) — the agreement gate read a `DiagnosticCode` typed into the test, not
+  smelt-db's real mapping.** Extracted the inline `match` from `check_file_diagnostics`
+  (`crates/smelt-db/src/lib.rs`) into `queries::maintenance::diagnostic_for_refusal(&MaintenanceRefusal)
+  -> Option<(DiagnosticSeverity, DiagnosticCode, String)>`; `check_file_diagnostics` now calls it,
+  and the existing diagnostics test suites (`check_diagnostics`, `maintenance_diagnostics`, the
+  full `cargo test -p smelt-db`) stay green, proving behaviour didn't change. The rewritten
+  `refusal_codes.rs` calls `diagnostic_for_refusal` directly and asserts agreement in both
+  directions (`refusal_code_names_are_real_variants_and_agree_with_smelt_db`,
+  `refusal_code_none_agrees_with_smelt_db_none`). **Visibility deviation**: the work order said
+  `pub(crate)`, but `tests/integration/*.rs` compiles as a separate crate that cannot see
+  `pub(crate)` items — `pub(crate)` would make the test unable to call the function at all,
+  defeating F2's point. Made it `pub` (not re-exported from the crate root) instead; documented
+  in the function's own doc comment. Red-green: running the *old* `refusal_code` (naming
+  `MaintenanceNoAdmissibleTechnique` for all three unmapped variants) against the *new* test's
+  `refusal_code_none_agrees_with_smelt_db_none` would fail, since smelt-db has no
+  `MaintenanceRefusal` counterpart to construct for those three — confirming the new test
+  actually exercises the F1 bug the old test missed.
+
+- **F3 (Important) — `covers_every_example_model` was a tautology.** Chose the "derive
+  `discovered_with_plan` independently" option (not deletion): added
+  `count_models_with_maintenance_plan`, which asks `smelt_db::maintenance_plan_report` directly
+  for every discovered model without going through `build_diagnostics_for`'s much larger
+  pipeline. Observed: before the fix, `compare_workspace`'s loop incremented both `checked` and
+  `discovered_with_plan` on the same unconditional lines inside the same `let Some(..) = .. else
+  { continue }` branch, so the assertion `checked == discovered_with_plan` could never fail short
+  of a panic — any bug that dropped a model *after* that point (a stray filter, a swallowed
+  `Err` later in the pipeline) would have gone undetected. The independent count now gives the
+  assertion real content.
+
+- **F4 (Important) — the UI parity test's independent assembly passed `&[]` for probes.**
+  `crates/smelt-ui/tests/api.rs`'s `assemble_diagnostics_independently` now calls
+  `smelt_runtime::probe_plan::probe_plan_for_model` with the same arguments, in the same order,
+  as the real endpoint (`crates/smelt-ui/src/build.rs`), including `key_locality` (added to the
+  test's `maintenance_plan_report` destructure — it wasn't captured before). The test still
+  passes, but now for the right reason: the endpoint's probe wiring is actually exercised by the
+  comparison, not incidentally skipped because the fixture declares no probe-backed fact.
+
+- **F5 (elevated to load-bearing) — `ContractPointView` dropped `retain_departed`.** Added
+  `retain_departed: Option<String>` to `ContractPointView` (`"true"` for the boolean form,
+  `"tombstone: <col>"` for the tombstone form, mirroring `EffectiveContract::render_label`'s own
+  rendering), wired it through `From<EffectiveContract>`, and included it in `is_default()`.
+  Updated `docs/specs/cli.md`'s JSON description of `contract_point` to mention it. This is the
+  field Phase 3's `contract_point` direction rule will diff — without it, a `retain_departed`
+  change could never surface as a downgrade.
+
+- **F6 (Minor, doc notes)** — `ContractPointView`'s doc comment now explicitly distinguishes it
+  from the neighbouring `ContractPoint` lattice-oracle enum (same module, deliberately distinct
+  types). `property_profile_parity.rs`'s module doc now states plainly that since
+  `build_maintenance_plan_json` reads `CellVerdict`, this gate compares JSON derived from the
+  profile against the profile itself — a real tripwire against a parallel derivation
+  reappearing, but not an independent correctness oracle for the profile's own values (that's
+  `maintenance_conformance`/`maintenance_diagnostics`'s job).
+
+- **F7 (open question, answered)** — the reviewer couldn't find where `examples/timeseries`'s 3
+  probes come from. Traced it directly: `user_daily_spend` yields 1 probe
+  (`mutation_profile.kind: append_only`, from its own declared source consumption) and
+  `daily_events_enriched` yields 2 (`referential_integrity`, both against `raw.users` —
+  `examples/timeseries/models/sources/raw/users.yml` declares `referential_integrity: [user_id]`,
+  which the reviewer's search missed because it's a declared fact in a source `.yml` file, not
+  model SQL/frontmatter). `1 + 2 = 3` matches the phase-2 summary's claim exactly. These are real
+  declared-fact probes, not an incidental non-vacuity accident — the `total_probes > 0` assertion
+  rests on genuine fixture content, safe for Phase 5 to lean on.
+
+Deferred item (per the work order, not touched): `crates/smelt-cli/src/explain.rs` still renders
+refusals/cell corner/technique via `{:?}` on the raw plan in the TEXT report — ledgered for
+Phase 5.
+
+### Gate status (fix round 1)
+
+- `cargo check --workspace --all-targets` — clean.
+- `cargo test -p smelt-logical --lib` — 746 passed.
+- `cargo test -p smelt-db --test integration refusal_codes` — 2 passed
+  (`refusal_code_names_are_real_variants_and_agree_with_smelt_db`,
+  `refusal_code_none_agrees_with_smelt_db_none`).
+- `cargo test -p smelt-cli --test property_profile_parity --test explain_maintenance --test
+  explain_show_sql --test explain_probes` — all passed (37 tests).
+- `cargo test -p smelt-ui --test api` — 2 passed.
+- `cargo fmt --all -- --check` — clean.
+- `bash .claude/scripts/verify-phase.sh` — see report for this fix round's final run.

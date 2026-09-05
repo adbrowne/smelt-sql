@@ -22,6 +22,20 @@
 //! succeeds for every one of its discovered models (the half of the profile
 //! that exists independent of a maintenance plan), so the workspace still
 //! earns its place in this gate rather than being dead weight.
+//!
+//! **What this gate is, and is not, an oracle for.** `smelt-cli`'s own
+//! `build_maintenance_plan_json` (`commands/explain.rs`) now *reads*
+//! `CellVerdict`/`ProfileRefusal`/`ProfileProbe` off the same
+//! `PropertyProfile` this test compares against, rather than recomputing
+//! its own encodings — the correct consequence of single ownership
+//! (`CLAUDE.md` §"Maintenance-plan purity"). That means this gate compares
+//! JSON derived from the profile against the profile itself for those
+//! fields, and is therefore a real tripwire against a parallel, drifting
+//! derivation reappearing in the report path — but it is NOT an
+//! independent oracle for whether the profile's own values are *correct*.
+//! Value-level correctness for the underlying maintenance plan is the
+//! standing-gate suite's job (`maintenance_conformance`,
+//! `maintenance_diagnostics`, and friends), not this file's.
 
 use std::path::Path;
 use std::process::Command;
@@ -227,7 +241,6 @@ struct WorkspaceCheck {
 fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
     let (_, models) = discover_all(project_dir);
     let mut checked = 0usize;
-    let mut discovered_with_plan = 0usize;
     let mut total_cell_verdicts = 0usize;
     let mut total_refusals_underlying = 0usize;
     let mut total_refusals_profile = 0usize;
@@ -240,7 +253,6 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         else {
             continue;
         };
-        discovered_with_plan += 1;
         checked += 1;
         total_refusals_underlying += refusals_ground_truth;
 
@@ -346,6 +358,8 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         }
     }
 
+    let discovered_with_plan = count_models_with_maintenance_plan(project_dir);
+
     WorkspaceCheck {
         checked,
         discovered_with_plan,
@@ -354,6 +368,30 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
         total_refusals_profile,
         total_probes,
     }
+}
+
+/// Count discovered models whose `smelt_db::maintenance_plan_report` is
+/// `Some` — computed independently of `compare_workspace`'s own loop above
+/// (fix round 1, F3). The loop's `checked` counter increments exactly when
+/// `build_diagnostics_for` returns `Some`; comparing it against a count
+/// derived from that very same conditional was a tautology, not a coverage
+/// check. This asks `maintenance_plan_report` directly for every discovered
+/// model, without going through `build_diagnostics_for`'s much larger
+/// pipeline (dependency graph, compiler registry, ephemeral resolver,
+/// probe plan, `build_model_diagnostics`), so a bug that silently drops a
+/// model somewhere later in that pipeline (a swallowed `Err`, a stray
+/// filter) still shows up as `checked != discovered_with_plan`.
+fn count_models_with_maintenance_plan(project_dir: &Path) -> usize {
+    let (_, models) = discover_all(project_dir);
+    let db = init_db(project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    models
+        .iter()
+        .filter(|m| {
+            let file = db.source_file(&m.path).expect("model file registered");
+            smelt_db::maintenance_plan_report(&db, ws, file).is_some()
+        })
+        .count()
 }
 
 fn timeseries_dir() -> std::path::PathBuf {

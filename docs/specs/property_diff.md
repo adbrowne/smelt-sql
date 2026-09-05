@@ -204,8 +204,9 @@ version, derived by the same pure functions the report is built from, and it con
    `cell_verdicts` rather than `cells` because the model-diagnostics response
    (`ui_model_diagnostics.md` §Surface) already carries an unrelated `cells` key (the
    technique-preview set) beside the flattened profile.
-3. `refusals` — the set of maintenance admission refusals (the diagnostic code's *name* plus the
-   refusal text), as the maintenance-plan gate would report them.
+3. `refusals` — the set of maintenance admission refusals (the diagnostic code's name — absent for
+   a refusal that raises no diagnostic today — plus the refusal text), as the maintenance-plan
+   gate would report them.
 4. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`, `cadence`).
 
 The profile omits everything that is a *rendering* rather than a verdict: emitted statements,
@@ -384,6 +385,10 @@ compares verdicts.
 - Whether `column_added` on a *maintained* model should be neutral (as specified) or should
   inherit the direction of the `cell_added` it usually accompanies is open; the current answer
   keeps it neutral so schema change stays owned by `smelt diff`.
+- Three admission refusals (`ReachNotDerivable`, `RepairKeysNotDiscoverable`,
+  `RepairSliceUnbounded`) raise no diagnostic through the ordinary diagnostics pipeline today, so
+  their profile `code` is absent. Whether each deserves its own `DiagnosticCode` catalogue entry
+  is open; tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
 
 ## Future Extensions
 

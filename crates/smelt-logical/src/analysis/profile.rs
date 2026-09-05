@@ -186,9 +186,14 @@ pub fn render_cell_verdict(cell: &PlanCell, contract_point: ContractPointView) -
 /// `smelt-logical` — layered single-ownership, ruling R1.3) plus the
 /// report's own `{:?}` rendering of the refusal, verbatim
 /// (`crates/smelt-cli/src/explain.rs`'s existing "Refusals" section).
+/// `code` is `None` for the three `Refusal` variants that raise no
+/// diagnostic through the ordinary pipeline today (`refusal_code`'s own doc
+/// comment) — a refusal must never claim a code the pipeline cannot
+/// actually produce.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ProfileRefusal {
-    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub text: String,
 }
 
@@ -198,7 +203,7 @@ impl ProfileRefusal {
     /// prints, so the two can never drift.
     pub fn from_refusal(refusal: &Refusal) -> Self {
         ProfileRefusal {
-            code: refusal_code(refusal).to_string(),
+            code: refusal_code(refusal).map(|c| c.to_string()),
             text: format!("{refusal:?}"),
         }
     }
@@ -387,7 +392,10 @@ mod tests {
         assert!(verdict.contract_point.is_default());
 
         assert_eq!(profile.refusals.len(), 1);
-        assert_eq!(profile.refusals[0].code, "MaintenanceScanUnbounded");
+        assert_eq!(
+            profile.refusals[0].code,
+            Some("MaintenanceScanUnbounded".to_string())
+        );
         assert!(profile.refusals[0].text.contains("ScanUnbounded"));
 
         assert_eq!(profile.probes.len(), 1);

@@ -517,43 +517,42 @@ pub enum Refusal {
 /// is unreachable from here — it lives in `smelt-db`, above `smelt-logical`
 /// (layered single-ownership, `CLAUDE.md` §Architectural invariants) — so
 /// `analysis::profile::ProfileRefusal` carries the code's name as
-/// `&'static str` rather than the enum value itself. This match is
+/// `Option<&'static str>` rather than the enum value itself. This match is
 /// exhaustive with **no wildcard arm**: a new [`Refusal`] variant is a
-/// compile error here until it is given a name, which is what buys back the
-/// compile-time guarantee `DiagnosticCode` would otherwise have given for
-/// free (ruling R2, `docs/outcomes/20260905-property-diff/phases/02-plan.md`).
+/// compile error here until it is given a name (or explicitly given `None`),
+/// which is what buys back the compile-time guarantee `DiagnosticCode` would
+/// otherwise have given for free (ruling R2,
+/// `docs/outcomes/20260905-property-diff/phases/02-plan.md`).
 ///
-/// Every name returned here is asserted, by
-/// `smelt-db`'s `refusal_code_names_are_real_variants` test, to parse to a
-/// real `DiagnosticCode` variant — and, for the variants
-/// `smelt-db/src/queries/maintenance.rs` actually maps onto a diagnostic
-/// today, to equal the code `smelt-db/src/lib.rs` emits for that refusal.
-/// Three variants (`ReachNotDerivable`, `RepairKeysNotDiscoverable`,
-/// `RepairSliceUnbounded`) have no `DiagnosticCode` of their own yet
-/// (`smelt-db/src/queries/maintenance.rs`'s own doc comments: "no
-/// `DiagnosticCode` variant yet ... a future phase's own diagnostic lands
-/// it"); until that lands, this names the closest real code that already
-/// covers the same failure to admit a technique —
-/// `MaintenanceNoAdmissibleTechnique` — rather than inventing a code here
-/// or leaving the match non-exhaustive. That is a placeholder, not an
-/// agreement claim: `smelt-db` does not emit `MaintenanceNoAdmissibleTechnique`
-/// for these three refusals today, and the agreement test does not assert
-/// it does.
-pub fn refusal_code(refusal: &Refusal) -> &'static str {
+/// Every `Some` name returned here is asserted, by `smelt-db`'s
+/// `refusal_code_names_are_real_variants` test, to parse to a real
+/// `DiagnosticCode` variant and to equal the code
+/// `smelt-db/src/queries/maintenance.rs`/`smelt-db/src/lib.rs` actually emit
+/// for that refusal shape. Three variants (`ReachNotDerivable`,
+/// `RepairKeysNotDiscoverable`, `RepairSliceUnbounded`) raise no diagnostic
+/// through the ordinary pipeline today — `smelt-db/src/queries/maintenance.rs`
+/// maps all three to `None` (no `DiagnosticCode` variant yet; see its own
+/// doc comments) — so this returns `None` for them too, rather than naming a
+/// code the pipeline can never actually produce. Whether these three deserve
+/// their own `DiagnosticCode` entries is open (`docs/specs/property_diff.md`
+/// §Known Divergences).
+pub fn refusal_code(refusal: &Refusal) -> Option<&'static str> {
     match refusal {
-        Refusal::SkeletonChanged { .. } => "MaintenanceSkeletonChanged",
-        Refusal::SkeletonClauseChanged { .. } => "MaintenanceSkeletonChanged",
-        Refusal::PartitionColumnChanged { .. } => "MaintenancePartitionColumnChanged",
-        Refusal::ScanUnbounded { .. } => "MaintenanceScanUnbounded",
-        Refusal::NoAdmissibleTechnique { .. } => "MaintenanceNoAdmissibleTechnique",
-        Refusal::ReachNotDerivable { .. } => "MaintenanceNoAdmissibleTechnique",
-        Refusal::UnsupportedGrain { .. } => "MaintenanceUnsupportedGrain",
-        Refusal::LocalityNotEstablished { .. } => "KeyedForbidsTimeseries",
-        Refusal::IdentityNotDerivable { .. } => "GrainAssertionMismatch",
-        Refusal::RepairKeysNotDiscoverable { .. } => "MaintenanceNoAdmissibleTechnique",
-        Refusal::RepairSliceUnbounded { .. } => "MaintenanceNoAdmissibleTechnique",
-        Refusal::DefinitionChangeNotBackfillable { .. } => "MaintenanceColumnAddNotBackfillable",
-        Refusal::KeyedRetractableContribution { .. } => "KeyedRetractableContribution",
+        Refusal::SkeletonChanged { .. } => Some("MaintenanceSkeletonChanged"),
+        Refusal::SkeletonClauseChanged { .. } => Some("MaintenanceSkeletonChanged"),
+        Refusal::PartitionColumnChanged { .. } => Some("MaintenancePartitionColumnChanged"),
+        Refusal::ScanUnbounded { .. } => Some("MaintenanceScanUnbounded"),
+        Refusal::NoAdmissibleTechnique { .. } => Some("MaintenanceNoAdmissibleTechnique"),
+        Refusal::ReachNotDerivable { .. } => None,
+        Refusal::UnsupportedGrain { .. } => Some("MaintenanceUnsupportedGrain"),
+        Refusal::LocalityNotEstablished { .. } => Some("KeyedForbidsTimeseries"),
+        Refusal::IdentityNotDerivable { .. } => Some("GrainAssertionMismatch"),
+        Refusal::RepairKeysNotDiscoverable { .. } => None,
+        Refusal::RepairSliceUnbounded { .. } => None,
+        Refusal::DefinitionChangeNotBackfillable { .. } => {
+            Some("MaintenanceColumnAddNotBackfillable")
+        }
+        Refusal::KeyedRetractableContribution { .. } => Some("KeyedRetractableContribution"),
     }
 }
 
@@ -561,11 +560,17 @@ pub fn refusal_code(refusal: &Refusal) -> &'static str {
 mod refusal_code_tests {
     use super::*;
 
-    /// Every [`Refusal`] variant returns a non-empty code — a future variant
-    /// added to the enum without a matching arm here is a compile error, not
-    /// a silent gap (ruling R2).
+    /// Every [`Refusal`] variant is classified — either a non-empty `Some`
+    /// code, or an explicit `None` for the three that raise no diagnostic
+    /// today — a future variant added to the enum without a matching arm
+    /// here is a compile error, not a silent gap (ruling R2).
     #[test]
-    fn every_refusal_has_a_code() {
+    fn every_refusal_is_classified() {
+        let none_variants = [
+            "ReachNotDerivable",
+            "RepairKeysNotDiscoverable",
+            "RepairSliceUnbounded",
+        ];
         let sample: Vec<Refusal> = vec![
             Refusal::SkeletonChanged {
                 column: "c".to_string(),
@@ -618,10 +623,18 @@ mod refusal_code_tests {
             },
         ];
         for r in &sample {
-            assert!(
-                !refusal_code(r).is_empty(),
-                "refusal_code returned an empty code for {r:?}"
-            );
+            let variant_name = format!("{r:?}");
+            let expects_none = none_variants.iter().any(|v| variant_name.starts_with(v));
+            match refusal_code(r) {
+                Some(code) => assert!(
+                    !expects_none && !code.is_empty(),
+                    "refusal_code returned Some(\"{code}\") for {r:?}, expected None"
+                ),
+                None => assert!(
+                    expects_none,
+                    "refusal_code returned None for {r:?}, expected Some"
+                ),
+            }
         }
     }
 }

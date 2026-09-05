@@ -215,16 +215,18 @@ fn assemble_diagnostics_independently(
         .unwrap_or_else(|| panic!("model `{model_name}` not found"));
     let file = db.source_file(&model.path).expect("model file registered");
 
-    let (plan_cells, column_groups, refusals): (
+    let (plan_cells, column_groups, refusals, key_locality): (
         Vec<smelt_logical::maintenance::PlanCell>,
         Vec<smelt_logical::maintenance::ColumnGroup>,
         Vec<smelt_logical::maintenance::Refusal>,
+        Option<smelt_logical::maintenance::KeyLocality>,
     ) = smelt_db::maintenance_plan_report(&db, ws, file)
         .map(|result| {
             (
                 result.plan.cells,
                 result.column_groups,
                 result.plan.refusals,
+                result.plan.key_locality,
             )
         })
         .unwrap_or_default();
@@ -296,6 +298,24 @@ fn assemble_diagnostics_independently(
 
     let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph, &source_infos);
 
+    // Mirror the real endpoint's own call (`crates/smelt-ui/src/build.rs`)
+    // instead of passing `&[]` (fix round 1, F4) — otherwise the endpoint's
+    // probe wiring goes untested and this byte-for-byte comparison only
+    // holds because the fixture happens to declare no probe-backed fact.
+    let probe_entries = smelt_runtime::probe_plan::probe_plan_for_model(
+        model_name,
+        &schema,
+        &model.db_name_owned(),
+        model.metadata.as_deref(),
+        model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()),
+        model,
+        &source_infos,
+        &target,
+        &plan_cells,
+        key_locality.as_ref(),
+        dialect,
+    );
+
     let diagnostics = smelt_runtime::diagnostics::build_model_diagnostics(
         model,
         &models,
@@ -312,7 +332,7 @@ fn assemble_diagnostics_independently(
         &unique_key,
         &column_groups,
         &refusals,
-        &[],
+        &probe_entries,
         contract_cfg,
     )
     .expect("build diagnostics");
