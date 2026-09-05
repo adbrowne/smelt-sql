@@ -2845,14 +2845,17 @@ adding a new one.</p>
 <a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="w">          </span><span class="nt">GH_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${{ secrets.GITHUB_TOKEN }}</span>
 <a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="w">          </span><span class="nt">PR</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${{ github.event.pull_request.number }}</span>
 <a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="w">        </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
-<a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a><span class="w">          </span><span class="no">id=$(gh api &quot;repos/$GITHUB_REPOSITORY/issues/comments&quot; --paginate \</span>
-<a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="w">                </span><span class="no">--jq &#39;[.[] | select(.user.login==&quot;github-actions[bot]&quot;)</span>
-<a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a><span class="w">                           </span><span class="no">| select(.body | contains(&quot;&lt;!-- smelt-property-diff --&gt;&quot;))] | last | .id // empty&#39;)</span>
-<a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a><span class="w">          </span><span class="no">if [ -n &quot;$id&quot; ]; then</span>
-<a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a><span class="w">            </span><span class="no">gh api -X PATCH &quot;repos/$GITHUB_REPOSITORY/issues/comments/$id&quot; -F body=@body.md</span>
-<a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a><span class="w">          </span><span class="no">else</span>
-<a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a><span class="w">            </span><span class="no">gh pr comment &quot;$PR&quot; --body-file body.md</span>
-<a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a><span class="w">          </span><span class="no">fi</span>
+<a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a><span class="w">          </span><span class="no"># This PR&#39;s own comments — NOT repos/.../issues/comments, which is</span>
+<a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="w">          </span><span class="no"># the repository-wide feed where `| last` resolves to whichever PR</span>
+<a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a><span class="w">          </span><span class="no"># was commented on most recently, not this one.</span>
+<a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a><span class="w">          </span><span class="no">id=$(gh api &quot;repos/$GITHUB_REPOSITORY/issues/$PR/comments&quot; --paginate \</span>
+<a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a><span class="w">                </span><span class="no">--jq &#39;[.[] | select(.user.login==&quot;github-actions[bot]&quot;)</span>
+<a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a><span class="w">                           </span><span class="no">| select(.body | contains(&quot;&lt;!-- smelt-property-diff --&gt;&quot;))] | last | .id // empty&#39;)</span>
+<a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a><span class="w">          </span><span class="no">if [ -n &quot;$id&quot; ]; then</span>
+<a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a><span class="w">            </span><span class="no">gh api -X PATCH &quot;repos/$GITHUB_REPOSITORY/issues/comments/$id&quot; -F body=@body.md</span>
+<a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a><span class="w">          </span><span class="no">else</span>
+<a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a><span class="w">            </span><span class="no">gh pr comment &quot;$PR&quot; --body-file body.md</span>
+<a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a><span class="w">          </span><span class="no">fi</span>
 </code></pre></div>
 <p>A multi-project workspace runs the render step once per project, concatenating each project's
 <code>body.md</code> before posting — <code>smelt explain --diff</code> diffs one <code>--project-dir</code> per invocation
