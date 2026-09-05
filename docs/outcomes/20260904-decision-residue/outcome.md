@@ -77,7 +77,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | done |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | done |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | done |
-| 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
+| 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | planned |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
 | 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
 
@@ -157,5 +157,19 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   workspace `cargo test`, `example_diagnostics`); `partition_residue_probes` ratchet unchanged
   (2, as expected — this phase touches a key-grain bullet, not a partition-grain one);
   `maintenance_conformance --features duckdb composed` green.
+
+- 2026-09-05 — Phase 5 planned with no table reshape (phase 4 surfaced no residue). Three
+  planning calls recorded: (a) the hard error is raised on the existing
+  `MetadataError::YamlParseError(custom(...))` channel the retired `batched:` sub-block already
+  uses, not a new `MetadataError` variant — the retirement needs a fix-it, not its own
+  diagnostic code, and this keeps the exhaustiveness gate untouched; (b) the `DataLatency`
+  *grammar* stays (`contract.frozen_horizon` parses intervals through it) — only the per-column
+  key dies, pinned by its own test; (c) the undocumented per-column `data_latency` on
+  **source** columns (`SourceColumnDef`, parsed and read by nothing) is retired in the same
+  phase as a `MalformedSource` with the same fix-it, rather than left as a silently-ignored
+  dead key — a fail-loud violation the models-side retirement would otherwise make more
+  conspicuous. This adds one sentence to `sources.md`'s `MalformedSource` row. Phase 5 also
+  deletes its own two Known Divergence bullets (`models.md`, `model_properties.md`) per the
+  phase-1 precedent, leaving phase 7 the bullets earlier phases did not close.
 
 ## Blocked
