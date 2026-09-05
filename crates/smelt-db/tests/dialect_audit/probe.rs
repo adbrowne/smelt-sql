@@ -323,6 +323,7 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &plans,
+        settled_emissions: &[],
     };
     combine_fixture_and_printed(&fixture::fixture_cte(dialect), &print(&root, &ctx))
 }

@@ -16,6 +16,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities, schem
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -39,6 +40,7 @@ fn print_with_ephemerals(
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -433,6 +435,7 @@ fn make_path_ref_ctx<'a>(
         smelt_path_ref: Some(resolver),
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     }
 }
 
@@ -453,6 +456,7 @@ fn make_path_call_ctx<'a>(
         smelt_path_ref: None,
         smelt_path_call: Some(expander),
         restructure_plans: &[],
+        settled_emissions: &[],
     }
 }
 

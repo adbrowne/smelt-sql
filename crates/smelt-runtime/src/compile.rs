@@ -3,13 +3,14 @@ use smelt_core::config::{BackendType, Config, Materialization, RefreshStrategy, 
 use smelt_core::{ModelFile, SourcesConfig};
 use smelt_db::type_inference::infer_select_column_types;
 use smelt_db::{
-    add_source_info_to_type_context, build_type_context, StaticRefSchemaProvider, TypeContext,
+    add_source_info_to_type_context, build_type_context, infer_expression_type,
+    StaticRefSchemaProvider, TypeContext,
 };
 use smelt_dialect::{
     wrap_with_type_casts, AsStructEmitter, BackendCapabilities, PrintContext, SmeltFnExpander,
     SmeltPathCallExpander, SmeltPathRefResolver, SqlDialect,
 };
-use smelt_parser::ast::{File, SelectStmt};
+use smelt_parser::ast::{Expr, File, SelectStmt};
 use smelt_types::{DataType, TypedColumn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -641,6 +642,7 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
         smelt_path_ref: Some(path_ref_resolver),
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -682,7 +684,23 @@ fn print_checked_for(
     dialect: &SqlDialect,
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     ctx: PrintContext,
+    type_ctx: Option<&TypeContext>,
 ) -> Result<String> {
+    // Settle every `Emission::Conditional` entry on the source CST *before*
+    // printing — the printer holds no type context and cannot resolve an arm
+    // itself (`docs/specs/multi_backend.md` §"Operand-conditional verdicts").
+    // `type_ctx` is `None` only for a caller with no populated upstream
+    // schemas; every class then reads `Unresolved` and every conditional
+    // takes its `otherwise` arm, the same fail-safe direction a lookup miss
+    // takes in the printer itself.
+    let settled = smelt_dialect::settle_emissions(syntax, *dialect, |node| {
+        type_ctx.and_then(|tc| {
+            Expr::cast(node.clone())
+                .and_then(|e| infer_expression_type(&e, tc))
+                .map(|c| c.data_type)
+        })
+    });
+
     let mut refused = smelt_dialect::unsupported_emissions(syntax, *dialect);
 
     let plans = match smelt_dialect::plan_restructure(syntax, *dialect) {
@@ -713,6 +731,7 @@ fn print_checked_for(
 
     let ctx = PrintContext {
         restructure_plans: &plans,
+        settled_emissions: &settled,
         ..ctx
     };
     Ok(smelt_dialect::print(syntax, &ctx))
@@ -821,6 +840,7 @@ pub fn expand_function_calls(sql: &str, fn_bodies: &FnBodyMap) -> String {
         smelt_path_ref: None,
         smelt_path_call: Some(path_call_expander),
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -1645,7 +1665,13 @@ impl SqlCompiler {
         syntax: &smelt_parser::syntax_kind::SyntaxNode,
         ctx: PrintContext,
     ) -> Result<String> {
-        print_checked_for(&self.dialect, syntax, ctx)
+        // Same `TypeContext` construction `derive_projection_for` uses, over
+        // the same pre-print source tree — settlement and the projection
+        // read one inference (`docs/specs/multi_backend.md`
+        // §"Operand-conditional verdicts").
+        let type_ctx =
+            File::cast(syntax.clone()).map(|file| self.build_projection_type_context(&file));
+        print_checked_for(&self.dialect, syntax, ctx, type_ctx.as_ref())
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -1685,6 +1711,7 @@ impl SqlCompiler {
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         // The projection — output column names and their inferred types — is
         // derived once, here, from the pre-print source CST (`parse`), before
@@ -1847,6 +1874,7 @@ impl SqlCompiler {
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let compiled_sql = self.print_checked(&parse.syntax(), ctx)?;
 
@@ -1931,6 +1959,7 @@ impl SqlCompiler {
             ),
             smelt_path_call: path_call_expander,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let compiled_sql = self.print_checked(&parse.syntax(), ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
@@ -2124,8 +2153,12 @@ impl EphemeralResolver {
             smelt_path_ref: Some(path_ref_resolver),
             smelt_path_call: None,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
-        let compiled = print_checked_for(dialect, &parse.syntax(), ctx)?;
+        // No upstream `TypeContext` is available on this lighter ephemeral
+        // compile path; every conditional entry settles from arity alone,
+        // same as the printer's own lookup-miss fallback.
+        let compiled = print_checked_for(dialect, &parse.syntax(), ctx, None)?;
 
         // Check for internal CTEs by parsing the compiled output
         let file = File::cast(parse.syntax());
@@ -2505,6 +2538,7 @@ impl SqlCompiler {
             ),
             smelt_path_call: path_call_expander,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let compiled_sql = self.print_checked(&parse.syntax(), ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.

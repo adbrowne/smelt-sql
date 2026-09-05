@@ -48,6 +48,11 @@ fn emission_label(emission: Emission) -> String {
         Emission::Template(t) => format!("template:{t}"),
         Emission::Restructure(id) => format!("restructure:{id:?}"),
         Emission::Unsupported { .. } => "unsupported".to_string(),
+        // Arm-set rendering (`docs/outcomes/20260904-dialect-emission-vocabulary`
+        // phase 6) lands with the audit-probe-per-arm work; until then this
+        // is a placeholder label, never a claim the audit has verified —
+        // no production entry is `Conditional` yet.
+        Emission::Conditional(_) => "conditional".to_string(),
     }
 }
 

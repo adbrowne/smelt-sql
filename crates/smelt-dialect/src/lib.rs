@@ -5,6 +5,7 @@
 
 mod dialect;
 mod emission_check;
+pub mod emission_settle;
 pub mod position;
 mod printer;
 pub mod restructure;
@@ -12,6 +13,7 @@ mod type_conformance;
 
 pub use dialect::{BackendCapabilities, NullSafeEqualitySpelling, SqlDialect};
 pub use emission_check::{unsupported_emissions, UnsupportedEmission};
+pub use emission_settle::settle_emissions;
 pub use position::classify as classify_position;
 pub use printer::{
     print, print_template, AsStructEmitter, PrintContext, SmeltFnExpander, SmeltPathCallExpander,

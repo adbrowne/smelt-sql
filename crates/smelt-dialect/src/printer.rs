@@ -18,12 +18,13 @@ use smelt_parser::{CastExpr, FunctionCall};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use crate::emission_settle::settled_verdict_for;
 use crate::position::classify as classify_position;
 use crate::restructure::{AnalyticCallReplacement, BoundSource, GroupBinding, RestructurePlan};
 use crate::{BackendCapabilities, NullSafeEqualitySpelling, SqlDialect};
 use smelt_parser::ast::{OrderByClause, SelectEntry, SelectItem, SelectStmt};
 use smelt_types::signatures::Position;
-use smelt_types::{is_call_shaped_template, BuiltinRegistry, Emission, RewriteId};
+use smelt_types::{is_call_shaped_template, BuiltinRegistry, Emission, RewriteId, SettledEmission};
 
 /// Emitter closure type for `smelt.as_struct(alias [EXCEPT cols])`.
 /// Called with `(alias, except_columns)` → emitted SQL, or `None` to pass through.
@@ -84,6 +85,15 @@ pub struct PrintContext<'a> {
     /// node is unaffected. Empty when nothing on this tree needs
     /// restructuring.
     pub restructure_plans: &'a [RestructurePlan],
+    /// Pre-settled operand-conditional verdicts, keyed by the call/operator
+    /// node's own `TextRange` (`docs/specs/multi_backend.md`
+    /// §"Operand-conditional verdicts"). Populated by the crate's settlement
+    /// walk over the same source tree, before printing starts. The printer
+    /// looks a node's verdict up here rather than resolving one itself — it
+    /// holds no type context and cannot. Empty when the caller has no type
+    /// context (e.g. `resolve_refs_in_sql`); a lookup miss falls back to an
+    /// arity-only settlement.
+    pub settled_emissions: &'a [(smelt_parser::TextRange, SettledEmission)],
 }
 
 /// Print a CST node as dialect-specific SQL.
@@ -2623,7 +2633,7 @@ fn emit_registered_function(
         let root = node.ancestors().last().unwrap_or_else(|| node.clone());
         classify_position(node, &root)
     });
-    match sig.emission_at(ctx.dialect.id(), position) {
+    match settled_verdict_for(node, sig, position, ctx) {
         // An `Unsupported` entry still prints verbatim; the compile path refuses
         // the model before reaching the printer (see `emission_check`), so a
         // verbatim print here is unreachable in production and harmless in a
@@ -2636,8 +2646,10 @@ fn emit_registered_function(
         // prints the call verbatim, exactly like `Unsupported` — the compile
         // path either applies the restructure plan upstream or refuses the
         // model before reaching the printer.
-        Emission::Native | Emission::Unsupported { .. } | Emission::Restructure(_) => false,
-        Emission::Rename(new_name) => {
+        SettledEmission::Native
+        | SettledEmission::Unsupported { .. }
+        | SettledEmission::Restructure(_) => false,
+        SettledEmission::Rename(new_name) => {
             // The author already wrote the target spelling — via an alias, or
             // in different case. Rewriting it would churn the user's own text
             // (and break DuckDB byte-identity, `architecture.md` §"Print-level
@@ -2649,8 +2661,8 @@ fn emit_registered_function(
             print_function_with_renamed(node, ctx, out, new_name);
             true
         }
-        Emission::Rewrite(id) => apply_rewrite(id, node, Some(fc), position, ctx, out),
-        Emission::Template(template) => {
+        SettledEmission::Rewrite(id) => apply_rewrite(id, node, Some(fc), position, ctx, out),
+        SettledEmission::Template(template) => {
             let args: Vec<SyntaxNode> = fc
                 .arguments()
                 .into_iter()
@@ -2673,9 +2685,9 @@ fn emit_registered_operator(node: &SyntaxNode, ctx: &PrintContext, out: &mut Str
     };
     // Operators are never a call in window/aggregate position; their verdicts
     // are stated with `Position::Any`, so there is no position to classify.
-    match sig.emission_at(ctx.dialect.id(), Position::Any) {
-        Emission::Rewrite(id) => apply_rewrite(id, node, None, Position::Any, ctx, out),
-        Emission::Template(template) => {
+    match settled_verdict_for(node, sig, Position::Any, ctx) {
+        SettledEmission::Rewrite(id) => apply_rewrite(id, node, None, Position::Any, ctx, out),
+        SettledEmission::Template(template) => {
             let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
                 return false;
             };
@@ -2851,6 +2863,7 @@ mod tests {
             smelt_path_ref: None,
             smelt_path_call: None,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         print(&parsed.syntax(), &ctx)
     }
@@ -2953,6 +2966,7 @@ mod tests {
             smelt_path_ref: None,
             smelt_path_call: None,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(
@@ -2993,6 +3007,7 @@ mod tests {
             smelt_path_ref: None,
             smelt_path_call: None,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(
@@ -3289,6 +3304,7 @@ mod tests {
             smelt_path_ref: None,
             smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
         // Should expand to three separate aliased projections, not the struct literal
@@ -3337,6 +3353,7 @@ mod tests {
             smelt_path_ref: None,
             smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
         // Must contain a synthesised alias beginning with __smelt_t
@@ -3375,6 +3392,7 @@ mod tests {
             smelt_path_ref: None,
             smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
         // Must NOT synthesise a __smelt_t alias
@@ -3417,6 +3435,7 @@ mod tests {
             smelt_path_ref: None,
             smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
         // Must NOT synthesise a __smelt_t alias in SELECT list position
@@ -3468,6 +3487,7 @@ mod tests {
                 }
             })),
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
 
@@ -3517,6 +3537,7 @@ mod tests {
                 ))
             })),
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let result = print(&parsed.syntax(), &ctx);
 

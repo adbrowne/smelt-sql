@@ -14,7 +14,7 @@ use smelt_parser::syntax_kind::{SyntaxKind, SyntaxNode};
 use smelt_parser::FunctionCall;
 use smelt_parser::{TextRange, TextSize};
 use smelt_types::signatures::{Position, RewriteId};
-use smelt_types::{BuiltinRegistry, DialectId, Emission};
+use smelt_types::{BuiltinRegistry, CallFacts, DialectId, SettledEmission};
 
 use crate::position::classify as classify_position;
 use crate::restructure::within_group_sort_key;
@@ -172,8 +172,24 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
                 _ => return None,
             };
             let sig = BuiltinRegistry::resolve(&name)?;
-            match sig.emission_at(id, position) {
-                Emission::Unsupported { reason } => Some(UnsupportedEmission {
+            // No type context is threaded into this pre-print pass (it runs
+            // over the bare source CST); a `Conditional` entry's class-guarded
+            // arms are unresolvable here, so this settles with arity alone —
+            // the same fail-safe lookup-miss fallback the printer uses. A
+            // class-guarded arm that a real type would have resolved away is
+            // instead decided by the entry's `otherwise` arm, which the
+            // registry's own validation ties to the safe direction
+            // (`docs/specs/multi_backend.md` §"Operand-conditional
+            // verdicts"). No production entry is `Conditional` yet, so this
+            // has no observable effect until phase 7 populates one.
+            let arity = match node.kind() {
+                SyntaxKind::FUNCTION_CALL => FunctionCall::cast(node.clone())
+                    .map(|fc| fc.arguments().len())
+                    .unwrap_or(0),
+                _ => 2,
+            };
+            match sig.settle_at(id, position, &CallFacts::unresolved(arity)) {
+                SettledEmission::Unsupported { reason } => Some(UnsupportedEmission {
                     name: sig.name.as_str(),
                     dialect: id,
                     reason,
@@ -184,7 +200,7 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
                 // refused here, before the printer ever runs. An operator
                 // `BINARY_EXPR` can carry none of these modifiers, so this
                 // only ever fires for a `FUNCTION_CALL`.
-                Emission::Template(_) if node.kind() == SyntaxKind::FUNCTION_CALL => {
+                SettledEmission::Template(_) if node.kind() == SyntaxKind::FUNCTION_CALL => {
                     template_unsupported_modifier(&node).map(|reason| UnsupportedEmission {
                         name: sig.name.as_str(),
                         dialect: id,
@@ -200,7 +216,7 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
                 // analytic form cannot express is refused here, before the
                 // printer ever runs, rather than reaching
                 // `print_within_group_to_analytic`'s verbatim fallback.
-                Emission::Rewrite(RewriteId::WithinGroupToAnalytic) => {
+                SettledEmission::Rewrite(RewriteId::WithinGroupToAnalytic) => {
                     match within_group_sort_key(&node) {
                         Ok(_) => None,
                         Err(reason) => Some(UnsupportedEmission {

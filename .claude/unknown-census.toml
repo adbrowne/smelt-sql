@@ -479,54 +479,54 @@ discriminant = "dynamic"
 
 # ── smelt-types / lib ─────────────────────────────────────────────────────────
 
-["crates/smelt-types/src/lib.rs:186"]
+["crates/smelt-types/src/lib.rs:188"]
 classification = "legitimate"
 reason = "unknown_reason() accessor: destructures DataType::Unknown(r) to extract the reason; not a construction site"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/lib.rs:195"]
+["crates/smelt-types/src/lib.rs:197"]
 classification = "legitimate"
 reason = "unknown_unresolved() canonical constructor body — the authoritative production site for Unknown(Unresolved)"
 discriminant = "unresolved"
 
-["crates/smelt-types/src/lib.rs:200"]
+["crates/smelt-types/src/lib.rs:202"]
 classification = "legitimate"
 reason = "unknown_dynamic() canonical constructor body — the authoritative production site for Unknown(Dynamic)"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/lib.rs:205"]
+["crates/smelt-types/src/lib.rs:207"]
 classification = "legitimate"
 reason = "unknown_propagated() canonical constructor body — the authoritative production site for Unknown(Propagated)"
 discriminant = "propagated"
 
-["crates/smelt-types/src/lib.rs:328"]
+["crates/smelt-types/src/lib.rs:330"]
 classification = "legitimate"
 reason = "TypedColumn::unknown() constructor — sentinel Unknown(Dynamic) value for error recovery"
 discriminant = "dynamic"
 
 # ── smelt-types / signatures ──────────────────────────────────────────────────
 
-["crates/smelt-types/src/signatures.rs:2685"]
+["crates/smelt-types/src/signatures.rs:2949"]
 classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3642"]
+["crates/smelt-types/src/signatures.rs:3942"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3644"]
+["crates/smelt-types/src/signatures.rs:3944"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:4615"]
+["crates/smelt-types/src/signatures.rs:4920"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:5813"]
+["crates/smelt-types/src/signatures.rs:6118"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"

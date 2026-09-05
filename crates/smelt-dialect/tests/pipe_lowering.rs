@@ -25,6 +25,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities, schem
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }

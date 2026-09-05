@@ -257,6 +257,52 @@ fn every_rewrite_id_states_why_it_is_not_a_template() {
     );
 }
 
+/// The printer must never need a type to print — arm resolution for an
+/// `Emission::Conditional` entry happens on the compile path, before the
+/// printer ever runs (`docs/specs/multi_backend.md`
+/// §"Operand-conditional verdicts": "The printer holds no type context and
+/// cannot ask for one").
+#[test]
+fn printer_holds_no_type_context() {
+    let hits: Vec<(usize, &str)> = PRINTER_SRC
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            ["DataType", "TypeContext", "OperandClass"]
+                .iter()
+                .any(|needle| l.contains(needle))
+        })
+        .map(|(i, l)| (i + 1, l.trim()))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "printer.rs references a type or type-context symbol — the printer must consume only \
+         pre-settled `SettledEmission` verdicts, never resolve one itself.\n{hits:#?}"
+    );
+}
+
+/// The printer consumes settled verdicts (`ctx.settled_emissions`, via
+/// `crate::emission_settle::settled_verdict_for`) — it never resolves a
+/// `Conditional` arm or calls the settlement functions itself.
+#[test]
+fn printer_never_resolves_an_arm() {
+    let hits: Vec<(usize, &str)> = PRINTER_SRC
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            ["Emission::Conditional", "settle_at", "settle_emissions"]
+                .iter()
+                .any(|needle| l.contains(needle))
+        })
+        .map(|(i, l)| (i + 1, l.trim()))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "printer.rs resolves a `Conditional` arm itself — that is \
+         `Signature::settle_at`'s job, run once on the compile path before printing.\n{hits:#?}"
+    );
+}
+
 /// The template interpreter holds no target-dialect text of its own — every
 /// character it emits comes from the registry's template string or from
 /// re-printing the call's own arguments. A double-quoted string literal in

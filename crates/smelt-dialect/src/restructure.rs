@@ -19,7 +19,7 @@ use smelt_parser::ast::{
 use smelt_parser::syntax_kind::{SyntaxKind, SyntaxNode};
 use smelt_parser::{TextRange, TextSize};
 use smelt_types::signatures::RestructureId;
-use smelt_types::{BuiltinRegistry, DialectId, Emission};
+use smelt_types::{BuiltinRegistry, CallFacts, DialectId, SettledEmission};
 
 use crate::position::classify as classify_position;
 use crate::SqlDialect;
@@ -168,18 +168,26 @@ pub fn plan(
             continue;
         };
         let position = classify_position(&node, root);
-        match sig.emission_at(id, position) {
-            Emission::Restructure(rid) => candidates.push((node.clone(), rid)),
-            Emission::Unsupported { reason } => refusals.push(UnsupportedEmission {
+        // Planning runs on the source CST alone, with no type context — a
+        // `Conditional` entry's arity-only arms still resolve; a
+        // class-guarded arm lands on `otherwise`, same as the printer's own
+        // lookup-miss fallback (`docs/specs/multi_backend.md`
+        // §"Operand-conditional verdicts").
+        let arity = FunctionCall::cast(node.clone())
+            .map(|fc| fc.arguments().len())
+            .unwrap_or(0);
+        match sig.settle_at(id, position, &CallFacts::unresolved(arity)) {
+            SettledEmission::Restructure(rid) => candidates.push((node.clone(), rid)),
+            SettledEmission::Unsupported { reason } => refusals.push(UnsupportedEmission {
                 name: sig.name.as_str(),
                 dialect: id,
                 reason,
                 range: trimmed_range(&node),
             }),
-            Emission::Native
-            | Emission::Rename(_)
-            | Emission::Rewrite(_)
-            | Emission::Template(_) => {}
+            SettledEmission::Native
+            | SettledEmission::Rename(_)
+            | SettledEmission::Rewrite(_)
+            | SettledEmission::Template(_) => {}
         }
     }
 

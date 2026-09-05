@@ -24,12 +24,14 @@ pub use signatures::{
     extract_function_signatures_with_raw, extract_signature, extract_signature_with_raw,
     format_smelt_type_hover, is_call_shaped_template, kind_ceiling, numeric_lub,
     parse_frontmatter_backends, parse_smelt_type, subkind_of, unify_call, unify_call_with_expected,
-    validate_template, BackendSet, BuiltinRegistry, ColumnRefFieldType, ColumnRefValue, ContextRef,
-    DataTypeHash, DataTypeReq, Emission, ExprKind, FrameInfo, FrontmatterParseError, FunctionSig,
-    ModelOrigin, ModelRefValue, ParamSpec, RewriteId, RowTail, RowVarBinding, SchemaRequirement,
-    SigOrigin, SigParam, Signature, SignatureBuildError, SmeltMetaSignature, SmeltType,
-    SmeltTypeParseError, SourceOrigin, SourceRefValue, StructRowTail, SyntaxForm, TemplateError,
-    Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult, COLUMN_REF_FIELDS,
+    validate_conditional, validate_template, BackendSet, BuiltinRegistry, CallFacts,
+    ColumnRefFieldType, ColumnRefValue, ConditionalArm, ConditionalError, ContextRef, DataTypeHash,
+    DataTypeReq, Emission, ExprKind, FrameInfo, FrontmatterParseError, FunctionSig, ModelOrigin,
+    ModelRefValue, OperandClass, ParamSpec, RewriteId, RowTail, RowVarBinding, SchemaRequirement,
+    SettledEmission, SigOrigin, SigParam, Signature, SignatureBuildError, SmeltMetaSignature,
+    SmeltType, SmeltTypeParseError, SourceOrigin, SourceRefValue, StructRowTail, SyntaxForm,
+    TemplateError, Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult,
+    COLUMN_REF_FIELDS,
 };
 
 /// Reason a type resolved to `Unknown`.

@@ -560,6 +560,7 @@ fn print_body_for_dialect(sql: &str, backend_type: BackendType) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }

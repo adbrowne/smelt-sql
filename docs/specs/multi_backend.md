@@ -374,10 +374,12 @@ otherwise recognise.
 **Operand classes.** An argument's class is a pure, total function of its inferred `DataType`,
 single-owned beside the registry: `Integral` (the integer widths), `Decimal`, `Floating` (`Float`,
 `Double`), `String`, `Boolean`, `Temporal` (`Date`, `Time`, and the timestamps), `Interval`,
-`Composite` (`Array`, `Struct`, `Map`), `Json`, and `Unresolved` for an argument whose type
-inference reports `Unknown`. A guard names classes, never concrete types, because the engine
-behaviours this axis exists for split along exactly these lines and a finer key would multiply
-arms without buying a different answer.
+`Composite` (`Array`, `Struct`, `Map`), `Binary` (`Blob`), and `Unresolved` for an argument whose
+type inference reports `Unknown`. `Null` also classifies as `Unresolved` — a NULL literal
+discriminates nothing, and sending it to `otherwise` is the fail-safe direction this axis's cost
+rule already demands. A guard names classes, never concrete types, because the engine behaviours
+this axis exists for split along exactly these lines and a finer key would multiply arms without
+buying a different answer.
 
 **Resolution happens on the compile path, never in the printer.** Arity is read from the source
 CST. Operand class is read from the same type inference that derives the model's projection
@@ -954,14 +956,14 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **No operand-conditional verdict exists; the lookup key is `(dialect, position)` alone.** In
-  consequence `%` on BigQuery lowers to `MOD` for every operand and fails at the warehouse on a
-  floating-point one (#173); `//` is refused wholesale on Spark and BigQuery rather than
-  lowered per operand class; `LOG` is registered at one arity only, so the two-argument form is not
-  recognised and its per-engine base and argument order (#174) are unaddressed; Spark's `TRUNC` and
-  `TO_JSON` carry no class-scoped arm (#178). The compile path today runs the refusal pre-pass
-  over the bare CST with no type context threaded in, so the resolution step §"Operand-conditional
-  verdicts" describes does not yet exist.
+- **No registry row is operand-conditional yet.** The `Emission::Conditional` mechanism and its
+  compile-path resolution step exist (`OperandClass`, `ConditionalArm`, `Signature::settle_at`),
+  but no entry uses them: `%` on BigQuery still lowers to `MOD` for every operand and fails at the
+  warehouse on a floating-point one (#173); `//` is still refused wholesale on Spark and BigQuery
+  rather than lowered per operand class; `LOG` is registered at one arity only, so the
+  two-argument form is not recognised and its per-engine base and argument order (#174) are
+  unaddressed; Spark's `TRUNC` and `TO_JSON` carry no class-scoped arm (#178). Populating these
+  rows is tracked in `docs/outcomes/20260904-dialect-emission-vocabulary` phase 7.
 - **`DAYOFWEEK` differs by one on Spark SQL (#174).** Spark numbers the week from Sunday = 1, DuckDB
   from Sunday = 0. This is a template (`DAYOFWEEK({0}) - 1`), and lands with the template verdict.
 

@@ -27,6 +27,7 @@ fn bigquery(sql: &str) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -95,6 +96,7 @@ fn other_dialects_keep_within_group_verbatim() {
             smelt_path_ref: None,
             smelt_path_call: None,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let out = print(&parsed.syntax(), &ctx);
         assert_eq!(

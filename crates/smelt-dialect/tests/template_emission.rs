@@ -27,6 +27,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> St
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -139,6 +140,7 @@ fn print_template_str(template: &str, args: &[smelt_parser::syntax_kind::SyntaxN
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     // The template's own node identity doesn't matter for a synthetic,
     // registry-independent call — reuse the first argument's node as a stand-in

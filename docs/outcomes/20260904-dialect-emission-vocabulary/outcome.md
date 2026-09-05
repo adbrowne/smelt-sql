@@ -76,7 +76,7 @@ audit before it is claimed — never from documentation.
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
-| 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | planned |
+| 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
 | 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
 | 8 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
@@ -201,6 +201,16 @@ audit before it is claimed — never from documentation.
   (#173 BigQuery, #174/#178 Spark, `//` per class) needs a live engine the phase cannot reach,
   so the mechanism is tested on synthetic signatures and the rows land in phase 7, as the
   outcome already schedules. Nothing leaves the outcome.
+
+- 2026-09-06 (implement 05) — phase 5 done. `OperandClass`/`SettledEmission`/`ConditionalArm`/
+  `CallFacts`/`Signature::settle_at` in `smelt-types`; `crates/smelt-dialect/src/emission_settle.rs`
+  (new) does the compile-path walk and the printer's lookup-or-arity-fallback; `printer.rs`,
+  `restructure.rs`, `emission_check.rs` moved off `emission_at` onto `settle_at`; `print_checked_for`
+  now threads a `TypeContext` into settlement, same construction `derive_projection_for` uses. Spec
+  edits landed (`Json` → `Binary`, `Null`/`Unknown` → `Unresolved`, Known Divergences narrowed). No
+  production row is `Conditional` yet (phase 7's job, per plan 05's note); mechanism tests use
+  synthetic signatures (`registry_coverage.rs`) plus the real `//` entry for walk-mechanics coverage
+  (`operand_conditional.rs`, new). `verify-phase.sh` ALL GREEN. See `phases/05-summary.md`.
 
 ## Blocked
 
