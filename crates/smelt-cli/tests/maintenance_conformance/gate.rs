@@ -5178,6 +5178,7 @@ fn assert_composed_admitted_with_expected_route(
     match (recipe.route, &key_locality.slice) {
         (ComposedRoute::KeyEmbedded, LocalitySlice::Window { .. }) => Ok(()),
         (ComposedRoute::KeyDetermined, LocalitySlice::DeltaValues { .. }) => Ok(()),
+        (ComposedRoute::KeyDerived, LocalitySlice::DeltaValues { .. }) => Ok(()),
         (ComposedRoute::RecurrenceBounded, LocalitySlice::RecurrenceBounded { .. }) => Ok(()),
         (route, slice) => {
             anyhow::bail!(
@@ -5314,6 +5315,27 @@ fn composed_route2_classification(recipe: &ComposedKeyedRecipe) -> CumulativeCla
     }
 }
 
+/// Route 2's **derived** sub-route: `unique_key` is `[id, d]` (both `id` and
+/// `d` — unlike `composed_route2_classification`'s `[id]` alone), so a
+/// merge matches on the full `(id, d)` pair and `pdate` (a deterministic
+/// function of `d`) is write-once trivially — the same `(id, d)` pair is
+/// never revisited with a different `d`.
+fn composed_derived_classification(recipe: &ComposedKeyedRecipe) -> CumulativeClassification {
+    CumulativeClassification {
+        unique_key: vec!["id".to_string(), "d".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "total".to_string(),
+            per_partition_agg: "SUM".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::Sum,
+            state: None,
+        }],
+        driving_source: DrivingSource {
+            name: format!("smelt.sources.{}", recipe.source.name),
+            timeseries: Some(composed_driving_timeseries()),
+        },
+    }
+}
+
 fn composed_route3_classification(recipe: &ComposedKeyedRecipe) -> CumulativeClassification {
     CumulativeClassification {
         unique_key: vec!["id".to_string()],
@@ -5375,6 +5397,15 @@ fn composed_route3_delta_sql(rows: &[GenRow]) -> String {
     )
 }
 
+/// Route 2's derived sub-route delta: grouped by `(id, d)`, matching
+/// `composed_derived_classification`'s `unique_key`.
+fn composed_derived_delta_sql(rows: &[GenRow]) -> String {
+    format!(
+        "SELECT id, d, CAST(d AS DATE) AS pdate, SUM(val) AS total FROM {} GROUP BY id, d",
+        composed_delta_values_sql(rows)
+    )
+}
+
 /// The route-2 oracle: `pdate` is write-once (never re-merged — see
 /// `ComposedKeyedRecipe`'s doc comment), so its true end-state value is the
 /// event-time of whichever window *first* delivered that key — the
@@ -5385,6 +5416,17 @@ fn composed_route2_oracle_sql(source_name: &str) -> String {
     format!(
         "SELECT id, CAST(MIN(d) AS DATE) AS pdate, SUM(val) AS total FROM main.sources_{source_name} \
          GROUP BY id"
+    )
+}
+
+/// The derived sub-route's oracle: since `unique_key` is `(id, d)`, a full
+/// group-by over the same pair is a plain additive fold — no write-once
+/// reasoning needed (`pdate` is a pure deterministic function of the key
+/// column `d`).
+fn composed_derived_oracle_sql(source_name: &str) -> String {
+    format!(
+        "SELECT id, d, CAST(d AS DATE) AS pdate, SUM(val) AS total FROM main.sources_{source_name} \
+         GROUP BY id, d"
     )
 }
 
@@ -5476,6 +5518,59 @@ async fn assert_composed_route2_per_slice(
             &maintained_sql,
             &oracle_sql,
             "composed route-2 per-slice equivalence",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn assert_composed_derived_equivalence(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<()> {
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let oracle_sql = composed_derived_oracle_sql(&recipe.source.name);
+    assert_backend_multiset_equal(
+        backend,
+        &maintained_sql,
+        &oracle_sql,
+        "composed route-2 derived-sub-route equivalence",
+    )
+    .await
+}
+
+/// Per-slice equivalence for the derived sub-route: `pdate` is a pure
+/// function of the key column `d`, so — unlike route 2's declared
+/// sub-route — this is a plain full-refresh-per-value check, same shape as
+/// [`assert_composed_route2_per_slice`].
+async fn assert_composed_derived_per_slice(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<()> {
+    let batches = backend
+        .execute_sql(&format!(
+            "SELECT DISTINCT CAST(pdate AS VARCHAR) AS v FROM main.{}",
+            recipe.model_name
+        ))
+        .await?;
+    let values: Vec<String> = batches_to_rows(&batches)
+        .into_iter()
+        .filter_map(|r| r.get("v").cloned())
+        .collect();
+    for v in values {
+        let maintained_sql = format!(
+            "SELECT * FROM main.{} WHERE pdate = DATE '{v}'",
+            recipe.model_name
+        );
+        let oracle_sql = format!(
+            "SELECT * FROM ({}) t WHERE pdate = DATE '{v}'",
+            composed_derived_oracle_sql(&recipe.source.name)
+        );
+        assert_backend_multiset_equal(
+            backend,
+            &maintained_sql,
+            &oracle_sql,
+            "composed route-2 derived-sub-route per-slice equivalence",
         )
         .await?;
     }
@@ -5580,6 +5675,12 @@ fn composed_route3_suppression() -> WriteSuppression {
     }
 }
 
+fn composed_derived_suppression() -> WriteSuppression {
+    WriteSuppression::Suppressed {
+        compared_columns: vec!["total".to_string()],
+    }
+}
+
 async fn drive_composed_route2_and_assert(
     backend: &DuckDbBackend,
     recipe: &ComposedKeyedRecipe,
@@ -5644,6 +5745,55 @@ async fn drive_composed_route2_and_assert(
 
         assert_composed_route2_equivalence(backend, recipe).await?;
         assert_composed_route2_per_slice(backend, recipe).await?;
+    }
+    Ok(())
+}
+
+/// Drives route 2's derived sub-route through the same direct-driver
+/// channel `drive_composed_route2_and_assert` uses for the declared
+/// sub-route. `slice` is passed as `None` for the identical reason that
+/// function documents (a real DuckDB MERGE-binder limitation on the
+/// `DeltaValues` slice-predicate shape) — this recipe's admitted slice is
+/// also `LocalitySlice::DeltaValues`.
+async fn drive_composed_derived_and_assert(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+    schedule: &KeyedSchedule,
+) -> anyhow::Result<()> {
+    let classification = composed_derived_classification(recipe);
+    let slice: Option<&LocalitySlice> = None;
+
+    for (i, window) in schedule.0.iter().enumerate() {
+        insert_composed_rows_via_backend(backend, recipe, &window.rows).await?;
+
+        let rows = window.rows.clone();
+        let compile_step = move |_step: &smelt_runtime::maintenance_driver::MaintenanceStep| {
+            Ok(composed_derived_delta_sql(&rows))
+        };
+        let steps = driving_steps(
+            &window.start.format("%Y-%m-%d").to_string(),
+            &window.end.format("%Y-%m-%d").to_string(),
+            &smelt_core::config::Granularity::Day,
+        )?;
+        run_windowed_keyed_maintenance(
+            backend,
+            &recipe.model_name,
+            "main",
+            &recipe.model_name,
+            &steps,
+            &classification,
+            slice,
+            &composed_derived_suppression(),
+            None,
+            compile_step,
+            &no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("composed derived-sub-route window {i} merge failed: {e}"))?;
+
+        assert_composed_derived_equivalence(backend, recipe).await?;
+        assert_composed_derived_per_slice(backend, recipe).await?;
     }
     Ok(())
 }
@@ -5773,6 +5923,26 @@ fn composed_keyed_pool_upholds_equivalence() {
                     panic!(
                         "case {i}: composed route-2 recipe {recipe:?} schedule {schedule:?} \
                          failed: {e}"
+                    )
+                });
+            }
+            ComposedRoute::KeyDerived => {
+                let schedule = keyed_schedule_strat
+                    .new_tree(&mut runner)
+                    .unwrap()
+                    .current();
+                let backend = rt.block_on(async {
+                    DuckDbBackend::new(&project.db_path, "main")
+                        .await
+                        .expect("open backend")
+                });
+                rt.block_on(drive_composed_derived_and_assert(
+                    &backend, &recipe, &schedule,
+                ))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i}: composed derived-sub-route recipe {recipe:?} schedule \
+                         {schedule:?} failed: {e}"
                     )
                 });
             }

@@ -75,7 +75,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 |---|-------|--------|
 | 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | done |
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | done |
-| 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | planned |
+| 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | done |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | pending |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
@@ -114,5 +114,17 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   extremal fold over a non-key column stays refused and remains route 3's shape; (b) the derived
   proof is a CST-based leaf classifier over the model's own select list (no raw-text scan), so
   the property-composition-walk gate stays green without an exception entry.
+
+- 2026-09-05 — Phase 3 done: `smelt_logical::analysis::key_derived::key_derived_partition_
+  verdict` lands, wired into `establish_locality` before the extremal check.
+  `ComposedRoute::KeyDerived` added to the maintenance-testkit recipe pool (admitted by the
+  derived sub-route with no declared FD) and driven to equivalence with the full-refresh oracle
+  via `run_windowed_keyed_maintenance` (same channel `KeyDetermined` uses — `classify_cumulative`
+  still refuses its scalar-wrapper projection independently of locality admission, the same
+  pre-existing gap `KeyDetermined` already hits). New end-to-end fixture
+  `crates/smelt-runtime/tests/locality_route2_derived.rs`. Spec bullet and stale-fixture clause
+  both deleted from `incremental_shapes.md`. `verify-phase.sh` ALL GREEN (fmt, clippy both
+  feature sets, full workspace `cargo test`, `example_diagnostics`), plus every plan-listed
+  targeted test green.
 
 ## Blocked

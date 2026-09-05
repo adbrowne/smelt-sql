@@ -867,7 +867,15 @@ One of three **routes** establishes it: **(1) key-embedded** — `partition_colu
 `unique_key` column; slice = scan window widened by the SQL-derived skew margin (never by
 declared source lateness). **(2)
 key-determined** — the partition projection is a per-key constant under once-write provenance;
-slice = the delta's own partition values, exact regardless of key age. **(3)
+slice = the delta's own partition values, exact regardless of key age. Two sub-routes are tried
+in order: **derived** — the partition projection is a deterministic expression over
+`unique_key` columns only (key membership establishes per-key constancy directly — the same
+argument §"The column-family catalogue"'s once-write key-derived spelling makes, extended to a
+`MIN`/`MAX` wrapper over a key column); consulted first, and it outranks the extremal-fold
+refusal below *only* when every column reference in the projection is a key column (a `MAX`
+over the key is the key) — an extremal fold over a non-key column stays refused for route 2 and
+remains route 3's shape. **Declared** — a `functional_dependencies:` entry, consulted only
+where the derived sub-route cannot decide. **(3)
 recurrence-bounded** — a **key-recurrence bound** `r` (same-keyed rows lie within `r` on event
 time), derived from the SQL where decidable, else declared (`sources.md`, `key_recurrence`);
 slice = scan window widened backward by `r` plus margins, admitted only **checked** — the run
@@ -1277,15 +1285,8 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.
-- **Key temporal locality route 2 admits only a declared functional dependency** — the
-  key-derived-expression sub-route is never consulted, so a provably key-derived partition
-  projection still refuses without the declaration. Decided 2026-09-04: implement the derived
-  sub-route, declared FD as fallback (`docs/research/20260904-decision-track.md`). Scheduled:
-  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **Locality machinery gaps**: the per-input scope-map explain surface is specified but
-  unbuilt; Route 2's declared-FD sub-route is unreachable for an arbitrary
-  non-clock-derived dimension column, so no runnable end-to-end route-2 fixture exists yet
-  (`docs/plans/20260705-keyed-collapse.md`); Route 2's `IN (SELECT DISTINCT …)` slice
+  unbuilt; Route 2's `IN (SELECT DISTINCT …)` slice
   predicate is unexercised against a real backend due to a DuckDB MERGE binder limitation
   (confirmed v1.4.4/v1.5.4); plan derivation admits routes only where it can determine the
   driving source's granularity. Key-grain rule 16 (derived recurrence authoritative, declared

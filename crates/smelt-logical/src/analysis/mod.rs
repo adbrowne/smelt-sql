@@ -11,6 +11,7 @@ pub mod functional_dependency;
 pub mod horizon_ceiling;
 pub mod input_delta;
 pub mod join_shape;
+pub mod key_derived;
 pub mod locality_projection;
 pub mod model_diff;
 pub mod monotonicity;

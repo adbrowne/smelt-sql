@@ -1036,6 +1036,12 @@ pub fn render_composed_model_body(recipe: &ComposedKeyedRecipe) -> String {
                  GROUP BY {id}"
             )
         }
+        ComposedRoute::KeyDerived => {
+            format!(
+                "SELECT {id}, {d}, CAST({d} AS DATE) AS pdate, SUM({val}) AS total FROM {src} \
+                 GROUP BY {id}, {d}"
+            )
+        }
         ComposedRoute::RecurrenceBounded => {
             format!("SELECT {id}, MAX({d}) AS last_seen FROM {src} GROUP BY {id}")
         }

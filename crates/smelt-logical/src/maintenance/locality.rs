@@ -17,10 +17,15 @@
 //! then routes are tried in order. **Route 1** (key-embedded —
 //! `partition_column` is itself a `unique_key` column), **route 2**
 //! (key-determined — the partition projection is a per-key constant under
-//! the once-write provenance proof, admitted only via a declared
-//! `functional_dependencies:` entry; an extremal-fold combiner such as
-//! `MIN`/`MAX` is a distinct, value-mutating family and is refused even
-//! when declared), and **route 3** (recurrence-bounded — a key-recurrence
+//! the once-write provenance proof, admitted first via the **derived**
+//! sub-route — a deterministic expression over `unique_key` columns alone,
+//! `crate::analysis::key_derived` — and, where derivation is undecidable,
+//! via the **declared** fallback (a `functional_dependencies:` entry); an
+//! extremal-fold combiner such as `MIN`/`MAX` over a *non-key* column is a
+//! distinct, value-mutating family and is refused even when declared — but
+//! the same combiner over a key column IS admitted by the derived
+//! sub-route, since a `MAX` over the key is the key), and **route 3**
+//! (recurrence-bounded — a key-recurrence
 //! bound `r` holds, statically derived where decidable or else declared on
 //! the driving source and admitted only checked) are all implemented.
 //!
@@ -682,6 +687,33 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
     // *also* fails to establish locality below, so a genuinely undecidable
     // model still gets route 2's more specific diagnosis rather than the
     // generic three-route message.
+    // Derived sub-route, tried first: the partition projection is a
+    // deterministic expression over `unique_key` columns only
+    // (`crate::analysis::key_derived::key_derived_partition_verdict`) — key
+    // membership alone establishes per-key constancy, so this outranks the
+    // extremal-fold refusal below whenever every column reference in the
+    // projection is a key column (a `MAX`/`MIN` over the key is the key
+    // itself); an extremal fold over a non-key column is unaffected and
+    // stays refused for route 2 (`incremental_shapes.md` §"Key temporal
+    // locality", route 2).
+    let key_derived_verdict = crate::analysis::key_derived::key_derived_partition_verdict(
+        inputs.sql,
+        &inputs.unique_key,
+        &inputs.partition_column,
+    );
+    if matches!(
+        key_derived_verdict,
+        crate::analysis::key_derived::KeyDerivedVerdict::Derived
+    ) {
+        return Ok(LocalitySlice::DeltaValues {
+            partition_column: inputs.partition_column.clone(),
+        });
+    }
+    let key_derived_reason = match key_derived_verdict {
+        crate::analysis::key_derived::KeyDerivedVerdict::NotDerived(reason) => reason,
+        crate::analysis::key_derived::KeyDerivedVerdict::Derived => unreachable!(),
+    };
+
     let mut route2_local_refusal: Option<LocalityRefusal> = None;
     // join-context: excluded (key-temporal-locality route 2's own FD-backed
     // check, not a model-edge/repair admission route in criterion 3's sense
@@ -700,7 +732,8 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
                 "route 2 (key-determined) refused: `{}` is derived from an extremal-fold \
                  combiner (MIN/MAX) — a later, out-of-order row can still change its value on \
                  re-merge, so it belongs to the extremal-fold family, distinct from once-write \
-                 provenance (`incremental_models.md` §\"Key temporal locality\")",
+                 provenance (`incremental_models.md` §\"Key temporal locality\"). The \
+                 key-derived sub-route also failed: {key_derived_reason}",
                 inputs.partition_column
             )));
         } else {
@@ -726,12 +759,19 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
                 FunctionalDependencyVerdict::Refused(reason) => {
                     route2_local_refusal = Some(refuse(format!(
                         "route 2 (key-determined) refused: `{}` is not a provable per-key \
-                         constant — {reason}",
+                         constant — {reason}. The key-derived sub-route also failed: \
+                         {key_derived_reason}",
                         inputs.partition_column
                     )));
                 }
                 FunctionalDependencyVerdict::NotProven => {
-                    // Fall through to route 3 below.
+                    // Fall through to route 3 below. The key-derived
+                    // sub-route's own reason (`key_derived_reason`) is not
+                    // folded in here: no declared-FD refusal fires in this
+                    // branch, so there is no existing route2 message to
+                    // enrich, and unconditionally surfacing one here would
+                    // pre-empt the generic three-route message a model with
+                    // no declaration at all is still supposed to get.
                 }
             }
         }
@@ -1257,6 +1297,92 @@ mod tests {
     #[test]
     fn route2_refuses_when_partition_column_not_provably_not_null() {
         let mut inputs = route2_inputs(ROUTE2_SQL);
+        inputs.partition_column_not_null = false;
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_deduped");
+        assert!(
+            message.contains("NOT NULL"),
+            "message must name the NOT NULL precondition: {message}"
+        );
+    }
+
+    // ---- Route 2: derived key-derived-expression sub-route --------------
+
+    /// A key-derived partition projection (a deterministic expression over
+    /// `unique_key` columns alone) admits route 2 with no declared
+    /// `functional_dependencies:` entry at all.
+    #[test]
+    fn route2_derived_admits_with_no_declaration() {
+        let sql = "SELECT id, d, CAST(d AS DATE) AS pdate, COUNT(*) AS n \
+                   FROM smelt.sources.raw.events GROUP BY id, d";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["id".to_string(), "d".to_string()];
+        inputs.partition_column = "pdate".to_string();
+        let slice = establish_locality(&inputs).expect("derived sub-route must admit route 2");
+        assert!(matches!(slice, LocalitySlice::DeltaValues { .. }));
+    }
+
+    /// The derived sub-route is consulted *before* the extremal-fold
+    /// refusal: `MAX` over a key column admits `DeltaValues` even though the
+    /// walk's own discriminants classify the column `Monotone::Value`
+    /// (extremal) — a `MAX` over the key is the key itself.
+    #[test]
+    fn route2_derived_outranks_the_extremal_refusal() {
+        let sql = "SELECT id, MAX(id) AS pdate, COUNT(*) AS n \
+                   FROM smelt.sources.raw.events GROUP BY id";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["id".to_string()];
+        inputs.partition_column = "pdate".to_string();
+        let slice = establish_locality(&inputs).expect("derived sub-route must outrank extremal");
+        assert!(matches!(slice, LocalitySlice::DeltaValues { .. }));
+    }
+
+    /// An extremal fold over a *non-key* column is unaffected by the derived
+    /// sub-route and still refuses route 2 — the existing regression test
+    /// (`route2_refuses_min_derived_partition_column_not_once_write`) already
+    /// pins this; this test names it explicitly for the phase's own record.
+    #[test]
+    fn route2_extremal_over_a_non_key_column_still_refuses_route2() {
+        let inputs = route2_inputs(ROUTE2_SQL);
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_deduped");
+        assert!(
+            message.to_lowercase().contains("extremal-fold"),
+            "message must name the extremal-fold family as the refusal reason: {message}"
+        );
+    }
+
+    /// A non-key-derived projection (undecidable by the derived sub-route)
+    /// still admits route 2 via the declared-FD fallback — the fallback
+    /// order is preserved.
+    #[test]
+    fn route2_declared_fd_still_admits_when_underivable() {
+        let sql = "SELECT id, d, other, CAST(other AS DATE) AS pdate, COUNT(*) AS n \
+                   FROM smelt.sources.raw.events GROUP BY id, d, other";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["id".to_string(), "d".to_string()];
+        inputs.partition_column = "pdate".to_string();
+        let fd = smelt_core::config::FunctionalDependency {
+            key: vec!["id".to_string(), "d".to_string()],
+            determines: "pdate".to_string(),
+        };
+        let declared = [fd];
+        inputs.declared_functional_dependencies = &declared;
+        let slice = establish_locality(&inputs).expect("declared FD fallback must still admit");
+        assert!(matches!(slice, LocalitySlice::DeltaValues { .. }));
+    }
+
+    /// A key-derived projection still obeys the structural preconditions
+    /// checked before any route: a caller-supplied `partition_column_not_
+    /// null: false` refuses even though the derived sub-route would
+    /// otherwise admit.
+    #[test]
+    fn route2_derived_still_obeys_the_structural_preconditions() {
+        let sql = "SELECT id, d, CAST(d AS DATE) AS pdate, COUNT(*) AS n \
+                   FROM smelt.sources.raw.events GROUP BY id, d";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["id".to_string(), "d".to_string()];
+        inputs.partition_column = "pdate".to_string();
         inputs.partition_column_not_null = false;
         let err = establish_locality(&inputs).unwrap_err();
         let message = err.message("events_deduped");
