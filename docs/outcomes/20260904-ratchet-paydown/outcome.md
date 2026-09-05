@@ -44,7 +44,7 @@ implementer, not this loop.
 |---|-------|--------|
 | 1 | Establish the pre-burst baseline values from git; census every added `unwrap`/`expect`/`println!` site in `39228307..HEAD`, with a per-site verdict | done |
 | 2 | `smelt-db`: convert the added `unwrap` sites (shared poison-recovering registry accessors) | done |
-| 3 | `smelt-cli`: mark the 13 added `println!`/`eprintln!` sites `// stdout: <reason>` and justify `migrate.rs:403`'s `expect` (not `rebuild.rs`) | pending |
+| 3 | `smelt-cli`: mark the 13 added `println!`/`eprintln!` sites `// stdout: <reason>` and justify `migrate.rs:403`'s `expect` (not `rebuild.rs`) | planned |
 | 4 | Regenerate the baseline with sign-off; record the file-split deferral in `docs/TODO.md`; gates green | pending |
 
 ## Decision log
@@ -92,6 +92,13 @@ implementer, not this loop.
   the target `RwLock`) before poisoning stands up a Salsa snapshot, and a subsequent `&mut self`
   mutation on the original handle blocks on Salsa's cancellation machinery. Fixed by cloning only
   the `Arc<RwLock<_>>` field; not a code-path change, so not tracked as a new TODO.
+
+- 2026-09-06 (plan 03): no reshape — phase 3's row already carries the census correction. Added a
+  scope note rather than a new row: the phase ships a source-text gate
+  (`crates/smelt-cli/tests/stdout_markers.rs`) so criterion 3 is machine-checked at the call sites
+  instead of asserted only in the census prose, and a future unmarked stdout site in `migrate.rs`
+  fails a test. The `diff.rs:502` comment alignment rides along as free consistency work (that site
+  predates the range and no criterion reaches it).
 
 ## Blocked
 
