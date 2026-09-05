@@ -771,6 +771,16 @@ pub fn validate_run_window_alignment(
 
     let total_days = (end - start).num_days();
 
+    // Every misalignment message below names the coarsened `[start, end)` pair
+    // that would be accepted (criterion 2), computed through the same
+    // `coarsen_window_to`/`align_output_*` rounding this module already uses
+    // to derive skew-widened output windows — one rounding rule, never
+    // restated per error arm.
+    let suggested = || {
+        let (s, e) = coarsen_window_to(start, end, granularity);
+        suggested_window_flags(s, e)
+    };
+
     match granularity {
         Granularity::Hour | Granularity::Day => Ok(()),
         Granularity::Week => {
@@ -778,24 +788,30 @@ pub fn validate_run_window_alignment(
             if start.weekday() != Weekday::Mon {
                 return Err(format!(
                     "Run window start ({}) is not aligned to weekly granularity: \
-                     start must be a Monday, got {:?}",
+                     start must be a Monday, got {:?} — the minimum accepted run window is `{}`",
                     start,
-                    start.weekday()
+                    start.weekday(),
+                    suggested(),
                 ));
             }
             if end.weekday() != Weekday::Mon {
                 return Err(format!(
                     "Run window end ({}) is not aligned to weekly granularity: \
-                     end must be a Monday, got {:?}",
+                     end must be a Monday, got {:?} — the minimum accepted run window is `{}`",
                     end,
-                    end.weekday()
+                    end.weekday(),
+                    suggested(),
                 ));
             }
             if total_days % 7 != 0 {
                 return Err(format!(
                     "Run window [{}, {}) is not aligned to weekly granularity: \
-                     window spans {} days which is not a multiple of 7",
-                    start, end, total_days
+                     window spans {} days which is not a multiple of 7 — the minimum accepted \
+                     run window is `{}`",
+                    start,
+                    end,
+                    total_days,
+                    suggested(),
                 ));
             }
             Ok(())
@@ -805,15 +821,17 @@ pub fn validate_run_window_alignment(
             if start.day() != 1 {
                 return Err(format!(
                     "Run window start ({}) is not aligned to monthly granularity: \
-                     start must be the 1st of a month",
-                    start
+                     start must be the 1st of a month — the minimum accepted run window is `{}`",
+                    start,
+                    suggested(),
                 ));
             }
             if end.day() != 1 {
                 return Err(format!(
                     "Run window end ({}) is not aligned to monthly granularity: \
-                     end must be the 1st of a month",
-                    end
+                     end must be the 1st of a month — the minimum accepted run window is `{}`",
+                    end,
+                    suggested(),
                 ));
             }
             Ok(())
@@ -824,15 +842,19 @@ pub fn validate_run_window_alignment(
             if start.day() != 1 || !quarter_months.contains(&start.month()) {
                 return Err(format!(
                     "Run window start ({}) is not aligned to quarterly granularity: \
-                     start must be the 1st of a quarter month (Jan, Apr, Jul, Oct)",
-                    start
+                     start must be the 1st of a quarter month (Jan, Apr, Jul, Oct) — the minimum \
+                     accepted run window is `{}`",
+                    start,
+                    suggested(),
                 ));
             }
             if end.day() != 1 || !quarter_months.contains(&end.month()) {
                 return Err(format!(
                     "Run window end ({}) is not aligned to quarterly granularity: \
-                     end must be the 1st of a quarter month (Jan, Apr, Jul, Oct)",
-                    end
+                     end must be the 1st of a quarter month (Jan, Apr, Jul, Oct) — the minimum \
+                     accepted run window is `{}`",
+                    end,
+                    suggested(),
                 ));
             }
             Ok(())
@@ -842,15 +864,17 @@ pub fn validate_run_window_alignment(
             if start.month() != 1 || start.day() != 1 {
                 return Err(format!(
                     "Run window start ({}) is not aligned to yearly granularity: \
-                     start must be Jan 1st",
-                    start
+                     start must be Jan 1st — the minimum accepted run window is `{}`",
+                    start,
+                    suggested(),
                 ));
             }
             if end.month() != 1 || end.day() != 1 {
                 return Err(format!(
                     "Run window end ({}) is not aligned to yearly granularity: \
-                     end must be Jan 1st",
-                    end
+                     end must be Jan 1st — the minimum accepted run window is `{}`",
+                    end,
+                    suggested(),
                 ));
             }
             Ok(())
@@ -932,13 +956,44 @@ pub fn validate_run_window_against_partition_grid(
             };
 
             if timeseries.granularity < g_part {
+                // Config-level refusal (`docs/specs/incremental_shapes.md`
+                // §"Run window vs partition granularity"): no run window fixes
+                // this, only a `timeseries.granularity` edit does. The
+                // covering window at `g_part` is named as context only — it
+                // must not read as "re-run with this and it works", since
+                // re-running with it still leaves `g_run` unchanged.
+                let (cov_start, cov_end) = coarsen_window_to(start, end, &g_part);
                 return Err(format!(
                     "run window granularity ({}) is finer than partition column '{}''s derived \
-                     granularity ({}); the minimum run window for this model is one {}",
+                     granularity ({}); declare `timeseries.granularity: {}` on this model to fix \
+                     this. For context only (this alone will not make the run pass), the window \
+                     covering this run at {} granularity is `{}`",
                     granularity_display(&timeseries.granularity),
                     timeseries.partition_column,
                     granularity_display(&g_part),
                     granularity_display(&g_part),
+                    granularity_display(&g_part),
+                    suggested_window_flags(cov_start, cov_end),
+                ));
+            }
+
+            // Window-level refusal: `g_run >= g_part` (checked above) does not
+            // by itself guarantee the *window's own bounds* land on `g_part`
+            // boundaries — e.g. a monthly `g_run` window over a weekly
+            // `g_part` grid, since a month start is not always a Monday. Named
+            // with the coarsened pair that would be accepted (criterion 2);
+            // re-running with exactly that pair succeeds.
+            if !is_grid_aligned(start, &g_part) || !is_grid_aligned(end, &g_part) {
+                let (coarse_start, coarse_end) = coarsen_window_to(start, end, &g_part);
+                return Err(format!(
+                    "run window [{}, {}) is not aligned to partition column '{}''s derived \
+                     granularity ({}); the minimum accepted run window aligned to that grid is \
+                     `{}`",
+                    start,
+                    end,
+                    timeseries.partition_column,
+                    granularity_display(&g_part),
+                    suggested_window_flags(coarse_start, coarse_end),
                 ));
             }
 
@@ -1049,6 +1104,41 @@ fn align_output_end(date: NaiveDate, granularity: &Granularity) -> NaiveDate {
     }
 }
 
+/// Round `[start, end)` outward to `unit`-aligned boundaries — the coarsened
+/// pair a run-window refusal suggests re-running with (`docs/specs/
+/// incremental_shapes.md` §"Run window vs partition granularity"). Reuses
+/// [`align_output_start`]/[`align_output_end`], the same rounding this module
+/// already uses to derive skew-widened output windows, so a suggested run
+/// window and a derived output window can never spell different rounding
+/// rules for the same granularity. An already-aligned pair is returned
+/// unchanged.
+fn coarsen_window_to(
+    start: NaiveDate,
+    end: NaiveDate,
+    unit: &Granularity,
+) -> (NaiveDate, NaiveDate) {
+    (align_output_start(start, unit), align_output_end(end, unit))
+}
+
+/// Render a `[start, end)` pair as the exact CLI flags that would reproduce
+/// it (`--event-time-start YYYY-MM-DD --event-time-end YYYY-MM-DD`) — the one
+/// place a suggested run window is formatted, so every refusal message
+/// spells the same flag names.
+fn suggested_window_flags(start: NaiveDate, end: NaiveDate) -> String {
+    format!(
+        "--event-time-start {} --event-time-end {}",
+        start.format("%Y-%m-%d"),
+        end.format("%Y-%m-%d"),
+    )
+}
+
+/// Whether `date` itself falls exactly on a `unit` grid boundary — the
+/// window-level `g_part`-alignment check's predicate
+/// ([`validate_run_window_against_partition_grid`]).
+fn is_grid_aligned(date: NaiveDate, unit: &Granularity) -> bool {
+    align_output_start(date, unit) == date
+}
+
 fn granularity_display(g: &Granularity) -> &'static str {
     match g {
         Granularity::Hour => "hour",
@@ -1077,5 +1167,28 @@ fn zero_effective_window() -> EffectiveWindow {
         lookahead_days: 0,
         is_unbounded: false,
         explanation: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coarsen_window_to_grid_floors_start_and_ceils_end() {
+        let start = NaiveDate::from_ymd_opt(2024, 12, 5).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
+        let (coarse_start, coarse_end) = coarsen_window_to(start, end, &Granularity::Month);
+        assert_eq!(coarse_start, NaiveDate::from_ymd_opt(2024, 12, 1).unwrap());
+        assert_eq!(coarse_end, NaiveDate::from_ymd_opt(2025, 1, 1).unwrap());
+    }
+
+    #[test]
+    fn coarsen_window_to_grid_leaves_an_already_aligned_pair_unchanged() {
+        let start = NaiveDate::from_ymd_opt(2024, 12, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let (coarse_start, coarse_end) = coarsen_window_to(start, end, &Granularity::Month);
+        assert_eq!(coarse_start, start);
+        assert_eq!(coarse_end, end);
     }
 }

@@ -74,7 +74,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | done |
-| 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | planned |
+| 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | done |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | pending |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | pending |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
@@ -99,5 +99,12 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   the covering window as context — a window suggestion there would be untrue. Phase 2 also
   folds in the phase-1 summary's residue: the stale "the six this outcome does not own" doc
   comment in `partition_residue_probes.rs`, and the ratchet drop for the bullet it closes.
+
+- 2026-09-05 — Phase 2 done: `coarsen_window_to`/`suggested_window_flags`/`is_grid_aligned`
+  helpers land in `windowing.rs`; every `validate_run_window_alignment` misalignment arm and
+  both `validate_run_window_against_partition_grid` refusals (window-level and config-level)
+  now name the coarsened/covering pair. The window-vs-`g_part`-grid residue (monthly `g_run`
+  over weekly `g_part`) is now caught, not just `g_run < g_part`. Spec bullet deleted;
+  `partition_residue_probes.rs` ratchet 3 → 2.
 
 ## Blocked

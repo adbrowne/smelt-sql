@@ -452,10 +452,19 @@ implied by `partition_column`'s own truncation/grid transform (`g_part`), derive
 rather than trusted: a daily truncation implies `g_part = day`, rejecting an hourly
 `granularity` as a DELETE+INSERT misalignment. `g_run >= g_part` is checked under the closed
 coarseness ordering (hour < day < week < month < quarter < year); an opaque `g_part` skips the
-comparison (undecided, not disproved). A sub-`g_part` run window is rejected with a diagnostic
-naming the model's partition granularity and spelling out the coarsened run window that would
-be accepted — never silently widened (auto-coarsening was rejected: it recomputes more than
-the operator asked for; `docs/research/20260816-open-questions-triage.md`).
+comparison (undecided, not disproved). Auto-coarsening is rejected outright: it recomputes more
+than the operator asked for (`docs/research/20260816-open-questions-triage.md`).
+
+Two distinct refusals follow, and only one has an actionable window fix. A **window-level**
+refusal fires when `g_run >= g_part` holds but the window's own bounds are not on `g_part`
+boundaries — either a misalignment to `g_run` itself, or the window-vs-`g_part`-grid residue a
+bare `g_run >= g_part` comparison alone lets through (e.g. a monthly `g_run` window over a
+weekly `g_part` grid: a month start is not always a Monday). Its message names the partition
+granularity and spells out the coarsened `[--event-time-start, --event-time-end)` pair that
+would be accepted; re-running with exactly that pair succeeds. A **config-level** refusal fires
+when `g_run < g_part` — no run window fixes this, only a `timeseries.granularity` edit does. Its
+message names the required `granularity` value and, as context only, the window covering the
+declined run at that granularity — phrased so it is not read as "re-run with this and it works".
 
 #### Batch safety classification
 
@@ -1220,10 +1229,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
   Divergences).
-- **The sub-`g_part` rejection does not yet name the coarsened window** — §"Run window vs
-  partition granularity" requires the refusal to spell out the run window that would be
-  accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over
-  auto-coarsening was decided 2026-08-16; `docs/research/20260816-open-questions-triage.md`.)
 - **`NOW()`/`CURRENT_*` are still compile-time-pinned** — §"Safety checks" admits them running
   as-is with no equivalence promise on the columns they feed; the implementation still freezes
   them to one per-run timestamp. Decision record:
