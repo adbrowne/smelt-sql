@@ -42,7 +42,7 @@ implementer, not this loop.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Establish the pre-burst baseline values from git; census every added `unwrap`/`expect`/`println!` site in `39228307..HEAD`, with a per-site verdict | planned |
+| 1 | Establish the pre-burst baseline values from git; census every added `unwrap`/`expect`/`println!` site in `39228307..HEAD`, with a per-site verdict | done |
 | 2 | `smelt-db`: classify or convert the added `unwrap` sites | pending |
 | 3 | `smelt-cli`: mark legitimate stdout, route the rest through the reporter/`tracing`, and classify or convert the added `expect` sites | pending |
 | 4 | Regenerate the baseline with sign-off; record the file-split deferral in `docs/TODO.md`; gates green | pending |
@@ -62,6 +62,14 @@ implementer, not this loop.
   `commands/migrate.rs` is a new command's user-facing plan output, which criterion 3 explicitly
   keeps. Phase 1 must return a Criterion-1 verdict; if ≤ 161 is unachievable by honest means, the
   phase-4 plan step restates the criterion rather than deleting user-visible output.
+
+- 2026-09-06 (phase 01): census complete (`phases/01-census.md`). All 16 added sites are
+  legitimate (`justify`/`stdout`); phase 3's scope shrinks — `commands/rebuild.rs`'s 2 `expect`s
+  are a verbatim rename of pre-burst `backbuild.rs` lines, not new sites. Criterion 1 is not
+  achievable as literally worded (`smelt-cli println ≤ 161`) — recommended restatement in
+  `01-census.md` §3: `smelt-cli println` = 174 with all 13 added sites marked `// stdout:
+  <reason>`, `smelt-db unwrap` ≤ 16 (achievable — all 3 additions are pre-justified
+  duplicate-pattern sites).
 
 ## Blocked
 
