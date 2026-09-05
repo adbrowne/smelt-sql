@@ -78,7 +78,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | done |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | done |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | done |
-| 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
+| 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | planned |
 | 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
 
 ## Decision log
@@ -185,5 +185,22 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   the signature. Two golden/tutorial fixtures drifted because `examples/timeseries`'s
   `raw.events` already declared `mutation_profile.lateness` — both regenerated/updated.
   `verify-phase.sh` ALL GREEN; `hardening_budget` baseline unchanged.
+
+- 2026-09-05 — Phase 6 planned with no table reshape (phase 5 surfaced no residue beyond a
+  fixture-grep caution, folded into the plan's verification list). Four planning calls
+  recorded: (a) `emit_append_only_posture_probe` stays the single owner of the *violation*
+  verdict with a narrowed predicate, while the *late-append* verdict is a new pure classifier
+  over the baseline snapshot the runtime already executes on a held probe — one SQL round
+  trip, no second rendering of the same comparison, mirroring
+  `contract/frozen_horizon.rs::late_arrivals`; (b) only a closed partition
+  (`check_fingerprint: true`, strictly below the recorded max) can produce a late append —
+  the open frontier partition legitimately grows every run and reporting it would make the
+  observation pure noise; (c) a delete+insert netting to a count increase reads as a late
+  append, because one aggregate fingerprint per partition cannot prove subset-ness — the spec
+  says so rather than implying a proof smelt cannot make; (d) the conformance "late-append
+  step kind" resolves to turning the harness's probe cadence back ON over the existing
+  `ConformanceStep::AppendLateRow` schedules — `render_smelt_yml_for` currently sets
+  `probes: {cadence: off}` with a comment citing this exact limitation, so closing the
+  limitation closes the workaround with it.
 
 ## Blocked
