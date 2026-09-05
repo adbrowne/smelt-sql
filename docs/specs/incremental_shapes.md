@@ -395,7 +395,13 @@ FROM smelt.customer_changes
 The classifier admits a model iff:
 
 - the `FROM` clause is exactly one source reference — no join, CTE, subquery, or set
-  operation — and that source declares `mutation_profile.kind: append_only` (`sources.md`);
+  operation — and that source declares `mutation_profile.kind: append_only` and a
+  `timeseries:` block (`sources.md`, `timeseries.md`; the source's `partition_column` is the
+  run axis, its `event_time_column` the clock, and the two may differ — §"The succession
+  grain" §"Run shape and late events");
+- at most one filter precedes the window projection, and it is a deterministic row-local
+  predicate over the driving source's own columns (the optional lateness clamp, §"The
+  succession grain" §"Run shape and late events");
 - every window function in the outermost projection is `LEAD(t)`/`LAG(t)` — or a scalar
   expression over one, such as the `IS NULL` above — with `PARTITION BY k ORDER BY t`, where
   `t` is the driving source's event-time column (`model_properties.md` §"Event-time
@@ -471,7 +477,8 @@ silently; it refuses with the nearest fix (§"Succession-grain admission (no dec
 | `SuccessionRowLocalColumnViolation` | A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local; names the column. |
 | `SuccessionIdentityNotProjected` | A key column or the clock column does not appear row-locally in the projection, so the derived `(k, t)` identity is not recoverable from the presented table; names the missing column. |
 | `SuccessionSingleSourceOnly` | The `FROM` clause is not exactly one source reference — a join, CTE, subquery, or set operation is present; names the offending clause (§"Succession-grain admission (no declaration)"). |
-| `SuccessionDrivingSourceNotAppendOnly` | The driving source does not declare `mutation_profile.kind: append_only`; names the source and its declared kind (§"The succession grain" §"Run shape and late events"). |
+| `SuccessionDrivingSourceNotAppendOnly` | The driving source does not declare `mutation_profile.kind: append_only`, or declares no `timeseries:` block; names the source and its declared kind or the missing block (§"The succession grain" §"Run shape and late events"). |
+| `SuccessionPreFilterNotRowLocal` | A filter precedes the window projection but is not a deterministic row-local predicate over the driving source's own columns — it references a window-derived column, an aggregate, a subquery, another relation, or a run-nondeterministic function; or more than one such filter is present. Names the offending predicate (§"The succession grain" §"Run shape and late events"). |
 | `SuccessionDeleteFilterMisplaced` | A post-projection filter exists but is not exactly `WHERE NOT <row-local boolean column>` applied after the window functions — e.g. it filters before the window, filters a non-boolean or non-row-local expression, is not a negated single column, or names a column not proven `NOT NULL` (a NULL flag drops the row under `WHERE NOT` without marking it a delete) (§"The succession grain" §"Delete events"). |
 | `SuccessionPatternUnrecognized` | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names; the general fallback when the model does not resemble any admitted grain. Names the three declared routes as fixes. |
 | `SuccessionClockTie` | Runtime: a delta presents two non-identical events with equal `(k, t)`; an event whose `(k, t)` matches a presented row with different row-local content or delete flag; or a delete and a non-delete at one `(k, t)` in either direction (against a stored tombstone only the delete flag is comparable). The run's transaction rolls back; reports the key, the clock value, and a sample. Identical rows are a redelivery and fold once (§"The succession grain" §"Run shape and late events"). |
@@ -1141,15 +1148,60 @@ in kind to the classifier than any other tracked-attribute column.
 #### Run shape and late events
 
 The succession grain has exactly one run shape: **window-forward** over the driving source's
-clock, sequenced by the same windowed-keyed-maintenance driver as the key grain (§"The two run
-shapes (derived, never declared)"). Snapshot-reconcile is never admitted — a snapshot carries no
-event stream to succeed over (§"What stays out of this grain"). The driving source must declare
-`mutation_profile.kind: append_only` (`SuccessionDrivingSourceNotAppendOnly` otherwise): the
-theorem folds each event exactly once into the event sequence, and a source that can rewrite
-or retract an already-folded event would leave the stored sequence disagreeing with the
-oracle. The
-declaration is paired with its usual verification mechanism, the append-only posture probe
-(`sources.md` §Semantics, `SourceMutationProfileViolated`).
+`timeseries.partition_column`, sequenced by the same windowed-keyed-maintenance driver as the
+key grain (§"The two run shapes (derived, never declared)"). Snapshot-reconcile is never
+admitted — a snapshot carries no event stream to succeed over (§"What stays out of this
+grain"). The driving source must declare `mutation_profile.kind: append_only`
+(`SuccessionDrivingSourceNotAppendOnly` otherwise): the theorem folds each event exactly once
+into the event sequence, and a source that can rewrite or retract an already-folded event
+would leave the stored sequence disagreeing with the oracle. The declaration is paired with
+its usual verification mechanism, the append-only posture probe (`sources.md` §Semantics,
+`SourceMutationProfileViolated`).
+
+**Two axes, deliberately distinct.** The **run axis** is the source's `partition_column` —
+what a window covers and what the driver steps. The **succession clock** is the `ORDER BY`
+column, which traces to the source's `event_time_column` (`timeseries.md` — the two may
+differ). The technique never computes `LEAD`/`LAG` inside a window's delta `SELECT`; a
+window's rows are *events*, projected row-locally, and their derived columns come from the
+patch against stored state. So the run axis places an event in a run, and the clock places it
+in its key's sequence, and the two are independent. Which column the source partitions by is
+therefore the single fact that decides how late events reach this grain:
+
+- **Arrival-partitioned** (`partition_column` is a landing/ingest date; `event_time_column`
+  is the event's own time) — the intended posture for a change stream. Every append lands in
+  the *open* arrival partition, so the append-only probe's closed-partition fingerprint leg
+  never fires on a late event, and a late event *is simply an event in a later arrival
+  window*: the ordinary window-forward step presents it, the theorem folds it, no discovery
+  mechanism beyond the landed delta is involved. The running example's `customer_changes`
+  declares `partition_column: ingested_date, event_time_column: effective_ts`.
+- **Event-time-partitioned** (`partition_column` is the clock's date) — admitted, but a late
+  append into a closed partition is then a violation of the source's own `append_only`
+  posture under the framework's existing definition (`sources.md` §Semantics 4), excluded by
+  the source, not by this grain. Nothing here changes that rule.
+
+`smelt explain` names the run axis and the clock and states which posture the source has.
+This is the partition grain's default-point doctrine applied to a keyed history — arrival
+time places the row, the model's own SQL decides what counts (`incremental_models.md`
+§"Windowed maintenance and the horizon", late arrivals at the default point) — and it is why
+the grain needs neither a weaker `append_only` sub-fact nor a lateness-gated probe
+(§"Succession-grain design").
+
+**The lateness clamp is the SQL, and it is optional.** An author who wants versions arriving
+too long after their event time *not* to count writes that as a deterministic row-local
+predicate over the driving source's own columns, **before** the window:
+
+```sql
+FROM smelt.customer_changes
+WHERE ingested_at < effective_ts + INTERVAL '7 days'
+```
+
+A row the predicate drops never enters the event sequence — in the oracle or in the
+maintained state — so equivalence holds by construction, and the taint rule that bars
+`CURRENT_DATE` from row placement (§"Safety checks (per-cell admission for recompute-a-region)")
+bars it here too: the clamp compares the feed's own columns, never the run clock. The
+classifier admits one such pre-window filter (`SuccessionPreFilterNotRowLocal` otherwise,
+`model_properties.md` §"Keyed-succession classification"). Nothing requires it — the write
+footprint is constant without it — it is how an author bounds *semantics*, not cost.
 
 Two derived execution postures follow from the theorem and are surfaced by `smelt explain`,
 never declared. The grain is **re-run tolerant**: a window already folded may be folded again,
@@ -1163,15 +1215,13 @@ there is no `KeyedReprocessedWindow` analogue here. The model keeps the window-f
 driver's per-model frontier (§"The transactional frontier write (merge ledger)") at the
 re-run-tolerant grade — bookkeeping for `--auto` staleness, never a refusal structure.
 
-Those postures bound what a late event *costs*, not how it is *discovered*. Consumption is the
-framework's ordinary window-forward step over the driving source's landed delta (`sources.md`
-§"Landed-delta (derived, recorded)"): a run folds the events the delta presents, and a late
-event whose event time falls inside an already-covered window is folded correctly, with the
-constant footprint above, whenever a run presents it — a re-run of that window, an explicit
-`--landed` range, or `smelt repair`. What this grain guarantees is that presenting a late event
-is always safe and always cheap; whether a scheduled run presents it at all is the shared
-delta-discovery question every window-forward shape faces, not a property of this grain (§Known
-Divergences).
+Consumption is the framework's ordinary window-forward step over the driving source's landed
+delta on the run axis (`sources.md` §"Landed-delta (derived, recorded)"): a run folds the
+events the delta presents. Under arrival partitioning that is every event, however late its
+clock value; under event-time partitioning it is every event the source's posture admits.
+Either way, presenting an event is always safe and always cheap, and a window may be
+re-presented — by a re-run, an explicit `--landed` range, or `smelt repair` — without
+refusal.
 
 **Clock ties.** The derived identity `(k, t)` requires that no two distinct events share a key
 and a clock value. At admission the trace must certify the `ORDER BY` column **strictly**
@@ -1376,11 +1426,38 @@ with a *derived horizon* — a margin past which a late fact is excluded from th
 good. The succession grain excludes nothing: its maintenance theorem names a constant
 footprint (the new row and its immediate neighbours) for every event regardless of how late
 it arrives, so a late event folds correctly whenever it is presented, and there is nothing
-to derive a bound over. The horizon question this grain does *not* answer is discovery — which
-run presents a late event — and that is deliberately left as the shared window-forward
-delta-discovery problem rather than given a grain-local mechanism (an arrival-time scan
-column, a per-model rescan margin) that would restate a source fact per consumer
-(`sources.md` §Design "World-facts live on the source, never per model").
+to derive a bound over.
+
+**Late events arrive on the run axis, not through a posture change.** The append-only posture
+probe fingerprints every closed partition of the source, so under an event-time-partitioned
+source a late append is a posture violation and the theorem's late-splice guarantee is
+unreachable. Three fixes were considered and rejected: gating the fingerprint leg to
+partitions older than the source's declared `lateness` (makes `lateness` a probe input,
+reversing the orchestration-only decision in `docs/research/20260904-decision-track.md`); a
+weaker `append_only` sub-fact with no fingerprint leg (a second posture vocabulary whose only
+consumer would be this grain, and which would silently weaken the probe for any other
+consumer of the same source); and dropping the late-splice claims (gives up the feature's
+main advantage over the partition grain). The chosen answer separates the **run axis** from
+the **succession clock**: a change stream is partitioned by *arrival*, so every append is
+into the open partition and a late event is merely an event in a later window. This is
+already the framework's default-point lateness doctrine — arrival time places the row, the
+SQL decides what counts (`incremental_models.md` §"Windowed maintenance and the horizon") —
+and it needs no new source vocabulary, no grain-local rescan margin, and no discovery
+mechanism beyond the landed delta. The cost is a declaration on the source
+(`partition_column` ≠ `event_time_column`), which `timeseries.md` already admits and which
+states a true fact about the feed rather than restating a source fact per consumer
+(`sources.md` §Design "World-facts live on the source, never per model"). An
+event-time-partitioned source is still admitted, with the framework's existing posture rule
+applying unchanged, so no source is refused for how it happens to be partitioned.
+
+**The lateness clamp is SQL, admitted as a pre-window filter.** A declared `max_lateness:`
+on the model was rejected — it would be a frontmatter fact restating something the SQL can
+state exactly, the derive-else-declare principle (`models.md` §Design). Admitting one
+deterministic row-local `WHERE` between the driving source and the window projection costs
+one classifier rule and one refusal code, keeps the oracle and the maintained state trivially
+equal (a dropped row is dropped in both), and reuses the existing determinism taint rule to
+keep the run clock out of it. The filter is optional because, unlike the partition grain's
+horizon, nothing about this grain's cost depends on it.
 
 **The tombstone ledger is a sibling table holding only deletes.** Rung-2 state in the key
 grain lives as `__part` columns on the presented rows (§"Decomposed state (rung 2) in keyed
@@ -1577,8 +1654,13 @@ larger one.
 5. **The run shape is window-forward only; the grain is re-run tolerant, order-independent,
    and serial; reprocessing is admitted.** Windows never apply concurrently. Snapshot-reconcile
    is never admitted.
-6. **The driving source is exactly one `append_only` source reference**, verified by the
-   append-only posture probe; joins, CTEs, subqueries, and set operations refuse.
+6. **The driving source is exactly one `append_only`, `timeseries:`-declaring source
+   reference**, verified by the append-only posture probe; joins, CTEs, subqueries, and set
+   operations refuse. The run axis is the source's `partition_column`; the clock is its
+   `event_time_column`; late events reach the grain through the run axis, never through a
+   weakened posture or a grain-local rescan.
+6a. **At most one pre-window filter, deterministic and row-local over the driving source's
+    own columns.** It is the only lateness clamp the grain has, and it is optional.
 7. **`(k, t)` is a strict identity, and both `k` and `t` are projected.** The clock traces
    strictly monotone at admission; the key columns and the clock column each appear
    row-locally in the projection so the `MERGE` can address presented rows; a runtime
@@ -1588,8 +1670,9 @@ larger one.
    expression over one, or with an offset other than the default 1), a non-row-local
    non-window projection, an unresolvable or nullable partition key, a non-strict or
    descending `ORDER BY`, an unprojected key or clock, a second source, a non-append-only
-   source, or a misplaced or nullable delete filter each refuses with a named diagnostic
-   (§"Diagnostics") — never falls back to an approximate or partial maintenance.
+   source, a non-row-local or nondeterministic pre-window filter, or a misplaced or nullable
+   delete filter each refuses with a named diagnostic (§"Diagnostics") — never falls back to
+   an approximate or partial maintenance.
 9. **End-state equivalence holds with the model's own SQL as the oracle**, identically to the
    key grain's rule: `full_refresh(model SQL)` over the same processed inputs is the executable
    correctness definition, with no bespoke interval-keyed specialisation.
@@ -1719,34 +1802,13 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   whose only events are deletes, `LAG`-projecting models under each of those, out-of-order and
   repeated window application, and an equal-`(k, t)` collision expecting `SuccessionClockTie`.
   Until they exist, this profile's theorem is a design claim, not a verified one.
-- **The append-only posture probe rejects the late appends this grain's theorem admits — an
-  undecided framework question, not a grain-local one.** §"Run shape and late events" requires
-  `append_only` paired with the append-only posture probe, and the probe's fingerprint leg
-  (`sources.md` §Semantics 4, `model_properties.md` §"Probe obligation") re-checks every
-  partition strictly below the source's recorded maximum, so a genuinely late row landing in a
-  closed partition changes that partition's digest and fails the consuming run with
-  `SourceMutationProfileViolated`. Under the probe as built, `append_only` therefore means
-  "append-only into the open partition", and the theorem's late-splice guarantee is
-  reachable only through a run that presents the late row *without* the probe rejecting it.
-  The same tension already exists for every window-forward consumer of an `append_only`
-  source declared with a non-zero `lateness` (the running example's `orders`, "up to 2 days
-  late"). Candidate resolutions, none decided: gate the fingerprint leg to partitions older
-  than the source's declared `lateness` (which would make `lateness` a probe input, contrary
-  to the orchestration-only decision in `docs/research/20260904-decision-track.md`); a
-  weaker `append_only` sub-fact — count-non-decrease only, no fingerprint — that the succession
-  grain admits and the additive-fold families do not; or accepting that a late append is a
-  posture violation and dropping the late-splice claims from this profile. This must be decided
-  before implementation planning; the profile is written assuming the second.
-- **Late-event discovery is the shared window-forward gap, not a grain-local one.** The theorem
-  makes presenting a late event safe and cheap (§"Run shape and late events"), but a scheduled
-  `--auto` run steps uncovered windows of the driving source's landed delta and does not by
-  itself re-present a covered window a late row landed in. Until the framework offers
-  arrival-addressed delta discovery for append-only clocked sources (`incremental_models.md`
-  §Future Extensions "Automatic, watermark-diffed `--since-upstream`"), a late row reaches a
-  succession model only through an explicit `--landed` range, `smelt repair`, or a re-run of
-  its window — all of which this grain admits without refusal. Current best answer: keep
-  discovery on the source, not the model, and let the succession grain inherit whichever
-  mechanism lands there.
+- **The conformance pool has no arrival-partitioned source recipe.** The late-splice claims
+  above are only reachable through an arrival-partitioned driving source (§"Run shape and
+  late events"), and the typed recipe generator today partitions every clocked source by its
+  event time. The succession recipe family needs a source recipe whose `partition_column` is
+  a landing date distinct from `event_time_column`, with lateness schedules that land old
+  event times in new arrival windows — and a leg with the optional pre-window lateness clamp,
+  asserting the clamped-out rows are absent from both oracle and maintained state.
 
 ## Future Extensions
 
