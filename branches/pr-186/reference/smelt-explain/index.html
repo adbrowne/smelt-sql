@@ -1635,6 +1635,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/ci/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Continuous Integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/orchestration/" class="md-nav__link">
         
   
@@ -2525,6 +2553,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#refusals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refusals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#probes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2604,6 +2643,17 @@
         
       </ul>
     </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#property-diff" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Property diff
+      
+    </span>
+  </a>
   
 </li>
       
@@ -2861,6 +2911,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#refusals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refusals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#probes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2944,6 +3005,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#property-diff" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Property diff
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#example" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2982,6 +3054,7 @@
 <h1 id="smelt-explain">smelt explain<a class="headerlink" href="#smelt-explain" title="Permanent link">&para;</a></h1>
 <p>Inspect the logical and physical execution plan for a project, or the derived maintenance plan for a single incremental model.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span><span class="o">[</span>MODEL_NAME<span class="o">]</span><span class="w"> </span><span class="o">[</span>--json<span class="o">]</span><span class="w"> </span><span class="o">[</span>--select<span class="w"> </span>&lt;selector&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--project-dir<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--show-sql<span class="o">]</span><span class="w"> </span><span class="o">[</span>--period<span class="w"> </span>&lt;start&gt;..&lt;end&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--technique<span class="w"> </span>&lt;name&gt;<span class="o">]</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--diff<span class="w"> </span><span class="o">[</span>&lt;ref&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--json<span class="o">]</span><span class="w"> </span><span class="o">[</span>--markdown<span class="o">]</span><span class="w"> </span><span class="o">[</span>--fail-on<span class="w"> </span>&lt;downgrade<span class="p">|</span>any&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--select<span class="w"> </span>&lt;selector&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--project-dir<span class="w"> </span>&lt;path&gt;<span class="o">]</span>
 </code></pre></div>
 <h2 id="options">Options<a class="headerlink" href="#options" title="Permanent link">&para;</a></h2>
 <table>
@@ -3020,6 +3093,18 @@
 <td><code>--technique</code></td>
 <td>Requires <code>--show-sql</code>. Render a named technique's own preview statements instead of the admitted one's, per cell — including a <code>NotApplicable</code> reason where that technique doesn't apply to a given cell. Accepts <code>delete_insert</code>, <code>keyed_fold</code>, <code>column_scoped_merge</code>, <code>in_place_update</code>, <code>per_group_recompute</code>, <code>recompute</code>.</td>
 </tr>
+<tr>
+<td><code>--diff [&lt;ref&gt;]</code></td>
+<td>Diff the project's property profile between a git baseline (default: merge-base with <code>main</code>) and the working tree, instead of printing a graph or a report. See <a href="#property-diff">Property diff</a> below. Exclusive with <code>MODEL_NAME</code>, <code>--show-sql</code>, <code>--period</code>, and <code>--technique</code> — combining them is a usage error (exit <code>2</code>).</td>
+</tr>
+<tr>
+<td><code>--fail-on</code></td>
+<td>Only with <code>--diff</code>. <code>downgrade</code> exits <code>1</code> when any downgrade is present; <code>any</code> exits <code>1</code> when any model shifted at all. Without it, <code>--diff</code> exits <code>0</code> whenever the diff was computed.</td>
+</tr>
+<tr>
+<td><code>--markdown</code></td>
+<td>Only with <code>--diff</code>. Emit the diff as a single GitHub-flavoured Markdown comment body instead of text. Exclusive with <code>--json</code>. See <a href="#property-diff">Property diff</a> below.</td>
+</tr>
 </tbody>
 </table>
 <h2 id="human-readable-output">Human-readable output<a class="headerlink" href="#human-readable-output" title="Permanent link">&para;</a></h2>
@@ -3045,6 +3130,18 @@
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>      presentation: avg_amount__sum / avg_amount__count
 </code></pre></div>
 <p>A model with no decomposed-state columns prints no state section. With <code>--json</code>, the same information appears as a top-level <code>state_columns</code> array: <code>[{"presented_column": "avg_amount", "state_columns": ["avg_amount__sum", "avg_amount__count"], "presentation_expr": "avg_amount__sum / avg_amount__count"}]</code>.</p>
+<h2 id="refusals">Refusals<a class="headerlink" href="#refusals" title="Permanent link">&para;</a></h2>
+<p><code>smelt explain &lt;model&gt;</code> also prints any maintenance admission refusals — the cases where no
+technique could be admitted for a cell, or the plan admitted the model with a caveat:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>Refusals (1):
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>  - ScanUnbounded { source: &quot;raw.orders&quot;, why: &quot;no partition_column declared&quot; }
+</code></pre></div>
+<p>A model whose plan admitted every cell prints <code>Refusals: (none)</code>. With <code>--json</code>, the same set
+appears as a top-level <code>refusals</code> array: <code>[{"code": "MaintenanceScanUnbounded", "text":
+"ScanUnbounded { source: \"raw.orders\", why: \"no partition_column declared\" }"}]</code> — <code>code</code>
+names the diagnostic code a refusal of this shape raises, absent for a refusal that raises no
+diagnostic today; <code>text</code> is the report's own rendering of the refusal, verbatim. Empty when the
+model's plan admitted every cell.</p>
 <h2 id="probes">Probes<a class="headerlink" href="#probes" title="Permanent link">&para;</a></h2>
 <p>A declared world-fact (<code>functional_dependencies:</code>, <code>bounded_domain:</code>, <code>assert_monotonic</code>,
 <code>mutation_profile: {kind: append_only}</code>, <code>referential_integrity:</code>, <code>key_recurrence</code>) licenses a
@@ -3053,12 +3150,12 @@ see <a href="../smelt-yml/#probes-configuration"><code>probes:</code> in the <co
 &lt;model&gt;</code> prints the model's declared-fact probe set: per probe, the declared fact, the named
 diagnostic it raises, the maintenance cell it licenses, the project's dispatch cadence, and its
 cost:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>Probes (1):
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>  cadence: per_run
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>  - fact: functional_dependencies:
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>      probe: DeclaredFunctionalDependencyViolated
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>      licensed cell: main.subscriptions (declared)
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>      cost: +1 query per consuming run
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>Probes (1):
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>  cadence: per_run
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>  - fact: functional_dependencies:
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>      probe: DeclaredFunctionalDependencyViolated
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>      licensed cell: main.subscriptions (declared)
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>      cost: +1 query per consuming run
 </code></pre></div>
 <p>A model declaring no probe-backed fact prints <code>Probes (0):</code>, not a missing section. The probe set
 stays <strong>offline</strong>: probe SQL is built to confirm a declaration is probe-backed, never executed, so
@@ -3071,11 +3168,11 @@ dispatched/skipped outcome.</p>
 <p>See <a href="../cli/#smelt-explain"><code>smelt explain</code> in the CLI reference</a> for the full flag list and a sample maintenance-plan report. The web UI's <a href="../../guide/model-diagnostics/">model diagnostics page</a> renders the same technique previews and admissibility verdicts interactively, alongside the model's full derived property set.</p>
 <h2 id="json-output-schema">JSON output schema<a class="headerlink" href="#json-output-schema" title="Permanent link">&para;</a></h2>
 <p>With <code>--json</code>, smelt prints a single JSON object with the following top-level fields:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">{</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;&lt;model-name&gt;&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="nt">&quot;execution_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;model-name&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="nt">&quot;physical&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p">{</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;&lt;model-name&gt;&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="nt">&quot;execution_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;model-name&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span><span class="nt">&quot;physical&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="p">}</span>
 </code></pre></div>
 <h3 id="models-per-model-entry"><code>models</code> — per-model entry<a class="headerlink" href="#models-per-model-entry" title="Permanent link">&para;</a></h3>
 <p>Each entry in <code>models</code> has:</p>
@@ -3172,14 +3269,14 @@ dispatched/skipped outcome.</p>
 <p>The <code>source_bounds</code> object maps each timeseries upstream reference name to its derived bound. Lookup sources (those without a <code>timeseries:</code> declaration) do not appear.</p>
 <p>Each entry is a tagged object with <code>"type"</code>:</p>
 <p><strong><code>"bounded"</code></strong> — the planner derived an explicit lookback/lookahead:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p">{</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT30M&quot;</span><span class="p">,</span>
-<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span>
-<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">  </span><span class="p">}</span>
-<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT30M&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="p">}</span>
 </code></pre></div>
 <table>
 <thead>
@@ -3223,24 +3320,24 @@ dispatched/skipped outcome.</p>
 </tbody>
 </table>
 <p>Without <code>--period</code>, <code>scan_start</code>/<code>scan_end</code>/<code>scan_unresolved</code> are all omitted:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span>--period<span class="w"> </span><span class="m">2026</span>-01-01..2026-01-08<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span>--period<span class="w"> </span><span class="m">2026</span>-01-01..2026-01-08<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="p">{</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT30M&quot;</span><span class="p">,</span>
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span><span class="p">,</span>
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="w">    </span><span class="nt">&quot;scan_start&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-01-01&quot;</span><span class="p">,</span>
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="w">    </span><span class="nt">&quot;scan_end&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-01-08&quot;</span>
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">  </span><span class="p">}</span>
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="p">{</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT30M&quot;</span><span class="p">,</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span><span class="p">,</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="w">    </span><span class="nt">&quot;scan_start&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-01-01&quot;</span><span class="p">,</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="w">    </span><span class="nt">&quot;scan_end&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-01-08&quot;</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="p">}</span>
 </code></pre></div>
 <p><strong><code>"unbounded"</code></strong> — the source requires reading unbounded history (cumulative aggregation, <code>UNBOUNDED PRECEDING</code>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;unbounded&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;unbounded&quot;</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <p><strong><code>"not_derivable"</code></strong> — the planner could not determine the bound (bare <code>LAG/LEAD</code> without a <code>RANGE</code> clause, or a computed-expression join without an explicit interval filter). A model with any <code>not_derivable</code> bound is refused at planning time.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;not_derivable&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;not_derivable&quot;</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <h3 id="duration-format">Duration format<a class="headerlink" href="#duration-format" title="Permanent link">&para;</a></h3>
 <p>All <code>before</code> and <code>after</code> values use ISO-8601 duration strings:</p>
@@ -3307,12 +3404,99 @@ dispatched/skipped outcome.</p>
 </tbody>
 </table>
 <p>Each node in <code>nodes</code> has <code>strategy</code>, <code>materialization</code>, <code>target</code>, and <code>logical_origins</code>.</p>
+<h2 id="property-diff">Property diff<a class="headerlink" href="#property-diff" title="Permanent link">&para;</a></h2>
+<p><code>smelt explain --diff [&lt;ref&gt;]</code> derives every model's property profile at two versions of the
+project — a git baseline (<code>&lt;ref&gt;</code>, defaulting to the merge-base with <code>main</code>) and the working
+tree, uncommitted edits included — and reports every model whose profile shifted: grain,
+bound/reach, per-cell technique, refusals, contract point, and probes. A model whose own file
+was edited is reported <code>(edited)</code>; one that shifted only because an upstream model or source it
+depends on changed is reported <code>(downstream of &lt;model&gt;[, &lt;model&gt;…])</code>, naming the nearest edited
+ancestors — this is how a downgrade that silently propagates into a downstream mart gets caught.</p>
+<p>The baseline never touches a warehouse, a deployed snapshot, or the maintenance ledger — it is a
+pure comparison of two source trees.</p>
+<p><strong>Text</strong> (default):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>$ smelt explain --diff
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>  user_daily_spend  (edited)
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    ▼ cell_technique {total_amount}@NewData { source: &quot;raw.transactions&quot; }: KeyedFold → DeleteInsert
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>  user_spend_running_total  (downstream of user_daily_spend)
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>    ▼ cell_removed {running_total}@NewData { source: &quot;user_daily_spend&quot; }: {...} → null
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>
+<a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>1 downgrades, 0 upgrades, 0 neutral.
+</code></pre></div>
+<p>When nothing shifted, the whole output is one line: <code>property diff vs &lt;ref&gt;: no models shifted</code>.</p>
+<p><strong>JSON</strong> (<code>--diff --json</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="p">{</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">  </span><span class="nt">&quot;baseline&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;ref&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;as given&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;commit&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;sha&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;resolved_as&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;merge_base&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;explicit&quot;</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">  </span><span class="nt">&quot;edited_files&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;project-relative path&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="w">  </span><span class="nt">&quot;summary&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;downgrades&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;upgrades&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;neutral&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;shifted_models&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="w">    </span><span class="p">{</span>
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="w">      </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;name&gt;&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="w">      </span><span class="nt">&quot;cause&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;edited&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;added&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;removed&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;downstream&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;of&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;model&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="w">      </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;dimension&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cell_technique&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;direction&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;downgrade&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;old&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;KeyedFold&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;new&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DeleteInsert&quot;</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a><span class="w">      </span><span class="p">]</span>
+<a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a><span class="w">  </span><span class="p">]</span>
+<a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a><span class="p">}</span>
+</code></pre></div>
+<p>The full schema — every <code>dimension</code> value, the per-dimension direction rules, and the
+attribution algorithm — is normative in <code>docs/specs/property_diff.md</code>.</p>
+<p><strong>Markdown</strong> (<code>--diff --markdown</code>): a single comment body suitable for <code>gh pr comment
+--body-file</code>, with one collapsible block per shifted model (open by default when it holds a
+downgrade) and a trailing <code>&lt;!-- smelt-property-diff --&gt;</code> marker a CI job uses to update its
+previous comment instead of stacking a new one on every push. The marker is emitted even when
+nothing shifted, so a stale downgrade comment can be cleared once the regression is fixed. See
+<a href="../../guide/ci/">Continuous integration</a> for the documented GitHub Actions job.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>$ smelt explain --diff --markdown
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>### property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>1 downgrades, 0 upgrades, 0 neutral.
+<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>
+<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>&lt;details open&gt;
+<a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a>&lt;summary&gt;user_daily_spend — edited — 1 downgrades, 0 upgrades, 0 neutral&lt;/summary&gt;
+<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>
+<a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a>| dimension | subject | direction | old | new | reason |
+<a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a>|---|---|---|---|---|---|
+<a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a>| cell_technique | {total_amount}@NewData { source: &quot;raw.transactions&quot; } | downgrade | KeyedFold | DeleteInsert |  |
+<a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a>
+<a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a>&lt;/details&gt;
+<a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a>
+<a id="__codelineno-13-16" name="__codelineno-13-16" href="#__codelineno-13-16"></a>&lt;details open&gt;
+<a id="__codelineno-13-17" name="__codelineno-13-17" href="#__codelineno-13-17"></a>&lt;summary&gt;user_spend_running_total — downstream of user_daily_spend — 1 downgrades, 0 upgrades, 0 neutral&lt;/summary&gt;
+<a id="__codelineno-13-18" name="__codelineno-13-18" href="#__codelineno-13-18"></a>
+<a id="__codelineno-13-19" name="__codelineno-13-19" href="#__codelineno-13-19"></a>| dimension | subject | direction | old | new | reason |
+<a id="__codelineno-13-20" name="__codelineno-13-20" href="#__codelineno-13-20"></a>|---|---|---|---|---|---|
+<a id="__codelineno-13-21" name="__codelineno-13-21" href="#__codelineno-13-21"></a>| cell_removed | {running_total}@NewData { source: &quot;user_daily_spend&quot; } | downgrade | {...} | null |  |
+<a id="__codelineno-13-22" name="__codelineno-13-22" href="#__codelineno-13-22"></a>
+<a id="__codelineno-13-23" name="__codelineno-13-23" href="#__codelineno-13-23"></a>&lt;/details&gt;
+<a id="__codelineno-13-24" name="__codelineno-13-24" href="#__codelineno-13-24"></a>
+<a id="__codelineno-13-25" name="__codelineno-13-25" href="#__codelineno-13-25"></a>&lt;!-- smelt-property-diff --&gt;
+</code></pre></div>
+<p><code>--select &lt;selector&gt;</code> narrows the <em>reported</em> set only; every model is still compared at both
+versions so a downstream model's <code>cause</code> stays correct even when its edited ancestor is filtered
+out of the printed set.</p>
+<p><strong>Exit codes:</strong> <code>0</code> whenever the diff was computed (whether or not anything shifted); <code>1</code> only
+under <code>--fail-on</code>; <code>2</code> for an unresolvable baseline (not a git work tree, an unknown ref, or a
+ref with no project at that path) or combining <code>--diff</code> with <code>MODEL_NAME</code>, <code>--show-sql</code>,
+<code>--period</code>, or <code>--technique</code>.</p>
 <h2 id="example">Example<a class="headerlink" href="#example" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># Human-readable</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>smelt<span class="w"> </span>explain
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="c1"># JSON, piped to jq for the sessions model&#39;s source bounds</span>
-<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="c1"># Human-readable</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>smelt<span class="w"> </span>explain
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="c1"># JSON, piped to jq for the sessions model&#39;s source bounds</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="c1"># Property diff against the default baseline (merge-base with main)</span>
+<a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--diff
+<a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>
+<a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a><span class="c1"># Property diff against an explicit ref, machine-readable, gating CI on any downgrade</span>
+<a id="__codelineno-14-11" name="__codelineno-14-11" href="#__codelineno-14-11"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--diff<span class="w"> </span>origin/main<span class="w"> </span>--json<span class="w"> </span>--fail-on<span class="w"> </span>downgrade
 </code></pre></div>
 
 

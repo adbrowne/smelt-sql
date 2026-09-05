@@ -1635,6 +1635,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/ci/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Continuous Integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/orchestration/" class="md-nav__link">
         
   
@@ -2809,7 +2837,7 @@
 <h2 id="code-catalogue">Code catalogue<a class="headerlink" href="#code-catalogue" title="Permanent link">&para;</a></h2>
 <p>The complete <code>DiagnosticCode</code> catalogue — every variant, its severity, and the user-input condition that triggers it — is maintained in
 <a href="https://github.com/brownie/smelt/blob/main/docs/specs/diagnostics.md"><code>docs/specs/diagnostics.md</code></a>.
-Codes are grouped by owning feature: models &amp; core analysis, sources, seeds, timeseries, incremental &amp; cumulative, types, Python models, functions &amp; expansion, meta-language, records/maps/loaders, and multi-model production.</p>
+Codes are grouped by owning feature: models &amp; core analysis, sources, seeds, timeseries, incremental &amp; cumulative, types, Python models, functions &amp; expansion, meta-language, records/maps/loaders, multi-model production, and property diff (<code>PropertyDowngrade</code>, <code>PropertyDiffBaselineUnavailable</code> — see <a href="../smelt-explain/"><code>smelt explain --diff</code></a>).</p>
 <h3 id="example-unknownstructfieldtype">Example: <code>UnknownStructFieldType</code><a class="headerlink" href="#example-unknownstructfieldtype" title="Permanent link">&para;</a></h3>
 <p><strong>Severity</strong>: Error</p>
 <p>Emitted when a <code>smelt.define</code> or <code>smelt.extern</code> parameter or return-type annotation contains a <code>Struct&lt;{…}&gt;</code> shape whose field type text cannot be resolved to a recognised <code>DataType</code>. The diagnostic is anchored at the individual field's type-reference span, not the whole annotation, so the exact bad token is highlighted.</p>
