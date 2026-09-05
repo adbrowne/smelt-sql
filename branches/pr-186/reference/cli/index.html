@@ -1383,14 +1383,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/backbuild-synthesis/" class="md-nav__link">
+      <a href="../../guide/migrations/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Backbuild Synthesis
+    Migrations
   
 
     
@@ -4018,7 +4018,7 @@ over a pending, non-eclipsed, unapproved definition delta — a redefined column
 <code>smelt migrate</code> hasn't reviewed yet — rather than silently maintaining a table whose definition
 no longer matches its contents. The run exits <code>3</code> naming <code>DefinitionDeltaPending</code> and the fix:
 <code>smelt migrate &lt;model&gt;</code> to review the plan, then <code>--apply</code>, or run with <code>--full-refresh</code>. See
-<a href="../../guide/backbuild-synthesis/">Backbuild synthesis</a>.</p>
+<a href="../../guide/migrations/">Migrations</a>.</p>
 <h3 id="parallel-execution-with-jobs">Parallel execution with <code>--jobs</code><a class="headerlink" href="#parallel-execution-with-jobs" title="Permanent link">&para;</a></h3>
 <p>The run engine (shared by <code>smelt run</code>, <code>smelt build</code>, and <code>smelt rebuild</code>) dispatches models as a topological <strong>wavefront</strong>: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. <code>smelt run --jobs</code> bounds how many models are in flight at once:</p>
 <ul>
@@ -4922,7 +4922,7 @@ no longer matches its contents. The run exits <code>3</code> naming <code>Defini
 <h2 id="smelt-migrate">smelt migrate<a class="headerlink" href="#smelt-migrate" title="Permanent link">&para;</a></h2>
 <p>Derive, approve, and apply a <strong>definition-delta</strong> migration plan: a targeted script that
 migrates a model's stored table in place after its SQL changed, instead of a full rebuild. See
-the <a href="../../guide/backbuild-synthesis/">migration guide</a> for the full walkthrough of when each
+the <a href="../../guide/migrations/">migration guide</a> for the full walkthrough of when each
 verdict (eclipsed, backfill in place, rederive, skeleton change) applies.</p>
 <p><strong>Usage:</strong></p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a>smelt migrate &lt;model&gt; [OPTIONS]

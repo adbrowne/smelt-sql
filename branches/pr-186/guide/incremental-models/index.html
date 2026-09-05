@@ -2097,14 +2097,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../backbuild-synthesis/" class="md-nav__link">
+      <a href="../migrations/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Backbuild Synthesis
+    Migrations
   
 
     
@@ -4623,7 +4623,7 @@ model to see which technique its own plan actually assigned.</p>
 <li>Process the target model last.</li>
 </ol>
 <p>Rebuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are <code>FullyBatchSafe</code>), not per partition.</p>
-<p>Rebuilding reprocesses <em>data</em> under an unchanged definition. For the complementary problem — migrating a deployed table after the model's <em>definition</em> changes, without a full rebuild — see <a href="../backbuild-synthesis/">Backbuild Synthesis</a>.</p>
+<p>Rebuilding reprocesses <em>data</em> under an unchanged definition. For the complementary problem — migrating a deployed table after the model's <em>definition</em> changes, without a full rebuild — see <a href="../migrations/">Migrations</a>.</p>
 <h2 id="incremental-strategies">Incremental strategies<a class="headerlink" href="#incremental-strategies" title="Permanent link">&para;</a></h2>
 <p>smelt supports multiple strategies for how data is updated. The strategy is chosen based on your configuration and the backend's capabilities:</p>
 <table>
