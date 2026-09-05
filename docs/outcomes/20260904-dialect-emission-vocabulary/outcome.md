@@ -77,7 +77,7 @@ audit before it is claimed — never from documentation.
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
-| 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
+| 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | planned |
 | 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
 | 8 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
@@ -211,6 +211,21 @@ audit before it is claimed — never from documentation.
   production row is `Conditional` yet (phase 7's job, per plan 05's note); mechanism tests use
   synthetic signatures (`registry_coverage.rs`) plus the real `//` entry for walk-mechanics coverage
   (`operand_conditional.rs`, new). `verify-phase.sh` ALL GREEN. See `phases/05-summary.md`.
+
+- 2026-09-06 (plan 06) — **No reshape**; phase 5's summary named phase 6 as exactly this work and
+  found nothing out of scope. Planning fixed four design points inside phase 6's own scope. (a) The
+  fixture gains `iv_interval` and `bin_blob` columns so every `OperandClass` has a typed column,
+  except `Unresolved`, which no typed column can classify — it is probed with a bare `NULL`
+  literal, and that is the phase's one spec sentence. (b) Arm probes are derived per *distinct arm
+  guard across dialects*, keeping the probe axis dialect-independent as it is today, and the
+  argument classes for arm *k* are found by searching assignments until `settle_at` actually
+  resolves to arm *k* — so an arm shadowed by an earlier one is reported by index rather than
+  silently under-probed. (c) `TypeConstraint`→column (existing) and `OperandClass`→column (new) stay
+  two separate mappings: they answer different questions, and merging them would perturb the
+  existing probe set and surface gaps that belong to phase 7. (d) The registry-wide arm gates land
+  green-but-vacuous because no production row is `Conditional` yet; the mechanism is proven
+  red-green on synthetic signatures, and the gate must exist before phase 7's rows or those arms
+  land unprobed. `.claude/dialect-gaps-baseline.txt` must be unchanged by this phase.
 
 ## Blocked
 
