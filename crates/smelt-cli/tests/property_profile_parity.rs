@@ -169,9 +169,24 @@ fn compare_workspace(project_dir: &Path) -> WorkspaceCheck {
 
     for model in &models {
         let canonical = model.canonical_path();
-        let Some(profile) = profiles.get(&canonical) else {
+        // Fix round 1, Q1: EVERY discovered model must have a profile now,
+        // maintained or not (`profiles_for_workspace` no longer skips an
+        // unmaintained model). `refusal_counts` is built from the same
+        // `maintenance_plan_report(...).is_some()` gate as before, so it is
+        // still the right scope for the report-vs-profile byte comparison
+        // below (`smelt explain <model> --json` only emits the
+        // maintenance-plan JSON shape for a maintained model) — but an
+        // unmaintained model must still be present in the map, just not
+        // compared against a report that doesn't exist for it.
+        assert!(
+            profiles.contains_key(&canonical),
+            "model '{canonical}' has no profile at all — every discovered model must be \
+             profiled, maintained or not (fix round 1, Q1)"
+        );
+        if !refusal_counts.contains_key(&canonical) {
             continue;
-        };
+        }
+        let profile = &profiles[&canonical];
         checked += 1;
         // Independent ground truth (P4): read from a raw
         // `maintenance_plan_report` call, never from `profile.refusals`

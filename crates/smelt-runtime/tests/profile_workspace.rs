@@ -12,23 +12,23 @@ fn workspace_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// The map's key set must equal the set of models with a `Some` maintenance
-/// plan, and must be non-empty for a workspace with maintained models.
+/// Fix round 1, Q1: `profiles_for_workspace` must profile EVERY discovered
+/// model, not only maintained ones — otherwise a `refresh: incremental` →
+/// `refresh: full` edit makes a model vanish from the map entirely instead
+/// of appearing present-with-empty-cells, and the `maintenance_lost`
+/// dimension (added specifically to catch that) never fires through the
+/// real pipeline. So: every model with `Some` maintenance plan must be in
+/// `profiles` (unchanged from before), AND every OTHER discovered model
+/// must be in `profiles` OR `failures` — never silently absent from both.
 #[test]
 fn profiles_for_workspace_covers_every_maintained_model() {
     let project_dir = workspace_dir("timeseries");
     let loaded = smelt_core::workspace::load_workspace(&project_dir);
     let result = smelt_runtime::profile::profiles_for_workspace(&loaded)
         .expect("profiles_for_workspace must not fail on examples/timeseries");
-    let profiles = result.profiles;
 
     assert!(
-        result.failures.is_empty(),
-        "examples/timeseries must not have any per-model derivation failures: {:?}",
-        result.failures
-    );
-    assert!(
-        !profiles.is_empty(),
+        !result.profiles.is_empty(),
         "examples/timeseries must have at least one maintained model"
     );
 
@@ -39,17 +39,73 @@ fn profiles_for_workspace_covers_every_maintained_model() {
     db.set_workspace(ingested.source_files.clone(), vec![ingested.project]);
     let ws = smelt_db::Workspace::try_get(&db).expect("workspace");
 
-    let mut expected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut maintained: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut all_discovered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (model, source_file) in loaded.sql_files.iter().zip(ingested.source_files.iter()) {
+        all_discovered.insert(model.canonical_path());
         if smelt_db::maintenance_plan_report(&db, ws, *source_file).is_some() {
-            expected.insert(model.canonical_path());
+            maintained.insert(model.canonical_path());
         }
     }
 
-    let actual: std::collections::BTreeSet<String> = profiles.keys().cloned().collect();
-    assert_eq!(
-        actual, expected,
-        "profiles_for_workspace's key set must equal every model with Some maintenance plan"
+    let profiled: std::collections::BTreeSet<String> = result.profiles.keys().cloned().collect();
+    assert!(
+        maintained.is_subset(&profiled),
+        "every model with Some maintenance plan must have a profile; missing: {:?}",
+        maintained.difference(&profiled).collect::<Vec<_>>()
+    );
+
+    // Every discovered entity that classifies as a bare-SELECT `Model` —
+    // maintained or not — must be in `profiles` or `failures`, never
+    // silently absent from both (`profile.rs`'s own `classify(...) ==
+    // Some(EntityKind::Model)` gate scopes the fallback-derivation path to
+    // exactly this set, so a `smelt.test`/`smelt.check`/`smelt.define`
+    // entity is expected to be absent from both, same as before Q1).
+    // `examples/timeseries`'s project-wide file walk (`load_workspace`'s
+    // own doc comment: "D-01 universal discovery") also includes
+    // `setup_sources.sql`, a plain DDL script with no `smelt.define`/
+    // `smelt.check`/`smelt.test` marker, so it default-classifies as a
+    // bare-SELECT `Model` (`smelt_core::resolver::classify_sql`) even
+    // though its body is not a query `PropertySet::derive` can analyze — a
+    // genuine, expected derivation failure the discovery walk cannot tell
+    // apart from a real model by classification alone. It is allow-listed
+    // here rather than silently ignored, so a NEW unexplained failure still
+    // fails this test.
+    let known_non_model_failures: std::collections::BTreeSet<&str> =
+        ["setup_sources"].into_iter().collect();
+    let mut unaccounted_absences = Vec::new();
+    for name in &all_discovered {
+        let in_profiles = result.profiles.contains_key(name);
+        let in_failures = result.failures.contains_key(name);
+        let is_model = matches!(
+            smelt_core::resolver::classify(
+                &loaded
+                    .sql_files
+                    .iter()
+                    .find(|m| &m.canonical_path() == name)
+                    .expect("name came from loaded.sql_files")
+                    .path,
+                None,
+                &[],
+            ),
+            Some(smelt_core::resolver::EntityKind::Model)
+        );
+        if !is_model {
+            continue;
+        }
+        if !in_profiles && !in_failures {
+            unaccounted_absences.push(name.clone());
+        }
+        if in_failures && !known_non_model_failures.contains(name.as_str()) {
+            panic!(
+                "model '{name}' has an unexplained derivation failure: {}",
+                result.failures[name]
+            );
+        }
+    }
+    assert!(
+        unaccounted_absences.is_empty(),
+        "these discovered models are in neither `profiles` nor `failures`: {unaccounted_absences:?}"
     );
 }
 

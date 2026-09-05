@@ -704,6 +704,69 @@ impl DiffReport {
             models: diff.models,
         }
     }
+
+    /// Narrow the REPORTED set to `selected` model names
+    /// (`docs/specs/property_diff.md` §Surface "`--select`", Δ2): `--diff`'s
+    /// `--select` restricts what is printed, not what was compared —
+    /// `diff_profiles` (and therefore attribution) already ran over every
+    /// model before this is called, so a retained entry's `cause` is
+    /// unaffected. The summary counts are recomputed from the retained
+    /// `models` so they always match what is actually printed
+    /// (`docs/outcomes/20260905-property-diff/phases/05-plan.md` D6).
+    /// Single-owned here (not in the CLI) so Phase 6's Markdown renderer
+    /// and Phase 7's LSP reuse the same narrowing rather than each
+    /// reimplementing retain-and-recount.
+    pub fn narrow_to(&mut self, selected: &BTreeSet<String>) {
+        self.models.retain(|m| selected.contains(&m.model));
+        let mut summary = DiffSummary {
+            shifted_models: self.models.len(),
+            ..Default::default()
+        };
+        for m in &self.models {
+            for c in &m.changes {
+                match c.direction {
+                    Direction::Downgrade => summary.downgrades += 1,
+                    Direction::Upgrade => summary.upgrades += 1,
+                    Direction::Neutral => summary.neutral += 1,
+                }
+            }
+        }
+        self.summary = summary;
+    }
+}
+
+/// C2 (`docs/specs/property_diff.md` §Constraints item 6, Δ1): patch an
+/// `added`/`removed` entry's `cause.reason` from the matching side's
+/// per-model derivation-failure map, when that side's absence was a
+/// FAILURE rather than a genuine new/deleted model. Single-owned here
+/// (`docs/outcomes/20260905-property-diff/phases/05-plan.md` fix round 1,
+/// Q6) rather than in the CLI, since this is a §Semantics rule Phase 6/7
+/// must apply identically, not a CLI-only presentation choice.
+pub fn apply_failure_reasons(
+    diff: &mut PropertyDiff,
+    base_failures: &BTreeMap<String, String>,
+    work_failures: &BTreeMap<String, String>,
+) {
+    for model_diff in diff.models.iter_mut() {
+        match model_diff.cause.kind {
+            // "added" = present in the working tree, ABSENT from the
+            // baseline — an absence-was-really-a-failure reason, if any,
+            // is recorded on the BASELINE side.
+            CauseKind::Added => {
+                if let Some(reason) = base_failures.get(&model_diff.model) {
+                    model_diff.cause.reason = Some(reason.clone());
+                }
+            }
+            // "removed" = present in the baseline, ABSENT from the working
+            // tree — the failure, if any, is on the WORKING TREE side.
+            CauseKind::Removed => {
+                if let Some(reason) = work_failures.get(&model_diff.model) {
+                    model_diff.cause.reason = Some(reason.clone());
+                }
+            }
+            CauseKind::Edited | CauseKind::Downstream => {}
+        }
+    }
 }
 
 /// The working-tree graph plus the edit provenance the diff attributes with
@@ -2502,5 +2565,105 @@ mod tests {
         let diff = diff_profiles(&old, &new, &empty_graph());
         assert_eq!(diff.summary.downgrades, 1);
         assert_eq!(diff.summary.shifted_models, 1);
+    }
+
+    fn model_diff_stub(model: &str, kind: CauseKind) -> ModelDiff {
+        ModelDiff {
+            model: model.to_string(),
+            cause: Cause {
+                kind,
+                of: vec![],
+                reason: None,
+            },
+            changes: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_failure_reasons_added_uses_baseline_failures() {
+        // "added" = present in the working tree, absent from the
+        // baseline — a derivation failure explaining that absence lives on
+        // the BASELINE side.
+        let mut diff = PropertyDiff {
+            models: vec![model_diff_stub("m", CauseKind::Added)],
+            summary: DiffSummary::default(),
+        };
+        let mut base_failures = BTreeMap::new();
+        base_failures.insert("m".to_string(), "parse error: bad SQL".to_string());
+        let work_failures = BTreeMap::new();
+
+        apply_failure_reasons(&mut diff, &base_failures, &work_failures);
+
+        assert_eq!(
+            diff.models[0].cause.reason.as_deref(),
+            Some("parse error: bad SQL")
+        );
+    }
+
+    #[test]
+    fn apply_failure_reasons_removed_uses_working_tree_failures() {
+        // "removed" = present in the baseline, absent from the working
+        // tree — a derivation failure explaining that absence lives on the
+        // WORKING TREE side (fix round 1, Q2: this was backwards before —
+        // a working-tree derivation failure was looked up in
+        // `base_failures`, which is never populated for it, so the reason
+        // silently never applied).
+        let mut diff = PropertyDiff {
+            models: vec![model_diff_stub("m", CauseKind::Removed)],
+            summary: DiffSummary::default(),
+        };
+        let base_failures = BTreeMap::new();
+        let mut work_failures = BTreeMap::new();
+        work_failures.insert(
+            "m".to_string(),
+            "working-tree derivation failed".to_string(),
+        );
+
+        apply_failure_reasons(&mut diff, &base_failures, &work_failures);
+
+        assert_eq!(
+            diff.models[0].cause.reason.as_deref(),
+            Some("working-tree derivation failed")
+        );
+    }
+
+    #[test]
+    fn apply_failure_reasons_leaves_a_genuinely_added_model_with_no_reason() {
+        let mut diff = PropertyDiff {
+            models: vec![model_diff_stub("m", CauseKind::Added)],
+            summary: DiffSummary::default(),
+        };
+        apply_failure_reasons(&mut diff, &BTreeMap::new(), &BTreeMap::new());
+        assert!(diff.models[0].cause.reason.is_none());
+    }
+
+    #[test]
+    fn narrow_to_retains_only_selected_models_and_recomputes_the_summary() {
+        let mut changed = model_diff_stub("kept", CauseKind::Edited);
+        changed
+            .changes
+            .push(Change::from_kind(ChangeKind::MaintenanceLost));
+        let dropped = model_diff_stub("dropped", CauseKind::Edited);
+        let mut report = DiffReport {
+            baseline: BaselineInfo {
+                r#ref: "main".to_string(),
+                commit: "abc".to_string(),
+                resolved_as: "merge_base".to_string(),
+            },
+            edited_files: vec![],
+            summary: DiffSummary {
+                downgrades: 1,
+                upgrades: 0,
+                neutral: 0,
+                shifted_models: 2,
+            },
+            models: vec![changed, dropped],
+        };
+        let selected: BTreeSet<String> = ["kept".to_string()].into_iter().collect();
+        report.narrow_to(&selected);
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(report.models[0].model, "kept");
+        assert_eq!(report.summary.shifted_models, 1);
+        assert_eq!(report.summary.downgrades, 1);
     }
 }

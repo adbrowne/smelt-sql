@@ -54,3 +54,59 @@ Reuse `diff_render::change_line`/`model_block` for the table/`<details>` rows, a
 directly — do not re-sort `models` or re-derive `cause`/`changes` text. `--markdown` flag was
 deliberately NOT added in Phase 5 (kept out of `ExplainArgs` to avoid an undocumented, unimplemented
 flag tripping `cli_docs_coverage`); add it alongside the renderer.
+
+## Fix round 1 (controller review)
+
+**Q1 (critical, fixed).** `profiles_for_workspace` skipped any model with no maintenance plan,
+so a `refresh: incremental` → `refresh: full` edit made the model vanish from the new map
+entirely rather than appearing present-with-empty-cells — routing through `whole_model_changes`
+(all-`Neutral`) instead of the matched-both-sides path that fires `maintenance_lost`. Fixed:
+every model that classifies as a bare-SELECT `Model` (`smelt_core::resolver::classify`) now gets
+a profile via `build_model_profile` with empty cells/refusals/probes when it has no maintenance
+plan, or a recorded `failures` entry if even that fails. Scoped to `Model`-classified entities
+only — `loaded.sql_files` is a project-wide walk that also carries `smelt.test`/`smelt.check`/
+`smelt.define` declarations, none of which are diffable models. Proven end to end against the
+real CLI: `losing_incremental_maintenance_reports_a_maintenance_lost_downgrade` in
+`property_diff_cli.rs` flips `user_daily_spend`'s `refresh:` and asserts a `maintenance_lost`
+downgrade plus `--fail-on downgrade` exiting `1`.
+
+**Q2 (critical, fixed — and a REAL second bug found underneath).** The reviewer's `DELETE FROM …`
+repro exposed that `apply_failure_reasons` had the two sides backwards: "added" (present in the
+working tree, absent from the baseline) was reading `work_failures` instead of `base_failures`,
+and "removed" was reading `base_failures` instead of `work_failures` — so a real derivation
+failure never actually reached `cause.reason`, and the three unit tests passed because they
+encoded the same swap. Fixed both the logic and the tests (which now assert the correct side);
+added `a_body_that_no_longer_derives_a_profile_is_reported_removed_with_a_reason` in
+`property_diff_cli.rs` using the reviewer's own repro.
+
+**Q3 — confirmed true.** After Q1, "every model's property profile" in `smelt-explain.md`/
+`cli.md` is accurate; no doc change needed.
+
+**Q4 (fixed).** `--fail-on` now has `requires = "diff"`; `smelt explain --fail-on any` exits `2`.
+Test: `fail_on_without_diff_is_a_usage_error`.
+
+**Q5 (fixed).** `outcome.md` criterion 4 now names the actual edit (join to `raw.users`) and the
+actual downstream model (`user_spend_running_total`), plus the `refresh: full` fixture. Added a
+dated Decision-log entry explaining why a combiner swap alone never downgrades a `NewData`-fold
+cell over an append-only source.
+
+**Q6 (fixed).** `apply_failure_reasons` and `DiffReport::narrow_to` moved to
+`smelt_logical::analysis::diff` (single-owned for Phase 6/7 reuse); `explain_diff.rs` now just
+calls them. Their unit tests moved to `diff.rs`'s own test module.
+
+**Q7 (fixed).** `change_line` no longer emits a double space for an empty `subject`
+(`▼ maintenance_lost: true → false`, not `▼ maintenance_lost : …`).
+
+**Unplanned fallout from Q1, found and fixed while proving it:** profiling every `Model`-classified
+entity surfaced that `examples/timeseries`'s project-wide file walk includes `setup_sources.sql`
+(a plain DDL script with no `smelt.` marker, so it default-classifies as `Model`) — a genuine,
+expected `PropertySet::derive` failure for a non-analyzable file the classifier cannot distinguish
+from a real model. It is symmetric on both sides of any diff (always fails identically), so it
+never appears in a reported diff, but it did break `profile_workspace.rs`'s stale
+"no per-model derivation failures" assertion, which predated Q1 and assumed the map only ever
+touched maintained models. Rewrote that test to assert the real contract (every `Model`-classified
+entity is in `profiles` or `failures`, with `setup_sources` allow-listed as the one known,
+harmless, structurally-unavoidable exception) rather than relaxing or deleting it.
+
+Gate re-run: fmt clean, clippy clean (both feature sets), `hardening_budget` green (no new
+regressions this round), and every previously-listed suite plus the new tests all pass.

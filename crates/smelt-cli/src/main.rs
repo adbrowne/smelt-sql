@@ -538,7 +538,7 @@ struct ExplainArgs {
     /// (`docs/specs/property_diff.md` §Surface): `downgrade` exits `1` when
     /// any downgrade is present; `any` exits `1` when any model shifted at
     /// all. Only meaningful with `--diff`.
-    #[arg(long = "fail-on", value_parser = ["downgrade", "any"])]
+    #[arg(long = "fail-on", value_parser = ["downgrade", "any"], requires = "diff")]
     fail_on: Option<String>,
 }
 

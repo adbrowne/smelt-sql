@@ -453,3 +453,156 @@ fn diff_json_top_level_matches_the_schema() {
         "summary.shifted_models must match models.len()"
     );
 }
+
+/// Fix round 1, Q1 (critical): `profiles_for_workspace` must profile every
+/// model, maintained or not — otherwise a `refresh: incremental` →
+/// `refresh: full` edit makes the model vanish from the new profile map
+/// entirely (never present-with-empty-cells), which routes through
+/// `whole_model_changes` and gets graded all-`Neutral`, so losing
+/// incremental maintenance reports ZERO downgrades and `--fail-on
+/// downgrade` stays green — silently reintroducing the exact defect the
+/// `maintenance_lost` dimension exists to catch. This is the headline case
+/// end to end, against the real CLI.
+#[test]
+fn losing_incremental_maintenance_reports_a_maintenance_lost_downgrade() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+
+    let model_path = tmp.path().join("models/user_daily_spend.sql");
+    let original = std::fs::read_to_string(&model_path).expect("read user_daily_spend.sql");
+    assert!(
+        original.contains("refresh: incremental"),
+        "the fixture's `refresh:` line must match what this test replaces"
+    );
+    let edited = original.replacen("refresh: incremental", "refresh: full", 1);
+    std::fs::write(&model_path, edited).expect("write edited user_daily_spend.sql");
+
+    let output = smelt()
+        .args(["explain", "--diff", "--json", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --json");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse json");
+    let models = json["models"].as_array().expect("models array");
+    let edited_model = models
+        .iter()
+        .find(|m| m["model"] == "user_daily_spend")
+        .unwrap_or_else(|| panic!("user_daily_spend must be reported shifted: {json}"));
+    assert_eq!(edited_model["cause"]["kind"], "edited");
+    let changes = edited_model["changes"].as_array().expect("changes array");
+    assert!(
+        changes
+            .iter()
+            .any(|c| c["dimension"] == "maintenance_lost" && c["direction"] == "downgrade"),
+        "user_daily_spend must show a maintenance_lost downgrade when refresh flips to full: \
+         {changes:?}"
+    );
+
+    let output = smelt()
+        .args([
+            "explain",
+            "--diff",
+            "--fail-on",
+            "downgrade",
+            "--project-dir",
+        ])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --fail-on downgrade");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "--fail-on downgrade must exit 1 when maintenance_lost fired: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Fix round 1, Q2: a model whose body no longer derives a profile at all
+/// (a `DELETE FROM …` statement, say — the reviewer's own repro) must be
+/// reported `removed` WITH a `reason`, never a bare unexplained absence
+/// (`docs/specs/property_diff.md` §Constraints item 6). Q1's fix (every
+/// model gets a profile-or-failure verdict) is what makes this reachable:
+/// before it, only a maintained model's derivation failure was ever
+/// captured, and `user_daily_spend`'s baseline version — a plain
+/// `refresh: incremental` SELECT — always had a maintenance plan, so this
+/// path was live only in principle.
+#[test]
+fn a_body_that_no_longer_derives_a_profile_is_reported_removed_with_a_reason() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+
+    let model_path = tmp.path().join("models/user_daily_spend.sql");
+    let original = std::fs::read_to_string(&model_path).expect("read user_daily_spend.sql");
+    // Keep the frontmatter (so it is still the same declared model), but
+    // replace the body with a non-SELECT statement `PropertySet::derive`
+    // cannot turn into a property vector.
+    let frontmatter_end = original.find("---\n").map(|i| i + 4).unwrap_or(0);
+    let frontmatter_end = original[frontmatter_end..]
+        .find("---\n")
+        .map(|i| frontmatter_end + i + 4)
+        .expect("fixture has a frontmatter block");
+    let mut edited = original[..frontmatter_end].to_string();
+    edited.push_str("DELETE FROM smelt.sources.raw.transactions WHERE amount < 0\n");
+    std::fs::write(&model_path, edited).expect("write edited user_daily_spend.sql");
+
+    let output = smelt()
+        .args(["explain", "--diff", "--json", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --json");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse json");
+    let models = json["models"].as_array().expect("models array");
+    let m = models
+        .iter()
+        .find(|m| m["model"] == "user_daily_spend")
+        .unwrap_or_else(|| panic!("user_daily_spend must be reported shifted: {json}"));
+    // Whichever side the derivation failure lands on, it must carry a
+    // reason — never a bare "removed"/"added" with none.
+    assert!(
+        m["cause"]["kind"] == "removed" || m["cause"]["kind"] == "added",
+        "expected removed or added, got {:?}",
+        m["cause"]
+    );
+    assert!(
+        m["cause"]["reason"].is_string(),
+        "a derivation failure must carry cause.reason, never a bare unexplained absence: {:?}",
+        m["cause"]
+    );
+}
+
+/// Fix round 1, Q4: `--fail-on` without `--diff` is a usage error, not a
+/// silently ignored flag — the same class the other four exclusivity
+/// checks already cover.
+#[test]
+fn fail_on_without_diff_is_a_usage_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+
+    let output = smelt()
+        .args(["explain", "--fail-on", "any", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --fail-on any");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

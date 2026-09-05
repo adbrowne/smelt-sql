@@ -15,11 +15,25 @@
 //! Per model: `smelt_db::maintenance_plan_report` (the thin Salsa query over
 //! pure `smelt-logical` derivation) → availability resolution → `probe_plan::
 //! probe_plan_for_model` → `diagnostics::build_model_diagnostics` → its
-//! `.profile` field. A model with no maintenance plan (not `refresh:
-//! incremental`, or no shape-defining fact) is simply absent from the
-//! returned map — it has no profile to diff, matching
-//! `property_profile_parity`'s own skip
-//! (`docs/specs/property_diff.md` §Interactions "Salsa purity").
+//! `.profile` field. **Every discovered model gets a profile in the
+//! returned map, maintained or not** (fix round 1, Q1): a model with no
+//! maintenance plan (not `refresh: incremental`, or no shape-defining fact)
+//! still gets its `PropertySet` derived, via `diagnostics::
+//! build_model_profile` with empty `cell_verdicts`/`refusals`/`probes` —
+//! the same single-owner assembly path a maintained model's profile takes,
+//! just fed empty plan-derived inputs. This is load-bearing for the diff:
+//! leaving such a model ABSENT from the map (the original design) meant a
+//! `refresh: incremental` → `refresh: full` edit made the model vanish from
+//! `P_new` entirely, which `diff_profiles` grades as `added`/`removed`
+//! (all-`Neutral`, `docs/specs/property_diff.md` §"The diff" G6) instead of
+//! routing through the matched-both-sides path that fires
+//! `maintenance_lost` — silently erasing the one dimension built
+//! specifically to catch losing incremental maintenance. Profiling every
+//! model closes that gap, makes the derivation-failure path reachable for
+//! a genuinely-still-a-model file (a `DELETE FROM …` body, say — Q2), and
+//! keeps `property_profile_parity`'s own skip of unmaintained models
+//! intact (it compares `--json`'s maintenance-plan report, which still
+//! only exists for maintained models; this map covers a strict superset).
 //!
 //! **Fail-loud, not empty** (`docs/specs/property_diff.md` §Constraints
 //! item 6, "an unresolvable baseline is an error … never an empty diff"):
@@ -48,7 +62,7 @@
 use std::collections::BTreeMap;
 
 use crate::compile::CompilerRegistry;
-use crate::diagnostics::build_bound_context;
+use crate::diagnostics::{build_bound_context, build_model_profile};
 use smelt_core::sources::{discover_source_infos, SourcesConfig};
 use smelt_core::workspace::LoadedWorkspace;
 use smelt_logical::analysis::profile::PropertyProfile;
@@ -132,11 +146,40 @@ pub fn profiles_for_workspace(
 
     for (model, source_file) in loaded.sql_files.iter().zip(ingested.source_files.iter()) {
         let canonical = model.canonical_path();
+        let bound_ctx: BoundContext = build_bound_context(&canonical, &graph, &loaded.config);
+        let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
+
         let Some(mut result) = smelt_db::maintenance_plan_report(&db, ws, *source_file) else {
+            // No maintenance plan (not `refresh: incremental`, or no
+            // shape-defining fact): still profile the model, with empty
+            // cells/refusals/probes, through the SAME single-owner
+            // assembly `build_model_diagnostics` uses (fix round 1, Q1) —
+            // never leave it absent from the map. Scoped to entities that
+            // classify as a bare-SELECT `Model` — `loaded.sql_files` is a
+            // project-wide file walk that also carries `smelt.test`/
+            // `smelt.check`/`smelt.define` declarations
+            // (`smelt_core::workspace::load_workspace`'s own doc comment,
+            // "D-01 universal discovery"), none of which are models with a
+            // property profile to diff; attempting `PropertySet::derive`
+            // on a `smelt.test` body would record a spurious "failure" for
+            // a file that was never a candidate in the first place.
+            let is_model = matches!(
+                smelt_core::resolver::classify(&model.path, Some(&model.content), &[]),
+                Some(smelt_core::resolver::EntityKind::Model)
+            );
+            if is_model {
+                match build_model_profile(model, &bound_ctx, &[], &[], &[], &[], contract_cfg) {
+                    Ok(profile) => {
+                        out.profiles.insert(canonical, profile);
+                    }
+                    Err(e) => {
+                        out.failures.insert(canonical, e.to_string());
+                    }
+                }
+            }
             continue;
         };
 
-        let bound_ctx: BoundContext = build_bound_context(&canonical, &graph, &loaded.config);
         let target =
             loaded
                 .config
@@ -176,7 +219,6 @@ pub fn profiles_for_workspace(
             .get_incremental_with_metadata(&canonical, model.metadata.as_deref())
             .map(|b| b.unique_key)
             .unwrap_or_default();
-        let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
         let model_upstream = graph.get_upstream(&canonical);
 
         let probe_entries = crate::probe_plan::probe_plan_for_model(

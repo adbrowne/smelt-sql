@@ -13,7 +13,12 @@
 //! Rendering is delegated entirely to `smelt_logical::analysis::
 //! diff_render` over the `DiffReport` envelope
 //! (`docs/specs/property_diff.md` §Surface "Output forms") — this module
-//! assembles the report's inputs and never formats a change itself.
+//! assembles the report's inputs and never formats a change itself. Same
+//! for the §Semantics rules `apply_failure_reasons` (C2) and
+//! `DiffReport::narrow_to` (`--select`, D6): both are single-owned in
+//! `smelt_logical::analysis::diff` (fix round 1, Q6) so Phase 6's Markdown
+//! renderer and Phase 7's LSP reuse them rather than each reimplementing
+//! the same rule.
 
 use anyhow::{Context, Result};
 use smelt_cli::argument_resolution::{compute_scope, resolve_selector_args};
@@ -22,7 +27,7 @@ use smelt_core::baseline::{edited_set, materialize, resolve_baseline};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::workspace::load_workspace;
 use smelt_logical::analysis::diff::{
-    diff_profiles, BaselineInfo, CauseKind, DiffGraph, DiffReport,
+    apply_failure_reasons, diff_profiles, BaselineInfo, DiffGraph, DiffReport,
 };
 use smelt_logical::analysis::diff_render::text_report;
 use smelt_runtime::profile::profiles_for_workspace;
@@ -106,23 +111,7 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
         let selected = graph
             .select_models(&selectors, &config)
             .with_context(|| "Failed to select models")?;
-        report.models.retain(|m| selected.contains(&m.model));
-
-        // Recompute the summary over the retained (reported) set only.
-        let mut summary = smelt_logical::analysis::diff::DiffSummary {
-            shifted_models: report.models.len(),
-            ..Default::default()
-        };
-        for m in &report.models {
-            for c in &m.changes {
-                match c.direction {
-                    smelt_logical::analysis::diff::Direction::Downgrade => summary.downgrades += 1,
-                    smelt_logical::analysis::diff::Direction::Upgrade => summary.upgrades += 1,
-                    smelt_logical::analysis::diff::Direction::Neutral => summary.neutral += 1,
-                }
-            }
-        }
-        report.summary = summary;
+        report.narrow_to(&selected.into_iter().collect());
     }
 
     if args.json {
@@ -151,98 +140,4 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
     }
 
     Ok(())
-}
-
-/// C2 (`docs/specs/property_diff.md` §Constraints item 6, Δ1): patch an
-/// `added`/`removed` entry's `cause.reason` from the matching side's
-/// per-model derivation-failure map, when that side's absence was a
-/// FAILURE rather than a genuine new/deleted model. Pure and standalone so
-/// it is unit-testable without a real SQL failure trigger — the
-/// `WorkspaceProfiles::failures` plumbing itself is Phase 4's, already
-/// covered elsewhere; this is the new consumption of it.
-fn apply_failure_reasons(
-    diff: &mut smelt_logical::analysis::diff::PropertyDiff,
-    base_failures: &std::collections::BTreeMap<String, String>,
-    work_failures: &std::collections::BTreeMap<String, String>,
-) {
-    for model_diff in diff.models.iter_mut() {
-        match model_diff.cause.kind {
-            CauseKind::Added => {
-                if let Some(reason) = work_failures.get(&model_diff.model) {
-                    model_diff.cause.reason = Some(reason.clone());
-                }
-            }
-            CauseKind::Removed => {
-                if let Some(reason) = base_failures.get(&model_diff.model) {
-                    model_diff.cause.reason = Some(reason.clone());
-                }
-            }
-            CauseKind::Edited | CauseKind::Downstream => {}
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use smelt_logical::analysis::diff::{Cause, DiffSummary, ModelDiff, PropertyDiff};
-    use std::collections::BTreeMap;
-
-    fn model_diff(model: &str, kind: CauseKind) -> ModelDiff {
-        ModelDiff {
-            model: model.to_string(),
-            cause: Cause {
-                kind,
-                of: vec![],
-                reason: None,
-            },
-            changes: vec![],
-        }
-    }
-
-    #[test]
-    fn added_entry_gets_the_working_tree_failure_reason() {
-        let mut diff = PropertyDiff {
-            models: vec![model_diff("m", CauseKind::Added)],
-            summary: DiffSummary::default(),
-        };
-        let base_failures = BTreeMap::new();
-        let mut work_failures = BTreeMap::new();
-        work_failures.insert("m".to_string(), "parse error: bad SQL".to_string());
-
-        apply_failure_reasons(&mut diff, &base_failures, &work_failures);
-
-        assert_eq!(
-            diff.models[0].cause.reason.as_deref(),
-            Some("parse error: bad SQL")
-        );
-    }
-
-    #[test]
-    fn removed_entry_gets_the_baseline_failure_reason() {
-        let mut diff = PropertyDiff {
-            models: vec![model_diff("m", CauseKind::Removed)],
-            summary: DiffSummary::default(),
-        };
-        let mut base_failures = BTreeMap::new();
-        base_failures.insert("m".to_string(), "baseline derivation failed".to_string());
-        let work_failures = BTreeMap::new();
-
-        apply_failure_reasons(&mut diff, &base_failures, &work_failures);
-
-        assert_eq!(
-            diff.models[0].cause.reason.as_deref(),
-            Some("baseline derivation failed")
-        );
-    }
-
-    #[test]
-    fn a_genuinely_added_model_with_no_recorded_failure_keeps_no_reason() {
-        let mut diff = PropertyDiff {
-            models: vec![model_diff("m", CauseKind::Added)],
-            summary: DiffSummary::default(),
-        };
-        apply_failure_reasons(&mut diff, &BTreeMap::new(), &BTreeMap::new());
-        assert!(diff.models[0].cause.reason.is_none());
-    }
 }

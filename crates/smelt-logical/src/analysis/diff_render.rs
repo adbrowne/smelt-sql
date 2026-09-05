@@ -50,14 +50,27 @@ fn json_display(v: &Option<Value>) -> String {
 /// One change line: glyph, dimension, subject, `old → new`
 /// (`docs/specs/property_diff.md` §Surface "Text").
 pub fn change_line(change: &Change) -> String {
-    format!(
-        "{} {} {}: {} → {}",
-        glyph(change.direction),
-        dimension_str(change.dimension),
-        change.subject,
-        json_display(&change.old),
-        json_display(&change.new),
-    )
+    // A whole-model dimension (`grain`, `maintenance_lost`, …) carries an
+    // empty `subject` — render `dimension:` directly rather than
+    // `dimension :` with a stray double space (fix round 1, Q7).
+    if change.subject.is_empty() {
+        format!(
+            "{} {}: {} → {}",
+            glyph(change.direction),
+            dimension_str(change.dimension),
+            json_display(&change.old),
+            json_display(&change.new),
+        )
+    } else {
+        format!(
+            "{} {} {}: {} → {}",
+            glyph(change.direction),
+            dimension_str(change.dimension),
+            change.subject,
+            json_display(&change.old),
+            json_display(&change.new),
+        )
+    }
 }
 
 /// The change's one-line reason, when the derivation exposed one
@@ -195,6 +208,27 @@ mod tests {
         assert!(change_line(&change(Direction::Downgrade)).starts_with('▼'));
         assert!(change_line(&change(Direction::Upgrade)).starts_with('▲'));
         assert!(change_line(&change(Direction::Neutral)).starts_with('●'));
+    }
+
+    #[test]
+    fn change_line_has_no_double_space_for_an_empty_subject() {
+        // Fix round 1, Q7: a whole-model dimension (empty `subject`) must
+        // not render "dimension :" with a stray double space.
+        let c = Change {
+            dimension: Dimension::MaintenanceLost,
+            subject: String::new(),
+            direction: Direction::Downgrade,
+            old: Some(Value::Bool(true)),
+            new: Some(Value::Bool(false)),
+            reason: None,
+            kind: crate::analysis::diff::ChangeKind::MaintenanceLost,
+        };
+        let line = change_line(&c);
+        assert!(
+            !line.contains("  "),
+            "expected no double space in a subject-less change line: {line:?}"
+        );
+        assert_eq!(line, "▼ maintenance_lost: true → false");
     }
 
     fn model_diff(cause: Cause) -> ModelDiff {

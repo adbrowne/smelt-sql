@@ -45,10 +45,17 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
 4. `smelt explain --diff [<ref>]` with `--json`, `--markdown`, `--fail-on {downgrade,any}`,
    `--select` (reported set only) works as specified; combining `--diff` with `<model>`,
    `--show-sql`, `--period`, or `--technique` exits `2`. A real-fixture test copies
-   `examples/timeseries` into a temp git repo, commits, edits a staging model (`SUM` → `MAX`),
-   and asserts the edited model shows a `cell_technique` downgrade and a downstream mart shows
-   cause `downstream` with `of: [<staging model>]`; a formatting-only edit yields
-   `no models shifted`.
+   `examples/timeseries` into a temp git repo, commits, and edits `user_daily_spend` to add a
+   join to the unclocked `raw.users` dimension — breaking its row identity — which asserts the
+   edited model shows a `cell_technique` downgrade and its downstream `user_spend_running_total`
+   shows cause `downstream` with `of: [user_daily_spend]`; a formatting-only edit yields
+   `no models shifted`. (A plain `SUM` → `MAX` combiner swap, tried first, produces no shift at
+   all here — see the Decision log: invertibility only matters for a correction/`UpstreamMutation`
+   cell, and `user_daily_spend`'s only combiner-sensitive cell is a `NewData` fold over an
+   append-only source, which never needs one.) A second fixture flips `user_daily_spend`'s
+   `refresh: incremental` to `refresh: full` and asserts the resulting `maintenance_lost`
+   downgrade trips `--fail-on downgrade` to exit `1` — the headline "losing incremental
+   maintenance is silent" case, exercised end to end.
 5. The JSON schema in §"Output forms" is emitted exactly; `old`/`new` values reuse the
    single-version report's encodings; `cli_docs_coverage` covers the new flags.
 6. The Markdown form carries the `<!-- smelt-property-diff -->` marker, one `<details>` per
@@ -98,6 +105,28 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
 ## Decision log
 
 <!-- Dated entries: decision, evidence, how to reverse. -->
+
+**2026-09-05 — a combiner swap (`SUM` → `MAX`) is a downgrade only where invertibility is
+needed, never over a `NewData` fold on an append-only source.** Phase 5's original criterion-4
+fixture plan assumed editing `user_daily_spend`'s `SUM(amount)` to `MAX(amount)` would downgrade
+its `cell_technique` and propagate to a downstream mart. Verified by hand against
+`examples/timeseries`: it does not — not even a discriminant-level shift beyond a neutral
+metadata note. Root cause: `user_daily_spend`'s only combiner-sensitive cell is a `NewData` fold
+over the append-only `raw.transactions` source. A `NewData` fold only ever *adds* new rows to the
+running aggregate; it never needs to *retract* a previously-folded value, so it never needs the
+combiner to be invertible. `MAX`, `AVG`, and even `SUM(DISTINCT …)` all stayed admitted as
+`KeyedFold`, and even a genuinely holistic combiner (`MEDIAN`) that loses the cell entirely still
+produced zero downstream propagation, because `user_daily_spend`'s downstream consumers derive
+their own admission from their own SQL, not from whether the upstream still has a maintained
+cell. Invertibility only becomes load-bearing for a correction cell (`UpstreamMutation` trigger,
+needed when the driving source can retroactively change an already-folded row) — none of
+`examples/timeseries`'s SUM-aggregating models read from a source declared mutable. The
+criterion-4 fixture instead uses an edit that breaks `user_daily_spend`'s row identity (a join to
+the unclocked `raw.users` dimension), which does downgrade its `cell_technique` and does
+propagate to `user_spend_running_total`. Reversal: none needed — this is a fact about the
+feature's sensitivity, not a workaround; a future fixture wanting to demonstrate a pure
+combiner-driven downgrade needs a model whose driving source is declared mutable (not
+append-only).
 
 ## Blocked
 
