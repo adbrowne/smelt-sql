@@ -76,7 +76,7 @@ audit before it is claimed — never from documentation.
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
-| 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
+| 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | planned |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
 | 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
 | 8 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
@@ -185,6 +185,22 @@ audit before it is claimed — never from documentation.
   to unit-test a new pure `classify_accepted` helper directly, since phase 4
   closed the only DuckDB Schema-leg row that test used to borrow. `verify-phase.sh`
   ALL GREEN. See `phases/04-summary.md`.
+
+- 2026-09-06 (plan 05) — **No reshape** (phase 4's summary explicitly says phase 5 stands).
+  Planning fixed four design points inside phase 5's own scope. (a) `OperandClass` lives in
+  `smelt-types::signatures` as a total `of(&DataType)` with no `_` arm. (b) The arm's verdict is
+  a distinct `SettledEmission` type, so a nested conditional is unrepresentable rather than
+  merely rejected, and "the printer receives settled verdicts only" is a type-level fact rather
+  than a convention. (c) Settlement runs inside `print_checked_for` — the single funnel
+  `dialect_seam` already guards — fed by the same `TypeContext` the projection derives from; a
+  caller without one settles every class as `Unresolved`, landing on `otherwise`. (d) Since
+  `smelt-dialect` cannot depend on `smelt-db`, the walk takes a type-lookup callback owned by
+  `smelt-runtime`. Two small spec amendments follow from the code: there is no `DataType::Json`,
+  so the class list swaps `Json` for `Binary` (`Blob`), and `Null`/`Unknown` both classify
+  `Unresolved`. No production registry row becomes conditional here — every candidate row
+  (#173 BigQuery, #174/#178 Spark, `//` per class) needs a live engine the phase cannot reach,
+  so the mechanism is tested on synthetic signatures and the rows land in phase 7, as the
+  outcome already schedules. Nothing leaves the outcome.
 
 ## Blocked
 
