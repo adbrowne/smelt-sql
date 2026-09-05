@@ -59,7 +59,7 @@ than the current residue.
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
-| 5 | `supports_fingerprint_sidecar` residue closed against its stated target | planned |
+| 5 | `supports_fingerprint_sidecar` residue closed against its stated target | done |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
 
 ## Decision log
@@ -141,6 +141,17 @@ than the current residue.
   §"The fingerprint sidecar capability" therefore gets a spec delta naming both legs. Recorded
   phase 4's orphaned-partition GC hand-off under ## Out of scope rather than as a new row — the
   criterion it serves (4) explicitly admits a rewritten residual-gap bullet, which phase 4 wrote.
+
+- 2026-09-05: Phase 5 implemented and closed — `resolve_live_per_group_recompute_cell` and
+  `resolve_live_key_addressed_model_edge_cell` gained a `supports_fingerprint_sidecar: bool`
+  parameter replacing their dialect gate; the four async sidecar entry points in
+  `maintenance_driver.rs` now gate on `backend.capabilities().supports_fingerprint_sidecar`
+  instead of `backend.dialect() != SqlDialect::DuckDB`; `execute.rs`'s two call sites pass the
+  real capability. `multi_backend.md` §"The fingerprint sidecar capability" now names both legs'
+  consequences for a flagless target. 5 new tests (2 in `repair_lowering.rs`, 2 in
+  `key_addressed_model_edge_lowering.rs`, 1 new `SidecarLessBackend`-driven test in
+  `fingerprint_sidecar.rs` covering all four entry points) prove the gate is the flag, not the
+  dialect. See `phases/05-summary.md`.
 
 ## Blocked
 

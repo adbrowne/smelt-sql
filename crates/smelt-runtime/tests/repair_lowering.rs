@@ -95,6 +95,7 @@ fn resolve_live_per_group_recompute_cell_finds_the_admitted_repair_cell() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        true,
         &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error")
@@ -143,6 +144,7 @@ fn snapshot_source_discovery_uses_the_sidecar_diff() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        true,
         &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error")
@@ -163,11 +165,12 @@ fn snapshot_source_discovery_uses_the_sidecar_diff() {
 }
 
 // ── P9 test 4 ────────────────────────────────────────────────────────────
-/// A non-DuckDB backend must fail loud rather than silently falling back to
-/// the unsound current-source scan (mirrors
-/// `diff_fingerprint_sidecar_changed_keys`'s own precedent).
+/// A target lacking `supports_fingerprint_sidecar` must fail loud rather
+/// than silently falling back to the unsound current-source scan (mirrors
+/// `diff_fingerprint_sidecar_changed_keys`'s own precedent). The gate is the
+/// declared capability, never the dialect directly.
 #[test]
-fn snapshot_discovery_fails_loud_on_a_non_duckdb_backend() {
+fn snapshot_discovery_refuses_without_the_sidecar_capability() {
     let text = format!("{REPAIR_MODEL_FILE}{REPAIR_MODEL_SQL}\n");
     let (metadata, sql) = metadata_and_sql(&text);
     let (sources, explicitly_mutable) = mutable_orders();
@@ -180,11 +183,12 @@ fn snapshot_discovery_fails_loud_on_a_non_duckdb_backend() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::SparkSQL,
+        smelt_dialect::BackendCapabilities::spark_delta().supports_fingerprint_sidecar,
         &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect_err(
-        "a MutableSnapshot source's sidecar-diff discovery must fail loud on a non-DuckDB \
-         backend, never silently use the unsound current-source scan",
+        "a MutableSnapshot source's sidecar-diff discovery must fail loud without the \
+         capability, never silently use the unsound current-source scan",
     );
 
     let backend_err = err
@@ -196,6 +200,40 @@ fn snapshot_discovery_fails_loud_on_a_non_duckdb_backend() {
             smelt_backend::BackendError::UnsupportedFeature { .. }
         ),
         "expected BackendError::UnsupportedFeature, got: {backend_err:?}"
+    );
+}
+
+// ── P9 test 4b ───────────────────────────────────────────────────────────
+/// Proves the gate is the flag, not the dialect: a non-DuckDB dialect WITH
+/// `supports_fingerprint_sidecar: true` still resolves
+/// `RepairDiscovery::SidecarDiff`.
+#[test]
+fn snapshot_discovery_admits_when_the_capability_is_declared() {
+    let text = format!("{REPAIR_MODEL_FILE}{REPAIR_MODEL_SQL}\n");
+    let (metadata, sql) = metadata_and_sql(&text);
+    let (sources, explicitly_mutable) = mutable_orders();
+
+    let (_source, _cell, _key, _slice, _write, discovery) = resolve_live_per_group_recompute_cell(
+        &sql,
+        "customer_max_amount",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &[],
+        smelt_dialect::SqlDialect::SparkSQL,
+        true,
+        &smelt_logical::maintenance::availability::StateAvailability::all(),
+    )
+    .expect("resolver must not error")
+    .expect("a live per-group-recompute cell must resolve for raw.orders");
+
+    assert!(
+        matches!(
+            discovery,
+            smelt_runtime::maintenance_driver::RepairDiscovery::SidecarDiff { .. }
+        ),
+        "a non-DuckDB dialect declaring the capability must still admit the sidecar diff, got \
+         {discovery:?}"
     );
 }
 
@@ -226,6 +264,7 @@ fn diff_patch_pin_over_a_repair_cell_resolves_a_diff_patch_write() {
         &explicitly_mutable,
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        true,
         &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error")
@@ -285,6 +324,7 @@ fn resolve_live_per_group_recompute_cell_ignores_a_pin_with_no_repair_cell_to_ad
         &HashSet::new(),
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        true,
         &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error");
@@ -384,6 +424,7 @@ fn resolve_live_per_group_recompute_cell_none_for_an_append_only_model() {
         &HashSet::new(),
         &[],
         smelt_dialect::SqlDialect::DuckDB,
+        true,
         &smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("resolver must not error");

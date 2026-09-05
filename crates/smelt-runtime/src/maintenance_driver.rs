@@ -2228,12 +2228,13 @@ pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
 /// (maintenance-plan purity, root `CLAUDE.md`); nothing downstream
 /// re-derives admission.
 ///
-/// `dialect` gates [`RepairDiscovery::SidecarDiff`]: a
+/// `supports_fingerprint_sidecar` gates [`RepairDiscovery::SidecarDiff`]: a
 /// [`smelt_logical::maintenance::MutationProfile::MutableSnapshot`] source routes to the group-grain
-/// sidecar diff, which is DuckDB-only (matching the per-row sidecar's own
-/// posture, `diff_fingerprint_sidecar_changed_keys`) — a non-DuckDB target
-/// fails loud here, before any backend call, rather than silently falling
-/// back to the unsound current-source scan.
+/// sidecar diff, which needs a target declaring the capability (matching the
+/// per-row sidecar's own posture, `diff_fingerprint_sidecar_changed_keys`) —
+/// a target that does not declare it fails loud here, before any backend
+/// call, rather than silently falling back to the unsound current-source
+/// scan. `dialect` still supplies `.name()` for the refusal message.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_live_per_group_recompute_cell(
     sql: &str,
@@ -2243,6 +2244,7 @@ pub fn resolve_live_per_group_recompute_cell(
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
     dialect: SqlDialect,
+    supports_fingerprint_sidecar: bool,
     availability: &StateAvailability,
 ) -> Result<Option<LiveRepairCell>> {
     let Some(result) = crate::maintenance_availability::derive_resolved(
@@ -2427,7 +2429,7 @@ pub fn resolve_live_per_group_recompute_cell(
                     );
                 };
                 let discovery = if posture == RepairDiscoveryPosture::SidecarDiff {
-                    if dialect != SqlDialect::DuckDB {
+                    if !supports_fingerprint_sidecar {
                         return Err(BackendError::unsupported(
                             dialect.name(),
                             "group-grain fingerprint-sidecar affected-key discovery for a \
@@ -2804,9 +2806,9 @@ pub type LiveKeyAddressedModelEdgeCell = (
 ///
 /// Two fail-loud legs run BEFORE any backend call
 /// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`):
-/// - a non-DuckDB target dialect — the group-grain sidecar diff this cell's
-///   execution needs is DuckDB-only, matching every other sidecar consumer
-///   in this module;
+/// - a target that does not declare `supports_fingerprint_sidecar` — the
+///   group-grain sidecar diff this cell's execution needs requires the
+///   capability, matching every other sidecar consumer in this module;
 /// - a `key_scope.keys` column the upstream relation does not actually
 ///   carry — checked against the upstream edge's own declared
 ///   `ModelEdge::unique_key` (the upstream's real output-table column
@@ -2822,6 +2824,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     dialect: SqlDialect,
+    supports_fingerprint_sidecar: bool,
     availability: &StateAvailability,
 ) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
     let Some(result) = crate::maintenance_availability::derive_resolved_with_edges(
@@ -2875,7 +2878,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
                 edge.name
             );
         };
-        if dialect != SqlDialect::DuckDB {
+        if !supports_fingerprint_sidecar {
             return Err(BackendError::unsupported(
                 dialect.name(),
                 "key-addressed model-edge affected-key discovery over a KeyedUpsert upstream \
@@ -2982,9 +2985,10 @@ pub fn resolve_live_key_addressed_model_edge_cell(
 /// [`KeyDiscovery::DownstreamGrainOverUpstream`] (whose diff's own
 /// changed-key set already **is** the downstream's affected-key set, so no
 /// forward-projection `SELECT` runs — [`repair_keys_literal_select`] wraps
-/// the resolved literals directly). A DuckDB-only discovery route —
-/// `resolve_live_key_addressed_model_edge_cell` already refused a
-/// non-DuckDB dialect before any backend call is reached.
+/// the resolved literals directly). A sidecar-capability-gated discovery
+/// route — `resolve_live_key_addressed_model_edge_cell` already refused a
+/// target lacking `supports_fingerprint_sidecar` before any backend call is
+/// reached.
 ///
 /// Returns an empty resolved key list when the sidecar diff discovers no
 /// changed keys — the caller reports a no-op rather than executing an
@@ -3737,15 +3741,19 @@ pub fn compute_fingerprint_sidecar_stamp(projection_identity: &str, model_sql: &
 /// diff query's own `FULL OUTER JOIN` produces that result against an
 /// empty (or not-yet-created) sidecar partition.
 ///
-/// DuckDB-only, matching every other `_smelt_fingerprint_sidecar`/
-/// `_smelt_observed_delta` consumer in this module. Unlike
-/// `read_observed_delta_changed_keys`'s read-side fallback (a missing
-/// delta is always a legal widen-never-narrow trigger, so it reads back
-/// `None` on a non-DuckDB backend), a caller asking for a sidecar diff at
-/// all has already chosen the sidecar-backed path — a non-DuckDB backend
-/// here fails loudly (`docs/specs/sources.md` §"The fingerprint sidecar" —
-/// "DuckDB-scoped today ... a non-DuckDB target fails loud rather than
-/// silently skipping the sidecar").
+/// Gated on a target declaring `supports_fingerprint_sidecar`, matching
+/// every other `_smelt_fingerprint_sidecar`/`_smelt_observed_delta` consumer
+/// in this module. Unlike `read_observed_delta_changed_keys`'s read-side
+/// fallback (a missing delta is always a legal widen-never-narrow trigger,
+/// so it reads back `None` for a target lacking the capability), a caller
+/// asking for a sidecar diff at all has already chosen the sidecar-backed
+/// path — a target without the capability here fails loudly
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "DuckDB-scoped
+/// today ... a target lacking the capability fails loud rather than
+/// silently skipping the sidecar"). The DDL owner
+/// (`ddl_duckdb::generate_fingerprint_sidecar_table_ddl`) is still
+/// DuckDB-shaped, so a second backend declaring the capability needs its
+/// own DDL first.
 ///
 /// `model_sql` is the consuming model's own SQL text — folded into the
 /// partition's identity stamp ([`compute_fingerprint_sidecar_stamp`]) so a
@@ -3769,7 +3777,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
     model_sql: &str,
     consumer_address: &str,
 ) -> std::result::Result<Vec<String>, BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "fingerprint-sidecar diff for a mutable_snapshot external source (F3)",
@@ -3851,9 +3859,11 @@ fn extract_delta_keys(batches: &[arrow::record_batch::RecordBatch]) -> Vec<Strin
 /// make a subsequent diff compare the source against itself and observe no
 /// changes.
 ///
-/// DuckDB-only, matching [`diff_fingerprint_sidecar_changed_keys`]'s own
-/// posture; a non-DuckDB backend fails loudly rather than being handed
-/// DuckDB-flavored SQL it cannot run.
+/// Gated on `supports_fingerprint_sidecar`, matching
+/// [`diff_fingerprint_sidecar_changed_keys`]'s own posture; a target lacking
+/// the capability fails loudly rather than being handed DuckDB-flavored SQL
+/// it cannot run. The DDL owner is still DuckDB-shaped — see that
+/// function's doc comment.
 ///
 /// `model_sql` must be the SAME consuming-model SQL text passed to the
 /// paired [`diff_fingerprint_sidecar_changed_keys`] call this refresh
@@ -3876,7 +3886,7 @@ pub async fn refresh_fingerprint_sidecar(
     consumer_address: &str,
     write_group: &StatementGroup,
 ) -> std::result::Result<(), BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "fingerprint-sidecar refresh for a mutable_snapshot external source (F3)",
@@ -4007,9 +4017,10 @@ fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_cor
 /// whole-table repair for that one run and self-heals once
 /// [`refresh_repair_group_sidecar`] populates a trustworthy comparandum.
 ///
-/// DuckDB-only, matching every other sidecar consumer in this module — a
-/// non-DuckDB backend fails loud (`BackendError::unsupported`) rather than
-/// silently falling back to the unsound current-source scan.
+/// Gated on `supports_fingerprint_sidecar`, matching every other sidecar
+/// consumer in this module — a target lacking the capability fails loud
+/// (`BackendError::unsupported`) rather than silently falling back to the
+/// unsound current-source scan.
 #[allow(clippy::too_many_arguments)]
 pub async fn diff_repair_group_sidecar_changed_keys(
     backend: &dyn Backend,
@@ -4022,7 +4033,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
     model_sql: &str,
     consumer_address: &str,
 ) -> std::result::Result<Vec<String>, BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "group-grain fingerprint-sidecar diff for a mutable_snapshot repair source (P9)",
@@ -4126,7 +4137,7 @@ pub async fn refresh_repair_group_sidecar(
     consumer_address: &str,
     write_group: &StatementGroup,
 ) -> std::result::Result<(), BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !backend.capabilities().supports_fingerprint_sidecar {
         return Err(BackendError::unsupported(
             backend.dialect().name(),
             "group-grain fingerprint-sidecar refresh for a mutable_snapshot repair source (P9)",

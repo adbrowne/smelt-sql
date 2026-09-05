@@ -32,11 +32,12 @@
 //!   mid-sequence invalidation still matches the full-refresh oracle on
 //!   every subsequent step.
 
-use smelt_backend::{Backend, BackendError, StatementGroup};
+use smelt_backend::{Backend, BackendError, PartitionRange, StatementGroup};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::analysis::fingerprint::Projection;
 use smelt_runtime::maintenance_driver::{
-    diff_fingerprint_sidecar_changed_keys, refresh_fingerprint_sidecar,
+    diff_fingerprint_sidecar_changed_keys, diff_repair_group_sidecar_changed_keys,
+    refresh_fingerprint_sidecar, refresh_repair_group_sidecar,
 };
 use std::cell::RefCell;
 use std::sync::Once;
@@ -1521,4 +1522,167 @@ async fn a_sibling_consumers_refresh_leaves_this_edges_sidecar_rows_untouched() 
         5,
         "consumer A's row count must be unaffected by consumer B's refresh"
     );
+}
+
+// ── P9/phase-5 test ─────────────────────────────────────────────────────
+/// A stub backend that declares DuckDB's dialect but NOT
+/// `supports_fingerprint_sidecar` — the sharpest possible red before this
+/// phase's fix: every one of the four sidecar entry points previously gated
+/// on `dialect != SqlDialect::DuckDB`, so a DuckDB-dialected backend alone
+/// satisfied that check regardless of the declared capability. All four
+/// must now refuse with `BackendError::UnsupportedFeature`.
+struct SidecarLessBackend;
+
+#[async_trait::async_trait]
+impl Backend for SidecarLessBackend {
+    async fn execute_sql(
+        &self,
+        _sql: &str,
+    ) -> Result<Vec<arrow::array::RecordBatch>, BackendError> {
+        unimplemented!("must not be called — the driver refuses before any backend call")
+    }
+    async fn create_table_as(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn create_view_as(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn drop_table_if_exists(&self, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn drop_view_if_exists(&self, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn get_row_count(&self, _: &str, _: &str) -> Result<usize, BackendError> {
+        unimplemented!()
+    }
+    async fn get_preview(
+        &self,
+        _: &str,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<arrow::array::RecordBatch>, BackendError> {
+        unimplemented!()
+    }
+    async fn table_exists(&self, _: &str, _: &str) -> Result<bool, BackendError> {
+        unimplemented!()
+    }
+    async fn ensure_schema(&self, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    fn dialect(&self) -> smelt_backend::SqlDialect {
+        smelt_backend::SqlDialect::DuckDB
+    }
+    fn capabilities(&self) -> smelt_backend::BackendCapabilities {
+        smelt_backend::BackendCapabilities {
+            supports_fingerprint_sidecar: false,
+            ..smelt_backend::BackendCapabilities::duckdb()
+        }
+    }
+    async fn load_table(
+        &self,
+        _: &str,
+        _: &str,
+        _: arrow::datatypes::SchemaRef,
+        _: Vec<arrow::array::RecordBatch>,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn delete_partitions(
+        &self,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn insert_into_from_query(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn insert_overwrite(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+}
+
+#[tokio::test]
+async fn sidecar_entry_points_refuse_without_the_capability() {
+    let backend = SidecarLessBackend;
+    let key = vec!["id".to_string()];
+    let digest_columns = vec!["name".to_string(), "tier".to_string()];
+
+    let diff_err = diff_fingerprint_sidecar_changed_keys(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &key,
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+    )
+    .await
+    .expect_err("diff_fingerprint_sidecar_changed_keys must refuse without the capability");
+    assert!(matches!(diff_err, BackendError::UnsupportedFeature { .. }));
+
+    let refresh_err = refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &key,
+        &projection(),
+        &all_columns(),
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+        &empty_write_group(),
+    )
+    .await
+    .expect_err("refresh_fingerprint_sidecar must refuse without the capability");
+    assert!(matches!(
+        refresh_err,
+        BackendError::UnsupportedFeature { .. }
+    ));
+
+    let repair_diff_err = diff_repair_group_sidecar_changed_keys(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        "main.customer_max_amount",
+        &key,
+        &digest_columns,
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+    )
+    .await
+    .expect_err("diff_repair_group_sidecar_changed_keys must refuse without the capability");
+    assert!(matches!(
+        repair_diff_err,
+        BackendError::UnsupportedFeature { .. }
+    ));
+
+    let repair_refresh_err = refresh_repair_group_sidecar(
+        &backend,
+        "main",
+        SOURCE_ADDRESS,
+        SOURCE_TABLE,
+        &key,
+        &digest_columns,
+        MODEL_SQL,
+        CONSUMER_ADDRESS,
+        &empty_write_group(),
+    )
+    .await
+    .expect_err("refresh_repair_group_sidecar must refuse without the capability");
+    assert!(matches!(
+        repair_refresh_err,
+        BackendError::UnsupportedFeature { .. }
+    ));
 }

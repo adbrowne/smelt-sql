@@ -2149,6 +2149,7 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         &request.technique_overrides,
                         backend.dialect(),
+                        backend.capabilities().supports_fingerprint_sidecar,
                         &availability,
                     )?
                 }
@@ -6087,6 +6088,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
             explicitly_mutable,
             model_edges,
             backend.dialect(),
+            backend.capabilities().supports_fingerprint_sidecar,
             availability,
         )?
     else {
