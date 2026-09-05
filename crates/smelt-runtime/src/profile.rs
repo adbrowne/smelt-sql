@@ -34,21 +34,16 @@
 //! §Constraints item 6) instead of a plain, unexplained absence — this phase
 //! captures the reason; rendering it is a later phase's job.
 //!
-//! **Scope note.** The maintenance dialect used here is fixed to
-//! [`MaintenanceDialect::DuckDb`] / [`smelt_backend::SqlDialect::DuckDB`],
-//! the same simplification `property_profile_parity`'s harness already made
-//! (its own doc comment: "every fixture workspace this gate runs over
-//! targets DuckDB"). Per-target dialect resolution (a target's declared
-//! backend, `smelt_cli::commands::explain`'s `backend_type_to_sql_dialect`)
-//! is a CLI-command-level concern not reproduced here. Live availability
-//! resolution IS wired in (`maintenance_availability::availability_for_run`
-//! together with `smelt_logical::maintenance::availability::resolve_availability`),
-//! the same as `smelt explain --json` applies before rendering
-//! (`crates/smelt-cli/src/commands/explain.rs`) — omitting it would make a
-//! cell's `technique` genuinely diverge between the report and the profile
-//! on any project with `state.warehouse_tables: false`, a live Constraint 4
-//! (report/profile parity) violation, not just an unreachable
-//! `state_downgrade` dimension.
+//! Each model's availability resolution (and the `MaintenanceDialect` its
+//! probe plan uses) is keyed on that model's **own** target
+//! (`smelt_runtime::execute::sql_dialect_for_target`, the same lookup
+//! `smelt explain`'s single-model report uses via
+//! `backend_type_to_sql_dialect`) rather than a hardcoded dialect — a
+//! multi-backend project with a Spark- or BigQuery-targeted model would
+//! otherwise get a diff whose techniques contradict what `smelt explain
+//! <model> --json` reports for that same model
+//! (`docs/specs/property_diff.md` §Constraints item 4, "Report/profile
+//! parity").
 
 use std::collections::BTreeMap;
 
@@ -56,8 +51,6 @@ use smelt_core::sources::{discover_source_infos, SourcesConfig};
 use smelt_core::workspace::LoadedWorkspace;
 use smelt_logical::analysis::profile::PropertyProfile;
 use smelt_logical::analysis::source_bounds::BoundContext;
-use smelt_logical::maintenance::emit::MaintenanceDialect;
-
 use crate::compile::CompilerRegistry;
 use crate::diagnostics::build_bound_context;
 
@@ -107,15 +100,6 @@ pub fn profiles_for_workspace(
     .map_err(|e| ProfileWorkspaceError::GraphBuildFailed(e.to_string()))?;
 
     let source_infos = discover_source_infos(&loaded.project_root, &loaded.config.paths);
-    let dialect = MaintenanceDialect::DuckDb;
-    // Live availability resolution (`state.md` §"The degradation contract"),
-    // the same call `smelt explain`'s report makes before rendering
-    // (`crates/smelt-cli/src/commands/explain.rs`) — omitting this would let
-    // a cell's `technique` diverge between the report and this profile.
-    let availability = crate::maintenance_availability::availability_for_run(
-        smelt_backend::SqlDialect::DuckDB,
-        &loaded.config,
-    );
 
     let mut registry = CompilerRegistry::new(&loaded.config, &loaded.config.targets);
     let fn_bodies = crate::fn_bodies::build_fn_body_map(&db, ws);
@@ -151,10 +135,6 @@ pub fn profiles_for_workspace(
         let Some(mut result) = smelt_db::maintenance_plan_report(&db, ws, *source_file) else {
             continue;
         };
-        smelt_logical::maintenance::availability::resolve_availability(
-            &mut result.plan.cells,
-            &availability,
-        );
 
         let bound_ctx: BoundContext = build_bound_context(&canonical, &graph, &loaded.config);
         let target =
@@ -167,6 +147,20 @@ pub fn profiles_for_workspace(
             .get(&target)
             .map(|t| t.schema.clone())
             .unwrap_or_else(|| "main".to_string());
+        // Per-model dialect/availability, keyed on this model's own target
+        // (`docs/specs/property_diff.md` §Constraints item 4) — the same
+        // resolution `smelt explain <model>`'s report makes, never a
+        // workspace-wide default.
+        let sql_dialect = crate::execute::sql_dialect_for_target(&loaded.config, &target);
+        let dialect = smelt_backend::maintenance_dialect(sql_dialect);
+        let availability = crate::maintenance_availability::availability_for_run(
+            sql_dialect,
+            &loaded.config,
+        );
+        smelt_logical::maintenance::availability::resolve_availability(
+            &mut result.plan.cells,
+            &availability,
+        );
 
         let resolver = match registry
             .get(&target)

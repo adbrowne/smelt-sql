@@ -419,6 +419,7 @@ pub fn build_maintenance_plan_report(
     edge_delta_types: &[(String, smelt_logical::analysis::output_delta::OutputDelta)],
     pending_definition_delta: Option<&(MigrationVerdict, String)>,
     own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
+    profile: &smelt_logical::analysis::profile::PropertyProfile,
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -478,14 +479,21 @@ pub fn build_maintenance_plan_report(
         let _ = writeln!(out, "Cells: (none)");
     } else {
         let _ = writeln!(out, "Cells ({}):", result.plan.cells.len());
-        for cell in &result.plan.cells {
+        for (cell, verdict) in result.plan.cells.iter().zip(profile.cell_verdicts.iter()) {
             let _ = writeln!(
                 out,
                 "  - group {} on trigger {:?}",
                 cell.group, cell.trigger
             );
-            let _ = writeln!(out, "      corner:    {:?}", cell.corner);
-            let _ = writeln!(out, "      technique: {:?}", cell.technique);
+            // Corner/technique render the property PROFILE's verdict
+            // (`docs/specs/property_diff.md` §Constraints item 1), not the
+            // raw plan cell — `verdict.corner` is already the `{:?}`-rendered
+            // string `PropertyProfile::assemble` captured, so it prints via
+            // `{}` (a second `{:?}` would double-escape it); `verdict.
+            // technique` is the enum, printed via `{:?}` exactly as the raw
+            // cell was.
+            let _ = writeln!(out, "      corner:    {}", verdict.corner);
+            let _ = writeln!(out, "      technique: {:?}", verdict.technique);
             // Recorded availability downgrade (`state.md` §"The degradation
             // contract" step 2, `docs/outcomes/20260904-state-residency/
             // outcome.md` phase 6): omitted entirely when the cell was not
@@ -1042,12 +1050,16 @@ pub fn build_maintenance_plan_report(
         let _ = writeln!(out);
     }
 
-    if result.plan.refusals.is_empty() {
+    // Rendered from the property profile's refusal list
+    // (`docs/specs/property_diff.md` §Constraints item 1) — `ProfileRefusal
+    // ::text` is the same `{:?}` string the raw `Refusal` used to render
+    // directly, so this is byte-identical output over a different source.
+    if profile.refusals.is_empty() {
         let _ = writeln!(out, "Refusals: (none)");
     } else {
-        let _ = writeln!(out, "Refusals ({}):", result.plan.refusals.len());
-        for refusal in &result.plan.refusals {
-            let _ = writeln!(out, "  - {:?}", refusal);
+        let _ = writeln!(out, "Refusals ({}):", profile.refusals.len());
+        for refusal in &profile.refusals {
+            let _ = writeln!(out, "  - {}", refusal.text);
         }
     }
     let _ = writeln!(out);

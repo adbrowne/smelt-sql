@@ -653,6 +653,63 @@ pub struct PropertyDiff {
     pub summary: DiffSummary,
 }
 
+/// The `baseline` object of the JSON schema
+/// (`docs/specs/property_diff.md` §Surface "JSON").
+#[derive(Debug, Clone, Serialize)]
+pub struct BaselineInfo {
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+    pub commit: String,
+    pub resolved_as: String,
+}
+
+impl From<&smelt_core::baseline::ResolvedBaseline> for BaselineInfo {
+    fn from(resolved: &smelt_core::baseline::ResolvedBaseline) -> Self {
+        BaselineInfo {
+            r#ref: resolved.requested.clone(),
+            commit: resolved.commit.clone(),
+            resolved_as: match resolved.resolved_as {
+                smelt_core::baseline::ResolvedAs::Explicit => "explicit".to_string(),
+                smelt_core::baseline::ResolvedAs::MergeBase => "merge_base".to_string(),
+            },
+        }
+    }
+}
+
+/// The full `smelt explain --diff` report — top-level key order here IS the
+/// §Surface "JSON" schema's top-level key order
+/// (`docs/specs/property_diff.md` §Surface "JSON"). Every renderer
+/// (`analysis::diff_render`, and later the Markdown/LSP consumers) reads
+/// this value; none re-derives or re-sorts `models`
+/// (`docs/outcomes/20260905-property-diff/phases/05-plan.md` D5).
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffReport {
+    pub baseline: BaselineInfo,
+    pub edited_files: Vec<String>,
+    pub summary: DiffSummary,
+    pub models: Vec<ModelDiff>,
+}
+
+impl DiffReport {
+    /// Assemble a [`DiffReport`] from a computed [`PropertyDiff`] plus the
+    /// baseline/edited-file facts the caller (a later phase, git-aware)
+    /// already resolved. `diff_profiles`'s pure `models`/`summary` are
+    /// carried unchanged; this is presentation-envelope assembly, not a
+    /// second diff.
+    pub fn new(
+        baseline: BaselineInfo,
+        edited_files: Vec<String>,
+        diff: PropertyDiff,
+    ) -> Self {
+        DiffReport {
+            baseline,
+            edited_files,
+            summary: diff.summary,
+            models: diff.models,
+        }
+    }
+}
+
 /// The working-tree graph plus the edit provenance the diff attributes with
 /// (`docs/specs/property_diff.md` §"Attribution"). Built by the caller
 /// (a later phase) — `diff_profiles` never touches git.

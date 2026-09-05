@@ -3,6 +3,7 @@ pub mod bounded_domain;
 pub mod decomposed_state;
 pub mod definition_change;
 pub mod diff;
+pub mod diff_render;
 pub mod discriminants;
 pub(crate) mod expr_util;
 pub mod faithful_fold;

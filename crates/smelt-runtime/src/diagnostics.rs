@@ -1045,18 +1045,14 @@ pub fn build_model_diagnostics(
     probe_entries: &[ProbePlanEntry],
     contract_cfg: Option<&ContractConfig>,
 ) -> Result<ModelDiagnostics, DiagnosticsError> {
-    let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
-    let declared_unique_key: Vec<String> = model
-        .metadata
-        .as_deref()
-        .and_then(|m| m.unique_key.clone())
-        .unwrap_or_default();
-
-    let properties = PropertySet::derive(
-        &model.canonical_path(),
-        &stripped_sql,
-        &declared_unique_key,
+    let profile = build_model_profile(
+        model,
         bound_ctx,
+        plan_cells,
+        column_groups,
+        refusals,
+        probe_entries,
+        contract_cfg,
     )?;
 
     let (contract, inbound_edges) =
@@ -1080,6 +1076,46 @@ pub fn build_model_diagnostics(
         })
         .collect();
 
+    Ok(ModelDiagnostics {
+        model: model.canonical_path(),
+        profile,
+        contract,
+        inbound_edges,
+        cells,
+    })
+}
+
+/// The profile half of [`build_model_diagnostics`]: `PropertySet::derive`
+/// plus the per-cell `effective_contract` fold and `PropertyProfile::
+/// assemble`, with no registry, resolver, schema, or compile target —
+/// everything a caller needs to get a [`PropertyProfile`] without paying
+/// for `build_plan_cell_diagnostics`'s per-technique statement-group
+/// preview (`docs/outcomes/20260905-property-diff/phases/05-plan.md` D7).
+/// `build_model_diagnostics` calls this, so a profile still has exactly one
+/// assembly path (`docs/specs/property_diff.md` §Constraints item 1).
+pub fn build_model_profile(
+    model: &ModelFile,
+    bound_ctx: &BoundContext,
+    plan_cells: &[PlanCell],
+    column_groups: &[ColumnGroup],
+    refusals: &[Refusal],
+    probe_entries: &[ProbePlanEntry],
+    contract_cfg: Option<&ContractConfig>,
+) -> Result<PropertyProfile, DiagnosticsError> {
+    let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+    let declared_unique_key: Vec<String> = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.unique_key.clone())
+        .unwrap_or_default();
+
+    let properties = PropertySet::derive(
+        &model.canonical_path(),
+        &stripped_sql,
+        &declared_unique_key,
+        bound_ctx,
+    )?;
+
     let contract_points: Vec<ContractPointView> = plan_cells
         .iter()
         .map(|cell| {
@@ -1097,21 +1133,14 @@ pub fn build_model_diagnostics(
             .into()
         })
         .collect();
-    let profile = PropertyProfile::assemble(
+
+    Ok(PropertyProfile::assemble(
         properties,
         plan_cells,
         &contract_points,
         refusals,
         probe_entries,
-    );
-
-    Ok(ModelDiagnostics {
-        model: model.canonical_path(),
-        profile,
-        contract,
-        inbound_edges,
-        cells,
-    })
+    ))
 }
 
 /// Build the [`BoundContext`] a model's bound/reach derivation needs: one
