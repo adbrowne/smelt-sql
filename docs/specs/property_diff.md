@@ -127,9 +127,11 @@ and neutrals. When nothing shifted the whole output is the single line
       "changes": [
         {
           "dimension": "grain" | "row_identity" | "source_bound" | "cell_technique"
-                     | "cell_corner" | "cell_added" | "cell_removed" | "refusal_added"
-                     | "refusal_removed" | "contract_point" | "probe_added" | "probe_removed"
-                     | "column_added" | "column_removed" | "determinism" | "discriminant",
+                     | "cell_corner" | "cell_row_identity" | "cell_added" | "cell_removed"
+                     | "refusal_added" | "refusal_removed" | "contract_point" | "probe_added"
+                     | "probe_removed" | "column_added" | "column_removed" | "determinism"
+                     | "discriminant" | "comparability" | "fd_added" | "fd_removed"
+                     | "literal_column" | "set_op_barrier" | "fan_out_join",
           "subject": "<cell group@source | source name | column name | probe fact>",
           "direction": "downgrade" | "upgrade" | "neutral",
           "old": <json value or null>,
@@ -203,11 +205,14 @@ version, derived by the same pure functions the report is built from, and it con
    technique, row identity, contract point)`; for an unmaintained model, empty. Named
    `cell_verdicts` rather than `cells` because the model-diagnostics response
    (`ui_model_diagnostics.md` §Surface) already carries an unrelated `cells` key (the
-   technique-preview set) beside the flattened profile.
+   technique-preview set) beside the flattened profile. A cell's contract point carries, in
+   addition to its display strings, the `frozen_horizon`/`deferral` windows as a machine-comparable
+   number of seconds — the interval a `contract_point` diff widens or narrows is decided from
+   these seconds, never by re-parsing the display string.
 3. `refusals` — the set of maintenance admission refusals (the diagnostic code's name — absent for
    a refusal that raises no diagnostic today — plus the refusal text), as the maintenance-plan
    gate would report them.
-4. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`, `cadence`).
+4. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`).
 
 The profile omits everything that is a *rendering* rather than a verdict: emitted statements,
 technique previews for non-admitted techniques, presentation expressions for decomposed state,
@@ -225,8 +230,21 @@ Given the profile maps `P_old` (baseline) and `P_new` (working tree), keyed by m
 - Otherwise the model is **shifted**, and its changes are the per-dimension differences, computed
   field by field with the following matching rules: cells match on `(group, trigger)`, source
   bounds on source name, columns on name, probes on `(fact, cell)`, refusals on `(code, text)`.
+  A refusal's `code` is absent for the three admission refusals that raise no diagnostic today
+  (§"The property profile" item 3), so the matching key is actually `(code: Option<string>, text)`:
+  a `None`-coded refusal matches another `None`-coded refusal with the same `text`, and never
+  matches a `Some(_)`-coded one even with identical text — collapsing the three onto one shared
+  placeholder key would hide a refusal changing kind. In JSON, a `refusal_added`/`refusal_removed`
+  change's `old`/`new` for one of these three carries `code: null`.
   A cell present on one side only is `cell_added`/`cell_removed`; a matched cell whose technique,
-  corner, or contract point differs yields one change per differing field.
+  corner, row identity, or contract point differs yields one change per differing field.
+- Every field of the profile that is not already named above as a matched-cell field is still
+  covered by its own dimension, so that a model can never be reported shifted with an empty
+  `changes` array (§Constraints item 6): a `PropertySet`'s functional dependencies (`fd_added`/
+  `fd_removed`, matched on `(key, determines)`), comparability (`comparability`, per column),
+  literal columns (`literal_column`, matched on column name), set-operation barrier and fan-out
+  join (`set_op_barrier`, `fan_out_join`, whole-model booleans), and a cell's row identity
+  (`cell_row_identity`) all produce a change whenever they differ.
 
 Renames are not detected: a renamed column or model is a removal plus an addition. This is
 fail-loud by construction (§Constraints) — a rename that changes nothing else still surfaces.
@@ -240,14 +258,15 @@ are data in `smelt-logical`, not spread across renderers:
 |-----------|----------------|--------------|
 | `cell_technique` | new technique is lower on the ladder `KeyedFold` ≻ `ColumnScopedMerge` ≻ `InPlaceUpdate` ≻ `PerGroupRecompute` ≻ `DeleteInsert` | higher |
 | `cell_added` / `cell_removed` | a cell is removed from a still-maintained model (a column group lost its maintenance route) | a cell is added |
-| `source_bound` | `Bounded` → `Unbounded`, or a bounded interval widened | narrower, or `Unbounded` → `Bounded` |
-| `grain` | a non-empty grain became empty, or lost a key column | gained a proven grain |
-| `row_identity` | `Declared`/`Proven` → `WholeRow` | the reverse |
+| `source_bound` | `Bounded` → `Unbounded`, or a bounded interval widened (`before + after` grew) | narrower, or `Unbounded` → `Bounded`. `NotDerivable` orders with `Unbounded`: `Bounded` ≻ `{Unbounded, NotDerivable}`, and a change between `Unbounded` and `NotDerivable` in either direction is `neutral` — both force a full read, so neither is worse than the other |
+| `grain` / `row_identity` / `cell_row_identity` | a non-empty grain became empty or lost a key column; a row identity moved `Key` → `WholeRow` | gained a proven grain; `WholeRow` → `Key` |
 | `refusal_added` / `refusal_removed` | a refusal appeared | one disappeared |
-| `contract_point` | a relaxation appeared or its interval widened (`default` → `frozen_horizon: 90 days`) | a relaxation was removed or narrowed |
+| `contract_point` | a relaxation appeared or its interval widened (`default` → `frozen_horizon: 90 days`, using the profile's machine-comparable seconds, never the display string), or `retain_departed` went from absent to present (per `EffectiveContract::is_default`) | a relaxation was removed or narrowed, or `retain_departed` went from present to absent. A change of `retain_departed`'s *shape* only (`Bool` → `Tombstone`, or a different tombstone column, presence unchanged) is `neutral` — there is no interval to widen |
 | `probe_added` / `probe_removed` | a probe was **removed** (a declared fact lost its runtime check) | one was added |
-| `determinism` | a column went from run-deterministic to nondeterministic | the reverse |
-| `column_added` / `column_removed` / `discriminant` / `cell_corner` | — | — (always `neutral`) |
+| `determinism` | a column moved up the lattice `Clean < Run < Row` | moved down it |
+| `comparability` | a column moved `Comparable` → `Incomparable` | `Incomparable` → `Comparable` |
+| `set_op_barrier` / `fan_out_join` | the flag went `false` → `true` (a new FD/keying barrier appeared) | `true` → `false` |
+| `column_added` / `column_removed` / `discriminant` / `cell_corner` / `fd_added` / `fd_removed` / `literal_column` | — | — (always `neutral`) |
 
 The technique ladder above is the maintenance cost ordering: it ranks a technique by how much it
 must read and write per run, which is what a downgrade costs the operator. It is a distinct
@@ -259,6 +278,10 @@ groups; `InPlaceUpdate` sits above it because it reads no upstream at all.
 A `contract_point` relaxation is a downgrade because it weakens the equivalence invariant the
 model promises (`incremental_models.md` §"The contract lattice"); a modeller who intends it
 sees a `▼` line, which is the point — the relaxation is never silent.
+
+A `cell_technique` change's `old`/`new` are the technique's name, unchanged from the
+single-version report's own rendering of that field — a reader cross-referencing the two never
+sees two different spellings for the same technique.
 
 ### Attribution
 
