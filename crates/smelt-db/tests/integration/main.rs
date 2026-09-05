@@ -42,6 +42,7 @@ mod path_resolution;
 mod phase52_lints;
 mod phase_d_wiring;
 mod provenance_validator;
+mod refusal_codes;
 mod registry_consistency;
 mod registry_inference;
 mod reserved_alias_prefix;

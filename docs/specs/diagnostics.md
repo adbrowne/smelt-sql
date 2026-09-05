@@ -578,6 +578,14 @@ Owned by `docs/specs/incremental_models.md` §"The contract lattice".
 | `ContractRetainDepartedInvalid` | Error | A `contract.retain_departed` is neither a bare bool nor `{tombstone: <col>}`, is declared on anything other than a keyed shape consuming a mutable snapshot, or names a tombstone column absent from the model's output. |
 | `ContractDepartedKeyUnmarked` | Error | Runtime probe, `retain_departed` point only: a departed key survives the reconcile without its declared tombstone column marked; names the unmarked count. |
 
+### Property diff
+
+Owned by `docs/specs/property_diff.md` §"Diagnostics".
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `PropertyDowngrade` | Warning | A model's property profile at the working tree is worse than at the baseline ref along one dimension (`property_diff.md` §"Direction"). Editor only; the CLI reports the same fact as a `▼` line and via `--fail-on`. |
+| `PropertyDiffBaselineUnavailable` | Error (CLI only, exit `2`) | `smelt explain --diff` was requested but the project is not inside a git work tree, the ref does not resolve, or the ref has no `smelt.yml` at the project's path. |
 ### State residency
 
 Owned by `docs/specs/state.md` §Diagnostics.
@@ -604,8 +612,9 @@ Owned by `docs/specs/state.md` §Diagnostics.
   `SuccessionDrivingSourceNotAppendOnly`, `SuccessionPreFilterNotRowLocal`, `SuccessionDeleteFilterMisplaced`,
   the advisory `SuccessionPreFilterNegatesFlag`,
   `SuccessionPatternUnrecognized`, or the runtime `SuccessionClockTie`
-  (`incremental_shapes.md` §"Succession-grain admission (no declaration)"). No plan exists
-  yet — this spec diff is the input to one.
+  (`incremental_shapes.md` §"Succession-grain admission (no declaration)"). Tracked by
+  `docs/outcomes/20260906-scd2-keyed-succession/outcome.md`.
+
 ## Open questions
 
 None currently open.

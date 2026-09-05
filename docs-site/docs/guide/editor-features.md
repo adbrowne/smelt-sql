@@ -109,3 +109,37 @@ When smelt detects an error, it often suggests a fix. The most useful code actio
 ![Create model from ref](../assets/editor-features/create-model-from-ref.gif)
 
 ![Create model quickfix](../assets/editor-features/01-create-model-quickfix-editor.png)
+
+## Property Diff
+
+While you're editing, the LSP compares each model's derived properties (grain, row identity,
+maintenance technique, and the rest — see `docs-site/docs/reference/smelt-explain.md`) against a
+git baseline, the same comparison `smelt explain --diff` prints from the command line. A model
+whose properties have shifted relative to that baseline gets a code lens on its first line:
+
+```
+2 downgrades, 1 upgrades vs main
+```
+
+`<short ref>` is the baseline's ref name, or a 7-character commit abbreviation when the baseline
+resolved to a bare commit. Every downgrade also gets its own warning diagnostic, anchored as
+precisely as the shift allows — a column-level change anchors on that column in the `SELECT` list,
+a source-level change anchors on the `FROM`/`JOIN` clause that names it, and anything else (a
+maintenance cell, a refusal, a whole-model verdict) anchors on the model's first line, since those
+changes have no narrower home in the file's text. Hovering over the lens shows the same per-model
+detail `smelt explain --diff`'s text form prints.
+
+The baseline defaults to the merge-base with `main`, exactly like the CLI. The diff refreshes when
+the workspace loads, when a model file is saved or changed on disk outside the editor, and when
+the resolved baseline commit changes (for example after `git checkout` or `git pull`) — never on
+every keystroke, so an unsaved edit does not *trigger* a refresh by itself. It still counts once
+one happens, though: any refresh, from any of those causes, reads a model file's open-buffer
+content rather than its on-disk content, so an unsaved edit already visible in the editor shows up
+in the next diff even before you save. A `smelt.yml` or source-YAML edit is different — it only
+takes effect once saved. While a new diff is being computed, the editor keeps showing whatever it
+last computed rather than blanking out; on first load, before any diff has ever been computed, it
+shows nothing.
+
+A workspace that is not a git repository, or whose baseline cannot be resolved, shows no lens and
+no diagnostic at all — this is not treated as an error, since plenty of projects are worked on
+outside of git.

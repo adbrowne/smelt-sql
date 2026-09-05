@@ -1,0 +1,22 @@
+name: dual_target_dialect_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  duckdb_local:
+    type: duckdb
+    schema: main
+  spark_remote:
+    type: spark
+    connect_url: sc://localhost:15002
+    catalog: spark_catalog
+    schema: main
+
+default_materialization: view
+target: duckdb_local
+
+models:
+  lifetime_spend_spark:
+    target: spark_remote

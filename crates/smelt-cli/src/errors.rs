@@ -79,9 +79,27 @@ pub fn exit_code_for(err: &anyhow::Error) -> u8 {
         || err
             .downcast_ref::<smelt_core::config::ConfigError>()
             .is_some()
+        || err
+            .downcast_ref::<smelt_core::baseline::BaselineError>()
+            .is_some()
     {
         2
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `docs/specs/property_diff.md` §Surface: an unresolvable baseline
+    /// (`PropertyDiffBaselineUnavailable`) is exit `2`, the same usage-error
+    /// class as a missing project or a bad `smelt.yml` — never treated as an
+    /// ordinary run failure (exit `1`).
+    #[test]
+    fn exit_code_for_baseline_error_is_2() {
+        let err: anyhow::Error = smelt_core::baseline::BaselineError::NoBaseBranch.into();
+        assert_eq!(exit_code_for(&err), 2);
     }
 }

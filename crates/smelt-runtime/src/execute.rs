@@ -5815,7 +5815,7 @@ fn maintenance_dialect_for_target(
 /// [`maintenance_dialect_for_target`] uses, stopping one step earlier so
 /// availability resolution (which needs `SqlDialect`, not
 /// `MaintenanceDialect`) can share it.
-fn sql_dialect_for_target(config: &Config, target: &str) -> smelt_backend::SqlDialect {
+pub(crate) fn sql_dialect_for_target(config: &Config, target: &str) -> smelt_backend::SqlDialect {
     config
         .targets
         .get(target)

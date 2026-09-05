@@ -4,6 +4,7 @@ Inspect the logical and physical execution plan for a project, or the derived ma
 
 ```bash
 smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>] [--show-sql] [--period <start>..<end>] [--technique <name>]
+smelt explain --diff [<ref>] [--json] [--markdown] [--fail-on <downgrade|any>] [--select <selector>] [--project-dir <path>]
 ```
 
 ## Options
@@ -17,6 +18,9 @@ smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>]
 | `--show-sql` | With `MODEL_NAME`, also print the maintenance statements each cell executes. Never connects to a backend. |
 | `--period` | With `--show-sql`, real literal date bounds (`<start>..<end>`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
 | `--technique` | Requires `--show-sql`. Render a named technique's own preview statements instead of the admitted one's, per cell — including a `NotApplicable` reason where that technique doesn't apply to a given cell. Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute`. |
+| `--diff [<ref>]` | Diff the project's property profile between a git baseline (default: merge-base with `main`) and the working tree, instead of printing a graph or a report. See [Property diff](#property-diff) below. Exclusive with `MODEL_NAME`, `--show-sql`, `--period`, and `--technique` — combining them is a usage error (exit `2`). |
+| `--fail-on` | Only with `--diff`. `downgrade` exits `1` when any downgrade is present; `any` exits `1` when any model shifted at all. Without it, `--diff` exits `0` whenever the diff was computed. |
+| `--markdown` | Only with `--diff`. Emit the diff as a single GitHub-flavoured Markdown comment body instead of text. Exclusive with `--json`. See [Property diff](#property-diff) below. |
 
 ## Human-readable output
 
@@ -57,6 +61,23 @@ State columns:
 ```
 
 A model with no decomposed-state columns prints no state section. With `--json`, the same information appears as a top-level `state_columns` array: `[{"presented_column": "avg_amount", "state_columns": ["avg_amount__sum", "avg_amount__count"], "presentation_expr": "avg_amount__sum / avg_amount__count"}]`.
+
+## Refusals
+
+`smelt explain <model>` also prints any maintenance admission refusals — the cases where no
+technique could be admitted for a cell, or the plan admitted the model with a caveat:
+
+```
+Refusals (1):
+  - ScanUnbounded { source: "raw.orders", why: "no partition_column declared" }
+```
+
+A model whose plan admitted every cell prints `Refusals: (none)`. With `--json`, the same set
+appears as a top-level `refusals` array: `[{"code": "MaintenanceScanUnbounded", "text":
+"ScanUnbounded { source: \"raw.orders\", why: \"no partition_column declared\" }"}]` — `code`
+names the diagnostic code a refusal of this shape raises, absent for a refusal that raises no
+diagnostic today; `text` is the report's own rendering of the refusal, verbatim. Empty when the
+model's plan admitted every cell.
 
 ## Probes
 
@@ -209,6 +230,103 @@ All `before` and `after` values use ISO-8601 duration strings:
 
 Each node in `nodes` has `strategy`, `materialization`, `target`, and `logical_origins`.
 
+## Property diff
+
+`smelt explain --diff [<ref>]` derives every model's property profile at two versions of the
+project — a git baseline (`<ref>`, defaulting to the merge-base with `main`) and the working
+tree, uncommitted edits included — and reports every model whose profile shifted: grain,
+bound/reach, per-cell technique, refusals, contract point, and probes. A model whose own file
+was edited is reported `(edited)`; one that shifted only because an upstream model or source it
+depends on changed is reported `(downstream of <model>[, <model>…])`, naming the nearest edited
+ancestors — this is how a downgrade that silently propagates into a downstream mart gets caught.
+
+The baseline never touches a warehouse, a deployed snapshot, or the maintenance ledger — it is a
+pure comparison of two source trees.
+
+**Text** (default):
+
+```
+$ smelt explain --diff
+
+property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+
+  user_daily_spend  (edited)
+    ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
+
+  user_spend_running_total  (downstream of user_daily_spend)
+    ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
+
+1 downgrades, 0 upgrades, 0 neutral.
+```
+
+When nothing shifted, the whole output is one line: `property diff vs <ref>: no models shifted`.
+
+**JSON** (`--diff --json`):
+
+```json
+{
+  "baseline": { "ref": "<as given>", "commit": "<sha>", "resolved_as": "merge_base" | "explicit" },
+  "edited_files": ["<project-relative path>", ...],
+  "summary": { "downgrades": 1, "upgrades": 0, "neutral": 0, "shifted_models": 2 },
+  "models": [
+    {
+      "model": "<name>",
+      "cause": { "kind": "edited" | "added" | "removed" | "downstream", "of": ["<model>", ...] },
+      "changes": [
+        { "dimension": "cell_technique", "subject": "...", "direction": "downgrade", "old": "KeyedFold", "new": "DeleteInsert" }
+      ]
+    }
+  ]
+}
+```
+
+The full schema — every `dimension` value, the per-dimension direction rules, and the
+attribution algorithm — is normative in `docs/specs/property_diff.md`.
+
+**Markdown** (`--diff --markdown`): a single comment body suitable for `gh pr comment
+--body-file`, with one collapsible block per shifted model (open by default when it holds a
+downgrade) and a trailing `<!-- smelt-property-diff -->` marker a CI job uses to update its
+previous comment instead of stacking a new one on every push. The marker is emitted even when
+nothing shifted, so a stale downgrade comment can be cleared once the regression is fixed. See
+[Continuous integration](../guide/ci.md) for the documented GitHub Actions job.
+
+```
+$ smelt explain --diff --markdown
+
+### property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+
+1 downgrades, 0 upgrades, 0 neutral.
+
+<details open>
+<summary>user_daily_spend — edited — 1 downgrades, 0 upgrades, 0 neutral</summary>
+
+| dimension | subject | direction | old | new | reason |
+|---|---|---|---|---|---|
+| cell_technique | {total_amount}@NewData { source: "raw.transactions" } | downgrade | KeyedFold | DeleteInsert |  |
+
+</details>
+
+<details open>
+<summary>user_spend_running_total — downstream of user_daily_spend — 1 downgrades, 0 upgrades, 0 neutral</summary>
+
+| dimension | subject | direction | old | new | reason |
+|---|---|---|---|---|---|
+| cell_removed | {running_total}@NewData { source: "user_daily_spend" } | downgrade | {...} | null |  |
+
+</details>
+
+<!-- smelt-property-diff -->
+```
+
+`--select <selector>` narrows the *reported* set only; every model is still compared at both
+versions so a downstream model's `cause` stays correct even when its edited ancestor is filtered
+out of the printed set.
+
+**Exit codes:** `0` whenever the diff was computed (whether or not anything shifted); `1` only
+under `--fail-on`; `2` for an unresolvable baseline (not a git work tree, an unknown ref, or a
+ref with no project at that path) or combining `--diff` with `MODEL_NAME`, `--show-sql`,
+`--period`, or `--technique`.
+
 ## Example
 
 ```bash
@@ -217,4 +335,10 @@ smelt explain
 
 # JSON, piped to jq for the sessions model's source bounds
 smelt explain --json | jq '.models.sessions.incremental.source_bounds'
+
+# Property diff against the default baseline (merge-base with main)
+smelt explain --diff
+
+# Property diff against an explicit ref, machine-readable, gating CI on any downgrade
+smelt explain --diff origin/main --json --fail-on downgrade
 ```

@@ -19,6 +19,15 @@ smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
+# Property-diff editor integration (`docs/specs/property_diff.md` §Surface
+# "Editor"): profile assembly lives in `smelt-runtime`
+# (`profiles_for_workspace` carries the probe plan `smelt-db` cannot own),
+# and the diff/render primitives live in `smelt-logical`. Acyclic:
+# `smelt-runtime` never depends on `smelt-lsp`, and its heaviest deps
+# (`smelt-backend`, `smelt-state`) link no DuckDB — that dependency is
+# `smelt-runtime`'s dev-only.
+smelt-runtime = { path = "../smelt-runtime" }
+smelt-logical = { path = "../smelt-logical" }
 
 tower-lsp.workspace = true
 lsp-types.workspace = true
@@ -35,7 +44,7 @@ rowan.workspace = true
 
 [features]
 default = ["python"]
-python = ["smelt-core/python", "pyo3"]
+python = ["smelt-core/python", "smelt-runtime/python", "pyo3"]
 
 [dev-dependencies]
 tempfile = "3"

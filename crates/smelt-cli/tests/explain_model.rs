@@ -12,6 +12,39 @@ use smelt_cli::{
 };
 use smelt_core::graph::DependencyGraph;
 
+/// Build a minimal [`smelt_logical::analysis::profile::PropertyProfile`]
+/// over a hand-constructed [`smelt_db::queries::maintenance::
+/// MaintenancePlanResult`] for a test that fabricates its own plan rather
+/// than deriving one from real SQL — `PropertySet::derive` needs *some*
+/// SQL, so this uses a one-column stand-in; only `cell_verdicts` (built
+/// from `result`'s own cells) and `refusals` matter to these tests'
+/// assertions.
+fn synthetic_profile(
+    result: &smelt_db::queries::maintenance::MaintenancePlanResult,
+    model_name: &str,
+) -> smelt_logical::analysis::profile::PropertyProfile {
+    let properties = smelt_logical::analysis::profile::PropertySet::derive(
+        model_name,
+        "SELECT 1 AS c",
+        &[],
+        &smelt_logical::analysis::source_bounds::BoundContext::default(),
+    )
+    .expect("PropertySet::derive");
+    let contract_points: Vec<smelt_logical::contract::ContractPointView> = result
+        .plan
+        .cells
+        .iter()
+        .map(|_| smelt_logical::contract::effective_contract(None, "", &[]).into())
+        .collect();
+    smelt_logical::analysis::profile::PropertyProfile::assemble(
+        properties,
+        &result.plan.cells,
+        &contract_points,
+        &result.plan.refusals,
+        &[],
+    )
+}
+
 /// Run the real discovery + Salsa pipeline for `project_dir` and return the
 /// built maintenance-plan report for `model_name` (mirrors
 /// `explain_maintenance.rs::build_report_for` /
@@ -112,6 +145,18 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             .collect()
     };
 
+    let bound_ctx = smelt_cli::explain::build_bound_context(&canonical, &graph, &config);
+    let profile = smelt_runtime::diagnostics::build_model_profile(
+        model,
+        &bound_ctx,
+        &result.plan.cells,
+        &result.column_groups,
+        &result.plan.refusals,
+        &[],
+        contract_cfg,
+    )
+    .expect("build_model_profile");
+
     Some(
         build_maintenance_plan_report(
             &canonical,
@@ -127,6 +172,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &edge_delta_types,
             None,
             None,
+            &profile,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -960,6 +1006,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         is_snapshot_reconcile: None,
         comparability: vec![],
     };
+    let __profile = synthetic_profile(&result, "daily_events_enriched");
     let report = build_maintenance_plan_report(
         "daily_events_enriched",
         &result,
@@ -974,6 +1021,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         &[],
         None,
         None,
+        &__profile,
     )
     .expect("build_maintenance_plan_report");
 
@@ -1090,6 +1138,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         is_snapshot_reconcile: None,
         comparability: vec![],
     };
+    let __profile = synthetic_profile(&result, "events_enriched");
     let report = build_maintenance_plan_report(
         "events_enriched",
         &result,
@@ -1104,6 +1153,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         &[],
         None,
         None,
+        &__profile,
     )
     .expect("build_maintenance_plan_report");
 
@@ -1221,6 +1271,7 @@ fn explain_shows_no_projection_row_for_a_bare_keyed_model() {
 mod write_variant_explain_surface {
     use std::collections::BTreeSet;
 
+    use super::synthetic_profile;
     use smelt_cli::build_maintenance_plan_report;
     use smelt_cli::explain::RelationContractView;
     use smelt_db::queries::maintenance::MaintenancePlanResult;
@@ -1302,6 +1353,7 @@ mod write_variant_explain_surface {
             is_snapshot_reconcile: None,
             comparability,
         };
+        let profile = synthetic_profile(&result, "write_variant_fixture");
         build_maintenance_plan_report(
             "write_variant_fixture",
             &result,
@@ -1316,6 +1368,7 @@ mod write_variant_explain_surface {
             &[],
             None,
             None,
+            &profile,
         )
     }
 

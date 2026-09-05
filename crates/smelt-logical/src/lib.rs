@@ -10,6 +10,10 @@ pub mod plan_builder;
 pub mod rules;
 pub mod types;
 
+pub use analysis::diff::{
+    diff_profiles, Cause, CauseKind, Change, ChangeKind, DiffGraph, DiffSummary, Dimension,
+    Direction, ModelDiff, PropertyDiff,
+};
 pub use analysis::monotonicity::{
     trace_event_time, trace_event_time_declared, EventTimeTrace, Monotonicity, NotTraceableKind,
     Offset,
