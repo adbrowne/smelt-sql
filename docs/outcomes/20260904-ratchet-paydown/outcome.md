@@ -43,8 +43,8 @@ implementer, not this loop.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Establish the pre-burst baseline values from git; census every added `unwrap`/`expect`/`println!` site in `39228307..HEAD`, with a per-site verdict | done |
-| 2 | `smelt-db`: classify or convert the added `unwrap` sites | pending |
-| 3 | `smelt-cli`: mark legitimate stdout, route the rest through the reporter/`tracing`, and classify or convert the added `expect` sites | pending |
+| 2 | `smelt-db`: convert the added `unwrap` sites (shared poison-recovering registry accessors) | planned |
+| 3 | `smelt-cli`: mark the 13 added `println!`/`eprintln!` sites `// stdout: <reason>` and justify `migrate.rs:403`'s `expect` (not `rebuild.rs`) | pending |
 | 4 | Regenerate the baseline with sign-off; record the file-split deferral in `docs/TODO.md`; gates green | pending |
 
 ## Decision log
@@ -70,6 +70,20 @@ implementer, not this loop.
   `01-census.md` §3: `smelt-cli println` = 174 with all 13 added sites marked `// stdout:
   <reason>`, `smelt-db unwrap` ≤ 16 (achievable — all 3 additions are pre-justified
   duplicate-pattern sites).
+
+- 2026-09-06 (plan 02): resolved the internal contradiction in `01-census.md` — its §3 restatement
+  keeps `smelt-db unwrap ≤ 16` while its "Phase ownership" section says the count "stays 19". §3
+  wins: the 13 `RwLock::read()/write().unwrap()` sites in `smelt-db/src/lib.rs` collapse to two
+  poison-recovering accessors, taking the crate to ~6 without changing any reachable behaviour, so
+  criterion 1's `smelt-db` half is met by honest means rather than restated. Phase 2 is therefore a
+  conversion phase, not verification-only, and touches ten pre-existing sites alongside the three
+  added ones (same file, same mechanical pattern).
+- 2026-09-06 (plan 02): phase 2 runs `hardening-budget.sh --update` for its own count drop (the
+  ratchet is two-sided, so leaving it stale would fail `verify-phase.sh`); phase 4 still owns the
+  whole-baseline regeneration, the criterion-1 restatement, and the `docs/TODO.md` deferral note.
+  Phase 4's restatement now only needs to change the `println` clause.
+- 2026-09-06 (plan 02): phase 3's row retitled to match the census correction — `rebuild.rs`'s two
+  `expect`s are a verbatim rename of pre-burst `backbuild.rs` lines and are out of scope.
 
 ## Blocked
 
