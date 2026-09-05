@@ -50,7 +50,7 @@ the tutorial pages in step.
 | 2 | Regenerate tutorial pages; re-derive the two hand-pasted explain excerpts (`reference/cli.md`, `guide/incremental-models.md`) from real output; standing headline gate; freshness gate green | done |
 | 3 | Rewrite `guide/incremental-models.md` around delta signatures; purge four-corners text across docs-site | done |
 | 4 | Rename `guide/backbuild-synthesis.md` to `guide/migrations.md` (the `smelt migrate` verb); nav, cross-links, doc-sync gate path, retired-verb ratchet | done |
-| 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | pending |
+| 5 | Validate + close out: TODO bullet removed, `/smelt:validate incremental_models` clean, gates green | planned |
 
 ## Decision log
 
@@ -136,6 +136,23 @@ the tutorial pages in step.
   marker constants + doc comment (7/7 green, unchanged assertion count, no regen needed), the
   `mkdocs.yml` nav entry, all four inbound cross-links, and the `definition_deltas.md` §References
   path. `verify-phase.sh` ALL GREEN; see `phases/04-summary.md`.
+
+- 2026-09-05 (plan, phase 5): criterion 5's `/smelt:validate incremental_models` is scoped to
+  §Surface "CLI" (spec lines 417-541) plus the §References **User docs** block. A full-spec
+  validate over a 2,240-line normative spec is a multi-hour sweep whose semantics/invariants
+  legs this outcome does not ask for, and `docs/TODO.md` already carries a separate bullet for
+  the three-spec drift baseline — which stays, as out-of-scope work. The report names what it
+  did not validate.
+- 2026-09-05 (plan, phase 5): the validation lands as a committed artifact
+  (`docs/validations/2026-09-05-incremental_models-cli-surface.md`, following the
+  `2026-09-04-definition_deltas-closure.md` precedent) so the close-out judgement has evidence
+  to read rather than a transcript to trust.
+- 2026-09-05 (plan, phase 5): no reshape - phase 5 is the last row, the phase 4 summary
+  deferred nothing, and this phase's audit found the divergence bullet already narrowed
+  (criterion 1) and the four-corners text already absent (criterion 2). One task is added
+  *inside* row 5 rather than deferred: a `spec_user_docs_block_lists_existing_pages` gate,
+  because phase 4's rename showed the spec's References block can point at a deleted docs-site
+  path with no gate noticing.
 
 ## Blocked
 
