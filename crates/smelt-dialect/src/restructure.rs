@@ -176,7 +176,10 @@ pub fn plan(
                 reason,
                 range: trimmed_range(&node),
             }),
-            Emission::Native | Emission::Rename(_) | Emission::Rewrite(_) => {}
+            Emission::Native
+            | Emission::Rename(_)
+            | Emission::Rewrite(_)
+            | Emission::Template(_) => {}
         }
     }
 

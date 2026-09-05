@@ -39,8 +39,8 @@ the exact reverse.
 
 | Entry | Form | DuckDB | Spark SQL | BigQuery |
 |---|---|---|---|---|
-| `%` | infix | native | native | rewrite:ModuloCall (gap #173) |
-| `**` | infix | native | rewrite:PowerCall | rewrite:PowerCall (gap divergent) |
+| `%` | infix | native | native | template:MOD({0}, {1}) (gap #173) |
+| `**` | infix | native | template:POWER({0}, {1}) | template:POWER({0}, {1}) (gap divergent) |
 | `//` | infix | native | unsupported | unsupported |
 | `ABS` | call | native | native | native |
 | `ACOS` | call | native | native | native |
@@ -188,7 +188,7 @@ the exact reverse.
 | `VAR_POP` | call | native | native | native |
 | `VAR_SAMP` | call | native | native | native |
 | `YEAR` | call | native | native | native (gap #179) |
-| `^` | infix | native | rewrite:PowerCall | rewrite:PowerCall (gap divergent) |
+| `^` | infix | native | template:POWER({0}, {1}) | template:POWER({0}, {1}) (gap divergent) |
 | `||` | infix | native | native | native |
 
 ## Schema-only entries

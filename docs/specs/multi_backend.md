@@ -954,13 +954,6 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **No template verdict exists yet; the fixed-shape rewrites live as `RewriteId` variants.** The
-  registry's `Emission` has `Native`, `Rename`, `Rewrite`, `Restructure`, and `Unsupported` only.
-  `%` → `MOD(a, b)` and `^`/`**` → `POWER(a, b)` are hand-written printer functions behind
-  `RewriteId::ModuloCall` and `RewriteId::PowerCall`; under §"Template emission" both are templates
-  and the variants retire. The audit's coverage table has no `template` column. Tracked by the plan
-  derived from this spec diff (the tracking issues for the outstanding lowerings are #177, #178,
-  #179).
 - **No operand-conditional verdict exists; the lookup key is `(dialect, position)` alone.** In
   consequence `%` on BigQuery lowers to `MOD` for every operand and fails at the warehouse on a
   floating-point one (#173); `//` is refused wholesale on Spark and BigQuery rather than

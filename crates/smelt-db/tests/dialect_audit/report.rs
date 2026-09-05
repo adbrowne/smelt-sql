@@ -45,6 +45,7 @@ fn emission_label(emission: Emission) -> String {
         Emission::Native => "native".to_string(),
         Emission::Rename(to) => format!("rename:{to}"),
         Emission::Rewrite(id) => format!("rewrite:{id:?}"),
+        Emission::Template(t) => format!("template:{t}"),
         Emission::Restructure(id) => format!("restructure:{id:?}"),
         Emission::Unsupported { .. } => "unsupported".to_string(),
     }

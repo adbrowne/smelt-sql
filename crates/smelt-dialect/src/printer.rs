@@ -23,7 +23,7 @@ use crate::restructure::{AnalyticCallReplacement, BoundSource, GroupBinding, Res
 use crate::{BackendCapabilities, NullSafeEqualitySpelling, SqlDialect};
 use smelt_parser::ast::{OrderByClause, SelectEntry, SelectItem, SelectStmt};
 use smelt_types::signatures::Position;
-use smelt_types::{BuiltinRegistry, Emission, RewriteId};
+use smelt_types::{is_call_shaped_template, BuiltinRegistry, Emission, RewriteId};
 
 /// Emitter closure type for `smelt.as_struct(alias [EXCEPT cols])`.
 /// Called with `(alias, except_columns)` → emitted SQL, or `None` to pass through.
@@ -2401,67 +2401,104 @@ fn print_bigquery_median(
     true
 }
 
-/// Lower infix `%` (modulo) to `MOD(x, y)`.
+/// Is `node`'s printed text an atom (needs no wrapping when substituted into a
+/// non-call template), or compound (needs wrapping so the template's
+/// surrounding text can't misparse it)?
 ///
-/// The registry establishes that this operator needs a `ModuloCall` rewrite for
-/// the target dialect before this function is called; the operator identity check
-/// is not repeated here.
-///
-/// Returns `true` when the expression was printed here (a `%` `BINARY_EXPR`
-/// with both operands present), `false` to fall through to the normal path
-/// so every other `BINARY_EXPR` (`+`, `-`, `AND`, …) still prints verbatim.
-fn print_modulo_call(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
-    let Some(bin) = BinaryExpr::cast(node.clone()) else {
-        return false;
-    };
-    let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
-        return false;
-    };
-    let mut left_sql = String::new();
-    print_node(left.syntax(), ctx, &mut left_sql);
-    let mut right_sql = String::new();
-    print_node(right.syntax(), ctx, &mut right_sql);
-    let left_sql = left_sql.trim();
-    let right_sql = right_sql.trim();
-    if left_sql.is_empty() || right_sql.is_empty() {
-        return false;
+/// Peels exactly the transparent `EXPRESSION` wrapper the parser puts around
+/// every function argument and every parenthesised group (`parse_expression`
+/// always opens one) down to the node it actually wraps — an `EXPRESSION`
+/// wrapping a bare token (identifier, literal) has no node children and the
+/// loop stops immediately, classifying it as an atom. What remains is
+/// compound exactly when it is `BINARY_EXPR` (which also covers comparisons
+/// and unary forms — `is_unary()` is `true` when `right()` is `None`),
+/// `CASE_EXPR`, or `CAST_EXPR`; anything else (a literal, an identifier, a
+/// column reference, a `FUNCTION_CALL`) is an atom.
+fn is_compound_argument(node: &SyntaxNode) -> bool {
+    let mut inner = node.clone();
+    while inner.kind() == SyntaxKind::EXPRESSION {
+        let mut children = inner.children();
+        match (children.next(), children.next()) {
+            (Some(only), None) => inner = only,
+            _ => break,
+        }
     }
-
-    out.push_str(&format!("MOD({left_sql}, {right_sql})"));
-    push_trailing_trivia(node, out);
-    true
+    matches!(
+        inner.kind(),
+        SyntaxKind::BINARY_EXPR | SyntaxKind::CASE_EXPR | SyntaxKind::CAST_EXPR
+    )
 }
 
-/// Lower infix `^` and `**` (power) to `POWER(x, y)`.
+/// Interpret an `Emission::Template` string against `node`'s positional
+/// arguments (`docs/specs/multi_backend.md` §"Template emission"). The one
+/// generic routine every `Emission::Template` row is printed through — it
+/// matches no function name and reads no template text to decide behaviour
+/// beyond substituting `{n}` placeholders.
 ///
-/// Both operators are DuckDB-exact synonyms for `POWER(x, y)` (measured against
-/// DuckDB 1.5.4: `2 ^ 10`, `2 ** 10`, and `power(2, 10)` all print `1024.0`).
-/// On Spark, `^` is bitwise XOR — a silent-wrong-answer hazard, not a syntax
-/// error, if left unlowered. The registry establishes which dialects need this
-/// rewrite before this function is called; the operator identity check is not
-/// repeated here.
+/// A call-shaped template (`is_call_shaped_template`, e.g. `MOD({0}, {1})`)
+/// substitutes each argument's own printed text verbatim — a function call's
+/// comma-separated arguments are already unambiguously delimited, so no
+/// argument ever needs wrapping. A non-call template (e.g. `{0} - {1}`)
+/// parenthesises a compound argument at the substitution site
+/// (`is_compound_argument`) and wraps its own output in parentheses so the
+/// result composes safely wherever the original call stood.
 ///
-/// Returns `true` when the expression was printed here (a `^`/`**`
-/// `BINARY_EXPR` with both operands present), `false` to fall through so
-/// every other `BINARY_EXPR` still prints verbatim.
-fn print_power_call(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
-    let Some(bin) = BinaryExpr::cast(node.clone()) else {
-        return false;
-    };
-    let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
-        return false;
-    };
-    let mut left_sql = String::new();
-    print_node(left.syntax(), ctx, &mut left_sql);
-    let mut right_sql = String::new();
-    print_node(right.syntax(), ctx, &mut right_sql);
-    let left_sql = left_sql.trim();
-    let right_sql = right_sql.trim();
-    if left_sql.is_empty() || right_sql.is_empty() {
-        return false;
+/// Returns `true` when the node was fully printed; `false` only if `args` or
+/// `template` don't match what registry validation already guaranteed (never
+/// reachable in production — `validate_template` runs at registry
+/// construction — but the safe fallback for a hand-built call in a test).
+pub fn print_template(
+    node: &SyntaxNode,
+    template: &str,
+    args: &[SyntaxNode],
+    ctx: &PrintContext,
+    out: &mut String,
+) -> bool {
+    let call_shaped = is_call_shaped_template(template);
+    let mut body = String::new();
+    let mut rest = template;
+    loop {
+        match rest.find('{') {
+            None => {
+                body.push_str(rest);
+                break;
+            }
+            Some(pos) => {
+                body.push_str(&rest[..pos]);
+                let after = &rest[pos + 1..];
+                let Some(end) = after.find('}') else {
+                    return false;
+                };
+                let Ok(idx) = after[..end].parse::<usize>() else {
+                    return false;
+                };
+                let Some(arg) = args.get(idx) else {
+                    return false;
+                };
+                let mut arg_sql = String::new();
+                print_node(arg, ctx, &mut arg_sql);
+                let arg_sql = arg_sql.trim();
+                if arg_sql.is_empty() {
+                    return false;
+                }
+                if !call_shaped && is_compound_argument(arg) {
+                    body.push('(');
+                    body.push_str(arg_sql);
+                    body.push(')');
+                } else {
+                    body.push_str(arg_sql);
+                }
+                rest = &after[end + 1..];
+            }
+        }
     }
-
-    out.push_str(&format!("POWER({left_sql}, {right_sql})"));
+    if call_shaped {
+        out.push_str(&body);
+    } else {
+        out.push('(');
+        out.push_str(&body);
+        out.push(')');
+    }
     push_trailing_trivia(node, out);
     true
 }
@@ -2613,11 +2650,22 @@ fn emit_registered_function(
             true
         }
         Emission::Rewrite(id) => apply_rewrite(id, node, Some(fc), position, ctx, out),
+        Emission::Template(template) => {
+            let args: Vec<SyntaxNode> = fc
+                .arguments()
+                .into_iter()
+                .map(|e| e.syntax().clone())
+                .collect();
+            print_template(node, template, &args, ctx, out)
+        }
     }
 }
 
 fn emit_registered_operator(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
-    let Some(op) = BinaryExpr::cast(node.clone()).and_then(|b| b.operator()) else {
+    let Some(bin) = BinaryExpr::cast(node.clone()) else {
+        return false;
+    };
+    let Some(op) = bin.operator() else {
         return false;
     };
     let Some(sig) = BuiltinRegistry::resolve(&op) else {
@@ -2627,6 +2675,13 @@ fn emit_registered_operator(node: &SyntaxNode, ctx: &PrintContext, out: &mut Str
     // are stated with `Position::Any`, so there is no position to classify.
     match sig.emission_at(ctx.dialect.id(), Position::Any) {
         Emission::Rewrite(id) => apply_rewrite(id, node, None, Position::Any, ctx, out),
+        Emission::Template(template) => {
+            let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
+                return false;
+            };
+            let args = [left.syntax().clone(), right.syntax().clone()];
+            print_template(node, template, &args, ctx, out)
+        }
         _ => false,
     }
 }
@@ -2645,8 +2700,6 @@ fn apply_rewrite(
         RewriteId::BigQueryMedian => {
             fc.is_some_and(|fc| print_bigquery_median(node, fc, position, ctx, out))
         }
-        RewriteId::ModuloCall => print_modulo_call(node, ctx, out),
-        RewriteId::PowerCall => print_power_call(node, ctx, out),
         RewriteId::WithinGroupToAnalytic => {
             fc.is_some_and(|fc| print_within_group_to_analytic(node, fc, ctx, out))
         }

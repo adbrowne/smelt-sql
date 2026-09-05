@@ -73,7 +73,7 @@ audit before it is claimed — never from documentation.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
-| 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | planned |
+| 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | pending |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb` | pending |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
@@ -116,6 +116,23 @@ audit before it is claimed — never from documentation.
   **variadic** signature is rejected at build time, since a placeholder cannot name a variadic
   tail. A `PAREN_EXPR` argument counts as an atom on substitution — double-wrapping it would break
   the byte-identical pins criterion 1 requires.
+
+- 2026-09-06 (implement 02) — phase 2 done. `Emission::Template` +
+  `validate_template` + `is_call_shaped_template` shipped in
+  `smelt-types::signatures`; `RewriteId::ModuloCall`/`PowerCall` deleted; `%`,
+  `^`, `**` now templates; generic `print_template` interpreter in
+  `smelt-dialect::printer` dispatched from both the function-call and
+  operator emission sites. Discovered no `PAREN_EXPR` `SyntaxKind` exists in
+  this grammar — the plan's design-decision text named it informally; the
+  real mechanism is the transparent `EXPRESSION` wrapper the parser puts
+  around every function argument and parenthesised group, verified
+  empirically. Argument-level wrapping is gated on the whole template being
+  call-shaped (never wraps for `MOD`/`POWER`, matching the pinned
+  byte-identity tests); a non-call template additionally wraps its own whole
+  output. `docs/reference/dialect-coverage.md` regenerated;
+  `docs/specs/multi_backend.md`'s stale divergence bullet removed. Full
+  `verify-phase.sh` green plus every gate the plan's Verification section
+  named. See `phases/02-summary.md` for detail.
 
 ## Blocked
 

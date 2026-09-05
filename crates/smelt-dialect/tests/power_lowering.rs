@@ -107,8 +107,8 @@ fn other_dialects_keep_infix_caret_and_double_star_verbatim() {
 }
 
 /// Spark's `^` is bitwise XOR, not exponentiation — the same silent-wrong-answer
-/// hazard as BigQuery. The registry maps `^` and `**` to `RewriteId::PowerCall`
-/// for Spark, so the printer must lower them to `POWER(...)`.
+/// hazard as BigQuery. The registry maps `^` and `**` to the `POWER({0}, {1})`
+/// template for Spark, so the printer must lower them to `POWER(...)`.
 #[test]
 fn spark_lowers_infix_caret_to_power_call() {
     let (dialect, caps) = (SqlDialect::SparkSQL, BackendCapabilities::spark());
