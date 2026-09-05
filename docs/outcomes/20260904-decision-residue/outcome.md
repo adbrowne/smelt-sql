@@ -1,7 +1,7 @@
 # Outcome: Decision residue — implement the 2026-09-04 decision-track calls
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260904-decision-track.md` (all eight decisions); `docs/research/20260816-open-questions-triage.md` items C (`PartitionGrainForbidsMetrics`, sub-`g_part` suggestion); `docs/outcomes/20260815-incremental-spec-closure-confirm/closure-report.md` rows IS-08, IS-10, IS-20, IS-21, MP-04
 **Spec anchors:** `docs/specs/incremental_shapes.md` §"Functions inside partition-grain bodies", §"Run window vs partition granularity", §"Key temporal locality (the time-partitioned output)" route 2, key-grain rule 16; `docs/specs/model_properties.md` §Constraints "Declared lateness is orchestration-only"; `docs/specs/sources.md` §Semantics trust rule; `docs/specs/diagnostics.md` (`PartitionGrainForbidsMetrics`, `KeyedRecurrenceDeclarationMismatch`)
 
@@ -73,14 +73,20 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture | pending |
+| 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | planned |
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | pending |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | pending |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | pending |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | pending |
-| 7 | Delete the divergence bullets; validate the four specs; all gates green | pending |
+| 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
 
 ## Decision log
+
+- 2026-09-05 — Outcome moved `queued` → `active`. Phase 1 now also deletes its own
+  `PartitionGrainForbidsMetrics`-is-unimplemented Known Divergence bullet (and updates the
+  `partition_residue_probes` bullet ratchet) instead of leaving it to phase 7: shipping an
+  implemented refusal alongside a spec bullet calling it unimplemented would be a false spec at
+  the phase-1 commit. Phase 7 narrows to the bullets earlier phases did not close.
 
 ## Blocked
