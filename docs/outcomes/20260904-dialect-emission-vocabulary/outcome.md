@@ -72,7 +72,7 @@ audit before it is claimed — never from documentation.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | planned |
+| 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
 | 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | pending |
 | 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | pending |
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb` | pending |
@@ -100,6 +100,13 @@ audit before it is claimed — never from documentation.
   branch of `smelt-logical`'s `as_struct` lowering. Both are unreachable surface —
   `Target::backend_type` already rejects `type: postgres` — so removing them is not a user-visible
   behaviour change, and they are folded into phase 1 rather than becoming a phase of their own.
+
+- 2026-09-06 (implement 01) — phase 1 done. `DialectId::PostgreSql`/`SqlDialect::PostgreSQL`,
+  `BackendCapabilities::postgresql()`, the three registry rows, the two string-keyed
+  `smelt-db`/`smelt-logical` paths, and the baseline entry are all removed; two new durable gates
+  added (`no_registry_row_names_a_retired_dialect`, `baseline_names_exactly_the_audited_dialects`);
+  coverage doc regenerated; #181 was already closed. `verify-phase.sh` ALL GREEN. No new gaps
+  surfaced; the pg_query anchor and ROADMAP are confirmed untouched.
 
 ## Blocked
 

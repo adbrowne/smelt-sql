@@ -1086,7 +1086,6 @@ pub fn backend_write_capabilities_for(
     let caps = match backend_name.to_ascii_lowercase().as_str() {
         "duckdb" => smelt_dialect::BackendCapabilities::duckdb(),
         "spark" | "databricks" => smelt_dialect::BackendCapabilities::spark(),
-        "postgres" | "postgresql" => smelt_dialect::BackendCapabilities::postgresql(),
         _ => {
             return smelt_logical::maintenance::BackendWriteCapabilities::default();
         }
@@ -1110,7 +1109,6 @@ pub fn backend_dialect_for(backend_name: &str) -> Option<smelt_dialect::SqlDiale
     match backend_name.to_ascii_lowercase().as_str() {
         "duckdb" => Some(smelt_dialect::SqlDialect::DuckDB),
         "spark" | "databricks" => Some(smelt_dialect::SqlDialect::SparkSQL),
-        "postgres" | "postgresql" => Some(smelt_dialect::SqlDialect::PostgreSQL),
         "bigquery" => Some(smelt_dialect::SqlDialect::BigQuery),
         _ => None,
     }
@@ -1678,6 +1676,28 @@ mod tests {
 
     use super::*;
     use smelt_core::config::{MaintenanceCellConfig, PerSourceScanBounds};
+
+    /// The PostgreSQL emission dialect is retired (#181): `Target::backend_type`
+    /// already rejects `type: postgres` at the declaration boundary, and these
+    /// two name-keyed resolvers must not resurrect it as a second, unguarded
+    /// entry point — an unrecognised name resolves conservatively, matching the
+    /// fail-loud posture both functions already take for any other unknown name.
+    #[test]
+    fn retired_backend_names_resolve_to_nothing() {
+        for name in ["postgres", "postgresql"] {
+            assert_eq!(
+                backend_dialect_for(name),
+                None,
+                "{name} must not resolve to a SqlDialect"
+            );
+            let caps = backend_write_capabilities_for(name);
+            assert_eq!(
+                caps,
+                smelt_logical::maintenance::BackendWriteCapabilities::default(),
+                "{name} must resolve to the conservative default, not a real capability set"
+            );
+        }
+    }
 
     fn group(columns: &[&str], sensitivity: &[&str]) -> ColumnGroup {
         ColumnGroup {

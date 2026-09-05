@@ -682,7 +682,6 @@ fn the_rename_matrix_matches_the_printer_it_replaces() {
     // replacement for it rather than a re-derivation.
     let expected: &[(&str, DialectId, &str)] = &[
         ("EXPLODE", DialectId::DuckDb, "UNNEST"),
-        ("EXPLODE", DialectId::PostgreSql, "UNNEST"),
         ("EXPLODE", DialectId::BigQuery, "UNNEST"),
         ("UNNEST", DialectId::SparkSql, "EXPLODE"),
         ("EVERY", DialectId::DuckDb, "BOOL_AND"),
@@ -701,18 +700,6 @@ fn the_rename_matrix_matches_the_printer_it_replaces() {
             dialect.slug()
         );
     }
-}
-
-#[test]
-fn every_is_native_on_postgresql() {
-    // PostgreSQL has `EVERY` natively; DuckDB does not and renames it to
-    // `BOOL_AND`. The printer's old rename chain carried the same asymmetry, and
-    // `smelt-dialect`'s `snapshots.rs` pins both halves of it.
-    let sig = BuiltinRegistry::resolve("EVERY").expect("EVERY");
-    assert_eq!(
-        sig.emission_at(DialectId::PostgreSql, Position::Any),
-        Emission::Native
-    );
 }
 
 #[test]
@@ -737,10 +724,6 @@ fn caret_is_rewritten_wherever_infix_caret_means_xor() {
             sig.emission_at(DialectId::DuckDb, Position::Any),
             Emission::Native
         );
-        assert_eq!(
-            sig.emission_at(DialectId::PostgreSql, Position::Any),
-            Emission::Native
-        );
     }
 }
 
@@ -751,11 +734,7 @@ fn floor_divide_is_unsupported_everywhere_it_has_no_safe_lowering() {
         sig.emission_at(DialectId::DuckDb, Position::Any),
         Emission::Native
     );
-    for dialect in [
-        DialectId::SparkSql,
-        DialectId::PostgreSql,
-        DialectId::BigQuery,
-    ] {
+    for dialect in [DialectId::SparkSql, DialectId::BigQuery] {
         assert!(
             matches!(
                 sig.emission_at(dialect, Position::Any),
@@ -959,4 +938,23 @@ fn window_verdict_totality() {
          them):\n{}",
         violations.join("\n")
     );
+}
+
+// ─── Retired dialects
+
+const SIGNATURES_SRC: &str = include_str!("../src/signatures.rs");
+
+#[test]
+fn no_registry_row_names_a_retired_dialect() {
+    // The PostgreSQL emission dialect was retired (#181): no backend crate
+    // exists to verify its verdicts, so a template or conditional-verdict
+    // arm reintroducing it would carry an unverifiable claim. This scans the
+    // registry source directly rather than `DialectId::ALL` (which would
+    // trivially be silent about a variant that no longer compiles).
+    for spelling in ["PostgreSql", "PostgreSQL"] {
+        assert!(
+            !SIGNATURES_SRC.contains(spelling),
+            "signatures.rs names the retired dialect spelling {spelling:?}"
+        );
+    }
 }

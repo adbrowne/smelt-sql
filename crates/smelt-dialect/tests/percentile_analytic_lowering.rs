@@ -80,7 +80,6 @@ fn other_dialects_keep_within_group_verbatim() {
     for (dialect, caps) in [
         (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         (SqlDialect::SparkSQL, BackendCapabilities::spark()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
     ] {
         let sql = "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g) \
                    AS m FROM t";

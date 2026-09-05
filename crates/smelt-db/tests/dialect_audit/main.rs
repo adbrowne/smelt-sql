@@ -310,6 +310,36 @@ fn baseline(metric: &str) -> usize {
         .unwrap_or_else(|| panic!("`{metric}` not found in .claude/dialect-gaps-baseline.txt"))
 }
 
+const BASELINE_SRC: &str = include_str!("../../../../.claude/dialect-gaps-baseline.txt");
+
+/// Two-sided: every `dialect_gaps_*` metric in the baseline corresponds to a
+/// `DialectId::ALL` slug, and every slug has a metric. Catches the retired-
+/// dialect class directly — a stale `dialect_gaps_postgres` line would
+/// otherwise sit unread forever, since `baseline()` only looks up metrics by
+/// name and never notices an entry nobody asks for.
+#[test]
+fn baseline_names_exactly_the_audited_dialects() {
+    let baseline_metrics: HashSet<String> = BASELINE_SRC
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .filter_map(|l| l.trim().split_once(' ').map(|(k, _)| k.to_string()))
+        .collect();
+    let expected: HashSet<String> = DialectId::ALL
+        .iter()
+        .map(|d| format!("dialect_gaps_{}", d.slug()))
+        .collect();
+    let stale: Vec<_> = baseline_metrics.difference(&expected).collect();
+    assert!(
+        stale.is_empty(),
+        "baseline names a metric for no audited dialect: {stale:?}"
+    );
+    let missing: Vec<_> = expected.difference(&baseline_metrics).collect();
+    assert!(
+        missing.is_empty(),
+        "baseline is missing a metric for an audited dialect: {missing:?}"
+    );
+}
+
 #[test]
 fn gap_count_ratchet() {
     for d in DialectId::ALL {
@@ -1087,7 +1117,7 @@ fn every_entry_and_dialect_appears_in_the_table() {
     }
     // Every dialect has a verification-tier row: the table's honesty depends
     // on saying which cells a live leg actually visits.
-    for label in ["DuckDB", "Spark SQL", "PostgreSQL", "BigQuery"] {
+    for label in ["DuckDB", "Spark SQL", "BigQuery"] {
         assert!(
             rendered.contains(&format!("| {label} |")),
             "{label} has no verification-tier row"

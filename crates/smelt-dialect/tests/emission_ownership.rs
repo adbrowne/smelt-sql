@@ -70,7 +70,6 @@ fn the_printer_branches_on_no_dialect_variant() {
             [
                 "SqlDialect::DuckDB",
                 "SqlDialect::SparkSQL",
-                "SqlDialect::PostgreSQL",
                 "SqlDialect::BigQuery",
             ]
             .iter()

@@ -5570,13 +5570,6 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 },
             ),
             (
-                DialectId::PostgreSql,
-                Position::Any,
-                Emission::Unsupported {
-                    reason: "PostgreSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
-                },
-            ),
-            (
                 DialectId::BigQuery,
                 Position::Any,
                 Emission::Unsupported {
@@ -5606,11 +5599,6 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_syntax_form(SyntaxForm::TableFn)
         .with_emission(&[
             (DialectId::DuckDb, Position::Any, Emission::Rename("UNNEST")),
-            (
-                DialectId::PostgreSql,
-                Position::Any,
-                Emission::Rename("UNNEST"),
-            ),
             (
                 DialectId::BigQuery,
                 Position::Any,
@@ -6581,7 +6569,7 @@ mod tests {
         assert!(lower.canonical_return.is_none());
         assert!(!lower.needs_cast_for(DialectId::DuckDb));
         assert!(!lower.needs_cast_for(DialectId::SparkSql));
-        assert!(!lower.needs_cast_for(DialectId::PostgreSql));
+        assert!(!lower.needs_cast_for(DialectId::BigQuery));
     }
 
     #[test]

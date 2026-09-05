@@ -166,18 +166,17 @@ pub fn render() -> String {
          the exact reverse.\n\n",
     );
 
-    out.push_str("| Entry | Form | DuckDB | Spark SQL | PostgreSQL | BigQuery |\n");
-    out.push_str("|---|---|---|---|---|---|\n");
+    out.push_str("| Entry | Form | DuckDB | Spark SQL | BigQuery |\n");
+    out.push_str("|---|---|---|---|---|\n");
     for name in &names {
         let Some(sig) = BuiltinRegistry::resolve(name) else {
             continue;
         };
         out.push_str(&format!(
-            "| `{name}` | {} | {} | {} | {} | {} |\n",
+            "| `{name}` | {} | {} | {} | {} |\n",
             form_label(sig.syntax_form),
             cell(name, DialectId::DuckDb),
             cell(name, DialectId::SparkSql),
-            cell(name, DialectId::PostgreSql),
             cell(name, DialectId::BigQuery),
         ));
     }
@@ -210,10 +209,6 @@ pub fn render() -> String {
     out.push_str(
         "| BigQuery | schema + value | manual sweep only — `scripts/bigquery-dialect-audit.sh`; \
          the value leg executes rather than dry-runs, so it bills |\n",
-    );
-    out.push_str(
-        "| PostgreSQL | none | **unverified** — a `SqlDialect` variant with no backend crate \
-         and no oracle, so nothing exercises its verdicts |\n",
     );
     out.push_str(
         "\nAn untested `native` is reported as *unverified*, never as *passing*: the value leg\n\

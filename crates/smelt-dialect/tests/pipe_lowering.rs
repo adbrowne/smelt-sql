@@ -347,7 +347,6 @@ fn no_pipe_token_reaches_backend() {
     let backends = [
         (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         (SqlDialect::SparkSQL, BackendCapabilities::spark_delta()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
     ];
 
     for (dialect, caps) in &backends {

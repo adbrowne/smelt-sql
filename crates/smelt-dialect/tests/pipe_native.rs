@@ -96,11 +96,6 @@ fn lowering_backends_emit_no_pipes_for_the_same_query() {
             BackendCapabilities::spark_delta(),
             "Spark(Delta)",
         ),
-        (
-            SqlDialect::PostgreSQL,
-            BackendCapabilities::postgresql(),
-            "PostgreSQL",
-        ),
     ] {
         let out = print_with(PIPE_SQL, dialect, caps);
         assert!(!out.contains("|>"), "{label} must not emit |>, got: {out}");

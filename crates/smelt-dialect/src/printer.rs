@@ -2770,13 +2770,13 @@ mod tests {
         (caps.dialect, caps)
     }
 
-    fn postgresql_ctx() -> (SqlDialect, BackendCapabilities) {
-        let caps = BackendCapabilities::postgresql();
+    fn spark_ctx() -> (SqlDialect, BackendCapabilities) {
+        let caps = BackendCapabilities::spark();
         (caps.dialect, caps)
     }
 
-    fn spark_ctx() -> (SqlDialect, BackendCapabilities) {
-        let caps = BackendCapabilities::spark();
+    fn bigquery_ctx() -> (SqlDialect, BackendCapabilities) {
+        let caps = BackendCapabilities::bigquery();
         (caps.dialect, caps)
     }
 
@@ -2979,9 +2979,9 @@ mod tests {
     // ===== QUALIFY rewrite tests =====
 
     #[test]
-    fn test_qualify_rewrite_postgresql() {
+    fn test_qualify_rewrite_spark() {
         let sql = "SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t QUALIFY rn = 1";
-        let (d, c) = postgresql_ctx();
+        let (d, c) = spark_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert!(
             result.contains("SELECT * FROM ("),
@@ -3164,9 +3164,9 @@ mod tests {
     }
 
     #[test]
-    fn test_explode_to_unnest_postgresql() {
+    fn test_explode_to_unnest_bigquery() {
         let sql = "SELECT EXPLODE(arr) FROM t";
-        let (d, c) = postgresql_ctx();
+        let (d, c) = bigquery_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, "SELECT UNNEST(arr) FROM t");
     }
@@ -3182,10 +3182,11 @@ mod tests {
     }
 
     #[test]
-    fn test_every_unchanged_postgresql() {
-        // PostgreSQL natively supports EVERY — no remapping needed
+    fn test_every_unchanged_spark() {
+        // Spark has no registry emission row for EVERY — it defaults to
+        // native, unlike DuckDB (BOOL_AND) and BigQuery (LOGICAL_AND).
         let sql = "SELECT EVERY(b) FROM t";
-        let (d, c) = postgresql_ctx();
+        let (d, c) = spark_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, sql);
     }

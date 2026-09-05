@@ -839,7 +839,7 @@ fn resolve_default_target(config: &Config) -> String {
 
 /// `BackendType` has only two variants today (`DuckDB`, `Spark`) —
 /// `smelt_backend::maintenance_dialect` and availability resolution both
-/// take the richer `SqlDialect` (which also has `PostgreSQL`); this is the
+/// take the richer `SqlDialect` (which also has `BigQuery`); this is the
 /// narrow bridge from a target's declared backend to it.
 fn backend_type_to_sql_dialect(
     backend_type: smelt_core::config::BackendType,

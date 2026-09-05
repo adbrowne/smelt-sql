@@ -40,7 +40,6 @@ pub const COLUMNS: &[(&str, &str)] = &[
 fn ty(dialect: DialectId, col: &str) -> &'static str {
     let bq = dialect == DialectId::BigQuery;
     let spark = dialect == DialectId::SparkSql;
-    let pg = dialect == DialectId::PostgreSql;
     match col {
         "rid" => {
             if bq {
@@ -75,8 +74,6 @@ fn ty(dialect: DialectId, col: &str) -> &'static str {
         "n_double" => {
             if bq {
                 "FLOAT64"
-            } else if pg {
-                "DOUBLE PRECISION"
             } else {
                 "DOUBLE"
             }
@@ -114,7 +111,6 @@ fn ty(dialect: DialectId, col: &str) -> &'static str {
 fn array_lit(dialect: DialectId, elems: &str) -> String {
     match dialect {
         DialectId::DuckDb | DialectId::BigQuery => format!("[{elems}]"),
-        DialectId::PostgreSql => format!("ARRAY[{elems}]"),
         DialectId::SparkSql => format!("ARRAY({elems})"),
     }
 }

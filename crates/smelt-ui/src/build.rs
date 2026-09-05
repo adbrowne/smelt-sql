@@ -295,7 +295,7 @@ fn build_bound_context(model_name: &str, graph: &DependencyGraph, config: &Confi
 
 /// `BackendType` has only two variants today (`DuckDB`, `Spark`) —
 /// `smelt_backend::maintenance_dialect` takes the richer `SqlDialect`
-/// (which also has `PostgreSQL`); this is the narrow bridge from a target's
+/// (which also has `BigQuery`); this is the narrow bridge from a target's
 /// declared backend to the maintenance-statement dialect tag. Mirrors
 /// `smelt_cli::commands::explain::backend_type_to_maintenance_dialect`
 /// (private to that crate, so duplicated here rather than reused).

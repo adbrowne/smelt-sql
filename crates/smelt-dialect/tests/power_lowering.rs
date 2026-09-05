@@ -91,13 +91,9 @@ fn the_lowered_power_parses_back_cleanly() {
 
 #[test]
 fn other_dialects_keep_infix_caret_and_double_star_verbatim() {
-    // DuckDB and PostgreSQL have no XOR hazard for `^` — both treat it as
-    // power (DuckDB) or raise a syntax error at parse time (PostgreSQL has no `**`).
-    // Neither needs a rewrite; verbatim emission is correct.
-    for (dialect, caps) in [
-        (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
-    ] {
+    // DuckDB has no XOR hazard for `^` — it treats it as power. No rewrite
+    // needed; verbatim emission is correct.
+    for (dialect, caps) in [(SqlDialect::DuckDB, BackendCapabilities::duckdb())] {
         for sql in ["SELECT val ^ 2 FROM t", "SELECT val ** 2 FROM t"] {
             let out = print_with(sql, &dialect, &caps);
             assert_eq!(
@@ -123,8 +119,8 @@ fn spark_lowers_infix_caret_to_power_call() {
     );
 }
 
-/// `//` (floor divide) is declared `Unsupported` in the registry for Spark,
-/// PostgreSQL, and BigQuery. The printer still emits `//` verbatim; the compile
+/// `//` (floor divide) is declared `Unsupported` in the registry for Spark and
+/// BigQuery. The printer still emits `//` verbatim; the compile
 /// path owns the refusal (`UnsupportedOnBackend`). The unsupported verdict is
 /// asserted here as a registry fact so it is not silently dropped.
 ///
@@ -144,13 +140,9 @@ fn floor_divide_is_declared_unsupported_rather_than_lowered() {
          silently approximates: {out}"
     );
 
-    // Registry verdict: Unsupported on Spark, PostgreSQL, and BigQuery.
+    // Registry verdict: Unsupported on Spark and BigQuery.
     let sig = BuiltinRegistry::resolve("//").expect("floor-divide `//` must have a registry entry");
-    for dialect in [
-        SqlDialect::SparkSQL,
-        SqlDialect::PostgreSQL,
-        SqlDialect::BigQuery,
-    ] {
+    for dialect in [SqlDialect::SparkSQL, SqlDialect::BigQuery] {
         let emission = sig.emission_at(dialect.id(), smelt_types::signatures::Position::Any);
         assert!(
             matches!(emission, Emission::Unsupported { .. }),

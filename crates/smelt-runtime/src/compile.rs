@@ -1446,7 +1446,6 @@ impl SqlCompiler {
         let dialect_name = match self.dialect {
             SqlDialect::DuckDB => "duckdb",
             SqlDialect::SparkSQL => "spark",
-            SqlDialect::PostgreSQL => "postgres",
             SqlDialect::BigQuery => "bigquery",
         };
         let as_struct_emitter: Option<AsStructEmitter<'static>> = type_ctx.map(|tc| {

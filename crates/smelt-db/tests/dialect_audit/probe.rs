@@ -302,13 +302,11 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
     let sql_dialect = match dialect {
         DialectId::DuckDb => SqlDialect::DuckDB,
         DialectId::SparkSql => SqlDialect::SparkSQL,
-        DialectId::PostgreSql => SqlDialect::PostgreSQL,
         DialectId::BigQuery => SqlDialect::BigQuery,
     };
     let capabilities = match dialect {
         DialectId::DuckDb => BackendCapabilities::duckdb(),
         DialectId::SparkSql => BackendCapabilities::spark(),
-        DialectId::PostgreSql => BackendCapabilities::postgresql(),
         DialectId::BigQuery => BackendCapabilities::bigquery(),
     };
     let parsed = smelt_parser::parse(smelt_sql);
