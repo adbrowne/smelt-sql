@@ -1,0 +1,6 @@
+description: Orders, mutable snapshot (rows may be updated/deleted in place).
+mutation_profile: mutable_snapshot
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: DATE, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }

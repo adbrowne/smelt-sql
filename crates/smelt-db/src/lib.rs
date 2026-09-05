@@ -2646,6 +2646,46 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
+        // Contract-lattice `frozen_horizon` driving-source posture check
+        // (`docs/specs/incremental_models.md` §"The contract lattice":
+        // declaring `frozen_horizon` on a model whose driving source has any
+        // other *declared* mutation profile is refused, since the late-
+        // arrival probe's row-count comparison is blind under any posture
+        // other than `append_only`). Resolves the model's driving relation
+        // from the FROM clause's first entry, the same parse pattern
+        // `smelt_logical::maintenance::locality::resolve_driving_source`
+        // uses, and shares the same diagnostic code (single-owner rule: the
+        // oracle/validator, not this Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if contract.frozen_horizon.is_some() {
+                let driving_source =
+                    smelt_parser::File::cast(smelt_parser::parse(sql_body).syntax())
+                        .and_then(|f| f.select_stmt())
+                        .and_then(|s| s.from_clause())
+                        .map(|fc| {
+                            smelt_logical::analysis::source_bounds::from_clause_alias_sources(&fc)
+                        })
+                        .and_then(|sources| sources.into_iter().next());
+                if let Some((_, source_name)) = driving_source {
+                    let profile =
+                        ref_source_info(db, workspace, project, &format!("smelt.{source_name}"))
+                            .and_then(|info| info.mutation_profile.map(|m| m.kind));
+                    if let Err(why) =
+                        smelt_logical::validate_frozen_horizon_posture(&source_name, profile)
+                    {
+                        DiagnosticAcc(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!("ContractFrozenHorizonInvalid: {why}"),
+                            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                            code: Some(DiagnosticCode::ContractFrozenHorizonInvalid),
+                            data: None,
+                        })
+                        .accumulate(db);
+                    }
+                }
+            }
+        }
+
         // Contract-lattice `deferral` clock-admissibility check
         // (`docs/specs/incremental_models.md` §"Contract relaxations
         // (`contract:`)"). Format validity was already checked at

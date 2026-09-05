@@ -62,6 +62,23 @@ columns:
   - { name: amount, type: DOUBLE, nullable: false }
 "#;
 
+const MUTABLE_ORDERS_SOURCE: &str = r#"
+description: Orders, mutable snapshot.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: TIMESTAMP, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+
+const MUTABLE_DIMENSION_SOURCE: &str = r#"
+description: A mutable dimension joined, not driving.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: segment, type: VARCHAR, nullable: false }
+"#;
+
 /// `frozen_horizon:` declared on a `grain: key` model is refused — the
 /// declaration is admitted only on a partition-grain model.
 #[test]
@@ -126,6 +143,135 @@ GROUP BY 1
         &[
             ("smelt.yml", SMELT_YML),
             ("models/sources/orders.yml", ORDERS_SOURCE),
+            ("models/revenue.sql", model),
+        ],
+        "revenue",
+    );
+
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ContractFrozenHorizonInvalid))
+        .collect();
+    assert!(
+        matches.is_empty(),
+        "expected no ContractFrozenHorizonInvalid, got {diags:?}"
+    );
+}
+
+/// `frozen_horizon:` declared on a partition-grain model driven by a
+/// `mutation_profile: mutable_snapshot` source is refused — the late-arrival
+/// probe's row-count comparison is blind under a non-append-only posture
+/// (`docs/specs/incremental_models.md` §"The contract lattice").
+#[test]
+fn frozen_horizon_on_mutable_snapshot_source_raises_diagnostic() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  frozen_horizon: '90 days'
+---
+SELECT
+    date_trunc('day', o.order_date) AS order_date,
+    SUM(o.amount) AS total
+FROM smelt.sources.mutable_orders o
+GROUP BY 1
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/mutable_orders.yml", MUTABLE_ORDERS_SOURCE),
+            ("models/revenue.sql", model),
+        ],
+        "revenue",
+    );
+
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ContractFrozenHorizonInvalid))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one ContractFrozenHorizonInvalid, got {diags:?}"
+    );
+}
+
+/// `frozen_horizon:` declared on a partition-grain model driven by the
+/// existing append-only `orders` source is clean.
+#[test]
+fn frozen_horizon_on_append_only_source_is_clean() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  frozen_horizon: '90 days'
+---
+SELECT
+    date_trunc('day', o.order_date) AS order_date,
+    SUM(o.amount) AS total
+FROM smelt.sources.orders o
+GROUP BY 1
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/orders.yml", ORDERS_SOURCE),
+            ("models/revenue.sql", model),
+        ],
+        "revenue",
+    );
+
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ContractFrozenHorizonInvalid))
+        .collect();
+    assert!(
+        matches.is_empty(),
+        "expected no ContractFrozenHorizonInvalid, got {diags:?}"
+    );
+}
+
+/// A partition-grain model driven by the append-only `orders` source that
+/// *joins* a `mutable_snapshot` dimension is clean — only the driving
+/// relation (the FROM clause's first entry) is judged.
+#[test]
+fn frozen_horizon_joined_dimension_posture_ignored() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  frozen_horizon: '90 days'
+---
+SELECT
+    date_trunc('day', o.order_date) AS order_date,
+    SUM(o.amount) AS total
+FROM smelt.sources.orders o
+JOIN smelt.sources.customers c ON o.order_id = c.customer_id
+GROUP BY 1
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/orders.yml", ORDERS_SOURCE),
+            ("models/sources/customers.yml", MUTABLE_DIMENSION_SOURCE),
             ("models/revenue.sql", model),
         ],
         "revenue",

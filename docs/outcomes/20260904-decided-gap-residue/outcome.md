@@ -52,7 +52,7 @@ than the current residue.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | planned |
+| 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | pending |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | pending |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
@@ -67,6 +67,10 @@ than the current residue.
   in the spec sentence "any other **declared** mutation profile": an *undeclared* driving-source
   profile is admitted, since nothing declared contradicts the probe and the undeclared case is
   already policed at run time by `SourceMutationProfileViolated`.
+- 2026-09-05: Phase 1 implemented and closed — `ContractFrozenHorizonInvalid` now refuses a
+  `frozen_horizon` declaration on a model whose driving source declares a non-`append_only`
+  mutation profile, surfaced through `check_file_diagnostics`, LSP-published, and covered by a
+  new `examples/broken` fixture. See `phases/01-summary.md`.
 
 ## Blocked
 

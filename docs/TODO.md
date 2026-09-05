@@ -39,9 +39,6 @@ committed; these are the loose ends the redraft deliberately left for follow-up 
 - **Sidecar per-consuming-edge audit** (`sources.md` §Known Divergences, new entry): verify
   the built fingerprint sidecar upholds the per-consumer comparandum requirement under a
   shared projection-identity partition.
-- **Frozen-horizon append-only gate**: the spec now refuses `frozen_horizon` on a
-  non-append-only driving source (`ContractFrozenHorizonInvalid`); the implementation does not
-  yet check this leg.
 - **Deferral oracle restatement**: the conformance gate's oracle transform should be checked
   against the restated landed-vs-processed form (`incremental_models.md` §"The contract
   lattice") — the previous spec text was vacuous and a comparator built from it checks
