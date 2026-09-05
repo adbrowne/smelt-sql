@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788652515367,
+  "lastUpdate": 1788652518729,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.814938574881978,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "eaf7065f2ec56bfb0a1793628ea441f640d608d1",
+          "message": "fix(runtime): include child PID in Python model error messages (#189)\n\nThe subprocess path's error message for a failed Python model\n(`run_python_model`) previously named only the model file. Issue #189\nreported one occurrence where a test's panic showed an error context\nfor one temp-dir model file paired with a traceback that referenced a\ndifferent (concurrently running) test's model file — a misattributed\nerror that would otherwise be nearly impossible to diagnose.\n\nRuled out via code review: file_path and stderr are both local to a\nsingle run_python_model call, each child gets its own OS pipe, and\nnone of find_python_sdk/build_pythonpath/setup_sdk share state across\ncalls — so cross-contamination inside this function is not currently\nexplainable from the code. Attempted to reproduce under heavy\nconcurrent load (~40k test executions across parallel process/thread\ncombinations) without success.\n\nSince the root cause remains unconfirmed, add the child's PID to every\nerror message this function can produce. If the misattribution recurs,\nthe PID immediately tells us whether it's genuinely a different child\n(pointing at an OS/std process-spawn bug) or something else entirely.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-06T09:50:37+10:00",
+          "tree_id": "040b1521dbbe5e7b4bfe915665d7d2a62a2e4936",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/eaf7065f2ec56bfb0a1793628ea441f640d608d1"
+        },
+        "date": 1788652517388,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.685394166007388,
             "unit": "MB/s"
           }
         ]
