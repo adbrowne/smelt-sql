@@ -1,7 +1,7 @@
 ---
 feature: property_diff
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -33,10 +33,13 @@ and §Constraints & Invariants — on any conflict, those win.*
 smelt proves things about a model from its SQL: whether it has a grain, how far a run must
 reach into each source, which maintenance technique each cell of the model is allowed to use.
 Those proofs are what make `refresh: incremental` cheap and correct. They are also fragile in
-a way that is invisible at edit time: replacing `SUM` with `MAX`, joining a second source
-without a clock, or adding a `DISTINCT` can silently demote a model from a keyed fold to a
-full recompute, and can demote every model downstream of it, without a single diagnostic firing —
-because the new SQL is perfectly valid, just more expensive to maintain.
+a way that is invisible at edit time: joining a second source without a clock, or adding a
+`DISTINCT`, can silently demote a model from a keyed fold to a full recompute, and can demote
+every model downstream of it, without a single diagnostic firing — because the new SQL is
+perfectly valid, just more expensive to maintain. Swapping a cell's combiner (`SUM` for `MAX`,
+say) is the same class of risk, but only bites where invertibility is load-bearing — a
+correction cell maintained over a source declared mutable — never over a `NewData` fold on an
+append-only source, which never needs to retract a value it already folded.
 
 The property diff closes that gap. It renders the same per-model **property profile** the
 maintenance report already prints, at two versions of the project, and diffs the profiles. The
@@ -48,19 +51,19 @@ $ smelt explain --diff
 property diff vs merge-base(main) = 3e9c1a4a (2 files changed, 3 models shifted)
 
   staging/orders                 (edited)
-    ▼ cell revenue@orders: technique KeyedFold → DeleteInsert
-        reason: SUM(amount) → MAX(amount) — combiner is a monoid, not a group
-    ▼ reach orders: bounded(7 days) → unbounded
+    ▼ cell_technique revenue@orders: KeyedFold → DeleteInsert
+    ▼ source_bound orders: bounded(7 days) → unbounded
 
   marts/order_facts              (downstream of staging/orders)
-    ▼ cell net_amount@staging/orders: technique KeyedFold → DeleteInsert
-    ▼ refusal added: MaintenanceScanUnbounded
+    ▼ cell_technique net_amount@staging/orders: KeyedFold → DeleteInsert
+    ▼ refusal_added MaintenanceScanUnbounded
+        reason: incremental maintenance requires a bounded reach; the source's reach just became unbounded
 
   marts/customer_ltv             (downstream of staging/orders)
-    ▼ contract point: default → frozen_horizon: 90 days
-    ● column added: net_amount
+    ▼ contract_point customer_ltv: default → frozen_horizon: 90 days
+    ● column_added net_amount
 
-4 downgrades, 0 upgrades, 1 neutral.
+5 downgrades, 0 upgrades, 1 neutral.
 ```
 
 The same list feeds a machine-readable `--json` form, a `--markdown` form a CI job posts as one
@@ -511,6 +514,20 @@ compares verdicts.
 - Executing the lens opens the text report for that model in the editor's output channel, but no
   editor extension yet registers the command the lens emits, so today executing it is a no-op in
   every editor. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- `CellVerdict.state_downgrade` has a live producer only for a model whose target dialect makes
+  it fire; no model in `examples/timeseries` or `examples/retail_analytics` exercises it, so the
+  diff's `state_downgrade` dimension is proven only by a dual-target unit fixture, not by an
+  example workspace. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- `examples/timeseries` has no fixture demonstrating a *combiner-driven* downgrade (swapping a
+  cell's combiner without otherwise changing row identity). Its own combiner-sensitive cells are
+  `NewData` folds over append-only sources, which never need an invertible combiner (see the
+  outcome's Decision log); a fixture demonstrating this case needs a model whose driving source
+  is declared mutable. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- The LSP refresh coalescer's `pending`-trailing-rerun path (a refresh trigger that arrives while
+  a refresh is already running schedules exactly one more pass on completion) has no test that
+  reliably induces the race — the coalescing gate covers the same-notification burst case, not
+  the cross-notification-concurrent-trigger case. Tracked in
+  `docs/outcomes/20260905-property-diff/outcome.md`.
 
 ## Future Extensions
 
@@ -524,8 +541,8 @@ compares verdicts.
 
 ## References
 
-- **Code**: `crates/smelt-logical/src/analysis/profile.rs` (profile + diff), `crates/smelt-cli/src/commands/explain.rs` (`--diff`), `crates/smelt-lsp/src/` (code lens, `PropertyDowngrade`), `crates/smelt-core/src/workspace.rs` (baseline export helper)
-- **Tests**: `crates/smelt-cli/tests/property_profile_parity.rs`, `crates/smelt-lsp/tests/property_diff_parity.rs`, `crates/smelt-logical/tests/profile_diff.rs`
-- **User docs**: `docs-site/docs/reference/smelt-explain.md`, `docs-site/docs/guide/ci.md`
-- **Plans (history)**: `docs/plans/20260905-property-diff.md`
+- **Code**: `crates/smelt-logical/src/analysis/profile.rs` (`PropertyProfile`), `crates/smelt-logical/src/analysis/diff.rs` (`diff_profiles`, the direction table), `crates/smelt-logical/src/analysis/diff_render.rs` (text/Markdown rendering, shared by the CLI and the editor), `crates/smelt-core/src/baseline.rs` (ref/merge-base resolution, `git archive` materialisation, cleanup), `crates/smelt-core/src/workspace.rs` (`load_workspace`, consumed by both sides), `crates/smelt-runtime/src/profile.rs` and `crates/smelt-runtime/src/property_diff.rs` (`build_model_diagnostics`, `profiles_for_workspace`, the `work_side`/`baseline_side`/`report` pipeline shared by the CLI and the LSP), `crates/smelt-cli/src/commands/explain_diff.rs` (`smelt explain --diff`), `crates/smelt-lsp/src/property_diff.rs` (`ProjectDiffState`, `anchor_for`, `diagnostics_for_model`, `refresh`)
+- **Tests**: `crates/smelt-cli/tests/property_profile_parity.rs`, `crates/smelt-cli/tests/property_diff_cli.rs`, `crates/smelt-cli/tests/property_diff_ci_docs.rs`, `crates/smelt-logical/tests/diff_purity.rs`, `crates/smelt-core/tests/baseline.rs`, `crates/smelt-runtime/tests/profile_workspace.rs`, `crates/smelt-lsp/tests/property_diff_parity.rs`, `crates/smelt-lsp/tests/property_diff_refresh.rs`, `crates/smelt-lsp/tests/property_diff_coalescing.rs`, `crates/smelt-lsp/tests/property_diff_overlay.rs`
+- **User docs**: `docs-site/docs/reference/smelt-explain.md`, `docs-site/docs/guide/ci.md`, `docs-site/docs/guide/editor-features.md`
+- **Plans (history)**: no separate implementation plan was written for this feature; it was driven end-to-end from `docs/outcomes/20260905-property-diff/outcome.md`, whose phase table and decision log record how each part of the surface landed.
 - **Related specs**: `model_properties.md`, `incremental_models.md`, `definition_deltas.md`, `cli.md`, `lsp.md`, `ui_model_diagnostics.md`, `diagnostics.md`, `architecture.md`

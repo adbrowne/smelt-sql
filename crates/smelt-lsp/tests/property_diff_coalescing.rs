@@ -8,23 +8,19 @@
 //! This calls `Backend::did_change_watched_files` DIRECTLY on a real
 //! `Backend` (via `LspService::inner()`, never boxed/mocked) rather than
 //! over the duplex-stream wire the other `property_diff_*` test files use.
-//! That is a deliberate, verified choice: driving this specific
-//! notification through `tower_lsp::Server::serve` over a
-//! `tokio::io::duplex` pair was found, while writing this test, to only
-//! ever deliver the FIRST `FileEvent` of a multi-event
-//! `DidChangeWatchedFilesParams` to the handler — every event after it
-//! silently vanished before `did_change_watched_files`'s own `for change
-//! in params.changes` loop ever saw it. Confirmed by instrumenting the
-//! loop directly: an unmodified 3- or 10-event burst produced exactly one
-//! `iter N` log line over the wire, but all three over a direct call on
-//! the identical `Backend`/params. That is a transport-harness artifact
-//! independent of the code under test (this suite exists BECAUSE of a
-//! coalescing bug, not the reverse), and asserting against it would
-//! silently test "does the harness drop the tail of the array" instead of
-//! "does the server coalesce" — the exact vacuous-test trap this outcome
-//! has hit before. `initialize`/`initialized` are still called directly on
-//! the same `Backend` beforehand so the notification hits the real,
-//! fully-initialized handler.
+//! While first writing this test, an ad hoc (uncommitted) over-the-wire
+//! variant appeared to only deliver the first `FileEvent` of a multi-event
+//! burst to the handler; re-investigated with a committed, reproducible
+//! probe for `docs/outcomes/20260905-property-diff/phases/08-plan.md` task
+//! 6 (evidence in `crates/smelt-lsp/CLAUDE.md`) and found NOT to reproduce
+//! — a 10-event burst sent over the real `tower_lsp::Server::serve` +
+//! `tokio::io::duplex` wire, including this test's own staged-repo
+//! scenario, delivers all 10 events to the handler. The direct-call
+//! approach here is kept anyway on its own merits — it isolates the
+//! coalescing logic from wire framing and needs no duplex plumbing — not
+//! because of a proven transport defect. `initialize`/`initialized` are
+//! still called directly on the same `Backend` beforehand so the
+//! notification hits the real, fully-initialized handler.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};

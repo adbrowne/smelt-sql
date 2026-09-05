@@ -132,9 +132,13 @@ detail `smelt explain --diff`'s text form prints.
 The baseline defaults to the merge-base with `main`, exactly like the CLI. The diff refreshes when
 the workspace loads, when a model file is saved or changed on disk outside the editor, and when
 the resolved baseline commit changes (for example after `git checkout` or `git pull`) — never on
-every keystroke, so an unsaved edit does not move the lens until you save. While a new diff is
-being computed, the editor keeps showing whatever it last computed rather than blanking out; on
-first load, before any diff has ever been computed, it shows nothing.
+every keystroke, so an unsaved edit does not *trigger* a refresh by itself. It still counts once
+one happens, though: any refresh, from any of those causes, reads a model file's open-buffer
+content rather than its on-disk content, so an unsaved edit already visible in the editor shows up
+in the next diff even before you save. A `smelt.yml` or source-YAML edit is different — it only
+takes effect once saved. While a new diff is being computed, the editor keeps showing whatever it
+last computed rather than blanking out; on first load, before any diff has ever been computed, it
+shows nothing.
 
 A workspace that is not a git repository, or whose baseline cannot be resolved, shows no lens and
 no diagnostic at all — this is not treated as an error, since plenty of projects are worked on

@@ -203,6 +203,37 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Property diff — "explain the diff" for model edits~~ ✅ (September 6, 2026)
+
+An edit that silently demotes a model's maintenance technique — a new join, a lost clock, a
+combiner that stops being invertible where it needs to be — produced no diagnostic before this:
+the new SQL was perfectly valid, just far more expensive to maintain. This closes that gap by
+diffing the same per-model **property profile** the maintenance report already prints, at a git
+baseline and the working tree.
+
+- **`smelt explain --diff [<ref>]`** (default baseline: merge-base with `main`) prints, as text,
+  `--json`, or `--markdown`, every model whose grain, bound/reach, per-cell technique, refusals,
+  contract point, or probe set shifted, classified downgrade/upgrade/neutral and attributed to
+  its nearest edited ancestors. `--fail-on {downgrade,any}` and `--select` narrow the reported
+  (never the derived) set.
+  This repository's own CI posts the Markdown form as a pull-request comment over `examples/` as
+  dogfood (`.github/workflows/property-diff.yml`, `docs-site/docs/guide/ci.md`).
+- **The LSP** advertises a code lens (`N downgrades, M upgrades vs <ref>`) on every shifted model
+  and a `PropertyDowngrade` warning per downgrade, baseline-cached per resolved commit and
+  re-resolved on `.git/HEAD` changes.
+- **Standing gates**: `property_profile_parity` (report/profile byte-identity), `diff_purity`
+  (no I/O in `diff_profiles`), `property_diff_cli`, `property_diff_ci_docs`,
+  `property_diff_parity` (LSP surface equals the CLI JSON, proven non-vacuous by a sabotage run).
+- **Divergences left open** (`docs/specs/property_diff.md` §Known Divergences): executing the
+  code lens is a no-op in every editor today (the promised "open the text report" action has no
+  registered command); no `examples/` fixture exercises a state downgrade or a purely
+  combiner-driven downgrade; the LSP refresh coalescer's trailing-rerun path has no
+  race-inducing test; whether `column_added` on a maintained model should inherit its
+  accompanying `cell_added`'s direction is undecided.
+
+Driven end-to-end from `docs/outcomes/20260905-property-diff/outcome.md` (no separate
+implementation plan was written).
+
 ### ~~Registry-owned dialect emission and the cross-engine audit~~ ✅ (August 24, 2026)
 
 BigQuery dialect coverage was incident-driven: probe a live warehouse, hit a failure, add a

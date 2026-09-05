@@ -1,7 +1,11 @@
 # Outcome: Property diff — "explain the diff" for model edits
 
 **Created:** 2026-09-05
-**Status:** queued
+**Status:** active — all 8 phases done, but criterion 7's promised lens *action* ("Executing
+the lens opens the text report… in the editor's output channel") is not implemented in any
+editor; see `docs/outcomes/20260905-property-diff/phases/08-summary.md` for the honest
+nine-criteria reading. Left as `active` rather than `done` for the controller to rule on
+(ruling R6).
 **Source:** `docs/specs/property_diff.md` (spec commit `5b439b80`); `docs/research/20260905-ten-directions.md` item 4
 **Spec anchors:** `docs/specs/property_diff.md` §Surface (`smelt explain --diff`, "Output forms", "Pull-request comment", "Editor", "Diagnostics"), §Semantics ("The property profile", "The diff", "Direction", "Attribution", "Baseline materialisation"), §Constraints items 1–9; `docs/specs/architecture.md` §"Salsa purity rule (analysis)", §"Workspace loading parity rule (CLI ↔ LSP)", §"Project isolation rule"
 
@@ -100,7 +104,7 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
 | 5 | `smelt explain --diff` text + JSON + `--fail-on` + `--select` + flag exclusivity; temp-git-repo fixture test over `examples/timeseries`; `smelt-explain.md` reference page | done |
 | 6 | `--markdown` renderer with marker and `<details>`; `docs-site/docs/guide/ci.md`; dogfood job in `.github/workflows` posting/updating one comment over `examples/` | done |
 | 7 | LSP: code lens capability, baseline cache keyed on resolved commit with `.git/HEAD` watch, `PropertyDowngrade` anchoring, non-git silence; `property_diff_parity` gate; `editor-features.md` | done |
-| 8 | Docs sweep and closure: `diagnostics.md` user page, spec Known Divergences cleared, ROADMAP entry, `/smelt:validate property_diff` zero drift | pending |
+| 8 | Docs sweep and closure: `diagnostics.md` user page, spec Known Divergences cleared, ROADMAP entry, `/smelt:validate property_diff` zero drift | done |
 
 ## Decision log
 
