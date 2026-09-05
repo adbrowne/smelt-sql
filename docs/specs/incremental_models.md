@@ -218,10 +218,12 @@ from one small warehouse:
   arrives within 7 days of the first copy (declared `key_recurrence: '7 days'` — a source
   world-fact, `sources.md`);
 - `sources.customers` — mutable dimension snapshot (`customer_id`, `tier`, `region`);
-- `sources.customer_changes` — clocked update-events feed of customer attribute changes,
-  one row per change, append-only; partitioned by arrival (`partition_column: ingested_date`)
-  with the change's own time as the clock (`event_time_column: effective_ts`), so a late
-  change is an ordinary row in a later arrival partition.
+- `sources.customer_changes` — clocked update-events feed of customer attribute changes
+  (`customer_id`, `tier`, `region`, `effective_ts`, `ingested_at`, `ingested_date`,
+  `is_deleted`), one row per change, append-only; partitioned by arrival
+  (`partition_column: ingested_date`) with the change's own time as the clock
+  (`event_time_column: effective_ts`), so a late change is an ordinary row in a later arrival
+  partition; `is_deleted` is a `NOT NULL` CDC tombstone flag.
 
 | model | declares | shape |
 |---|---|---|

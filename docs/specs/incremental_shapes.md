@@ -410,9 +410,11 @@ The classifier admits a model iff:
   column;
 - every projected column that is not a window function (or an expression over one) is
   row-local — a function of the current row alone, not an aggregate or a further window;
-- at most one further filter follows the projection, of the form `WHERE NOT <boolean column>`
-  over a row-local boolean column (the delete-flag admission, §"The succession grain" §"Delete
-  events").
+- at most one filter follows the window functions, spelled `QUALIFY NOT <boolean column>`
+  over a `NOT NULL` row-local boolean column (the delete-flag admission, §"The succession
+  grain" §"Delete events"). `QUALIFY` is the only single-scope clause SQL evaluates *after*
+  window functions; a `WHERE` in the same scope is evaluated before them and is the pre-window
+  clamp above, never the delete filter.
 
 The derived output identity is `(k, t)` — one row per key per event, addressed by the pair the
 window functions themselves partition and order by. No `unique_key` is declared or inferable
@@ -479,7 +481,8 @@ silently; it refuses with the nearest fix (§"Succession-grain admission (no dec
 | `SuccessionSingleSourceOnly` | The `FROM` clause is not exactly one source reference — a join, CTE, subquery, or set operation is present; names the offending clause (§"Succession-grain admission (no declaration)"). |
 | `SuccessionDrivingSourceNotAppendOnly` | The driving source does not declare `mutation_profile.kind: append_only`, or declares no `timeseries:` block; names the source and its declared kind or the missing block (§"The succession grain" §"Run shape and late events"). |
 | `SuccessionPreFilterNotRowLocal` | A filter precedes the window projection but is not a deterministic row-local predicate over the driving source's own columns — it references a window-derived column, an aggregate, a subquery, another relation, or a run-nondeterministic function; or more than one such filter is present. Names the offending predicate (§"The succession grain" §"Run shape and late events"). |
-| `SuccessionDeleteFilterMisplaced` | A post-projection filter exists but is not exactly `WHERE NOT <row-local boolean column>` applied after the window functions — e.g. it filters before the window, filters a non-boolean or non-row-local expression, is not a negated single column, or names a column not proven `NOT NULL` (a NULL flag drops the row under `WHERE NOT` without marking it a delete) (§"The succession grain" §"Delete events"). |
+| `SuccessionDeleteFilterMisplaced` | A `QUALIFY` clause exists but is not exactly `QUALIFY NOT <row-local boolean column>` — it filters a non-boolean, non-row-local, or window-derived expression, is not a negated single column, or names a column not proven `NOT NULL` (a NULL flag drops the row under `NOT` without marking it a delete); or a `WHERE` predicate tests a window-derived column, which no same-scope `WHERE` can do (§"The succession grain" §"Delete events"). |
+| `SuccessionDriverEventTimePartitioned` (warning) | The driving source's `partition_column` traces to the succession clock, so the run axis and the clock coincide: a late append is a violation of the source's own `append_only` posture, not an event this grain can fold. Names the source and suggests partitioning the feed by arrival (§"The succession grain" §"Run shape and late events"). |
 | `SuccessionPatternUnrecognized` | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names; the general fallback when the model does not resemble any admitted grain. Names the three declared routes as fixes. |
 | `SuccessionClockTie` | Runtime: a delta presents two non-identical events with equal `(k, t)`; an event whose `(k, t)` matches a presented row with different row-local content or delete flag; or a delete and a non-delete at one `(k, t)` in either direction (against a stored tombstone only the delete flag is comparable). The run's transaction rolls back; reports the key, the clock value, and a sample. Identical rows are a redelivery and fold once (§"The succession grain" §"Run shape and late events"). |
 
@@ -1130,11 +1133,29 @@ events").
 A delete-flagged row (a CDC tombstone in the change stream `customer_history` reads) must still
 close out its predecessor's validity interval before it is dropped from the output — deleting a
 version ends the previous version's currency without opening a new one. The classifier admits
-this by permitting one trailing `WHERE NOT <boolean column>` filter *after* the window
-functions in the query (`SuccessionDeleteFilterMisplaced` otherwise, `model_properties.md`
-§"Keyed-succession classification"): the `LEAD` is computed over every row including deletes, so
-a deleted row still contributes its timestamp to its predecessor's `valid_to`, and only then is
-it filtered from the materialised output. The succession-patch `MERGE` (`model_transforms.md`)
+this by permitting one `QUALIFY NOT <boolean column>` clause — the one single-scope filter
+SQL evaluates *after* window functions (`SuccessionDeleteFilterMisplaced` otherwise,
+`model_properties.md` §"Keyed-succession classification"). `customer_history` with a CDC
+delete flag:
+
+```sql
+SELECT
+    customer_id,
+    tier,
+    region,
+    effective_ts AS valid_from,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) IS NULL AS is_current
+FROM smelt.customer_changes
+QUALIFY NOT is_deleted
+```
+
+The `LEAD` is computed over every row including deletes, so a deleted row still contributes
+its timestamp to its predecessor's `valid_to`, and only then is it filtered from the
+materialised output. A `WHERE NOT is_deleted` in the same scope would run *before* the window
+and drop the tombstone's timestamp from its predecessor — the misplaced case. On a backend
+without native `QUALIFY` the dialect layer lowers the clause to a wrapping subquery
+(`multi_backend.md`, `supports_qualify`), so the full-refresh oracle runs unchanged everywhere. The succession-patch `MERGE` (`model_transforms.md`)
 reflects this: a delete event is recorded in the tombstone ledger and contributes neighbour
 patches but no presented insert. Because the ledger remembers the tombstone, every later
 event — whether it arrives after the delete or splices in before it — sees the tombstone as a
@@ -1170,14 +1191,19 @@ therefore the single fact that decides how late events reach this grain:
 - **Arrival-partitioned** (`partition_column` is a landing/ingest date; `event_time_column`
   is the event's own time) — the intended posture for a change stream. Every append lands in
   the *open* arrival partition, so the append-only probe's closed-partition fingerprint leg
-  never fires on a late event, and a late event *is simply an event in a later arrival
+  (gated to partitions strictly below the recorded maximum, `model_properties.md` §"Probe
+  obligation") never fires on a late event, and a late event *is simply an event in a later arrival
   window*: the ordinary window-forward step presents it, the theorem folds it, no discovery
   mechanism beyond the landed delta is involved. The running example's `customer_changes`
   declares `partition_column: ingested_date, event_time_column: effective_ts`.
 - **Event-time-partitioned** (`partition_column` is the clock's date) — admitted, but a late
   append into a closed partition is then a violation of the source's own `append_only`
   posture under the framework's existing definition (`sources.md` §Semantics 4), excluded by
-  the source, not by this grain. Nothing here changes that rule.
+  the source, not by this grain. Nothing here changes that rule — but because
+  `SourceMutationProfileViolated`'s remedy is "correct the source", never "repartition it",
+  the classifier warns at plan time when it can see the two axes coincide (the trace shows
+  `partition_column` derives from the clock): `SuccessionDriverEventTimePartitioned`, naming
+  arrival partitioning as the route to the late-splice guarantee.
 
 `smelt explain` names the run axis and the clock and states which posture the source has.
 This is the partition grain's default-point doctrine applied to a keyed history — arrival
@@ -1240,13 +1266,16 @@ emit for a replace — is refused on the same grounds: the oracle's `LEAD` order
 is undefined. Against a stored tombstone only the delete flag is comparable, since the ledger
 carries no row-local content.
 
-A row **identical** to one already folded — or two identical rows in one delta — is treated
-as a redelivery (`sources.md` §"`mutation_profile`", `redelivery: at_least_once`) and folded
-once. This equals the oracle over the *deduplicated* input, the same footing every fold
-technique stands on under redelivery; a feed in which two genuinely distinct events share
-both `(k, t)` and every row-local value is indistinguishable from redelivery, and the
-zero-length interval the raw oracle would emit for it is not produced. This is a declared
-boundary of the grain (§Constraints), not a divergence to close.
+A row **identical** to one already folded — or two identical rows in one delta — is read
+through the source's declared `redelivery` sub-fact (`sources.md` §"`mutation_profile`").
+Under `redelivery: at_least_once` (the default) it is a redelivery and folds once; this
+equals the oracle over the *deduplicated* input, the same footing every fold technique
+stands on under redelivery, and a feed in which two genuinely distinct events share both
+`(k, t)` and every row-local value is indistinguishable from redelivery, so the zero-length
+interval the raw oracle would emit for it is not produced — a declared boundary of the grain
+(§Constraints), not a divergence to close. Under `redelivery: none` the source has promised
+that no row arrives twice, so two identical rows are two events at one `(k, t)` and refuse
+(`SuccessionClockTie`) like any other collision.
 
 #### What stays out of this grain
 
@@ -1429,7 +1458,8 @@ it arrives, so a late event folds correctly whenever it is presented, and there 
 to derive a bound over.
 
 **Late events arrive on the run axis, not through a posture change.** The append-only posture
-probe fingerprints every closed partition of the source, so under an event-time-partitioned
+probe fingerprints every closed partition of the source (`model_properties.md` §"Probe
+obligation", the frontier gate), so under an event-time-partitioned
 source a late append is a posture violation and the theorem's late-splice guarantee is
 unreachable. Three fixes were considered and rejected: gating the fingerprint leg to
 partitions older than the source's declared `lateness` (makes `lateness` a probe input,
@@ -1452,7 +1482,7 @@ applying unchanged, so no source is refused for how it happens to be partitioned
 
 **The lateness clamp is SQL, admitted as a pre-window filter.** A declared `max_lateness:`
 on the model was rejected — it would be a frontmatter fact restating something the SQL can
-state exactly, the derive-else-declare principle (`models.md` §Design). Admitting one
+state exactly (`models.md` §Design "The declaration law: declared, derived, implied"). Admitting one
 deterministic row-local `WHERE` between the driving source and the window projection costs
 one classifier rule and one refusal code, keeps the oracle and the maintained state trivially
 equal (a dropped row is dropped in both), and reuses the existing determinism taint rule to
@@ -1501,7 +1531,7 @@ to be carried in the ledger too, widening the state per projected column; the cl
 keeps the ledger at the fixed `(k, t)` pair (§Future Extensions).
 
 **Delete admission is a grammar widening, not a change-feed dependency.** Recognising
-`WHERE NOT <boolean column>` as a permitted post-window filter was chosen over requiring the
+`QUALIFY NOT <boolean column>` as a permitted post-window filter was chosen over requiring the
 driving source to declare a change feed (`sources.md`) or waiting on general change-feed/CDF
 consumption (`incremental_models.md` §Future Extensions "Live change-feed folds"): the delete
 flag is already an ordinary row in the input the model reads, so admitting it needs only a
@@ -1665,7 +1695,8 @@ larger one.
    strictly monotone at admission; the key columns and the clock column each appear
    row-locally in the projection so the `MERGE` can address presented rows; a runtime
    collision — two distinct events at one `(k, t)` — rolls the run back
-   (`SuccessionClockTie`). Identical rows at one `(k, t)` are folded once as a redelivery.
+   (`SuccessionClockTie`). Identical rows at one `(k, t)` fold once under
+   `redelivery: at_least_once` and refuse under `redelivery: none`.
 8. **The classifier is fail-closed.** A window function that is not `LEAD(t)`/`LAG(t)` (or an
    expression over one, or with an offset other than the default 1), a non-row-local
    non-window projection, an unresolvable or nullable partition key, a non-strict or
@@ -1676,9 +1707,10 @@ larger one.
 9. **End-state equivalence holds with the model's own SQL as the oracle**, identically to the
    key grain's rule: `full_refresh(model SQL)` over the same processed inputs is the executable
    correctness definition, with no bespoke interval-keyed specialisation.
-10. **Delete admission is exactly one grammar shape.** Only `WHERE NOT <row-local boolean
-    column>` applied after the window functions is admitted; any other filter placement or
-    shape refuses (`SuccessionDeleteFilterMisplaced`).
+10. **Delete admission is exactly one grammar shape.** Only `QUALIFY NOT <row-local boolean
+    column>` is admitted; any other post-window filter shape refuses
+    (`SuccessionDeleteFilterMisplaced`). `WHERE` is always pre-window and never the delete
+    filter.
 11. **SCD2-over-mutable-snapshots is never admitted, regardless of SQL shape** — this grain
     requires a source that already carries change events with their own event times
     (§"What stays out of this grain").
