@@ -79,7 +79,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | done |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | done |
 | 6 | Append-only posture probe: increase = late arrival, decrease/fingerprint = violation; conformance late-append step kind | done |
-| 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | pending |
+| 7 | Delete the remaining divergence bullets (those phases 1-6 did not already close); validate the four specs; all gates green | planned |
 
 ## Decision log
 
@@ -218,5 +218,17 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   unchanged (still 2 — this bullet isn't one of that file's partition-grain bullets).
   `verify-phase.sh` ALL GREEN on a clean re-run (one transient `smelt-lsp::example_workspaces`
   timeout under concurrent load, confirmed a flake by standalone re-run).
+
+- 2026-09-06 — Phase 7 planned with no table reshape (phase 6 surfaced no residue beyond a
+  known LSP flake). A pre-scan of the four anchors found **no** surviving Known Divergence
+  bullet this outcome created — phases 1–6 each deleted their own inline, as the phase-1
+  precedent set — so phase 7's real content is the residue those deletions left *elsewhere*:
+  `models.md` still lists the retired per-column `data_latency` as a live declared fact in two
+  places outside the frontmatter table, and `sources.md`'s `mutation_profile` divergence bullet
+  still lists `lateness` among the sub-facts awaiting per-cell admission, which contradicts the
+  now-decided orchestration-only trust rule in the same file. Both are corrected here and
+  fenced by a new doc-sweep case on the existing `lateness_orchestration_only` grep gate.
+  Drift the validate passes surface that phases 1–6 did not cause is classified, not fixed:
+  recorded as a Known Divergence bullet if unrecorded, left alone if already recorded.
 
 ## Blocked
