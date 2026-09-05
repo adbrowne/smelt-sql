@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788568129571,
+  "lastUpdate": 1788568133394,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.682705,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "292954ccaabd90f18727150dfd32b9f4cf641ae2",
+          "message": "docs: self-directed scheduler research; fix stale orchestration/state citations in roadmap, cli.md, run_state.md\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
+          "timestamp": "2026-09-05T10:22:49+10:00",
+          "tree_id": "f37e946bb669286dbe556ba7a05b0cc2287ea6b0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/292954ccaabd90f18727150dfd32b9f4cf641ae2"
+        },
+        "date": 1788568131993,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.478371321905602,
+            "unit": "MB/s"
           }
         ]
       }
