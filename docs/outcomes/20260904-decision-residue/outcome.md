@@ -74,7 +74,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | done |
-| 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | pending |
+| 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | planned |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | pending |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | pending |
 | 5 | Retire per-column `data_latency` (hard error + fix-it, LSP parity); remove lateness from `compute_effective_window` and the runtime widening path; grep gate; explain prints it as orchestration-only | pending |
@@ -91,5 +91,13 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 - 2026-09-05 — Phase 1 done: `PartitionGrainForbidsMetrics` classifier, `DiagnosticCode`, LSP
   parity, `examples/broken/models/partition_grain_forbids_metrics.sql`, catalogue row, and the
   divergence bullet deleted. `partition_residue_probes.rs` ratchet updated 4 → 3.
+
+- 2026-09-05 — Phase 2 planned with no table reshape. Two refusals are distinguished
+  explicitly: the window-level one carries the actionable coarsened
+  `[--event-time-start, --event-time-end)` pair (criterion 2's "re-running with it succeeds"),
+  while the config-level `g_run < g_part` one names the required `timeseries.granularity` plus
+  the covering window as context — a window suggestion there would be untrue. Phase 2 also
+  folds in the phase-1 summary's residue: the stale "the six this outcome does not own" doc
+  comment in `partition_residue_probes.rs`, and the ratchet drop for the bullet it closes.
 
 ## Blocked
