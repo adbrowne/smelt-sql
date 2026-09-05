@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/concepts/how-it-works/">
+        <link rel="canonical" href="https://smeltsql.com/guide/ci/">
       
       
-        <link rel="prev" href="../../getting-started/quickstart/">
+        <link rel="prev" href="../deployment/">
       
       
-        <link rel="next" href="../project-structure/">
+        <link rel="next" href="../orchestration/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>How smelt Works - smelt</title>
+        <title>Continuous Integration - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#how-smelt-works" class="md-skip">
+        <a href="#continuous-integration" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              How smelt Works
+              Continuous Integration
             
           </span>
         </div>
@@ -268,13 +268,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="./" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../concepts/how-it-works/" class="md-tabs__link">
           
   
   
@@ -310,11 +308,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../guide/sql-models/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../sql-models/" class="md-tabs__link">
           
   
   
@@ -588,31 +588,28 @@
       
   
   
-    
   
   
-  
     
     
     
     
-      
-        
-        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
         
           
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
             
   
   
@@ -630,7 +627,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_3">
             <span class="md-nav__icon md-icon"></span>
             
@@ -645,37 +642,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    How smelt Works
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../concepts/how-it-works/" class="md-nav__link">
         
   
   
@@ -691,131 +661,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#what-is-smelt" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What is smelt
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#logical-vs-physical-separation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Logical vs Physical Separation
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-compilation-pipeline" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The Compilation Pipeline
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-smelt-differs-from-dbt" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How smelt Differs from dbt
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="How smelt Differs from dbt">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#no-jinja-templates" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        No Jinja templates
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#automatic-incrementalization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Automatic incrementalization
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#static-type-checking" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Static type checking
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multi-backend-execution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multi-backend execution
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#key-concepts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Key Concepts
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -828,7 +673,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../project-structure/" class="md-nav__link">
+      <a href="../../concepts/project-structure/" class="md-nav__link">
         
   
   
@@ -1313,28 +1158,31 @@
       
   
   
+    
   
   
+  
     
     
     
     
+      
+        
+        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
-        
-          
-          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
             
   
   
@@ -1352,7 +1200,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_5">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1370,7 +1218,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/sql-models/" class="md-nav__link">
+      <a href="../sql-models/" class="md-nav__link">
         
   
   
@@ -1398,7 +1246,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/pipe-syntax/" class="md-nav__link">
+      <a href="../pipe-syntax/" class="md-nav__link">
         
   
   
@@ -1426,7 +1274,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/sources/" class="md-nav__link">
+      <a href="../sources/" class="md-nav__link">
         
   
   
@@ -1454,7 +1302,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/materializations/" class="md-nav__link">
+      <a href="../materializations/" class="md-nav__link">
         
   
   
@@ -1482,7 +1330,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/incremental-models/" class="md-nav__link">
+      <a href="../incremental-models/" class="md-nav__link">
         
   
   
@@ -1510,7 +1358,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/schema-evolution/" class="md-nav__link">
+      <a href="../schema-evolution/" class="md-nav__link">
         
   
   
@@ -1538,7 +1386,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/migrations/" class="md-nav__link">
+      <a href="../migrations/" class="md-nav__link">
         
   
   
@@ -1566,7 +1414,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/seeds/" class="md-nav__link">
+      <a href="../seeds/" class="md-nav__link">
         
   
   
@@ -1594,7 +1442,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/datagen/" class="md-nav__link">
+      <a href="../datagen/" class="md-nav__link">
         
   
   
@@ -1622,7 +1470,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/model-selection/" class="md-nav__link">
+      <a href="../model-selection/" class="md-nav__link">
         
   
   
@@ -1650,7 +1498,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/python-models/" class="md-nav__link">
+      <a href="../python-models/" class="md-nav__link">
         
   
   
@@ -1678,7 +1526,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/functions/" class="md-nav__link">
+      <a href="../functions/" class="md-nav__link">
         
   
   
@@ -1706,7 +1554,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/testing/" class="md-nav__link">
+      <a href="../testing/" class="md-nav__link">
         
   
   
@@ -1734,7 +1582,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/targets/" class="md-nav__link">
+      <a href="../targets/" class="md-nav__link">
         
   
   
@@ -1762,7 +1610,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/deployment/" class="md-nav__link">
+      <a href="../deployment/" class="md-nav__link">
         
   
   
@@ -1787,10 +1635,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../guide/ci/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Continuous Integration
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1806,6 +1681,70 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-job" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The job
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-the-job-always-writes-the-job-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the job always writes the job summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fetch-depth-0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        fetch-depth: 0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gating-the-build-an-opt-in-not-this-repositorys-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gating the build: an opt-in, not this repository's default
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1818,7 +1757,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/orchestration/" class="md-nav__link">
+      <a href="../orchestration/" class="md-nav__link">
         
   
   
@@ -1846,7 +1785,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/web-ui/" class="md-nav__link">
+      <a href="../web-ui/" class="md-nav__link">
         
   
   
@@ -1874,7 +1813,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/model-diagnostics/" class="md-nav__link">
+      <a href="../model-diagnostics/" class="md-nav__link">
         
   
   
@@ -1902,7 +1841,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/editor-setup/" class="md-nav__link">
+      <a href="../editor-setup/" class="md-nav__link">
         
   
   
@@ -1930,7 +1869,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/editor-features/" class="md-nav__link">
+      <a href="../editor-features/" class="md-nav__link">
         
   
   
@@ -2790,10 +2729,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#what-is-smelt" class="md-nav__link">
+  <a href="#the-job" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What is smelt
+        The job
       
     </span>
   </a>
@@ -2801,10 +2740,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#logical-vs-physical-separation" class="md-nav__link">
+  <a href="#why-the-job-always-writes-the-job-summary" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Logical vs Physical Separation
+        Why the job always writes the job summary
       
     </span>
   </a>
@@ -2812,10 +2751,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-compilation-pipeline" class="md-nav__link">
+  <a href="#fetch-depth-0" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The Compilation Pipeline
+        fetch-depth: 0
       
     </span>
   </a>
@@ -2823,71 +2762,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#how-smelt-differs-from-dbt" class="md-nav__link">
+  <a href="#gating-the-build-an-opt-in-not-this-repositorys-default" class="md-nav__link">
     <span class="md-ellipsis">
       
-        How smelt Differs from dbt
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="How smelt Differs from dbt">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#no-jinja-templates" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        No Jinja templates
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#automatic-incrementalization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Automatic incrementalization
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#static-type-checking" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Static type checking
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multi-backend-execution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multi-backend execution
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#key-concepts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Key Concepts
+        Gating the build: an opt-in, not this repository's default
       
     </span>
   </a>
@@ -2911,7 +2789,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/concepts/how-it-works.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/ci.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2919,121 +2797,100 @@
   
 
 
-<h1 id="how-smelt-works">How smelt Works<a class="headerlink" href="#how-smelt-works" title="Permanent link">&para;</a></h1>
-<h2 id="what-is-smelt">What is smelt<a class="headerlink" href="#what-is-smelt" title="Permanent link">&para;</a></h2>
-<p>smelt is a SQL-to-SQL compiler and orchestrator for data transformation pipelines. You write SQL models that reference each other using <code>smelt.&lt;path&gt;</code>, and smelt takes care of the rest: resolving dependencies, compiling to target-specific SQL, and executing against your database.</p>
-<p><code>smelt.&lt;path&gt;</code> is the universal addressing scheme: the path is the workspace-relative directory joined with the entity's name, so a model at <code>models/staging/user_logins.sql</code> is referenced as <code>smelt.staging.user_logins</code> (the <code>models/</code> scan root is stripped). Every project entity — model, source, seed, function, or test — is addressed the same way.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">-- models/marts/active_users.sql</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="c1">---</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1">---</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="k">SELECT</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="n">user_id</span><span class="p">,</span>
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">login_count</span>
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">staging</span><span class="p">.</span><span class="n">user_logins</span>
-<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">login_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="k">CURRENT_DATE</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;30 days&#39;</span>
-<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">user_id</span>
+<h1 id="continuous-integration">Continuous Integration<a class="headerlink" href="#continuous-integration" title="Permanent link">&para;</a></h1>
+<p>This page documents a GitHub Actions job that posts a property-diff comment on every pull
+request: it derives each model's property profile at the PR's base commit and at the head
+commit, reports every model whose profile shifted, and keeps one comment on the PR up to date
+across pushes rather than stacking a new one each time. See <a href="../../reference/smelt-explain/#property-diff"><code>smelt explain</code> §Property
+diff</a> for the underlying command and
+<code>docs/specs/property_diff.md</code> for the full normative surface.</p>
+<h2 id="the-job">The job<a class="headerlink" href="#the-job" title="Permanent link">&para;</a></h2>
+<p>The job is plain shell composed around two tools: the <code>smelt</code> CLI and the <code>gh</code> CLI. Its only
+smelt-specific knowledge is the <code>&lt;!-- smelt-property-diff --&gt;</code> marker every <code>--markdown</code> body
+ends with, which it uses to find a comment it posted earlier and update it in place instead of
+adding a new one.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">property-diff</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="nt">on</span><span class="p">:</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="nt">pull_request</span><span class="p">:</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="nt">permissions</span><span class="p">:</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="nt">contents</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">read</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="nt">pull-requests</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">write</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="nt">jobs</span><span class="p">:</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">  </span><span class="nt">property-diff</span><span class="p">:</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">    </span><span class="nt">runs-on</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ubuntu-latest</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">    </span><span class="nt">steps</span><span class="p">:</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">actions/checkout@v6</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">        </span><span class="nt">with</span><span class="p">:</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">          </span><span class="nt">fetch-depth</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Build smelt</span>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="w">        </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cargo build --release -p smelt-cli --no-default-features --features duckdb</span>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Render the property diff</span>
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">        </span><span class="nt">env</span><span class="p">:</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="w">          </span><span class="nt">BASE_SHA</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${{ github.event.pull_request.base.sha }}</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a><span class="w">        </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="w">          </span><span class="no">BIN=./target/release/smelt</span>
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="w">          </span><span class="no">{</span>
+<a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="w">            </span><span class="no">&quot;$BIN&quot; explain --diff &quot;$BASE_SHA&quot; --markdown --project-dir path/to/your/project</span>
+<a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="w">          </span><span class="no">} &gt; body.md</span>
+<a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a><span class="w">          </span><span class="no">cat body.md &gt;&gt; &quot;$GITHUB_STEP_SUMMARY&quot;</span>
+<a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>
+<a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Post or update the PR comment</span>
+<a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a><span class="w">        </span><span class="nt">if</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github.event.pull_request.head.repo.full_name == github.repository</span>
+<a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a><span class="w">        </span><span class="nt">env</span><span class="p">:</span>
+<a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="w">          </span><span class="nt">GH_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${{ secrets.GITHUB_TOKEN }}</span>
+<a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="w">          </span><span class="nt">PR</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${{ github.event.pull_request.number }}</span>
+<a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="w">        </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+<a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a><span class="w">          </span><span class="no">id=$(gh api &quot;repos/$GITHUB_REPOSITORY/issues/comments&quot; --paginate \</span>
+<a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="w">                </span><span class="no">--jq &#39;[.[] | select(.user.login==&quot;github-actions[bot]&quot;)</span>
+<a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a><span class="w">                           </span><span class="no">| select(.body | contains(&quot;&lt;!-- smelt-property-diff --&gt;&quot;))] | last | .id // empty&#39;)</span>
+<a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a><span class="w">          </span><span class="no">if [ -n &quot;$id&quot; ]; then</span>
+<a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a><span class="w">            </span><span class="no">gh api -X PATCH &quot;repos/$GITHUB_REPOSITORY/issues/comments/$id&quot; -F body=@body.md</span>
+<a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a><span class="w">          </span><span class="no">else</span>
+<a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a><span class="w">            </span><span class="no">gh pr comment &quot;$PR&quot; --body-file body.md</span>
+<a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a><span class="w">          </span><span class="no">fi</span>
 </code></pre></div>
-<p>smelt parses this SQL, understands that <code>active_users</code> depends on <code>staging.user_logins</code>, builds a dependency graph, and executes models in the correct order.</p>
-<h2 id="logical-vs-physical-separation">Logical vs Physical Separation<a class="headerlink" href="#logical-vs-physical-separation" title="Permanent link">&para;</a></h2>
-<p>The core architectural insight behind smelt is the separation of <strong>what to compute</strong> from <strong>how to execute</strong>.</p>
-<p><strong>Logical layer (what you write):</strong></p>
-<ul>
-<li>SQL models with <code>smelt.&lt;path&gt;</code> calls (e.g., <code>smelt.staging.users</code>)</li>
-<li>YAML frontmatter for configuration</li>
-<li>Pure data transformation logic</li>
-</ul>
-<p><strong>Physical layer (what smelt decides):</strong></p>
-<ul>
-<li>Which database engine to use</li>
-<li>Whether to materialize as a table, view, or materialized view</li>
-<li>Whether to run incrementally or as a full refresh</li>
-<li>How to batch and partition the work</li>
-<li>What optimizations to apply across model boundaries</li>
-</ul>
-<p>This separation has practical consequences:</p>
-<ul>
-<li><strong>You write pure SQL</strong>, not execution logic. No <code>{% if is_incremental() %}</code> branching.</li>
-<li><strong>The framework can automatically incrementalize models</strong> by analyzing your SQL and generating the appropriate DELETE+INSERT logic.</li>
-<li><strong>The same models run on different backends.</strong> Use DuckDB locally for fast iteration, then deploy to Spark or PostgreSQL in production without changing your SQL.</li>
-<li><strong>Optimizations are applied automatically</strong> without modifying user code. smelt can fuse queries, push down predicates, and reorganize execution across model boundaries.</li>
-</ul>
-<h2 id="the-compilation-pipeline">The Compilation Pipeline<a class="headerlink" href="#the-compilation-pipeline" title="Permanent link">&para;</a></h2>
-<p>Every <code>smelt run</code> follows this pipeline:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>SQL Files --&gt; Parse --&gt; Analyze --&gt; Plan --&gt; Generate --&gt; Execute
+<p>A multi-project workspace runs the render step once per project, concatenating each project's
+<code>body.md</code> before posting — <code>smelt explain --diff</code> diffs one <code>--project-dir</code> per invocation
+(<code>docs/specs/property_diff.md</code> §Limitations).</p>
+<h2 id="why-the-job-always-writes-the-job-summary">Why the job always writes the job summary<a class="headerlink" href="#why-the-job-always-writes-the-job-summary" title="Permanent link">&para;</a></h2>
+<p>A <code>pull_request</code> event triggered from a fork gets a read-only <code>GITHUB_TOKEN</code>: both <code>gh</code> calls in
+the comment step would fail with a permissions error on a fork PR. The render step therefore
+always appends the body to <code>$GITHUB_STEP_SUMMARY</code>, which needs no write permission and is visible
+on every PR including forks; only the comment step is guarded to run solely when the PR's head
+repository is the same as the base repository. Do <strong>not</strong> switch this job to the
+<code>pull_request_target</code> event to work around the fork restriction — that event grants a write token
+to a workflow that must not check out and execute untrusted head-branch code, and <code>smelt build</code>
+does execute the project's own SQL and (optionally) Python models.</p>
+<h2 id="fetch-depth-0"><code>fetch-depth: 0</code><a class="headerlink" href="#fetch-depth-0" title="Permanent link">&para;</a></h2>
+<p><code>smelt explain --diff "$BASE_SHA"</code> resolves <code>$BASE_SHA</code> with <code>git rev-parse</code>, which needs the
+commit to actually be present in the checkout. <code>actions/checkout</code>'s default <code>fetch-depth: 1</code>
+fetches only the PR's merge commit, so <code>$BASE_SHA</code> would not resolve and the job would fail with
+<code>PropertyDiffBaselineUnavailable</code> (exit <code>2</code>) — a smelt-shaped error for what is really a shallow
+checkout. Passing the base SHA explicitly, rather than relying on <code>--diff</code>'s own default
+merge-base resolution, also avoids a subtlety of the checkout action's merge commit: its <code>main</code>
+parent is not necessarily the PR's actual base commit once other commits have landed on the base
+branch since the PR opened.</p>
+<h2 id="gating-the-build-an-opt-in-not-this-repositorys-default">Gating the build: an opt-in, not this repository's default<a class="headerlink" href="#gating-the-build-an-opt-in-not-this-repositorys-default" title="Permanent link">&para;</a></h2>
+<p><code>smelt explain --diff --markdown</code> never gates the build by itself — the job above only comments.
+Add <code>--fail-on downgrade</code> (or <code>--fail-on any</code>) to the render step to make a genuine property
+downgrade fail the job:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="s2">&quot;</span><span class="nv">$BIN</span><span class="s2">&quot;</span><span class="w"> </span>explain<span class="w"> </span>--diff<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$BASE_SHA</span><span class="s2">&quot;</span><span class="w"> </span>--fail-on<span class="w"> </span>downgrade<span class="w"> </span>--markdown<span class="w"> </span>--project-dir<span class="w"> </span>path/to/your/project
 </code></pre></div>
-<dl>
-<dt><strong>Parse</strong></dt>
-<dd>The error-recovery parser produces a complete syntax tree even from incomplete or invalid SQL. This powers both the CLI and the LSP -- you get diagnostics and autocompletion while typing, not just at build time.</dd>
-<dt><strong>Analyze</strong></dt>
-<dd>Resolve <code>smelt.&lt;path&gt;</code> calls to their targets — models, sources, seeds, and functions all follow the same scheme. Infer column types. Validate schemas and detect mismatches. Build the dependency graph.</dd>
-<dt><strong>Plan</strong></dt>
-<dd>Determine execution order from the dependency graph. Detect optimization opportunities (predicate pushdown, model fusion). Choose materialization strategies. For incremental models, generate the appropriate merge logic.</dd>
-<dt><strong>Generate</strong></dt>
-<dd>Compile the analyzed SQL into the target engine's dialect. DuckDB, Spark SQL, and PostgreSQL each have syntax differences that smelt handles transparently.</dd>
-<dt><strong>Execute</strong></dt>
-<dd>Send the generated SQL to the target engine. Track run history and interval state for incremental models. Report results.</dd>
-</dl>
-<h2 id="how-smelt-differs-from-dbt">How smelt Differs from dbt<a class="headerlink" href="#how-smelt-differs-from-dbt" title="Permanent link">&para;</a></h2>
-<h3 id="no-jinja-templates">No Jinja templates<a class="headerlink" href="#no-jinja-templates" title="Permanent link">&para;</a></h3>
-<p>dbt embeds execution logic in SQL files using Jinja:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">-- dbt</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="err">{{</span><span class="w"> </span><span class="n">config</span><span class="p">(</span><span class="n">materialized</span><span class="o">=</span><span class="s1">&#39;incremental&#39;</span><span class="p">)</span><span class="w"> </span><span class="err">}}</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="err">{{</span><span class="w"> </span><span class="k">ref</span><span class="p">(</span><span class="s1">&#39;events&#39;</span><span class="p">)</span><span class="w"> </span><span class="err">}}</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="err">{</span><span class="o">%</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">is_incremental</span><span class="p">()</span><span class="w"> </span><span class="o">%</span><span class="err">}</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="k">MAX</span><span class="p">(</span><span class="n">event_date</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="err">{{</span><span class="w"> </span><span class="n">this</span><span class="w"> </span><span class="err">}}</span><span class="p">)</span>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="err">{</span><span class="o">%</span><span class="w"> </span><span class="n">endif</span><span class="w"> </span><span class="o">%</span><span class="err">}</span>
-</code></pre></div>
-<p>smelt parses and understands your SQL semantically. Configuration goes in YAML frontmatter, and incrementalization is handled by the framework:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">-- smelt</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="c1">---</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="n">timeseries</span><span class="p">:</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
-<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
-<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
-<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="c1">---</span>
-<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">events</span>
-</code></pre></div>
-<h3 id="automatic-incrementalization">Automatic incrementalization<a class="headerlink" href="#automatic-incrementalization" title="Permanent link">&para;</a></h3>
-<p>smelt analyzes your SQL to determine whether it is safe to run incrementally. It detects partition columns, validates safety constraints (no window functions with unbounded frames, no LIMIT, no non-deterministic functions), and generates DELETE+INSERT logic automatically.</p>
-<p>You declare <em>intent</em> (enable incremental with a partition column), and smelt handles the <em>mechanics</em>.</p>
-<h3 id="static-type-checking">Static type checking<a class="headerlink" href="#static-type-checking" title="Permanent link">&para;</a></h3>
-<p>The smelt LSP catches errors before you run anything:</p>
-<ul>
-<li>Undefined <code>smelt.&lt;path&gt;</code> targets</li>
-<li>Column type mismatches between models</li>
-<li>Schema validation against source definitions</li>
-<li>Parse errors with precise line/column positions</li>
-</ul>
-<h3 id="multi-backend-execution">Multi-backend execution<a class="headerlink" href="#multi-backend-execution" title="Permanent link">&para;</a></h3>
-<p>A single smelt project can target multiple engines. Define targets in <code>smelt.yml</code> and switch between them:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--target<span class="w"> </span>dev<span class="w">      </span><span class="c1"># DuckDB on your laptop</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--target<span class="w"> </span>prod<span class="w">     </span><span class="c1"># Spark on your cluster</span>
-</code></pre></div>
-<p>The same SQL models work across both -- smelt generates the appropriate dialect for each target.</p>
-<h2 id="key-concepts">Key Concepts<a class="headerlink" href="#key-concepts" title="Permanent link">&para;</a></h2>
-<dl>
-<dt>Model</dt>
-<dd>A SQL file in <code>models/</code> that defines a data transformation. Each model produces one table or view.</dd>
-<dt>Ref</dt>
-<dd><code>smelt.&lt;path&gt;</code> addresses any project entity — model, source, seed, function, or test. The path maps to the entity's filesystem location relative to the workspace root, with the <code>models/</code> scan root stripped (e.g., <code>smelt.marts.customers</code> for <code>models/marts/customers.sql</code>). smelt resolves these to actual table names and ensures correct execution order.</dd>
-<dt>Source</dt>
-<dd>A <code>.yml</code> file in <code>sources/</code> declaring an external table that smelt does not manage. Referenced via <code>smelt.&lt;path&gt;</code> like any other entity (e.g., <code>smelt.sources.raw.events</code> for <code>sources/raw/events.yml</code>). smelt validates schema correctness but does not create or modify source tables.</dd>
-<dt>Materialization</dt>
-<dd>How a model's results are stored: <code>table</code> (persisted), <code>view</code> (virtual, re-evaluated on read), or <code>ephemeral</code> (inlined into downstream queries).</dd>
-<dt>Refresh</dt>
-<dd>How a stored <code>table</code>'s output is kept current across runs — the <code>refresh:</code> axis. <code>full</code> (default) rebuilds from scratch; <code>incremental</code> keeps the table current by running the derived maintenance plan (and requires a sibling <code>grain:</code> declaration); <code>materialized_view</code> delegates freshness to the backend's own native incremental-view maintenance. smelt determines incrementalization safety automatically.</dd>
-<dt>Seed</dt>
-<dd>A CSV file in <code>seeds/</code> that is loaded into the database as a table. Useful for lookup data, mappings, and small reference tables.</dd>
-<dt>Target</dt>
-<dd>A named execution environment defined in <code>smelt.yml</code>. Each target specifies a database backend and connection details (e.g., <code>dev</code> for local DuckDB, <code>prod</code> for Spark).</dd>
-<dt>Selector</dt>
-<dd>A pattern for choosing which models to run. Use <code>--select model_name</code> for a single model, <code>--select +model_name</code> to include upstream dependencies, or <code>--select tag:finance</code> to run all models with a given tag.</dd>
-</dl>
+<p>Whether this is the right default for your project is a real tradeoff. A repository whose
+tracked models shift property profiles routinely as ordinary maintenance work lands (new joins,
+changed grains, technique tuning) will find a default-on <code>--fail-on</code> gate goes red on legitimate
+work — and a gate that goes red on legitimate work gets bypassed, which destroys the one signal
+it exists to protect: an <em>unintended</em> downgrade slipping through unreviewed. This repository's
+own dogfood job over its <code>examples/</code> projects runs without <code>--fail-on</code> for exactly that reason:
+its build-failing assertion is narrower but real — <code>smelt explain --diff --markdown</code> must exit
+<code>0</code>, so a broken renderer or an example that no longer derives a profile fails the job, while a
+legitimate property shift does not. Choose <code>--fail-on</code> deliberately for your own project rather
+than copying this repository's choice.</p>
 
 
 
