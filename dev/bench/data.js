@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788590886703,
+  "lastUpdate": 1788590889893,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.721162,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "8b2993bb8b8237cf0871958670a55235f8beb884",
+          "message": "outcome(20260904-decided-gap-residue): record human decision, unblock phase 3\n\nResolves the once-write FD-requirement block: classify_once_write will skip\nthe declared-FD check when the candidate is already a unique_key member\n(option c), rather than widening SourceRecipe/KeyedRecipe (a) or relaxing\nFD self-contradiction validation generally (b).",
+          "timestamp": "2026-09-05T16:38:41+10:00",
+          "tree_id": "df944d2a69570932fa8c067fc01c3aeb3fad48e2",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/8b2993bb8b8237cf0871958670a55235f8beb884"
+        },
+        "date": 1788590888888,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.123673927907856,
+            "unit": "MB/s"
           }
         ]
       }
