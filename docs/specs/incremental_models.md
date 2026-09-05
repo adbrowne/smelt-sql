@@ -1992,14 +1992,18 @@ FROM smelt.customer_changes
 Every version of a key is a row; each version's validity interval closes at the next change's
 event time; the newest version per key is open. A delete-flagged row in the change stream closes
 its predecessor's interval without opening a new one (`incremental_shapes.md` §"Delete events").
-If the feed carries no-op change events (full row images where no tracked attribute changed),
-dedupe first — a `LAG`-comparison filter over the tracked columns before the `LEAD` — so
-spurious versions never open.
+The recognised shape reads a feed that already carries only real changes: if the feed carries
+no-op change events (full row images where no tracked attribute changed), each opens a
+spurious version, and the dedupe that would drop them — a `LAG`-comparison filter over the
+tracked columns in a CTE *before* the `LEAD` — is outside the recognised grammar, which admits
+one scope and no CTE (`incremental_shapes.md` §Future Extensions "Widening the succession
+grammar"). Such a feed's history model stays on the routes below until that widening lands, or
+the dedupe moves upstream into its own model.
 
 A model outside this pattern — an aggregate mixed into the same projection, a window ordered by
 something other than a traceable clock, a running-total or ranking window rather than
-`LEAD`/`LAG` — is not recognised, and stays on the two routes available to arbitrary windowed
-SQL:
+`LEAD`/`LAG`, a join, or a non-append-only driving source — is not recognised, and stays on the
+two routes available to arbitrary windowed SQL:
 
 - **`refresh: full`** — rebuild from the change stream each run. Always correct; cost is a
   full rescan of the feed.

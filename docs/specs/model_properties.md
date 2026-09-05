@@ -56,7 +56,7 @@ The surface is the set of properties and their verdicts. Callers are the planner
 | Fingerprint projection | `Projection` = `Columns{cols}` \| `FullRow{reason}`: for a consuming model reading an external source, which of the source's columns feed the model — the projection a row-content fingerprint sidecar digests (`sources.md` §"The fingerprint sidecar"). Fail-closed: `SELECT *`, an opaque function call over the source, or a provenance path the walk cannot resolve yields `FullRow{reason}`, never a guessed subset. Per-consumer — two consumers of the same source derive independent projections, never unioned | partial (simple-rename lineage composes through CTEs/derived tables via the walk; an embedded reference inside a computed expression does not chase further) |
 | Skeleton-source closure | `SkeletonSourceClosure` = `Closed` \| `Open{reason}`: does an enrichment join's row skeleton (row membership, count, and multiplicity) trace to the driving source **alone**, so the enrichment side can never add, drop, or duplicate a row. Composes five independently-sourced conjuncts — skeleton-role extraction (no skeleton column originates on the enrichment side), per-column provenance (every enrichment column's mutation-sensitivity is confined to its own source, never blended with the driving fact's), one-to-one join contribution (fan-out/cardinality proves the join `OneToOne`, never `OneToMany`), row preservation (every driving row survives the join — a `LEFT JOIN` always qualifies; an inner/equi-join qualifies only under a source's declared `referential_integrity` world-fact, `sources.md`), and no membership predicate on an enrichment column (a `WHERE`/`HAVING` clause testing an enrichment-side column would make output row-membership depend on the enrichment source, breaking the closure). Fail-closed to `Open` on any unproven conjunct. **v1 restriction**: the enrichment join must sit below any aggregation in the scope — a join feeding a `GROUP BY`/window changes the skeleton question (which rows survive the fold, not which rows survive the join), so join-below-aggregation is `Open` regardless of the five conjuncts | built (v1: non-aggregating enrichment scopes only) |
 | Output-delta shape | `OutputDelta` = `AppendOnlyWindow{axis}` ⊑ `KeyedUpsert{keys}` ⊑ `General{reason}`, derived **per column group** (§"Per-column mutation-sensitivity / column provenance"), never per model — what the model *emits* when its inputs change, not what its inputs are. See §"Output-delta shape" | derived, typed onto propagation edges, and acted on by dirt propagation (keyed dirt-sets for an admitted `KeyedUpsert` component) |
-| Keyed-succession classification | `Succession` = `Recognized{key_cols, clock_col, lead_cols, delete_flag}` \| `NotSuccession{reason}`: does every window function in the projection reduce to `LEAD`/`LAG` (or a scalar expression over one) partitioned by one consistent key and ordered by a `Traceable` clock, with every other projected column row-local, and at most one trailing `WHERE NOT <row-local boolean>` filter. The one classifier whose vocabulary is window-function/`ORDER BY` shape rather than aggregation — see §"Keyed-succession classification" | not-yet |
+| Keyed-succession classification | `Succession` = `Recognized{source, key_cols, clock_col, lead_cols, lag_cols, delete_flag}` \| `NotSuccession{reason}`: is the `FROM` exactly one `append_only` source reference, does every window function in the projection reduce to `LEAD(t)`/`LAG(t)` over the clock (or a scalar expression over one) partitioned by one consistent key and ordered by a strictly-`Traceable` clock, with every other projected column row-local, and at most one trailing `WHERE NOT <row-local boolean>` filter. The one classifier whose vocabulary is window-function/`ORDER BY` shape rather than aggregation — see §"Keyed-succession classification" | not-yet |
 
 ### Model-scoped declarations
 
@@ -157,25 +157,37 @@ A declared key and a differing proven key may both be present for the same outpu
 decide whether a model's SQL is the keyed-succession shape — the sole vocabulary this spec has
 for `ORDER BY`-carrying window functions rather than aggregation, since every other classifier
 above reasons about `GROUP BY`/`DISTINCT` scopes or frame reach, never window-function
-succession semantics. It returns `Recognized{key_cols, clock_col, lead_cols, delete_flag}` when
-every condition below holds, and fail-closed `NotSuccession{reason}` otherwise — absence of a
-proof is a refusal, never an approximate or partial admission:
+succession semantics. It returns `Recognized{source, key_cols, clock_col, lead_cols, lag_cols,
+delete_flag}` when every condition below holds, and fail-closed `NotSuccession{reason}`
+otherwise — absence of a proof is a refusal, never an approximate or partial admission:
 
-1. **Every window function in the outermost projection is a succession function.** Each
-   `OVER (...)` clause is `LEAD(t)`/`LAG(t)`, or a scalar expression over exactly one such call
-   (an `IS NULL`, a `CASE`, an arithmetic expression), never a plain aggregate window, a running
-   total, or a ranking function.
-2. **Every succession function shares one `PARTITION BY` key set** (`key_cols`) and **one
-   `ORDER BY` column** (`clock_col`). `clock_col` must trace `Traceable` under the event-time
-   monotonicity trace (§"Event-time monotonicity trace") against the driving source — an
-   `ORDER BY` column the trace cannot certify monotone refuses the whole model, since a
-   non-monotone order makes "immediate predecessor" undefined.
-3. **Every other projected column is row-local** — a function of the current row's own columns
+1. **The `FROM` clause is exactly one source reference** (`source`) — no join, CTE, subquery,
+   or set operation — and that source declares `mutation_profile.kind: append_only`
+   (`sources.md`). A join refuses because nothing today proves an enrichment side cannot add,
+   drop, or duplicate a version row (§"Skeleton-source closure" rules a join feeding a window
+   `Open`); a non-append-only source refuses because the succession technique folds each event
+   exactly once and cannot un-see a retracted one (`incremental_shapes.md` §"Run shape and late
+   events").
+2. **Every window function in the outermost projection is a succession function.** Each
+   `OVER (...)` clause is `LEAD(t)`/`LAG(t)` **over the clock column itself**, or a scalar
+   expression over exactly one such call (an `IS NULL`, a `CASE`, an arithmetic expression),
+   never a plain aggregate window, a running total, a ranking function, or a `LEAD`/`LAG` over
+   any other column. Columns derived from a `LEAD` call are collected as `lead_cols`, from a
+   `LAG` call as `lag_cols`; the technique patches a new event's predecessor for the former
+   and its successor for the latter.
+3. **Every succession function shares one `PARTITION BY` key set** (`key_cols`) and **one
+   `ORDER BY` column** (`clock_col`). `clock_col` must trace `Traceable` **with `is_strict`**
+   under the event-time monotonicity trace (§"Event-time monotonicity trace") against the
+   driving source — an `ORDER BY` column the trace cannot certify monotone refuses the whole
+   model, since a non-monotone order makes "immediate predecessor" undefined, and one it
+   certifies monotone but not strict refuses too, since a clock that can collapse two distinct
+   source times onto one value makes the derived `(k, t)` identity collide.
+4. **Every other projected column is row-local** — a function of the current row's own columns
    alone, containing no aggregate and no further window function. A column that mixes
    aggregation into the same projection as a succession window (a would-be
    `SUM(...) OVER (...)` sibling) refuses; that shape is not this pattern
    (`incremental_shapes.md` §"What stays out of this grain").
-4. **At most one trailing filter is admitted**, and only in the exact shape `WHERE NOT
+5. **At most one trailing filter is admitted**, and only in the exact shape `WHERE NOT
    <row-local boolean column>`, applied *after* the window functions rather than filtering the
    FROM-clause input before them — the delete-flag admission (`incremental_shapes.md`
    §"Delete events"). The filtered column becomes `delete_flag`; its absence leaves
