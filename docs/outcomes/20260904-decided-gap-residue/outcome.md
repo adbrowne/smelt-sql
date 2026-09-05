@@ -55,7 +55,7 @@ than the current residue.
 | 1 | `ContractFrozenHorizonInvalid`: validation leg, diagnostic, LSP, fixture, test | done |
 | 2 | Deferral oracle transform restated; metamorphic test proving the comparator is no longer vacuous | done |
 | 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
-| 4 | Sidecar per-consuming-edge audit test; fix if it fails | pending |
+| 4 | Sidecar per-consuming-edge audit test; fix if it fails | planned |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | pending |
 | 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
 
@@ -105,6 +105,18 @@ than the current residue.
   source shape offers. Reverted the recipe/render/gate.rs wiring attempt (dead code with no
   legal path to exercise it) and rewrote the `incremental_shapes.md` Known Divergences bullet to
   name this precisely rather than deleting it. See `phases/03-summary.md`.
+
+- 2026-09-05: Phase 4 planned with no reshape (phase 3's blocked clause is already recorded under
+  ## Blocked; no new residue surfaced). Audited the built sidecar on paper first: rows are keyed
+  `(source_address, projection_identity, source_key)` with no consumer discriminator, so the only
+  thing separating two consumers of one source is the `stamp`'s model-SQL hash — which is unsound
+  for two consuming models with byte-identical bodies (a sibling's refresh satisfies this edge's
+  next diff) and merely useless otherwise (distinct bodies mutually invalidate, so neither
+  consumer ever narrows). Decided the fix is a fourth namespace/PK column `consumer_address`
+  rather than folding the consumer into the stamp: stamp-folding fixes the unsoundness but keeps
+  the clobber-thrash. `sources.md` §"Naming and namespace" therefore gets a spec delta — sharing
+  digests across consuming edges is deliberately not taken (it would need per-consumer consumption
+  cursors), rather than admitted-but-conditioned.
 
 ## Blocked
 
