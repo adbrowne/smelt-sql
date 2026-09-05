@@ -11,7 +11,7 @@ use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
 use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
 use smelt_logical::maintenance::{lookup_write_pattern, PlanCell, Technique};
-use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
+use smelt_planner::{analyze_batch_safety, BatchSafety, BoundResult, ModelInfo};
 use smelt_runtime::{CompilerRegistry, EphemeralResolver, SourceBound, TimeRange};
 use std::collections::BTreeMap;
 
@@ -125,39 +125,10 @@ fn is_self_origin(origins: &[String]) -> bool {
 // imports (`use crate::explain::RelationContractView`, etc.) continue to work
 // unchanged — `smelt-cli` no longer owns a second copy of this derivation.
 pub use smelt_runtime::diagnostics::{
-    build_relation_contract, Admissibility, InboundEdgeContract, ModelDiagnostics,
-    PlanCellDiagnostics, PropertySet, RelationContractClock, RelationContractProvider,
-    RelationContractView, TechniquePreview,
+    build_bound_context, build_relation_contract, Admissibility, InboundEdgeContract,
+    ModelDiagnostics, PlanCellDiagnostics, PropertySet, RelationContractClock,
+    RelationContractProvider, RelationContractView, TechniquePreview,
 };
-
-/// Build the [`smelt_planner::BoundContext`] a model's `--json` source-bounds
-/// section (`compute_source_bounds`) and the shared `smelt-runtime::
-/// diagnostics` property-set derivation both need: one `add_source` per
-/// upstream dependency that declares its own `timeseries:` clock. Shared
-/// so both call sites build the bound context from the same rule rather
-/// than two independent copies of this loop
-/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
-/// boundary").
-pub fn build_bound_context(
-    model_name: &str,
-    graph: &DependencyGraph,
-    config: &Config,
-) -> BoundContext {
-    let mut ctx = BoundContext::new();
-    for dep_name in graph.get_upstream(model_name) {
-        if let Ok(dep_model) = graph.get_model(&dep_name) {
-            let dep_meta = dep_model.metadata.as_deref();
-            let ts = config
-                .get_timeseries_with_metadata(&dep_name, dep_meta)
-                .cloned()
-                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
-            if let Some(ts) = ts {
-                ctx.add_source(&dep_name, &ts.partition_column);
-            }
-        }
-    }
-    ctx
-}
 
 /// Render one [`RelationContractView`] as indented text lines shared by
 /// the model's own contract and every inbound edge's contract — the same
