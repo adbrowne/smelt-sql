@@ -78,3 +78,33 @@ fn the_dogfood_workflow_requests_pull_requests_write() {
         "expected the same fork guard docs-pr-preview.yml uses: {workflow}"
     );
 }
+
+/// The comment-lookup step must list **the PR's own** comments
+/// (`/repos/{owner}/{repo}/issues/{number}/comments`), not the
+/// repository-wide issue-comment feed
+/// (`/repos/{owner}/{repo}/issues/comments`). The repo-wide feed returns
+/// every issue's and PR's comments, so `| last` picks whichever PR was
+/// commented on most recently — in practice the *first* PR the job ever
+/// commented on becomes the permanent PATCH target, and every later PR's
+/// diff overwrites that one comment while its own PR shows nothing. Caught
+/// live: run 33997596604 (PR #191) rendered PR #191's diff and PATCHed it
+/// onto PR #188.
+#[test]
+fn the_comment_lookup_is_scoped_to_this_pull_request() {
+    for rel in [
+        ".github/workflows/property-diff.yml",
+        "docs-site/docs/guide/ci.md",
+    ] {
+        let text = read(rel);
+        assert!(
+            text.contains("issues/$PR/comments"),
+            "{rel} must list the PR's own comments \
+             (repos/$GITHUB_REPOSITORY/issues/$PR/comments): {text}"
+        );
+        assert!(
+            !text.contains(r#"issues/comments" --paginate"#),
+            "{rel} must not list the repository-wide issue-comment feed — \
+             `| last` there resolves to another PR's comment: {text}"
+        );
+    }
+}
