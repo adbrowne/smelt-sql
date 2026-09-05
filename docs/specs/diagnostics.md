@@ -1,7 +1,7 @@
 ---
 feature: diagnostics
 status: experimental
-last_reviewed: 2026-07-17
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -184,6 +184,25 @@ unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, 
 | `KeyedRecurrenceDeclarationMismatch` | Error | Plan time: a declared `key_recurrence` disagrees with the recurrence bound derived from the model's SQL; names both values. The derived value is authoritative (`incremental_shapes.md` key-grain rule 16). Specified, unimplemented — see §Known divergences. |
 | `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
 | `KeyedSnapshotPostureUnsupported` | Error | A `grain: key` model has no clocked driving source, AND no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source joined, none clocked) — genuinely unsupportable, not a "not yet" refusal (`incremental_shapes.md` §"The two run shapes"). |
+
+---
+
+### Succession grain
+
+Owned by `docs/specs/incremental_shapes.md` §"Succession-grain admission (no declaration)". A
+`refresh: incremental` model with no `unique_key`, no `timeseries:`, and a SQL shape that does
+not match the keyed-succession pattern refuses with the specific code naming the clause that
+broke admission — never a silent fallback to `refresh: full`. Specified, unimplemented — see
+§Known divergences.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `SuccessionWindowFunctionNotLead` | Error | A window function in the projection is not `LEAD`/`LAG`, or not a scalar expression over one. Names the offending call. |
+| `SuccessionPartitionKeyMismatch` | Error | Two or more window functions in the projection partition by different column sets, or by a column set the classifier cannot resolve to a stable per-row key. |
+| `SuccessionOrderNotMonotoneClock` | Error | A window's `ORDER BY` column does not trace as a monotone event-time clock on the driving source (`model_properties.md` §"Event-time monotonicity trace" returns `NotTraceable`). Names the column and the trace's refusal reason. |
+| `SuccessionRowLocalColumnViolation` | Error | A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local. Names the column. |
+| `SuccessionDeleteFilterMisplaced` | Error | A post-projection filter exists but is not exactly `WHERE NOT <row-local boolean column>` applied after the window functions (`incremental_shapes.md` §"Delete events"). |
+| `SuccessionPatternUnrecognized` | Error | `refresh: incremental` with no `GROUP BY`, no `timeseries:`, and a SQL shape none of the succession rules above individually names. Names the three declared routes (`refresh: full`, `refresh: materialized_view`, or declaring `unique_key`/`timeseries` to reach another grain) as fixes. |
 
 ---
 
@@ -572,6 +591,12 @@ Owned by `docs/specs/state.md` §Diagnostics.
 - **Three probe-obligation codes are specified and unimplemented.** `DeclaredMonotonicityViolated`, `DeclaredFunctionalDependencyViolated`, and `DeclaredBoundedDomainExceeded` (`model_properties.md` §"Probe obligation") have no `DiagnosticCode` variant yet, though their probe emitters (`emit_monotonicity_probe`, `emit_functional_dependency_probe`, `emit_bounded_domain_probe`) now exist in `crates/smelt-logical/src/maintenance/emit.rs`, proven against a real DuckDB — the coverage gate only asserts enum → catalogue coverage, so a catalogue row may precede its variant, the same posture as the `Maintenance*` rows above. No live run dispatches any of the three yet. Landing the variants and run-driver dispatch is `docs/outcomes/20260809-probe-backed-facts/outcome.md` phases 3-4. The append-only posture's probe (`emit_append_only_posture_probe`, also now built) reuses the already-catalogued `SourceMutationProfileViolated` rather than a new code.
 - **The write-addressing pin's equivalence-invariant factor is structural-facts-only.** `resolve_write_pin` implements the available-addressings rule's declared-facts, trigger, and backend-capability factors; the third factor (a per-cell equivalence proof beyond a pattern's declared required facts) is a caller-supplied hook that always accepts today (`incremental_models.md` §Known Divergences). Deepening it — e.g. threading P3 column-comparability into a `column`/`keyed_conditional` pin's own check — is later work.
 - **All five contract-lattice codes have live derivation or probe-emitter sites; `ContractDeferralExceeded` remains catalogue-ahead-of-variant.** `ContractFrozenHorizonInvalid`, `ContractDeferralInvalid`, and `ContractRetainDepartedInvalid` (`incremental_models.md` §"The contract lattice") each have a `DiagnosticCode` variant: `ContractFrozenHorizonInvalid` is raised at frontmatter-parse time (an unparseable `contract.frozen_horizon`), by the grain-admissibility check (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon`), and by the driving-source posture check (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon_posture`); `ContractDeferralInvalid` is raised at frontmatter-parse time (an unparseable `contract.deferral`) and by the clock-admissibility check (`smelt_logical::contract::deferral::validate_deferral`); `ContractRetainDepartedInvalid` is raised at frontmatter-parse time (a malformed `contract.retain_departed` value) and by the posture/tombstone-column check (`smelt_logical::contract::retain_departed::validate`) — all three folded into `check_file_diagnostics`. `ContractLateArrivalOutsideHorizon`, `ContractDeferralExceeded`, and `ContractDepartedKeyUnmarked` are raised by `smelt_runtime`'s pure comparisons (`smelt_logical::contract::frozen_horizon::late_arrivals`, `smelt_logical::contract::deferral::deferral_violations`, `smelt_logical::contract::retain_departed::classify_key`), dispatched at the same pre-write site as the other declared-fact probes — runtime probe failures, like `SourceMutationProfileViolated` and `DeclaredMonotonicityViolated`, so none of the three has a `DiagnosticCode` variant (the coverage gate only asserts enum → catalogue coverage, not the reverse). `retain_departed`'s own probe (the reconcile anti-join, `smelt_logical::contract::retain_departed::emit_departed_key_probe`) is dispatched on every reconcile that suppresses the default point's delete and its outcome is recorded on the run manifest's `probes[]` (`run_state.md` §"Run manifest"). Landing: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`, `docs/outcomes/20260815-definition-delta-migrate/outcome.md`.
+- **All six succession-grain codes are specified and unimplemented.** No classifier, technique,
+  or diagnostic dispatch exists yet for `SuccessionWindowFunctionNotLead`,
+  `SuccessionPartitionKeyMismatch`, `SuccessionOrderNotMonotoneClock`,
+  `SuccessionRowLocalColumnViolation`, `SuccessionDeleteFilterMisplaced`, or
+  `SuccessionPatternUnrecognized` (`incremental_shapes.md` §"Succession-grain admission (no
+  declaration)"). No plan exists yet — this spec diff is the input to one.
 ## Open questions
 
 None currently open.

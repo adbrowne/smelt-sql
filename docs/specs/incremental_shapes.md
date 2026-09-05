@@ -1,18 +1,21 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-09-04
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
 # Incremental Shape Profiles
 
 > **What this is.** The normative spec for the **shape profiles** of maintained models — the
-> per-shape implementation chapters for the two declared output addressings: the **partition
-> grain** (a clocked table maintained partition by partition) and the **key grain** (a keyed
-> table maintained by folding deltas into per-key state), including the composed key-and-time
-> form. A profile owns only what is meaningful *inside* its shape; everything shared it composes
-> by name. Out of scope, with their own homes: the delta algebra, the equivalence invariant, the
+> per-shape implementation chapters for the two declared output addressings (the **partition
+> grain**, a clocked table maintained partition by partition, and the **key grain**, a keyed
+> table maintained by folding deltas into per-key state, including the composed key-and-time
+> form) and for the one **inferred** shape, the **succession grain** (a keyed history table
+> maintained by patching each new row's predecessor, admitted by recognising the shape of the
+> model's own SQL rather than by a declared fact). A profile owns only what is meaningful
+> *inside* its shape; everything shared it composes by name. Out of scope, with their own homes:
+> the delta algebra, the equivalence invariant, the
 > maintenance plan, per-cell admission and write addressing, the contract lattice, the frontier,
 > and the graph layer (`incremental_models.md`); definition-delta migration
 > (`definition_deltas.md`); the provable properties of a model's SQL (`model_properties.md`);
@@ -37,7 +40,8 @@ everything derived from it that is shared across shapes. This spec owns what is 
 it accepts, how its runs execute, which SQL it admits, and the local machinery (ledgers, safety
 checks, column families) that exists only inside that shape.
 
-Three shapes are inhabited, each named by its derived **grain** label:
+Four shapes are inhabited. Three are named by a derived **grain** label read off a declared
+fact; the fourth needs no declared fact at all:
 
 - **partition grain** — a clock and no identity: a complete time-partitioned table, kept current
   by rewriting touched partitions.
@@ -77,7 +81,28 @@ Three shapes are inhabited, each named by its derived **grain** label:
   FROM smelt.raw_events GROUP BY event_id
   ```
 
-Declaring neither fact leaves no maintainable shape. A fourth derived label,
+- **succession grain** — no declared fact: a keyed history table whose validity intervals come
+  from `LEAD`/`LAG` window functions in the model's own SQL, kept current by patching each new
+  row's immediate predecessor. Admission reads the SQL shape directly rather than a `grain:` or
+  `unique_key:`/`timeseries:` declaration — the classifier is the declaration
+  (§"The succession grain").
+
+  ```sql
+  ---
+  refresh: incremental
+  ---
+  SELECT
+      customer_id,
+      tier,
+      region,
+      effective_ts AS valid_from,
+      LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to,
+      LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) IS NULL AS is_current
+  FROM smelt.customer_changes
+  ```
+
+Declaring neither `timeseries:` nor `unique_key:`, and having a SQL shape the succession
+classifier does not recognise, leaves no maintainable shape. A further derived label,
 `key_per_partition` (the key recurs across partitions, storing a per-partition trajectory), is
 derived-only: declaring it is a hard error, and the derived label currently refuses at plan
 derivation (§Known Divergences).
@@ -86,7 +111,11 @@ The shapes are not modes to choose between — they are what the declared facts 
 and they compose. Declaring `unique_key` on a clocked table does not bolt "dedup" onto it; it
 makes the output key-addressable, which unlocks keyed maintenance for dimension corrections
 while new-data arrival still rewrites partitions. Several capabilities exist *only* in the
-composed shape (§"Key temporal locality (the time-partitioned output)").
+composed shape (§"Key temporal locality (the time-partitioned output)"). The succession grain
+does not compose with the other three: it is admitted by a distinct SQL shape (window functions
+in the projection) that the partition and key grains each independently forbid or cannot
+express, so a model is a succession-grain model or a partition/key/composed model, never a
+blend of both.
 
 The examples throughout draw from the running warehouse of `incremental_models.md` §Overview
 ("The running example"): sources `orders`, `order_events`, `raw_events` (redelivery-prone,
@@ -100,6 +129,7 @@ derived in each model that reads it. Models:
 | `order_lifecycle` | identity | key grain (bare) |
 | `order_facts` | clock + identity (joins `customers`) | composed — the per-cell-addressing example |
 | `event_dedupe` | clock + identity | composed — the locality example |
+| `customer_history` | none — SQL shape only, over `customer_changes` | succession grain |
 
 Reading guide: *what can I declare, and what errors can I get?* → §Surface. *What does a run of
 my shape actually do?* → §Semantics, one chapter per shape. *Why is the shape designed this
@@ -341,6 +371,51 @@ sugar for the overwrite, once-write, and plain-overwrite families. They ship as 
 admitted on exactly the same terms as hand-written calls. Promotion to built-ins is a possible
 later step, not part of this surface (§Future Extensions).
 
+### Succession-grain admission (no declaration)
+
+Opt-in: `refresh: incremental` alone, with **no** `unique_key`, no `timeseries:`, and no
+`grain:` value. Nothing is declared because nothing needs to be — the model's SQL shape *is*
+the declaration, read by the keyed-succession classifier (`model_properties.md` §"Keyed-
+succession classification"). `customer_history` from the running example (§Overview):
+
+```sql
+---
+refresh: incremental
+---
+SELECT
+    customer_id,
+    tier,
+    region,
+    effective_ts AS valid_from,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) IS NULL AS is_current
+FROM smelt.customer_changes
+```
+
+The classifier admits a model iff:
+
+- every window function in the outermost projection is `LEAD(t)`/`LAG(t)` — or a scalar
+  expression over one, such as the `IS NULL` above — with `PARTITION BY k ORDER BY t`, where
+  `t` is the driving source's event-time column (`model_properties.md` §"Event-time
+  monotonicity trace" must certify `t` `Traceable`) and `k` is a column set every window shares
+  identically;
+- every projected column that is not a window function (or an expression over one) is
+  row-local — a function of the current row alone, not an aggregate or a further window;
+- at most one further filter follows the projection, of the form `WHERE NOT <boolean column>`
+  over a row-local boolean column (the delete-flag admission, §"The succession grain" §"Delete
+  events").
+
+The derived output identity is `(k, t)` — one row per key per event, addressed by the pair the
+window functions themselves partition and order by. No `unique_key` is declared or inferable
+from a `GROUP BY`, because there is none: this shape has no aggregation.
+
+A model matching none of the three admitted grains — no `GROUP BY` (ruling out key grain), no
+`timeseries:` (ruling out partition grain), and a SQL shape the succession classifier does not
+recognise — has no maintainable shape under `refresh: incremental` and refuses
+(`SuccessionPatternUnrecognized`, below), naming the nearest declared route
+(`refresh: full`, `refresh: materialized_view`, or declaring `unique_key`/`timeseries` to reach
+one of the other three grains).
+
 ### Diagnostics
 
 All codes are catalogued in `diagnostics.md`; this spec owns the semantics of the shape-local
@@ -380,6 +455,19 @@ chooser").
 | `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window, and the repair family cannot admit a per-group recompute for the change; names the failing repair obligation and points at `--full-refresh` (§"Reprocessing", `incremental_models.md` §"The repair family"). |
 | `KeyedRecurrenceDeclarationMismatch` | Plan time: a declared `key_recurrence` disagrees with the recurrence bound derived from the SQL. Names both values; the derived value is authoritative and the declaration must be corrected or removed (key-grain rule 16). |
 | `KeyedRecurrenceBoundViolated` | Runtime, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice. The run's transaction rolls back; reports the violation count and sample keys (§"Key temporal locality (the time-partitioned output)"). |
+
+**Succession-grain codes.** Each names the specific clause that broke admission — a
+`refresh: incremental` model with none of the three grains' declared facts never falls back
+silently; it refuses with the nearest fix (§"Succession-grain admission (no declaration)").
+
+| Code | Fires when |
+|---|---|
+| `SuccessionWindowFunctionNotLead` | A window function appears in the projection that is not `LEAD`/`LAG`, or not a scalar expression over one; names the offending call. |
+| `SuccessionPartitionKeyMismatch` | Two or more window functions in the projection partition by different column sets, or partition by a column set the classifier cannot resolve to a stable per-row key. |
+| `SuccessionOrderNotMonotoneClock` | A window's `ORDER BY` column does not trace as a monotone event-time clock on the driving source (`model_properties.md` §"Event-time monotonicity trace" returns `NotTraceable`); names the column and the trace's refusal reason. |
+| `SuccessionRowLocalColumnViolation` | A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local; names the column. |
+| `SuccessionDeleteFilterMisplaced` | A post-projection filter exists but is not exactly `WHERE NOT <row-local boolean column>` applied after the window functions — e.g. it filters before the window, filters a non-boolean or non-row-local expression, or is not a negated single column (§"The succession grain" §"Delete events"). |
+| `SuccessionPatternUnrecognized` | `refresh: incremental` with no `GROUP BY`, no `timeseries:`, and a SQL shape none of the succession rules above individually names; the general fallback when the model does not resemble any admitted grain. Names the three declared routes as fixes. |
 
 ## Semantics
 
@@ -950,6 +1038,68 @@ additive models refuse re-processing of ledgered windows (`KeyedReprocessedWindo
 to `--full-refresh`. **Snapshot-reconcile:** the model is always-stale; every `--auto` run
 reconciles.
 
+### The succession grain
+
+The one inferred shape: a keyed history table, one row per `(k, t)` pair, kept current by
+inserting each new event and patching its immediate predecessor's `LEAD`-derived columns.
+Admitted surface: §"Succession-grain admission (no declaration)".
+
+| Kind | What the profile composes | Home |
+|---|---|---|
+| **Output shape / grain** | `(k, t)` — one row per key per event, addressed by the pair the projection's window functions partition and order by; not a `unique_key` (no `GROUP BY` exists) | this spec |
+| **Properties (required)** | the keyed-succession classifier (window-function shape, row-local column check, delete-filter admission); event-time monotonicity trace of the driving source, certifying the `ORDER BY` column | `model_properties.md` |
+| **World-facts (consumed)** | none beyond the driving source's clock — no declared `unique_key`, `timeseries:`, or `functional_dependencies:` | — |
+| **Default plan** | succession-patch keyed `MERGE`: insert the new row(s), patch each new row's stored predecessor's `LEAD`-derived columns | `model_transforms.md` |
+| **Admission** | the classifier itself — a leaf verdict the composition walk invokes, not a per-cell admission matrix lookup (there is only one cell: insert-plus-predecessor-patch) | `model_properties.md` |
+| **Invariant upheld** | end-state equivalence — the projection's own `LEAD`/`LAG` over the full processed input is the executable oracle, identically to the key grain's SQL-is-the-oracle rule | `incremental_models.md` §"The equivalence invariant" |
+
+#### The maintenance theorem (bounded footprint)
+
+When a batch of new events is processed, the only stored rows whose output changes are the new
+rows themselves (inserted) and, for each new row, its **immediate predecessor within its key**
+— the stored row whose `LEAD(t)` acquires or changes a value. Both are locatable from stored
+state: the predecessor is the stored row for the same key with the greatest `t` less than the
+new row's `t`.
+
+The theorem covers **late events** without qualification. An event that splices into the middle
+of a key's history touches exactly its predecessor (whose `valid_to` shrinks to the new event's
+time) and takes its own `valid_to` from its successor (the minimum stored `t` for the key above
+the new event's `t`) — locatable the same way regardless of arrival order. There is no derived
+horizon and no lateness bound to declare: every event, however late, is admitted by the same
+rule, because the footprint the theorem names is always exactly two rows (the new row and its
+predecessor), never a function of how late the event is.
+
+#### Delete events
+
+A delete-flagged row (a CDC tombstone in the change stream `customer_history` reads) must still
+close out its predecessor's validity interval before it is dropped from the output — deleting a
+version ends the previous version's currency without opening a new one. The classifier admits
+this by permitting one trailing `WHERE NOT <boolean column>` filter *after* the window
+functions in the query (`SuccessionDeleteFilterMisplaced` otherwise, `model_properties.md`
+§"Keyed-succession classification"): the `LEAD` is computed over every row including deletes, so
+a deleted row still contributes its timestamp to its predecessor's `valid_to`, and only then is
+it filtered from the materialised output. The succession-patch `MERGE` (`model_transforms.md`)
+reflects this: a delete event contributes a predecessor patch but no insert.
+
+This is a self-contained widening of the pattern grammar, not a dependency on the driving
+source declaring a change feed (`sources.md`) or on general change-feed/CDF consumption — the
+delete flag is an ordinary row-local boolean column in an already-consumed input, no different
+in kind to the classifier than any other tracked-attribute column.
+
+#### What stays out of this grain
+
+**SCD2 over mutable snapshots** is never admitted here regardless of SQL shape: deriving a
+change stream by diffing successive scans of a mutable snapshot source would stamp version
+boundaries with the scan time — the run clock — making the history depend on when `smelt build`
+happened to run, which breaks the replay-safety the equivalence invariant demands
+(`incremental_models.md` §"The equivalence invariant"). The succession grain requires a source
+that already carries change events with their own event times; a snapshot-to-change-stream
+facility, if ever wanted, is a source-layer concern (`sources.md`), never this profile's.
+
+**Non-succession window functions** — a running total, a ranking function, a frame-based
+aggregate — are not this grain; they either fail the classifier and stay on `refresh: full`, or
+belong to a different, not-yet-admitted pattern family entirely (§Future Extensions).
+
 ## Design
 
 Each paragraph records one load-bearing decision and what was rejected. Deeper derivations live
@@ -1084,6 +1234,45 @@ windowed-keyed-maintenance driver (`model_transforms.md`), parameterised by
 drift risk; a consequence is that every consumer inherits the driver's granularity support
 (day and week today — widening is driver work, §Future Extensions).
 
+### Succession-grain design
+
+**Recognition, not declaration.** A declared `versioning: interval` profile — smelt-managed
+hidden validity columns, a tracked-attribute change detector, a bespoke "interval-keyed"
+equivalence contract — was rejected in favour of reading the shape directly off the model's own
+`LEAD`/`LAG` SQL. The declared profile bought exactly one feature and carried its own open
+questions (hidden column surface, NULL vs. far-future sentinel, tracked-attribute selection);
+the classifier buys the whole family of `LEAD`/`LAG`-over-clock-within-key models (SCD2,
+next-event features, sessionisation gaps) with no declaration surface at all, and the user's SQL
+already states every one of the declared profile's open questions explicitly. This is the same
+"derive from the SQL, never restate in frontmatter" principle the key grain's column families
+already apply, taken one step further: here even the *grain itself* is inferred, not merely the
+per-column combiner. (`docs/research/20260723-scd2-succession-pattern.md`.)
+
+**The first inference-only shape, deliberately narrow.** The partition and key grains stay
+declared: `grain: partition`/`grain: key` (or the `timeseries:`/`unique_key:` facts they derive
+from) are not made optional by this shape's existence, and no general "infer any grain from SQL
+alone" admission path is introduced. The succession grain earns inference because its SQL shape
+(window functions in the outermost projection) is one the other two grains already positively
+forbid or cannot express (`KeyedForbidsWindowFunctions`; partition grain has no per-key window
+semantics at all), so there is no ambiguity to resolve between a declared and an inferred
+reading of the same SQL. Extending inference to a shape that could plausibly be either declared
+or inferred is future work, not decided here (§Future Extensions).
+
+**Bounded footprint, not a horizon.** Every other windowed shape in this spec bounds its reach
+with a *derived horizon* — a margin past which a late fact is excluded. The succession grain
+needs none: its maintenance theorem names an exactly-two-row footprint (new row, predecessor)
+for every event regardless of how late it arrives, so there is nothing to derive a bound over.
+Introducing a horizon here would be solving a problem this shape does not have.
+
+**Delete admission is a grammar widening, not a change-feed dependency.** Recognising
+`WHERE NOT <boolean column>` as a permitted post-window filter was chosen over requiring the
+driving source to declare a change feed (`sources.md`) or waiting on general change-feed/CDF
+consumption (`incremental_models.md` §Future Extensions "Live change-feed folds"): the delete
+flag is already an ordinary row in the input the model reads, so admitting it needs only a
+classifier rule, not new source-layer or delta-typing machinery. Coupling SCD2 delete-handling
+to the unrelated, unscheduled CDF work would have blocked a self-contained feature on a much
+larger one.
+
 ## Constraints & Invariants
 
 ### Partition-grain constraints
@@ -1208,6 +1397,31 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
     comparison anywhere in locality reasoning is order-independent: a key is a set of columns,
     never a list.
 
+### Succession-grain constraints
+
+1. **Admission is the classifier; there is no declared surface.** No `grain:`, `unique_key`, or
+   `timeseries:` value changes succession-grain admission or behaviour. A future declared knob
+   for this shape would be a spec change, not a frontmatter addition silently consumed here.
+2. **The output identity is `(k, t)`, never a `unique_key`.** A model admitted to this grain has
+   no `GROUP BY` and derives no single-row-per-key identity; downstream consumers see a history
+   table, one row per event.
+3. **The footprint is exactly two rows per processed event: the new row and its immediate
+   predecessor within its key.** No derived horizon, no lateness bound, and no declared margin
+   ever widens or narrows it — late arrivals are admitted by the same rule as on-time ones.
+4. **The classifier is fail-closed.** A window function that is not `LEAD`/`LAG` (or an
+   expression over one), a non-row-local non-window projection, an unresolvable partition key,
+   a non-monotone `ORDER BY`, or a misplaced filter each refuses with a named diagnostic
+   (§"Diagnostics") — never falls back to an approximate or partial maintenance.
+5. **End-state equivalence holds with the model's own SQL as the oracle**, identically to the
+   key grain's rule: `full_refresh(model SQL)` over the same processed inputs is the executable
+   correctness definition, with no bespoke interval-keyed specialisation.
+6. **Delete admission is exactly one grammar shape.** Only `WHERE NOT <row-local boolean
+   column>` applied after the window functions is admitted; any other filter placement or shape
+   refuses (`SuccessionDeleteFilterMisplaced`).
+7. **SCD2-over-mutable-snapshots is never admitted, regardless of SQL shape** — this grain
+   requires a source that already carries change events with their own event times
+   (§"What stays out of this grain").
+
 ## Known Divergences / Open Questions
 
 Live gaps between this spec and the implementation, and questions where intent itself is
@@ -1310,6 +1524,21 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   at plan derivation (`MaintenanceUnsupportedGrain`); trajectory support is tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 
+### The succession grain
+
+- **No implementation exists yet.** The classifier (`model_properties.md` §"Keyed-succession
+  classification"), the succession-patch technique (`model_transforms.md`), and this profile's
+  admission rules are specified but unimplemented; `refresh: incremental` over a
+  keyed-succession-shaped model today refuses with the ordinary "no maintainable shape" error
+  rather than the named diagnostics above. No plan exists yet — this spec diff is the input to
+  one.
+- **The generative conformance recipes this profile's splice and delete claims depend on do not
+  exist yet.** §"The maintenance theorem (bounded footprint)" and §"Delete events" are proved on
+  paper; a late-arriving-splice recipe family and a delete-then-late-insert recipe family, run
+  against the full-refresh oracle by `cargo test -p smelt-cli --test maintenance_conformance`
+  (`incremental_models.md` §References), are where those claims will actually be checked. Until
+  they exist, this profile's theorem is a design claim, not a verified one.
+
 ## Future Extensions
 
 Ideas for widening the admission space that are **not decided**. Nothing here is surface;
@@ -1345,6 +1574,13 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
 - **Promoting the pattern functions to built-ins.** `smelt.latest`/`smelt.once`/
   `smelt.current` ship as a `smelt.define` template file; a registry surface is worth its
   cost only if adoption proves the names.
+- **Widening inference beyond the succession grain.** The succession-grain classifier recognises
+  exactly one window-function shape (`LEAD`/`LAG`-over-clock-within-key). Other
+  `LEAD`/`LAG`-adjacent shapes — next-event feature computation, session-gap detection, running
+  ranks — are structurally similar and could plausibly earn their own inferred grain by the same
+  method; none is specified. Extending inference to a shape the partition or key grain could
+  also plausibly claim (rather than one they positively forbid) is a harder design question,
+  deliberately left open (§"Succession-grain design").
 - **Metric expansion in partition-grain bodies.** The `PartitionGrainForbidsMetrics` refusal
   stands until the composition of metric expansion with time-filter injection is specified,
   when metrics work resumes.
@@ -1438,3 +1674,14 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   boundary); `docs/research/20260703-model-updates.md`;
   `docs/research/20260705-refresh-as-maintenance-plan/` (the shape-profile demotion and
   per-cell admission this spec composes).
+
+### The succession grain
+
+- **Research**: `docs/research/20260723-scd2-succession-pattern.md` (the full design sketch this
+  profile specifies: the pattern, the maintenance theorem, the four-layer machinery breakdown,
+  the two hard parts, and the case for recognition over declaration).
+- **Related specs**: `model_properties.md` §"Keyed-succession classification" (the classifier);
+  `model_transforms.md` (the succession-patch keyed `MERGE`); `incremental_models.md` §Limitations
+  "No smelt-maintained SCD2 — history-keeping is plain SQL" (the boundary of what this profile
+  admits vs. what stays plain SQL); `diagnostics.md` §"Succession grain" (the code catalogue).
+- **Plans (history)**: none yet — this spec diff is the input to the first one.

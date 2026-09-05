@@ -1964,15 +1964,19 @@ cut. Unlike §Known Divergences (implementation lagging decided intent), nothing
 to be closed by a tracked plan — changing an entry requires its own spec diff. Each entry
 states the boundary, the reason, and the sanctioned alternative.
 
-### No smelt-maintained SCD2 — history-keeping is plain SQL
+### SCD2 recognition is bounded to the keyed-succession pattern
 
-smelt has no declared or derived history-keeping shape: no frontmatter opts a keyed model
-into retaining every version of a key. SCD2 is written as ordinary windowed SQL over a change
-stream. `customer_history` over the running example's `customer_changes` feed:
+smelt has no declared history-keeping shape: no frontmatter opts a model into retaining every
+version of a key. Instead, a model whose SQL matches the **keyed-succession pattern** — every
+window function in the projection is `LEAD`/`LAG` (or a scalar expression over one) partitioned
+by an entity key and ordered by the driving source's monotone event-time column, every other
+projected column row-local — is recognised directly from that SQL and given a
+`refresh: incremental` route (`incremental_shapes.md` §"The succession grain"). `customer_history`
+over the running example's `customer_changes` feed is exactly this shape:
 
 ```sql
 ---
-refresh: full
+refresh: incremental
 ---
 
 SELECT
@@ -1986,23 +1990,27 @@ FROM smelt.customer_changes
 ```
 
 Every version of a key is a row; each version's validity interval closes at the next change's
-event time; the newest version per key is open. If the feed carries no-op change events (full
-row images where no tracked attribute changed), dedupe first — a `LAG`-comparison filter over
-the tracked columns before the `LEAD` — so spurious versions never open.
+event time; the newest version per key is open. A delete-flagged row in the change stream closes
+its predecessor's interval without opening a new one (`incremental_shapes.md` §"Delete events").
+If the feed carries no-op change events (full row images where no tracked attribute changed),
+dedupe first — a `LAG`-comparison filter over the tracked columns before the `LEAD` — so
+spurious versions never open.
 
-The two sanctioned routes for keeping such a model current:
+A model outside this pattern — an aggregate mixed into the same projection, a window ordered by
+something other than a traceable clock, a running-total or ranking window rather than
+`LEAD`/`LAG` — is not recognised, and stays on the two routes available to arbitrary windowed
+SQL:
 
 - **`refresh: full`** — rebuild from the change stream each run. Always correct; cost is a
   full rescan of the feed.
 - **`refresh: materialized_view`** — the same SQL, engine-maintained, where the backend has
   native IVM (`materialized_view.md` §Design "No named pattern").
 
-There is deliberately no `refresh: incremental` route: `LEAD` is inadmissible in every shape —
-the key grain rejects window functions outright (`KeyedForbidsWindowFunctions`,
-`incremental_shapes.md`), and under the partition grain a new event must rewrite a row in an
-already-written earlier partition, outside every output clamp. Recognising the
-LEAD-over-clock-within-key pattern as an admissible incrementally-maintained shape is sketched
-in §Future Extensions.
+The key grain still rejects window functions outright (`KeyedForbidsWindowFunctions`,
+`incremental_shapes.md`) — the keyed-succession pattern is a distinct, inferred shape, never an
+instance of the key grain — and under the partition grain a new event must still rewrite a row
+in an already-written earlier partition, outside every output clamp, so neither declared grain
+gains a `LEAD` route.
 
 ### No SCD2 over mutable snapshots
 
@@ -2178,20 +2186,6 @@ none of it may be relied on or implemented against until it graduates into
   assertable, printed over the full lattice. Deliberately after the scheduler and
   definition-delta work, which change what the proofs say.
   (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.)
-- **Smelt-maintained SCD2 via succession-pattern recognition.** The plain-SQL SCD2 shape
-  (§Limitations) could gain a `refresh: incremental` route by *recognising* the pattern
-  rather than declaring it: a walk-produced verdict that every window function in the
-  projection is `LEAD(t)` (or an expression over it) partitioned by an entity key and ordered
-  by the driving source's event-time column. The maintenance theorem: a new event touches
-  only its own row and its immediate predecessor within the key — bounded footprint, late
-  events included (a mid-history splice touches exactly the predecessor and reads its
-  successor). The technique is a keyed `MERGE` plus a targeted predecessor patch, and the
-  standard equivalence invariant applies directly (the SQL is its own oracle). The machinery
-  generalises beyond SCD2 to any `LEAD`/`LAG`-over-clock-within-key model (next-event
-  features, sessionisation gaps), which is what would justify building it. Open: the
-  classifier grammar (expressions over `LEAD`, post-window delete filtering), the fail-loud
-  diagnostics for near-misses, and the `model_properties.md` walk vocabulary for window
-  functions. Full sketch: `docs/research/20260723-scd2-succession-pattern.md`.
 - **Automatic, watermark-diffed `--since-upstream`.** Today the caller supplies each source's
   landed delta explicitly (§Surface "CLI"). A future extension persists a per-source "last
   propagated through" watermark in `smelt-state` and diffs it against the source's current
@@ -2273,7 +2267,9 @@ none of it may be relied on or implemented against until it graduates into
   registry §"Per-cell write addressing" and §"The declared shape" encode);
   `docs/research/20260809-incremental-rethink.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` (the delta-signature
-  front door and the definition-delta unification this spec encodes).
+  front door and the definition-delta unification this spec encodes);
+  `docs/research/20260723-scd2-succession-pattern.md` (the keyed-succession pattern
+  §"SCD2 recognition is bounded to the keyed-succession pattern" specifies).
 - **Related specs**: `incremental_shapes.md` (the shape profiles); `definition_deltas.md`
   (definition-delta migration); `model_properties.md` (the derived proofs — monotonicity
   trace, bound/reach, partition alignment, determinism, discriminants, anchor resolution,
