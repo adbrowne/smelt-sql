@@ -132,7 +132,7 @@ and neutrals. When nothing shifted the whole output is the single line
                      | "probe_removed" | "column_added" | "column_removed" | "determinism"
                      | "discriminant" | "comparability" | "fd_added" | "fd_removed"
                      | "literal_column" | "set_op_barrier" | "fan_out_join"
-                     | "maintenance_lost" | "maintenance_gained",
+                     | "maintenance_lost" | "maintenance_gained" | "state_downgrade",
           "subject": "<cell group@source | source name | column name | probe fact>",
           "direction": "downgrade" | "upgrade" | "neutral",
           "old": <json value or null>,
@@ -203,7 +203,12 @@ version, derived by the same pure functions the report is built from, and it con
    verdicts are derived together, by one pure function, and are never split back into separate
    profile fields — doing so would fork the derivation.
 2. `cell_verdicts` — for a maintained model, each `PlanCell`'s `(group, trigger, corner, admitted
-   technique, row identity, contract point)`; for an unmaintained model, empty. Named
+   technique, row identity, contract point, state downgrade)`; for an unmaintained model, empty.
+   A cell's state downgrade (`incremental_models.md`, `state.md` §"The degradation contract") is
+   present when the technique the plan actually admits was forced down from a cheaper one because
+   a state structure the cheaper technique needs has no realisation on the target — a state
+   downgrade is by definition a downgrade, and the diff must see it appear or disappear the same
+   way it sees a `cell_technique` change. Named
    `cell_verdicts` rather than `cells` because the model-diagnostics response
    (`ui_model_diagnostics.md` §Surface) already carries an unrelated `cells` key (the
    technique-preview set) beside the flattened profile. A cell's contract point carries, in
@@ -273,6 +278,7 @@ are data in `smelt-logical`, not spread across renderers:
 | `cell_technique` | new technique is lower on the ladder `KeyedFold` ≻ `ColumnScopedMerge` ≻ `InPlaceUpdate` ≻ `PerGroupRecompute` ≻ `DeleteInsert` | higher |
 | `cell_added` / `cell_removed` | a cell is removed from a still-maintained model (a column group lost its maintenance route) | a cell is added |
 | `maintenance_lost` / `maintenance_gained` | the model's cell list went from non-empty to empty — no cell survived at all, so it is no longer incrementally maintained | empty to non-empty (maintenance regained) |
+| `state_downgrade` | a cell's state downgrade appeared (the target gained a technique it can no longer realise the required state structure for) | a cell's state downgrade disappeared |
 | `source_bound` | `Bounded` → `Unbounded`, or a bounded interval widened (`before + after` grew) | narrower, or `Unbounded` → `Bounded`. `NotDerivable` orders with `Unbounded`: `Bounded` ≻ `{Unbounded, NotDerivable}`, and a change between `Unbounded` and `NotDerivable` in either direction is `neutral` — both force a full read, so neither is worse than the other |
 | `grain` / `row_identity` / `cell_row_identity` | a non-empty grain became empty or lost a key column; a row identity moved `Key` → `WholeRow` | gained a proven grain; `WholeRow` → `Key` |
 | `refusal_added` / `refusal_removed` | a refusal appeared | one disappeared |
@@ -300,9 +306,13 @@ sees two different spellings for the same technique.
 
 ### Attribution
 
-The **edited set** is the set of model files whose *frontmatter-stripped* SQL text differs
-between the two versions, plus files whose `smelt.yml` model override differs, plus source
-`.yml` files whose declaration changed. A shifted model whose own file is in the edited set has
+The **edited set** is the set of model files whose *frontmatter-stripped* SQL text **or parsed
+frontmatter metadata** differs between the two versions, plus files whose `smelt.yml` model
+override differs, plus source `.yml` files whose declaration changed. Frontmatter is stripped to
+blank lines before the SQL comparison, so a frontmatter edit is invisible to that half of the
+predicate unless it happens to change a line's byte length; comparing the parsed metadata
+directly closes that gap — a `unique_key:`/`refresh:`/`grain:`/`contract:` edit is itself an edit
+to the model, not a downstream effect of something else. A shifted model whose own file is in the edited set has
 cause `edited`. Otherwise its cause is `downstream` and `of` lists the **nearest edited
 ancestors**: walking the working tree's dependency graph upward from the model, every edited
 model or source reached without passing through another edited node. A shifted model with no
@@ -335,9 +345,12 @@ the committed content at the ref.
   snapshot. The `column_added`/`column_removed` dimensions here are neutral precisely because
   schema change has its own owner; they appear only so a reader can see why a cell was added or
   removed.
-- **Salsa purity.** The profile derivation is a pure function over already-loaded workspace data
-  and is wrapped by a thin `smelt-db` query on each side; the diff is a pure function over two
-  profile maps (`architecture.md` §"Salsa purity rule (analysis)").
+- **Salsa purity.** The per-model maintenance-plan derivation the profile is built from stays a
+  thin `smelt-db` query (`maintenance_plan_report`) over pure `smelt-logical` functions,
+  consistent with `architecture.md` §"Salsa purity rule (analysis)". The profile itself is
+  assembled from that report by a single-owner builder in `smelt-runtime`
+  (`build_model_diagnostics`), which both the single-version report and the diff call — there is
+  no second assembly path. The diff is a pure function over two profile maps.
 - **Project isolation.** In a multi-project workspace the editor computes one diff per project;
   the CLI diffs the project at `--project-dir` only (`architecture.md` §"Project isolation rule").
 

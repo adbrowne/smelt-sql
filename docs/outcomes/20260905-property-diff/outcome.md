@@ -36,7 +36,12 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
    `merge-base`, `archive`), loads through `load_workspace`, and leaves no worktree, stash,
    index entry, ref, or scratch directory behind (a test asserts `git status --porcelain` and
    `git worktree list` are unchanged after a diff). An unresolvable baseline is
-   `PropertyDiffBaselineUnavailable` / exit `2`, never an empty diff.
+   `PropertyDiffBaselineUnavailable` / exit `2`, never an empty diff. The profile for each side is
+   assembled by the single-owner `smelt-runtime` builder (`build_model_diagnostics`), consumed by
+   a thin `smelt-db` query (`maintenance_plan_report`) over pure `smelt-logical` functions — not a
+   "thin `smelt-db` profile query" (`smelt-db` cannot depend on `smelt-runtime`, which owns the
+   probe plan a profile carries; corrected per `docs/specs/property_diff.md` §Interactions
+   "Salsa purity").
 4. `smelt explain --diff [<ref>]` with `--json`, `--markdown`, `--fail-on {downgrade,any}`,
    `--select` (reported set only) works as specified; combining `--diff` with `<model>`,
    `--show-sql`, `--period`, or `--technique` exits `2`. A real-fixture test copies
@@ -84,7 +89,7 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
 | 1 | Diagnostics catalogue + spec cross-refs: add `PropertyDowngrade` and `PropertyDiffBaselineUnavailable` to `DiagnosticCode`, `diagnostics.md`, `map_metadata_error_to_diagnostic` exhaustiveness untouched; `cli.md`/`lsp.md` pointers to `property_diff.md` | done |
 | 2 | `PropertyProfile` in `smelt-logical` derived by the same pure functions the report uses; `ModelDiagnostics` and the CLI report render from it; `property_profile_parity` gate over both example workspaces | done |
 | 3 | `diff_profiles`: dimensions, the exhaustive direction table, matching rules, added/removed/unshifted, attribution over the dependency graph; unit tests per §"Direction" row | done |
-| 4 | Baseline materialisation in `smelt-core`: ref/merge-base resolution, `git archive` into scratch, `load_workspace`, cleanup guarantee, `PropertyDiffBaselineUnavailable`; thin `smelt-db` profile query | pending |
+| 4 | Baseline materialisation in `smelt-core`: ref/merge-base resolution, `git archive` into scratch, `load_workspace`, cleanup guarantee, `PropertyDiffBaselineUnavailable`; `smelt-runtime::profile::profiles_for_workspace` assembling both sides' profile maps | pending |
 | 5 | `smelt explain --diff` text + JSON + `--fail-on` + `--select` + flag exclusivity; temp-git-repo fixture test over `examples/timeseries`; `smelt-explain.md` reference page | pending |
 | 6 | `--markdown` renderer with marker and `<details>`; `docs-site/docs/guide/ci.md`; dogfood job in `.github/workflows` posting/updating one comment over `examples/` | pending |
 | 7 | LSP: code lens capability, baseline cache keyed on resolved commit with `.git/HEAD` watch, `PropertyDowngrade` anchoring, non-git silence; `property_diff_parity` gate; `editor-features.md` | pending |
