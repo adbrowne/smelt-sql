@@ -418,11 +418,13 @@ fn probe_partition_column_rename_refusal() {
 }
 
 /// Ratchet: `docs/outcomes/20260815-partition-grain-residue` closed seven pre-`docs/outcomes/`
-/// partition-grain Known Divergences bullets (phases 2-7; two folded into phase 2). This test
-/// pins the bullet set the spec's §"The partition grain" Known Divergences is allowed to carry
-/// going forward, so a future edit cannot quietly reintroduce a closed residue without the
-/// change being visible here. Green on arrival; red if the bullet set drifts from the six this
-/// outcome does not own.
+/// partition-grain Known Divergences bullets (phases 2-7; two folded into phase 2), and the
+/// 2026-09-04 decision track (`3e9c1a4a`) closed two more — non-deterministic row-set membership
+/// became a permanent refusal, and per-column `data_latency` was retired in favour of
+/// orchestration-only lateness. This test pins the bullet set the spec's §"The partition grain"
+/// Known Divergences is allowed to carry going forward, so a future edit cannot quietly
+/// reintroduce a closed residue without the change being visible here. The count ratchets DOWN
+/// only: adding a lead back requires the spec to have genuinely reopened the divergence.
 #[test]
 fn partition_grain_residues_stay_closed() {
     let spec_path =
@@ -446,8 +448,6 @@ fn partition_grain_residues_stay_closed() {
         .collect();
 
     let expected_leads = [
-        "Per-column `data_latency` is unimplemented",
-        "Non-deterministic row-set-membership or grouping is out of scope",
         "Schema evolution on the partition grain is largely a definition delta now",
         "The `PartitionGrainForbidsMetrics` refusal is unimplemented",
         "The sub-`g_part` rejection does not yet name the coarsened window",
@@ -457,8 +457,8 @@ fn partition_grain_residues_stay_closed() {
     assert_eq!(
         bullets.len(),
         expected_leads.len(),
-        "expected exactly {} partition-grain Known Divergences bullets (the six this outcome \
-         does not own), found {}:\n{}",
+        "expected exactly {} partition-grain Known Divergences bullets (the ones no closed \
+         outcome or decision owns), found {}:\n{}",
         expected_leads.len(),
         bullets.len(),
         bullets.join("\n")
