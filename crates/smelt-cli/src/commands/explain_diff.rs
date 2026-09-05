@@ -21,7 +21,9 @@ use smelt_cli::{find_project_root, init_db, parse_selector, CliError, Config};
 use smelt_core::baseline::{edited_set, materialize, resolve_baseline};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::workspace::load_workspace;
-use smelt_logical::analysis::diff::{diff_profiles, BaselineInfo, CauseKind, DiffGraph, DiffReport};
+use smelt_logical::analysis::diff::{
+    diff_profiles, BaselineInfo, CauseKind, DiffGraph, DiffReport,
+};
 use smelt_logical::analysis::diff_render::text_report;
 use smelt_runtime::profile::profiles_for_workspace;
 
@@ -61,7 +63,11 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
         edited.project_config_changed,
     );
 
-    let mut diff = diff_profiles(&base_profiles.profiles, &work_profiles.profiles, &diff_graph);
+    let mut diff = diff_profiles(
+        &base_profiles.profiles,
+        &work_profiles.profiles,
+        &diff_graph,
+    );
     // C2: an added/removed entry whose absence on that side was a
     // derivation FAILURE, not a genuine new/deleted model, carries that
     // failure as its reason (`docs/specs/property_diff.md` §Constraints
@@ -83,10 +89,11 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
         let config =
             Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
         let db = init_db(&project_dir, &work_loaded.sql_files);
-        let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+        let ws = smelt_db::Workspace::try_get(&db)
+            .ok_or_else(|| anyhow::anyhow!("workspace not initialized"))?;
         let project = db
             .project_input(&project_dir)
-            .expect("project not initialized");
+            .ok_or_else(|| anyhow::anyhow!("project not initialized"))?;
         let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
         let active_scope = compute_scope(&project_dir, &cwd, &config.paths, None);
         let resolved_select =
@@ -109,9 +116,7 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
         for m in &report.models {
             for c in &m.changes {
                 match c.direction {
-                    smelt_logical::analysis::diff::Direction::Downgrade => {
-                        summary.downgrades += 1
-                    }
+                    smelt_logical::analysis::diff::Direction::Downgrade => summary.downgrades += 1,
                     smelt_logical::analysis::diff::Direction::Upgrade => summary.upgrades += 1,
                     smelt_logical::analysis::diff::Direction::Neutral => summary.neutral += 1,
                 }

@@ -47,12 +47,12 @@
 
 use std::collections::BTreeMap;
 
+use crate::compile::CompilerRegistry;
+use crate::diagnostics::build_bound_context;
 use smelt_core::sources::{discover_source_infos, SourcesConfig};
 use smelt_core::workspace::LoadedWorkspace;
 use smelt_logical::analysis::profile::PropertyProfile;
 use smelt_logical::analysis::source_bounds::BoundContext;
-use crate::compile::CompilerRegistry;
-use crate::diagnostics::build_bound_context;
 
 /// A workspace-wide failure that means no profile can be derived for
 /// *any* model — distinct from a single model's own derivation failure
@@ -153,10 +153,8 @@ pub fn profiles_for_workspace(
         // workspace-wide default.
         let sql_dialect = crate::execute::sql_dialect_for_target(&loaded.config, &target);
         let dialect = smelt_backend::maintenance_dialect(sql_dialect);
-        let availability = crate::maintenance_availability::availability_for_run(
-            sql_dialect,
-            &loaded.config,
-        );
+        let availability =
+            crate::maintenance_availability::availability_for_run(sql_dialect, &loaded.config);
         smelt_logical::maintenance::availability::resolve_availability(
             &mut result.plan.cells,
             &availability,

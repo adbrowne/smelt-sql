@@ -71,3 +71,52 @@ fn profiles_for_workspace_matches_the_report_builder() {
         "profile for {name} must carry real data, not a default"
     );
 }
+
+/// C4 (`docs/outcomes/20260905-property-diff/phases/05-plan.md`,
+/// `docs/specs/property_diff.md` §Constraints item 4): a model's
+/// availability resolution must use ITS OWN target's dialect, not a
+/// workspace-wide default. This fixture (`tests/fixtures/dual_target_
+/// dialect/`, deliberately standalone) declares a DuckDB default target
+/// and one model bound to a Spark target, both identically shaped
+/// `refresh: incremental` / `grain: key` keyed folds over the same
+/// append-only source. Spark has no ledger builder
+/// (`smelt_logical::maintenance::availability::realisable_state_structures`),
+/// so the Spark-targeted model's `KeyedFold` cell must show a
+/// `state_downgrade` regardless of `state.warehouse_tables`, while the
+/// DuckDB-targeted model (identical SQL) must not — proving the dialect was
+/// actually resolved per-model rather than defaulted to DuckDB everywhere.
+#[test]
+fn profiles_use_the_models_own_target_dialect() {
+    let project_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dual_target_dialect");
+    let loaded = smelt_core::workspace::load_workspace(&project_dir);
+    let profiles = smelt_runtime::profile::profiles_for_workspace(&loaded)
+        .expect("profiles_for_workspace must not fail on the dual-target fixture")
+        .profiles;
+
+    let duckdb_profile = profiles
+        .get("lifetime_spend_duckdb")
+        .expect("lifetime_spend_duckdb must have a derived profile");
+    assert!(
+        duckdb_profile
+            .cell_verdicts
+            .iter()
+            .all(|c| c.state_downgrade.is_none()),
+        "the DuckDB-targeted model must not show a state_downgrade: {:?}",
+        duckdb_profile.cell_verdicts
+    );
+
+    let spark_profile = profiles
+        .get("lifetime_spend_spark")
+        .expect("lifetime_spend_spark must have a derived profile");
+    assert!(
+        spark_profile
+            .cell_verdicts
+            .iter()
+            .any(|c| c.state_downgrade.is_some()),
+        "the Spark-targeted model must show a state_downgrade (no ledger builder on \
+         Spark) — if this fails with a hardcoded-DuckDB regression, every cell will show \
+         KeyedFold with no downgrade instead: {:?}",
+        spark_profile.cell_verdicts
+    );
+}

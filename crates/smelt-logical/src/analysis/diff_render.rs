@@ -100,12 +100,7 @@ fn cause_str(cause: &Cause) -> String {
 /// (`docs/specs/property_diff.md` §Surface "Text").
 pub fn model_block(model: &ModelDiff) -> String {
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "  {}  ({})",
-        model.model,
-        cause_str(&model.cause)
-    );
+    let _ = writeln!(out, "  {}  ({})", model.model, cause_str(&model.cause));
     for change in &model.changes {
         let _ = writeln!(out, "    {}", change_line(change));
         if let Some(reason) = reason_line(change) {
@@ -122,7 +117,10 @@ pub fn model_block(model: &ModelDiff) -> String {
 /// `property diff vs <ref>: no models shifted`.
 pub fn text_report(report: &DiffReport) -> String {
     if report.models.is_empty() {
-        return format!("property diff vs {}: no models shifted\n", report.baseline.r#ref);
+        return format!(
+            "property diff vs {}: no models shifted\n",
+            report.baseline.r#ref
+        );
     }
     let mut out = String::new();
     let _ = writeln!(

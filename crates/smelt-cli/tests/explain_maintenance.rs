@@ -1774,17 +1774,15 @@ fn text_report_technique_matches_the_profile_technique() {
     // "renders the raw plan" implementation would fail to reflect.
     let mut downgraded_cell = result.plan.cells[0].clone();
     downgraded_cell.technique = Technique::DeleteInsert;
-    let properties =
-        smelt_logical::analysis::profile::PropertySet::derive(
-            "technique_fixture",
-            "SELECT 1 AS amount",
-            &[],
-            &BoundContext::default(),
-        )
-        .expect("PropertySet::derive");
-    let contract_points: Vec<smelt_logical::contract::ContractPointView> = vec![
-        smelt_logical::contract::effective_contract(None, "", &[]).into(),
-    ];
+    let properties = smelt_logical::analysis::profile::PropertySet::derive(
+        "technique_fixture",
+        "SELECT 1 AS amount",
+        &[],
+        &BoundContext::default(),
+    )
+    .expect("PropertySet::derive");
+    let contract_points: Vec<smelt_logical::contract::ContractPointView> =
+        vec![smelt_logical::contract::effective_contract(None, "", &[]).into()];
     let profile = PropertyProfile::assemble(
         properties,
         std::slice::from_ref(&downgraded_cell),

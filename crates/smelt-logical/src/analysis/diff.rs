@@ -696,11 +696,7 @@ impl DiffReport {
     /// already resolved. `diff_profiles`'s pure `models`/`summary` are
     /// carried unchanged; this is presentation-envelope assembly, not a
     /// second diff.
-    pub fn new(
-        baseline: BaselineInfo,
-        edited_files: Vec<String>,
-        diff: PropertyDiff,
-    ) -> Self {
+    pub fn new(baseline: BaselineInfo, edited_files: Vec<String>, diff: PropertyDiff) -> Self {
         DiffReport {
             baseline,
             edited_files,
