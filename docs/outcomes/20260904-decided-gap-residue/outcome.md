@@ -60,7 +60,7 @@ than the current residue.
 | 3 | Once-write fallback-case nullability route; generative pool coverage | blocked |
 | 4 | Sidecar per-consuming-edge audit test; fix if it fails | done |
 | 5 | `supports_fingerprint_sidecar` residue closed against its stated target | done |
-| 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | pending |
+| 6 | Delete/rewrite the closed bullets, TODO cleanup, validate, gates green | planned |
 
 ## Decision log
 
@@ -152,6 +152,15 @@ than the current residue.
   `key_addressed_model_edge_lowering.rs`, 1 new `SidecarLessBackend`-driven test in
   `fingerprint_sidecar.rs` covering all four entry points) prove the gate is the flag, not the
   dialect. See `phases/05-summary.md`.
+
+- 2026-09-05: Phase 6 planned with no reshape. Phases 1/2/4 already removed their `docs/TODO.md`
+  bullets and phases 3/4 already rewrote their spec bullets, so the residue phase 6 actually
+  owns narrowed to two writes — the `incremental_models.md` "Conditional-maintenance gaps"
+  bullet phase 5 deliberately left stale (it still says the flag is DuckDB-set and names only
+  the widened-scan leg, omitting the `UnsupportedOnBackend` repair/model-edge leg) and the
+  `docs-site` guide sentence that still frames the sidecar as dialect-gated — plus the validate
+  and gate sweep. No new phase row: nothing the summaries surfaced serves a success criterion
+  without already having a home.
 
 ## Blocked
 
