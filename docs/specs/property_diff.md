@@ -213,6 +213,24 @@ work tree, or whose baseline cannot be resolved, shows no lens and no `PropertyD
 diagnostics — and logs the reason at `info`, never as a user diagnostic (an un-versioned
 workspace is not an error).
 
+The lens's `<short ref>` is the baseline's `ref` string, except when that string is a full 40-hex
+commit sha, in which case its 7-character abbreviation.
+
+The diff is recomputed on workspace load, on a model file being saved or changed outside the
+editor, and when the resolved baseline commit changes — never on every keystroke. Open buffers
+override on-disk contents for **model files** on the working-tree side; an unsaved `smelt.yml` or
+source-YAML buffer takes effect only once it is saved.
+
+While a derivation is running, the editor shows the previously computed diff if one exists, and
+nothing at all on first load. It never shows a half-computed diff.
+
+A change's anchor is only as narrow as its `subject` supports: a change whose `subject` names a
+column anchors at that SELECT-list item (its alias when aliased, the whole item otherwise); a
+change whose `subject` names a source or upstream model anchors at that `FROM`/`JOIN` item; every
+other change — a maintenance cell's `<group>@<trigger>` subject, a refusal's free-text subject, or
+a whole-model dimension with no subject at all — has no narrower anchor available and anchors at
+the model's first SQL token.
+
 ### Diagnostics
 
 | Code | Severity | Trigger |
@@ -469,8 +487,6 @@ compares verdicts.
 
 ## Known Divergences / Open Questions
 
-- The feature is specified but not yet implemented. Tracking plan:
-  `docs/plans/20260905-property-diff.md`.
 - Whether `column_added` on a *maintained* model should be neutral (as specified) or should
   inherit the direction of the `cell_added` it usually accompanies is open; the current answer
   keeps it neutral so schema change stays owned by `smelt diff`.
@@ -486,6 +502,15 @@ compares verdicts.
   a diff — that would surface as a spurious `added`/`removed` entry carrying the derivation
   failure text as its reason, rather than being recognised as "not a model." Tracked in
   `docs/outcomes/20260905-property-diff/outcome.md`.
+- The editor treats every baseline-resolution failure (not a git work tree, no `main`/`master` to
+  default against, an unresolvable ref, git itself unavailable) uniformly as the "no lens, no
+  diagnostic, logged at info" case. A narrower treatment — distinguishing "genuinely not
+  versioned" from "git is broken in a way the user should probably know about" — is possible but
+  not yet made; both still satisfy "never a user diagnostic for an unresolved baseline." Tracked
+  in `docs/outcomes/20260905-property-diff/outcome.md`.
+- Executing the lens opens the text report for that model in the editor's output channel, but no
+  editor extension yet registers the command the lens emits, so today executing it is a no-op in
+  every editor. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
 
 ## Future Extensions
 

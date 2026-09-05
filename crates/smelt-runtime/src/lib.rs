@@ -37,6 +37,7 @@ pub mod probe_plan;
 pub mod probes;
 pub mod profile;
 pub mod propagation;
+pub mod property_diff;
 pub mod python;
 pub mod reporter;
 pub mod safety;

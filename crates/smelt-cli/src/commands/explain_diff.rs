@@ -23,69 +23,59 @@
 use anyhow::{Context, Result};
 use smelt_cli::argument_resolution::{compute_scope, resolve_selector_args};
 use smelt_cli::{find_project_root, init_db, parse_selector, CliError, Config};
-use smelt_core::baseline::{edited_set, materialize, resolve_baseline};
-use smelt_core::graph::DependencyGraph;
-use smelt_core::workspace::load_workspace;
-use smelt_logical::analysis::diff::{
-    apply_failure_reasons, diff_profiles, BaselineInfo, DiffGraph, DiffReport,
-};
 use smelt_logical::analysis::diff_render::{markdown_report, text_report};
-use smelt_runtime::profile::profiles_for_workspace;
+use smelt_runtime::property_diff::{
+    baseline_side, report as diff_report, work_side, PropertyDiffError,
+};
 
 use crate::ExplainArgs;
 
+/// Convert a working-tree pipeline error to `anyhow`, preserving the exit
+/// code contract: a bare working tree never produces a `Baseline` error
+/// (only `baseline_side` resolves git), so every variant here gets a
+/// helpful context message and exit code `1`.
+fn property_diff_err_for_working_tree(err: PropertyDiffError) -> anyhow::Error {
+    anyhow::Error::new(err).context("Failed to derive property profiles for the working tree")
+}
+
+/// Convert a baseline-side pipeline error to `anyhow` WITHOUT wrapping a
+/// [`smelt_core::baseline::BaselineError`] in `.context(...)`:
+/// `smelt_cli::exit_code_for` downcasts the top-level wrapped error type to
+/// decide usage-error exit code `2`
+/// (`docs/specs/property_diff.md` §Surface, `PropertyDiffBaselineUnavailable`),
+/// and `anyhow`'s context-aware downcast only looks at the type immediately
+/// wrapped by `.context()`, not its own transitive source chain — so a
+/// `Baseline` variant must convert `?`-style (no context) to stay
+/// downcastable, exactly as it did before this pipeline was extracted into
+/// `smelt-runtime`.
+fn property_diff_err_for_baseline(err: PropertyDiffError) -> anyhow::Error {
+    match err {
+        PropertyDiffError::Baseline(e) => e.into(),
+        other => {
+            anyhow::Error::new(other).context("Failed to derive property profiles for the baseline")
+        }
+    }
+}
+
 /// Run `smelt explain --diff`. `explicit_ref` is `args.diff`'s inner value
 /// (`None` ⇒ default merge-base baseline).
+///
+/// Sequencing (D2, preserved by the shared pipeline): `work_side` loads and
+/// derives the working tree FIRST, so a broken working tree fails before
+/// any scratch directory exists; only then does `baseline_side` resolve and
+/// materialise the baseline. The pipeline itself is single-owned in
+/// `smelt_runtime::property_diff` so the editor (Phase 7) reuses it rather
+/// than re-deriving the comparison (`docs/specs/property_diff.md`
+/// §Constraints item 5).
 pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Result<()> {
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
-    // Working tree first (D2): fails before any scratch directory exists.
-    let work_loaded = load_workspace(&project_dir);
-    let work_profiles = profiles_for_workspace(&work_loaded)
-        .with_context(|| "Failed to derive property profiles for the working tree")?;
+    let work =
+        work_side(&project_dir, &Default::default()).map_err(property_diff_err_for_working_tree)?;
+    let base = baseline_side(&project_dir, explicit_ref).map_err(property_diff_err_for_baseline)?;
 
-    let resolved = resolve_baseline(&project_dir, explicit_ref)?;
-    let checkout = materialize(&resolved)?;
-    let base_loaded = load_workspace(checkout.project_root());
-    let base_profiles = profiles_for_workspace(&base_loaded)
-        .with_context(|| "Failed to derive property profiles for the baseline")?;
-
-    let work_sources =
-        smelt_core::discover_source_infos(&work_loaded.project_root, &work_loaded.config.paths);
-    let base_sources =
-        smelt_core::discover_source_infos(&base_loaded.project_root, &base_loaded.config.paths);
-    let edited = edited_set(&base_loaded, &base_sources, &work_loaded, &work_sources);
-
-    // The working-tree graph is the one attribution walks
-    // (`docs/specs/property_diff.md` §"Attribution").
-    let legacy_sources = smelt_cli::SourcesConfig::load(&project_dir).ok();
-    let graph = DependencyGraph::build(work_loaded.sql_files.clone(), legacy_sources.as_ref())
-        .with_context(|| "Failed to build dependency graph")?;
-    let diff_graph = DiffGraph::from_dependency_graph(
-        &graph,
-        edited.names.clone(),
-        edited.project_config_changed,
-    );
-
-    let mut diff = diff_profiles(
-        &base_profiles.profiles,
-        &work_profiles.profiles,
-        &diff_graph,
-    );
-    // C2: an added/removed entry whose absence on that side was a
-    // derivation FAILURE, not a genuine new/deleted model, carries that
-    // failure as its reason (`docs/specs/property_diff.md` §Constraints
-    // item 6, Δ1).
-    apply_failure_reasons(&mut diff, &base_profiles.failures, &work_profiles.failures);
-
-    // Everything derived from the baseline checkout has now been read;
-    // drop it explicitly so the scratch directory is gone before this
-    // function does any further (non-git) work.
-    drop(checkout);
-
-    let baseline_info = BaselineInfo::from(&resolved);
-    let mut report = DiffReport::new(baseline_info, edited.files.clone(), diff);
+    let mut report = diff_report(&work, &base);
 
     // D6: --select narrows the REPORTED set only (Δ2) — the compared set
     // (everything derived above) is untouched, so attribution stays
@@ -93,7 +83,7 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
     if !args.select.is_empty() {
         let config =
             Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
-        let db = init_db(&project_dir, &work_loaded.sql_files);
+        let db = init_db(&project_dir, &work.loaded.sql_files);
         let ws = smelt_db::Workspace::try_get(&db)
             .ok_or_else(|| anyhow::anyhow!("workspace not initialized"))?;
         let project = db
@@ -108,7 +98,8 @@ pub async fn explain_diff(args: &ExplainArgs, explicit_ref: Option<&str>) -> Res
             .iter()
             .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
             .collect::<Result<_, _>>()?;
-        let selected = graph
+        let selected = work
+            .graph
             .select_models(&selectors, &config)
             .with_context(|| "Failed to select models")?;
         report.narrow_to(&selected.into_iter().collect());

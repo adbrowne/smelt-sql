@@ -99,7 +99,7 @@ job posts as one pull-request comment. The editor shows a code lens on every shi
 | 4 | Baseline materialisation in `smelt-core`: ref/merge-base resolution, `git archive` into scratch, `load_workspace`, cleanup guarantee, `PropertyDiffBaselineUnavailable`; `smelt-runtime::profile::profiles_for_workspace` assembling both sides' profile maps | done |
 | 5 | `smelt explain --diff` text + JSON + `--fail-on` + `--select` + flag exclusivity; temp-git-repo fixture test over `examples/timeseries`; `smelt-explain.md` reference page | done |
 | 6 | `--markdown` renderer with marker and `<details>`; `docs-site/docs/guide/ci.md`; dogfood job in `.github/workflows` posting/updating one comment over `examples/` | done |
-| 7 | LSP: code lens capability, baseline cache keyed on resolved commit with `.git/HEAD` watch, `PropertyDowngrade` anchoring, non-git silence; `property_diff_parity` gate; `editor-features.md` | pending |
+| 7 | LSP: code lens capability, baseline cache keyed on resolved commit with `.git/HEAD` watch, `PropertyDowngrade` anchoring, non-git silence; `property_diff_parity` gate; `editor-features.md` | done |
 | 8 | Docs sweep and closure: `diagnostics.md` user page, spec Known Divergences cleared, ROADMAP entry, `/smelt:validate property_diff` zero drift | pending |
 
 ## Decision log

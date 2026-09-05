@@ -139,6 +139,14 @@ pub struct Backend {
     /// Populated by `publish_tests()`; read by the VSCode TestController via
     /// the `smelt/publishTests` notification.
     known_tests: Arc<Mutex<Vec<crate::notifications::TestInfo>>>,
+    /// Property-diff editor state, one entry per project root
+    /// (`docs/specs/property_diff.md` §Surface "Editor"; project isolation
+    /// — each project resolves its own baseline). Populated by
+    /// `refresh_property_diff`, which runs off the request path in
+    /// `spawn_blocking` (`docs/outcomes/20260905-property-diff/phases/
+    /// 07-plan.md` D7/R6) and is read-only from `code_lens` and
+    /// `publish_diagnostics`.
+    property_diff: Arc<Mutex<HashMap<PathBuf, crate::property_diff::ProjectDiffState>>>,
 }
 
 /// Collect every `smelt.functions.<name>(...)` call-site path range across
@@ -185,6 +193,28 @@ pub(crate) fn derive_watch_globs(project_roots: &[PathBuf]) -> Vec<FileSystemWat
             glob_pattern: GlobPattern::String(format!("{root_str}/**/*.py")),
             kind: Some(WatchKind::all()),
         });
+    }
+    watchers
+}
+
+/// Derive `.git` watcher patterns for the property diff's baseline refresh
+/// trigger (`docs/specs/property_diff.md` §Surface "Editor";
+/// `docs/outcomes/20260905-property-diff/phases/07-plan.md` D2). `repo_roots`
+/// is deduplicated by the caller — several projects in one workspace may
+/// share a repo root. This is a TRIGGER, not the correctness mechanism:
+/// `refresh_property_diff` always re-resolves and compares the commit, so a
+/// client that never reports `.git` changes only loses promptness, not
+/// correctness.
+pub(crate) fn derive_git_watch_globs(repo_roots: &[PathBuf]) -> Vec<FileSystemWatcher> {
+    let mut watchers = Vec::new();
+    for root in repo_roots {
+        let root_str = root.to_string_lossy();
+        for suffix in [".git/HEAD", ".git/refs/**", ".git/packed-refs"] {
+            watchers.push(FileSystemWatcher {
+                glob_pattern: GlobPattern::String(format!("{root_str}/{suffix}")),
+                kind: Some(WatchKind::all()),
+            });
+        }
     }
     watchers
 }
@@ -430,6 +460,7 @@ impl Backend {
             // Default: UTF-16, as required by LSP spec §3.17 general capabilities.
             negotiated_encoding: Arc::new(Mutex::new(PositionEncodingKind::UTF16)),
             known_tests: Arc::new(Mutex::new(Vec::new())),
+            property_diff: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -737,7 +768,7 @@ impl Backend {
 
         let db = self.snapshot().await;
 
-        let lsp_diagnostics: Vec<lsp_types::Diagnostic> =
+        let mut lsp_diagnostics: Vec<lsp_types::Diagnostic> =
             if let Some(virtual_entries) = multi_entries {
                 let mut lsp_diagnostics = Vec::new();
                 for (virtual_path, sql_start_line, _) in virtual_entries {
@@ -760,6 +791,23 @@ impl Backend {
                     .map(|d| self.to_lsp_diagnostic(d, &converter))
                     .collect()
             };
+
+        // D6: append the cached `PropertyDowngrade` diagnostics for this
+        // path INTO the same publish, rather than a second
+        // `publish_diagnostics` call — `publish_diagnostics` replaces a
+        // file's whole diagnostic set, so a separate call would clobber, or
+        // be clobbered by, the Salsa set just published above.
+        {
+            let text = file_text(&db, &path);
+            let converter = self.boundary_converter(&text).await;
+            let property_diff = self.property_diff.lock().await;
+            for state in property_diff.values() {
+                if let Some(diags) = state.diagnostics.get(&path) {
+                    lsp_diagnostics
+                        .extend(diags.iter().map(|d| self.to_lsp_diagnostic(d, &converter)));
+                }
+            }
+        }
 
         self.client
             .publish_diagnostics(uri, lsp_diagnostics, None)
@@ -798,6 +846,112 @@ impl Backend {
         }
 
         self.publish_source_diagnostics().await;
+    }
+
+    /// Refresh one project's property-diff state
+    /// (`docs/specs/property_diff.md` §Surface "Editor";
+    /// `docs/outcomes/20260905-property-diff/phases/07-plan.md` D7/R6): the
+    /// pipeline (git resolution + working-tree/baseline derivation) runs in
+    /// `spawn_blocking`, off the request path. Triggered on workspace load
+    /// (`initialized`), a model save, an external `.sql`/`smelt.yml`
+    /// change, and a `.git` HEAD/refs change (a promptness trigger, not the
+    /// correctness mechanism — `crate::property_diff::refresh` always
+    /// re-resolves and compares the commit). Concurrent triggers for the
+    /// same project coalesce via `ProjectDiffState::running`.
+    async fn refresh_property_diff(&self, project_root: PathBuf) {
+        let cached_baseline = {
+            let mut state = self.property_diff.lock().await;
+            let entry = state.entry(project_root.clone()).or_default();
+            if entry.running {
+                return;
+            }
+            entry.running = true;
+            entry.cached_baseline.clone()
+        };
+
+        // Snapshot open-buffer overlays for this project's tracked model
+        // files before handing off to the blocking task — Salsa access
+        // must stay on the async side (`docs/outcomes/20260905-property-
+        // diff/phases/07-plan.md` D4).
+        let db = self.snapshot().await;
+        let tracked = self.tracked_files.lock().await.clone();
+        let mut overlays = std::collections::BTreeMap::new();
+        for path in tracked.iter().filter(|p| p.starts_with(&project_root)) {
+            overlays.insert(path.clone(), file_text(&db, path));
+        }
+        drop(db);
+
+        let root_for_blocking = project_root.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::property_diff::refresh(&root_for_blocking, &overlays, cached_baseline)
+        })
+        .await;
+
+        let mut affected: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut log_info: Option<String> = None;
+        {
+            let mut state = self.property_diff.lock().await;
+            let entry = state.entry(project_root.clone()).or_default();
+            entry.running = false;
+            match outcome {
+                Ok(crate::property_diff::RefreshOutcome::Report {
+                    commit,
+                    baseline,
+                    lenses,
+                    diagnostics,
+                }) => {
+                    affected.extend(entry.lenses.keys().cloned());
+                    affected.extend(entry.diagnostics.keys().cloned());
+                    affected.extend(lenses.keys().cloned());
+                    affected.extend(diagnostics.keys().cloned());
+                    entry.baseline_commit = Some(commit);
+                    entry.cached_baseline = Some(baseline);
+                    entry.lenses = lenses;
+                    entry.diagnostics = diagnostics;
+                    entry.silent_reason = None;
+                }
+                Ok(crate::property_diff::RefreshOutcome::Silent(reason)) => {
+                    // D8: not a git work tree, or the baseline cannot be
+                    // resolved — no lens, no diagnostic, logged at info
+                    // only (an un-versioned workspace is not an error).
+                    affected.extend(entry.lenses.keys().cloned());
+                    affected.extend(entry.diagnostics.keys().cloned());
+                    entry.lenses.clear();
+                    entry.diagnostics.clear();
+                    entry.cached_baseline = None;
+                    entry.baseline_commit = None;
+                    entry.silent_reason = Some(reason.clone());
+                    log_info = Some(reason);
+                }
+                Ok(crate::property_diff::RefreshOutcome::Failed(reason)) => {
+                    // Δ3 ("in-flight behaviour"): a transient derivation
+                    // failure keeps whatever diff was last computed rather
+                    // than showing nothing.
+                    log_info = Some(format!("property-diff refresh failed: {reason}"));
+                }
+                Err(join_err) => {
+                    log_info = Some(format!("property-diff refresh task panicked: {join_err}"));
+                }
+            }
+        }
+
+        if let Some(reason) = log_info {
+            self.client.log_message(MessageType::INFO, reason).await;
+        }
+        for path in affected {
+            if let Ok(uri) = Url::from_file_path(&path) {
+                self.publish_diagnostics(uri).await;
+            }
+        }
+        // Best-effort: ask the client to re-pull code lenses. Ignored if
+        // the client never advertised `codeLens.refreshSupport` — the next
+        // `textDocument/codeLens` request (e.g. on scroll/focus) picks up
+        // the fresh state regardless, since `code_lens` only reads cached
+        // state.
+        let _ = self
+            .client
+            .send_request::<request::CodeLensRefresh>(())
+            .await;
     }
 
     /// Collect test entries from sql_files and merge into `known_tests`.
@@ -1435,6 +1589,9 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -1463,12 +1620,43 @@ impl LanguageServer for Backend {
         // Publish emitted-name collision diagnostics (DuplicateEmittedName).
         self.publish_emitted_name_collision_diagnostics().await;
 
+        // Property-diff: derive each project's diff against its default
+        // baseline on workspace load (`docs/specs/property_diff.md`
+        // §Surface "Editor"). Placed BEFORE the `register_capability`
+        // round-trip below for the same reason `publish_source_diagnostics`
+        // is: that call awaits a client response, and a client slow (or
+        // never) to answer it must not delay this. Off the request path —
+        // `refresh_property_diff` hands the actual work to
+        // `spawn_blocking` — but awaited here sequentially, same as the
+        // diagnostics publishes above it.
+        {
+            let project_roots_for_diff = self.project_roots.lock().await.clone();
+            for root in project_roots_for_diff {
+                self.refresh_property_diff(root).await;
+            }
+        }
+
         // Register file watchers (dynamic registration). Watch every
         // discoverable `.sql` and `.py` under each project root, derived
         // from the loaded project roots rather than hardcoded directory names.
         // See `derive_watch_globs` for the rationale (D-48).
         let project_roots_snapshot = self.project_roots.lock().await.clone();
-        let watchers = derive_watch_globs(&project_roots_snapshot);
+        let mut watchers = derive_watch_globs(&project_roots_snapshot);
+        // `.git` watch (`docs/specs/property_diff.md` §Surface "Editor"): a
+        // promptness trigger for the property-diff refresh, not the
+        // correctness mechanism (D2) — a project with no resolvable git
+        // repo root simply gets no `.git` watcher, same as any other
+        // non-git workspace shows no lens.
+        let git_roots: Vec<PathBuf> = {
+            let mut roots: Vec<PathBuf> = project_roots_snapshot
+                .iter()
+                .filter_map(|root| smelt_core::baseline::discover_repo_root(root))
+                .collect();
+            roots.sort();
+            roots.dedup();
+            roots
+        };
+        watchers.extend(derive_git_watch_globs(&git_roots));
         let registration = Registration {
             id: "smelt-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
@@ -1670,6 +1858,20 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        // Property-diff refresh trigger (`docs/specs/property_diff.md`
+        // §Surface "Editor", Δ2): a model file being saved. `smelt.yml` and
+        // source YAML overlays are deliberately not applied on `didChange`
+        // (D4) — a save of either still lands here as an ordinary file
+        // save and refreshes from the now-current disk content.
+        if let Ok(path) = params.text_document.uri.to_file_path() {
+            let project_roots = self.project_roots.lock().await.clone();
+            if let Some(project_root) = project_roots.iter().find(|root| path.starts_with(root)) {
+                self.refresh_property_diff(project_root.clone()).await;
+            }
+        }
+    }
+
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         for change in params.changes {
             let path = match change.uri.to_file_path() {
@@ -1722,6 +1924,22 @@ impl LanguageServer for Backend {
                     self.publish_all_diagnostics().await;
                     // Re-scan tests in case a test file was added/modified.
                     self.refresh_and_publish_tests().await;
+                    // Δ2: a model file changed outside the editor.
+                    self.refresh_property_diff(project_root).await;
+                }
+            } else if path.components().any(|c| c.as_os_str() == ".git") {
+                // `.git/HEAD`, `.git/refs/**`, or `.git/packed-refs` changed
+                // (`derive_git_watch_globs`) — a commit, checkout, or merge
+                // may have moved the resolved baseline. This is a
+                // promptness trigger only (D2): `refresh_property_diff`
+                // always re-resolves and compares the commit, so a client
+                // that never reports `.git` changes only loses promptness,
+                // not correctness. Every project refreshes (cheap:
+                // `running` coalesces a project already mid-refresh, and
+                // `resolve_baseline` is a handful of `git` subcommands).
+                let project_roots = self.project_roots.lock().await.clone();
+                for root in project_roots {
+                    self.refresh_property_diff(root).await;
                 }
             }
         }
@@ -2499,6 +2717,34 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(locations))
         }
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        // Read-only: `code_lens` never derives (R6) — it only reads
+        // whatever `refresh_property_diff` last cached, per project.
+        let path = match self.uri_to_path(&params.text_document.uri).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let property_diff = self.property_diff.lock().await;
+        for state in property_diff.values() {
+            if let Some(title) = state.lenses.get(&path) {
+                return Ok(Some(vec![CodeLens {
+                    // §Surface "Editor": "one lens on the first line".
+                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    command: Some(Command {
+                        title: title.clone(),
+                        command: "smelt.showPropertyDiff".to_string(),
+                        arguments: Some(vec![serde_json::json!({
+                            "modelPath": path.to_string_lossy(),
+                        })]),
+                    }),
+                    data: None,
+                }]));
+            }
+        }
+        Ok(None)
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {

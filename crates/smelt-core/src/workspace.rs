@@ -20,6 +20,7 @@
 
 use crate::config::{Config, Materialization, ProbesConfig, StateConfig};
 use crate::discovery::{ModelDiscovery, ModelFile};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Errors collected while loading a workspace. Mirrors the LSP's
@@ -69,6 +70,29 @@ pub struct LoadedWorkspace {
     /// separate `ModelFile` entries with virtual paths.
     pub sql_files: Vec<ModelFile>,
     pub errors: WorkspaceLoadErrors,
+}
+
+/// Patch `loaded.sql_files` so open editor buffers override on-disk content
+/// on the working-tree side, without introducing a second discovery path
+/// (`docs/outcomes/20260905-property-diff/phases/07-plan.md` D4). Discovery
+/// still happens exactly once, in [`load_workspace`]; this is a post-load
+/// patch keyed by path — a path with no matching entry in `loaded.sql_files`
+/// (an unsaved new file `load_workspace` never found) is silently ignored,
+/// since the workspace-loading-parity rule forbids this function from ever
+/// becoming a second loader.
+///
+/// `overlays` carries only tracked `.sql` model buffers — `smelt.yml` and
+/// source YAML are read from disk elsewhere and are deliberately not
+/// overlaid (`docs/specs/property_diff.md` §Surface "Editor", Δ2).
+pub fn apply_open_buffers(loaded: &mut LoadedWorkspace, overlays: &BTreeMap<PathBuf, String>) {
+    if overlays.is_empty() {
+        return;
+    }
+    for model in loaded.sql_files.iter_mut() {
+        if let Some(text) = overlays.get(&model.path) {
+            model.content = text.clone();
+        }
+    }
 }
 
 /// Load a workspace from `project_root`.

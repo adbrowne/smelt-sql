@@ -168,6 +168,20 @@ fn show_toplevel_and_rel(project_dir: &Path) -> Result<(PathBuf, String), Baseli
     Ok((repo_root, rel))
 }
 
+/// Cheaply discover `project_dir`'s git work-tree root, without resolving
+/// or materialising a baseline (`docs/outcomes/20260905-property-diff/
+/// phases/07-plan.md` D2): the editor needs this just to derive `.git`
+/// watch globs at startup, and computing a full baseline for that would
+/// pay for a `merge-base` lookup no watcher registration needs. `None`
+/// when `project_dir` is not inside a git work tree — the caller (the LSP)
+/// registers no `.git` watcher for that project, exactly as a workspace
+/// with no resolvable baseline shows no lens (D8, non-git silence).
+pub fn discover_repo_root(project_dir: &Path) -> Option<PathBuf> {
+    show_toplevel_and_rel(project_dir)
+        .ok()
+        .map(|(root, _)| root)
+}
+
 fn branch_exists(repo_root: &Path, name: &str) -> Result<bool, BaselineError> {
     let output = run_git(
         repo_root,
@@ -283,6 +297,36 @@ impl BaselineCheckout {
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
+}
+
+impl ResolvedBaseline {
+    /// The git work-tree root this baseline was resolved in
+    /// (`docs/outcomes/20260905-property-diff/phases/07-plan.md` D2). Used
+    /// by editor callers to derive the `.git` watch globs that trigger a
+    /// prompt re-check of the resolved commit — re-resolution, not the
+    /// watch, is the correctness mechanism (see [`git_watch_paths`]).
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
+}
+
+/// The `.git` paths whose change should prompt an editor to re-resolve
+/// `resolve_baseline` promptly (`docs/specs/property_diff.md` §Surface
+/// "Editor"; `docs/outcomes/20260905-property-diff/phases/07-plan.md` D2).
+///
+/// This is a **trigger**, not the correctness mechanism: several clients
+/// (and some VS Code configurations) never report changes under `.git`, so
+/// a design that relied on this watch firing would silently serve a stale
+/// baseline after e.g. a `git checkout`. The re-resolve-and-compare-commit
+/// step in the caller is what actually decides whether the cached baseline
+/// is still valid; this list only makes that check happen sooner.
+pub fn git_watch_paths(resolved: &ResolvedBaseline) -> Vec<PathBuf> {
+    let git_dir = resolved.repo_root.join(".git");
+    vec![
+        git_dir.join("HEAD"),
+        git_dir.join("refs"),
+        git_dir.join("packed-refs"),
+    ]
 }
 
 /// Export `resolved`'s commit's project subtree into a fresh scratch

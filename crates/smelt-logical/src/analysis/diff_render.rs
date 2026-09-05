@@ -21,7 +21,9 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use super::diff::{Cause, CauseKind, Change, DiffReport, Dimension, Direction, ModelDiff};
+use super::diff::{
+    BaselineInfo, Cause, CauseKind, Change, DiffReport, Dimension, Direction, ModelDiff,
+};
 
 /// The HTML comment marker every rendered form's Markdown body ends with,
 /// so a CI workflow can find and update its previous comment instead of
@@ -135,6 +137,44 @@ pub fn cause_str(cause: &Cause) -> String {
             }
         }
     }
+}
+
+/// The editor lens's `<short ref>` (`docs/specs/property_diff.md` §Surface
+/// "Editor", Δ1): the baseline's `ref` string, except when that string is a
+/// full 40-hex commit sha, in which case its 7-character abbreviation.
+/// Public: the one primitive that spells `<short ref>` — the lens title and
+/// any other consumer call this rather than re-deriving their own
+/// truncation rule (§Constraints item 5, "Surface parity").
+pub fn short_ref(baseline: &BaselineInfo) -> String {
+    let r = &baseline.r#ref;
+    let is_full_sha = r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit());
+    if is_full_sha {
+        r.chars().take(7).collect()
+    } else {
+        r.clone()
+    }
+}
+
+/// The editor code lens's title
+/// (`docs/specs/property_diff.md` §Surface "Editor"): `N downgrades,
+/// M upgrades vs <short ref>`, counted from `model`'s own changes. Public:
+/// the one primitive that spells the lens title, so the LSP renders it and
+/// the parity gate asserts on the same string rather than a re-derived one.
+pub fn lens_title(model: &ModelDiff, baseline: &BaselineInfo) -> String {
+    let downgrades = model
+        .changes
+        .iter()
+        .filter(|c| c.direction == Direction::Downgrade)
+        .count();
+    let upgrades = model
+        .changes
+        .iter()
+        .filter(|c| c.direction == Direction::Upgrade)
+        .count();
+    format!(
+        "{downgrades} downgrades, {upgrades} upgrades vs {}",
+        short_ref(baseline)
+    )
 }
 
 /// One shifted model's block: header line with its cause, then one line
@@ -388,6 +428,44 @@ mod tests {
             "expected no double space in a subject-less change line: {line:?}"
         );
         assert_eq!(line, "▼ maintenance_lost: true → false");
+    }
+
+    #[test]
+    fn short_ref_abbreviates_a_sha_and_leaves_a_named_ref_alone() {
+        let sha_baseline = BaselineInfo {
+            r#ref: "3f9a1c2e4b6d8a0c1e3f5a7b9c0d1e2f3a4b5c6d".to_string(),
+            commit: "3f9a1c2e4b6d8a0c1e3f5a7b9c0d1e2f3a4b5c6d".to_string(),
+            resolved_as: "explicit".to_string(),
+        };
+        assert_eq!(short_ref(&sha_baseline), "3f9a1c2");
+
+        let named_baseline = BaselineInfo {
+            r#ref: "merge-base(main)".to_string(),
+            commit: "abc1234".to_string(),
+            resolved_as: "merge_base".to_string(),
+        };
+        assert_eq!(short_ref(&named_baseline), "merge-base(main)");
+    }
+
+    #[test]
+    fn lens_title_matches_the_summary_counts() {
+        let model = ModelDiff {
+            model: "staging.orders".to_string(),
+            cause: Cause {
+                kind: CauseKind::Edited,
+                of: vec![],
+                reason: None,
+            },
+            changes: vec![
+                change(Direction::Downgrade),
+                change(Direction::Downgrade),
+                change(Direction::Upgrade),
+            ],
+        };
+        assert_eq!(
+            lens_title(&model, &baseline()),
+            "2 downgrades, 1 upgrades vs main"
+        );
     }
 
     fn model_diff(cause: Cause) -> ModelDiff {
