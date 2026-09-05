@@ -447,7 +447,6 @@ fn partition_grain_residues_stay_closed() {
 
     let expected_leads = [
         "Schema evolution on the partition grain is largely a definition delta now",
-        "The `PartitionGrainForbidsMetrics` refusal is unimplemented",
         "The sub-`g_part` rejection does not yet name the coarsened window",
         "`NOW()`/`CURRENT_*` are still compile-time-pinned",
     ];
@@ -455,9 +454,10 @@ fn partition_grain_residues_stay_closed() {
     assert_eq!(
         bullets.len(),
         expected_leads.len(),
-        "expected exactly {} partition-grain Known Divergences bullets (the four this outcome \
-         does not own — the decision track retired `data_latency` and the row-set-membership \
-         bullet separately), found {}:\n{}",
+        "expected exactly {} partition-grain Known Divergences bullets (the three this outcome \
+         does not own — phase 1 of `docs/outcomes/20260904-decision-residue` closed the \
+         `PartitionGrainForbidsMetrics`-is-unimplemented bullet, and the decision track \
+         retired `data_latency` and the row-set-membership bullet separately), found {}:\n{}",
         expected_leads.len(),
         bullets.len(),
         bullets.join("\n")

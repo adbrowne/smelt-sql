@@ -1273,6 +1273,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
         }
+        R::PartitionGrainForbidsMetrics => DiagnosticCode::PartitionGrainForbidsMetrics,
     }
 }
 

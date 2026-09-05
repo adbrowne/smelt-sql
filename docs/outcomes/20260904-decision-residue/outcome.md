@@ -73,7 +73,7 @@ orchestration fact. The Known Divergence bullets those decisions created are del
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | planned |
+| 1 | `PartitionGrainForbidsMetrics`: classifier in the partition-grain admission walk, `DiagnosticCode`, `file_diagnostics()` + LSP parity, broken-example fixture, and its Known Divergence bullet | done |
 | 2 | Sub-`g_part` refusal names the coarsened run window; test asserts the printed pair and that it is accepted | pending |
 | 3 | Route 2 derived key-derived-expression sub-route, declared FD as fallback; conformance recipe and end-to-end fixture | pending |
 | 4 | `KeyedRecurrenceDeclarationMismatch` (derived authoritative, declared is a check); order-independent key-set comparison with permutation test | pending |
@@ -88,5 +88,8 @@ orchestration fact. The Known Divergence bullets those decisions created are del
   `partition_residue_probes` bullet ratchet) instead of leaving it to phase 7: shipping an
   implemented refusal alongside a spec bullet calling it unimplemented would be a false spec at
   the phase-1 commit. Phase 7 narrows to the bullets earlier phases did not close.
+- 2026-09-05 — Phase 1 done: `PartitionGrainForbidsMetrics` classifier, `DiagnosticCode`, LSP
+  parity, `examples/broken/models/partition_grain_forbids_metrics.sql`, catalogue row, and the
+  divergence bullet deleted. `partition_residue_probes.rs` ratchet updated 4 → 3.
 
 ## Blocked

@@ -377,6 +377,7 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::EventTimeColumnNotVisibleAtOuterSelect => {
             "event-time-column-not-visible-at-outer-select"
         }
+        DbCode::PartitionGrainForbidsMetrics => "partition-grain-forbids-metrics",
         DbCode::StateModeWidening => "state-mode-widening",
         DbCode::CteRefOutsideTest => "cte-ref-outside-test",
         DbCode::CheckHasTestClause => "check-has-test-clause",

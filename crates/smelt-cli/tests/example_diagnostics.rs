@@ -1255,6 +1255,104 @@ fn broken_workspace_maintenance_scan_unbounded() {
     );
 }
 
+/// `docs/outcomes/20260904-decision-residue` phase 1:
+/// `examples/broken/models/partition_grain_forbids_metrics.sql` — a
+/// `grain: partition` model whose body calls `smelt.metric(...)` — produces
+/// exactly one `PartitionGrainForbidsMetrics` diagnostic from that file, and
+/// none from any other file in the shared `examples/broken/` workspace.
+///
+/// Spec: `docs/specs/incremental_shapes.md` §"Functions inside
+/// partition-grain bodies".
+#[test]
+fn broken_workspace_partition_grain_forbids_metrics() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, DiagnosticCode, Workspace};
+
+    const TARGET_CODE: DiagnosticCode = DiagnosticCode::PartitionGrainForbidsMetrics;
+    let expected_file = "models/partition_grain_forbids_metrics.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/broken");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel.replace('\\', "/").ends_with(expected_file);
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if d.code != Some(TARGET_CODE) {
+                continue;
+            }
+            if is_target {
+                target.push(d.clone());
+            } else {
+                other.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if d.0.code != Some(TARGET_CODE) {
+                continue;
+            }
+            if is_target {
+                target.push(d.0.clone());
+            } else {
+                other.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "expected zero PartitionGrainForbidsMetrics diagnostics from files other than \
+         '{expected_file}', got {}:\n  {}",
+        other.len(),
+        other
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target.len(),
+        1,
+        "expected exactly 1 PartitionGrainForbidsMetrics diagnostic from '{expected_file}', \
+         got {}:\n  {}",
+        target.len(),
+        target
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
 /// MP14 TDD: `examples/broken/models/maintenance_granularity_mismatch.sql` —
 /// a `grain: partition` model declaring `granularity: hour` while its own
 /// `order_date` projection only truncates to `day` — a narrowing declaration

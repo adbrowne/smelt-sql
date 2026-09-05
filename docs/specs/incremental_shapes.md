@@ -1220,11 +1220,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
   Divergences).
-- **The `PartitionGrainForbidsMetrics` refusal is unimplemented** — §"Functions inside
-  partition-grain bodies" refuses `smelt.metric()` in a partition-grain body, but no
-  classifier or diagnostic produces the code today, so the combination's behaviour is
-  effectively undefined at runtime. Decision record:
-  `docs/research/20260816-open-questions-triage.md`.
 - **The sub-`g_part` rejection does not yet name the coarsened window** — §"Run window vs
   partition granularity" requires the refusal to spell out the run window that would be
   accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over

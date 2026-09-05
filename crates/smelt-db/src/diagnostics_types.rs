@@ -787,6 +787,12 @@ pub enum DiagnosticCode {
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
     /// clause is a subquery that does not project the column. Error severity.
     EventTimeColumnNotVisibleAtOuterSelect,
+    /// A `grain: partition` model's body calls `smelt.metric(...)`. The
+    /// composition of metric expansion with time-filter injection is
+    /// deliberately unspecified (`incremental_shapes.md` §"Functions inside
+    /// partition-grain bodies"), so the combination refuses ahead of
+    /// execution rather than composing unpredictably. Error severity.
+    PartitionGrainForbidsMetrics,
     /// Emitted when two files in the same project resolve to the same
     /// `smelt.<path>` address across any entity kind (model, function, seed,
     /// source). Hard workspace-load error; the colliding entities do not load.

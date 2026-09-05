@@ -132,6 +132,7 @@ Owned by `docs/specs/incremental_shapes.md`.
 |------|----------|---------|
 | `PartitionGrainNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
 | `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery or CTE that does not project the column. |
+| `PartitionGrainForbidsMetrics` | Error | A `grain: partition` model's body consumes `smelt.metric()` — the composition of metric expansion with time-filter injection is deliberately unspecified, so the combination refuses ahead of execution rather than composing unpredictably. |
 | `PlausibleContractOnSkeletonColumn` | Error | A `columns.<c>.contract: plausible` declaration names a column that also serves as the model's `event_time_column`, `partition_column`, or a `unique_key` member. Names the column and the skeleton role it holds — those positions govern windowing, partition placement, or dedup identity and must stay deterministic. |
 
 A `batched:` sub-block is refused outright on both surfaces — `.sql` frontmatter and the
