@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788647639163,
+  "lastUpdate": 1788647642035,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.794521,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4d51727a76fad522b8b00a51e1fe97b535111cb8",
+          "message": "Merge pull request #188 from adbrowne/outcome-20260905-property-diff\n\nProperty diff — explain what a model edit did to smelt's proofs",
+          "timestamp": "2026-09-06T08:29:06+10:00",
+          "tree_id": "6ca7ceab50cf344ff027b3f076e6d897a7965a93",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4d51727a76fad522b8b00a51e1fe97b535111cb8"
+        },
+        "date": 1788647640899,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.990066708369216,
+            "unit": "MB/s"
           }
         ]
       }
