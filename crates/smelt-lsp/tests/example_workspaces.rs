@@ -387,9 +387,30 @@ async fn assert_example_workspace_clean(name: &str) {
     for (uri, ds) in diags {
         latest.insert(uri, ds);
     }
-    // Filter: any non-empty list is a real diagnostic.
+    // `property-downgrade` is excluded here, narrowly and only here: it is
+    // a baseline-relative ADVISORY comparing the working tree to a git ref
+    // (`docs/specs/property_diff.md` §Surface "Editor"), not a statement
+    // that the file itself is invalid, which is what this suite asserts.
+    // `examples/` genuinely differs from `main` on some branches (the
+    // property-diff outcome's own fixtures, for one), so a shifted example
+    // model would otherwise fail a suite this feature has no business
+    // failing. Nothing else is filtered — a real correctness diagnostic on
+    // an example workspace still fails this test
+    // (`docs/outcomes/20260905-property-diff/phases/07-plan.md` ruling R4).
     let dirty: Vec<(String, Vec<lsp_types::Diagnostic>)> = latest
         .into_iter()
+        .map(|(uri, ds)| {
+            let filtered: Vec<lsp_types::Diagnostic> = ds
+                .into_iter()
+                .filter(|d| {
+                    d.code
+                        != Some(lsp_types::NumberOrString::String(
+                            "property-downgrade".to_string(),
+                        ))
+                })
+                .collect();
+            (uri, filtered)
+        })
         .filter(|(_, ds)| !ds.is_empty())
         .collect();
 

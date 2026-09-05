@@ -56,6 +56,7 @@ The surface is the set of properties and their verdicts. Callers are the planner
 | Fingerprint projection | `Projection` = `Columns{cols}` \| `FullRow{reason}`: for a consuming model reading an external source, which of the source's columns feed the model — the projection a row-content fingerprint sidecar digests (`sources.md` §"The fingerprint sidecar"). Fail-closed: `SELECT *`, an opaque function call over the source, or a provenance path the walk cannot resolve yields `FullRow{reason}`, never a guessed subset. Per-consumer — two consumers of the same source derive independent projections, never unioned | partial (simple-rename lineage composes through CTEs/derived tables via the walk; an embedded reference inside a computed expression does not chase further) |
 | Skeleton-source closure | `SkeletonSourceClosure` = `Closed` \| `Open{reason}`: does an enrichment join's row skeleton (row membership, count, and multiplicity) trace to the driving source **alone**, so the enrichment side can never add, drop, or duplicate a row. Composes five independently-sourced conjuncts — skeleton-role extraction (no skeleton column originates on the enrichment side), per-column provenance (every enrichment column's mutation-sensitivity is confined to its own source, never blended with the driving fact's), one-to-one join contribution (fan-out/cardinality proves the join `OneToOne`, never `OneToMany`), row preservation (every driving row survives the join — a `LEFT JOIN` always qualifies; an inner/equi-join qualifies only under a source's declared `referential_integrity` world-fact, `sources.md`), and no membership predicate on an enrichment column (a `WHERE`/`HAVING` clause testing an enrichment-side column would make output row-membership depend on the enrichment source, breaking the closure). Fail-closed to `Open` on any unproven conjunct. **v1 restriction**: the enrichment join must sit below any aggregation in the scope — a join feeding a `GROUP BY`/window changes the skeleton question (which rows survive the fold, not which rows survive the join), so join-below-aggregation is `Open` regardless of the five conjuncts | built (v1: non-aggregating enrichment scopes only) |
 | Output-delta shape | `OutputDelta` = `AppendOnlyWindow{axis}` ⊑ `KeyedUpsert{keys}` ⊑ `General{reason}`, derived **per column group** (§"Per-column mutation-sensitivity / column provenance"), never per model — what the model *emits* when its inputs change, not what its inputs are. See §"Output-delta shape" | derived, typed onto propagation edges, and acted on by dirt propagation (keyed dirt-sets for an admitted `KeyedUpsert` component) |
+| Keyed-succession classification | `Succession` = `Recognized{source, pre_filter, key_cols, clock_col, lead_cols, lag_cols, delete_flag}` \| `NotSuccession{reason}`: is the `FROM` exactly one `append_only`, clocked source reference with at most one deterministic row-local pre-window filter, does every window function in the projection reduce to `LEAD(t)`/`LAG(t)` over the clock (or a scalar expression over one) partitioned by one consistent key and ordered by a strictly-`Traceable` clock, with every other projected column row-local, and at most one `QUALIFY NOT <row-local boolean>` filter. The one classifier whose vocabulary is window-function/`ORDER BY` shape rather than aggregation — see §"Keyed-succession classification" | not-yet |
 
 ### Model-scoped declarations
 
@@ -149,6 +150,90 @@ A conditional write must address the rows it touches — including under the par
 The proven-key branch is fail-closed against fan-out: a key the `GROUP BY` factory would otherwise prove is only trusted when the walk also proves no input join fans the output out (`PropertyVector.has_fan_out_join`) — a key that does not uniquely cover every output row is never used, not even as a partial key, since joining stored to candidate rows on a non-unique key would silently corrupt whichever rows share it. A declared key carries no such caveat: it is the modeller's own world-fact, not a derived proof, so it is trusted through a fan-out join exactly as it is trusted anywhere else.
 
 A declared key and a differing proven key may both be present for the same output at once — the declared key always wins the precedence, but the disagreement is never silently dropped: the proven key it overrode is carried alongside the verdict, so a caller (`smelt explain`, a future admission audit) can see that the two facts disagree rather than only ever seeing the winner.
+
+### Keyed-succession classification
+
+`classify_keyed_succession(sql, ctx)` is the leaf classifier the composition walk invokes to
+decide whether a model's SQL is the keyed-succession shape — the sole vocabulary this spec has
+for `ORDER BY`-carrying window functions rather than aggregation, since every other classifier
+above reasons about `GROUP BY`/`DISTINCT` scopes or frame reach, never window-function
+succession semantics. It returns `Recognized{source, pre_filter, key_cols, clock_col,
+lead_cols, lag_cols, delete_flag}` when every condition below holds, and fail-closed `NotSuccession{reason}`
+otherwise — absence of a proof is a refusal, never an approximate or partial admission:
+
+1. **The `FROM` clause is exactly one source reference** (`source`) — no join, CTE, subquery,
+   or set operation — and that source declares `mutation_profile.kind: append_only` and a
+   `timeseries:` block (`sources.md`, `timeseries.md`). A join refuses because nothing today
+   proves an enrichment side cannot add, drop, or duplicate a version row (§"Skeleton-source
+   closure" rules a join feeding a window `Open`); a non-append-only source refuses because
+   the succession technique folds each event exactly once and cannot un-see a retracted one;
+   an unclocked source refuses because the run has no axis to step (`incremental_shapes.md`
+   §"Run shape and late events").
+1a. **At most one filter precedes the window projection**, and it is a deterministic
+    row-local predicate over the driving source's own columns — no window-derived column,
+    aggregate, subquery, second relation, or run-nondeterministic function (the determinism
+    predicate, §Surface). This is the optional lateness clamp; its predicate is carried as
+    `pre_filter`. Any other pre-window filter refuses (`SuccessionPreFilterNotRowLocal`). A
+    pre-filter that is a bare negated boolean column is admitted but carries the advisory
+    `SuccessionPreFilterNegatesFlag` on the verdict (a delete flag filtered here never closes
+    its predecessor — `incremental_shapes.md` §"Delete events"); the advisory never changes
+    admission.
+1b. **No other clause on the scope.** `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, and
+    `LIMIT` each refuse (`SuccessionPatternUnrecognized`, naming the clause): the first three
+    are aggregation, which is not this shape; the last two impose an order or a bound on the
+    output that the succession patch cannot maintain.
+2. **Every window function in the outermost projection is a succession function.** Each
+   `OVER (...)` clause is `LEAD(t)`/`LAG(t)` **over the clock column itself, with the default
+   offset of 1 and no default-value argument**, or a scalar expression over exactly one such
+   call (an `IS NULL`, a `CASE`, an arithmetic expression) **whose other operands are
+   constants, the clock column, or row-local columns the projection also carries** — the patch
+   re-evaluates the expression against the presented row, so it can reach only what that row
+   presents. Never a plain aggregate window, a running total, a ranking function, a
+   `LEAD`/`LAG` over any other column, one with an explicit offset (`LEAD(t, 2)` reaches past
+   the immediate neighbour the maintenance theorem patches), or an expression over an
+   unprojected column. Columns derived from a `LEAD` call are collected as `lead_cols`, from a
+   `LAG` call as `lag_cols`; the technique patches a new event's predecessor for the former and
+   its successor for the latter.
+3. **Every succession function shares one `PARTITION BY` key set** (`key_cols`) and **one
+   ascending `ORDER BY` column** (`clock_col`). Every `key_cols` member and `clock_col` are
+   proven `NOT NULL` (a NULL key belongs to no key's sequence; a NULL clock has no position in
+   one, and `timeseries.md`'s own NOT NULL rule covers only pruning columns, which the clock
+   here is not). `clock_col` must trace `Traceable` **with `is_strict`** under the event-time
+   monotonicity trace (§"Event-time monotonicity trace") **to the driving source's declared
+   `event_time_column`** — the verdict's `source_column` must be that column, not merely some
+   column of the source, since the run axis (`partition_column`) and the clock are
+   deliberately distinct (`incremental_shapes.md` §"Run shape and late events"). An `ORDER BY`
+   column the trace cannot certify monotone refuses the whole model, since a non-monotone
+   order makes "immediate predecessor" undefined; one it certifies monotone but not strict
+   refuses too, since a clock that can collapse two distinct source times onto one value makes
+   the derived `(k, t)` identity collide; one that traces to a column other than
+   `event_time_column` refuses because the succession clock must be the source's own time
+   fact. A descending order or a second sort key refuses: the former swaps which neighbour
+   `LEAD` and `LAG` name, the latter makes the order depend on more than the clock.
+4. **The key columns and the clock column are each projected row-locally** (possibly under an
+   alias), so the derived `(k, t)` identity is recoverable from the presented table and the
+   succession `MERGE` can address rows by it. A projection that drops `k` or `t` refuses
+   (`SuccessionIdentityNotProjected`).
+5. **Every other projected column is row-local** — a function of the current row's own columns
+   alone, containing no aggregate and no further window function. A column that mixes
+   aggregation into the same projection as a succession window (a would-be
+   `SUM(...) OVER (...)` sibling) refuses; that shape is not this pattern
+   (`incremental_shapes.md` §"What stays out of this grain").
+6. **At most one post-window filter is admitted**, and only in the exact shape `QUALIFY NOT
+   <row-local boolean column>` — `QUALIFY` being the single-scope clause SQL evaluates after
+   window functions; a same-scope `WHERE` is always evaluated before them and is rule 1a's
+   pre-window clamp, never the delete filter — the delete-flag admission
+   (`incremental_shapes.md` §"Delete events"). The column must be proven `NOT NULL`: under
+   `NOT`, a NULL flag drops the row from the output exactly as `TRUE` does, so a nullable flag
+   would let a row vanish without being recorded as a tombstone. The filtered column becomes
+   `delete_flag`; its absence leaves `delete_flag = None`. Any other `QUALIFY` shape or
+   column refuses, as does a `WHERE` that tests a window-derived column.
+
+The classifier is a **leaf** the shared bottom-up walk invokes over one already-bounded scope's
+own projection (the Property composition walk rule, `architecture.md`) — it does not itself
+compose through CTEs or set operations; a succession-shaped projection nested inside a CTE or
+a `UNION` arm is future work (`incremental_shapes.md` §Future Extensions), and refuses at
+the outer scope rather than being silently missed.
 
 ### Per-column mutation-sensitivity / column provenance
 
@@ -484,5 +569,5 @@ graduates into §Surface/§Semantics via its own spec diff.
 - **Tests**: the monotonicity-trace unit tests (`smelt-logical`); the batched per-source bound tests; the cumulative classifier tests; the §"Probe obligation" registry gate (`crates/smelt-logical/tests/probe_obligation.rs`); the fact-violation conformance pool (`crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs`) — one recipe per `built` registry row, driven through conforming and violating feeds and, where end-state observable, a `probes: {cadence: off}` leg proving the probe is load-bearing.
 - **User docs**: the per-mode refresh pages under `docs-site/docs/` consume these properties; no standalone user page (the properties are internal to the analysis layer).
 - **Plans (history)**: `docs/plans/20260704-model-updates.md` (the mode-vertical master whose capabilities this spec re-homes); `docs/plans/20260707-maintenance-plan-impl.md` (the maintenance-plan tracer and its first classifiers); `docs/plans/20260808-derived-maintenance-proofs.md` (the derived faithful-fold, footprint, locality, and definition-change proofs).
-- **Design research**: `docs/research/20260707-property-composition-overview.md` (the per-operator transfer rules and composition algebra behind §"The composition walk", with nine per-property companion docs).
+- **Design research**: `docs/research/20260707-property-composition-overview.md` (the per-operator transfer rules and composition algebra behind §"The composition walk", with nine per-property companion docs); `docs/research/20260723-scd2-succession-pattern.md` (§"Keyed-succession classification").
 - **Related specs**: `incremental_models.md`, `model_transforms.md`, `models.md`, `incremental_models.md`, `incremental_models.md`, `incremental_models.md`, `materialized_view.md`, `timeseries.md`, `sources.md`, `multi_backend.md`, `schema_evolution.md`.

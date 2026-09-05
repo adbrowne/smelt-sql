@@ -1,18 +1,21 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-09-04
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
 # Incremental Shape Profiles
 
 > **What this is.** The normative spec for the **shape profiles** of maintained models — the
-> per-shape implementation chapters for the two declared output addressings: the **partition
-> grain** (a clocked table maintained partition by partition) and the **key grain** (a keyed
-> table maintained by folding deltas into per-key state), including the composed key-and-time
-> form. A profile owns only what is meaningful *inside* its shape; everything shared it composes
-> by name. Out of scope, with their own homes: the delta algebra, the equivalence invariant, the
+> per-shape implementation chapters for the two declared output addressings (the **partition
+> grain**, a clocked table maintained partition by partition, and the **key grain**, a keyed
+> table maintained by folding deltas into per-key state, including the composed key-and-time
+> form) and for the one **inferred** shape, the **succession grain** (a keyed history table
+> maintained by patching each new row's predecessor, admitted by recognising the shape of the
+> model's own SQL rather than by a declared fact). A profile owns only what is meaningful
+> *inside* its shape; everything shared it composes by name. Out of scope, with their own homes:
+> the delta algebra, the equivalence invariant, the
 > maintenance plan, per-cell admission and write addressing, the contract lattice, the frontier,
 > and the graph layer (`incremental_models.md`); definition-delta migration
 > (`definition_deltas.md`); the provable properties of a model's SQL (`model_properties.md`);
@@ -37,7 +40,8 @@ everything derived from it that is shared across shapes. This spec owns what is 
 it accepts, how its runs execute, which SQL it admits, and the local machinery (ledgers, safety
 checks, column families) that exists only inside that shape.
 
-Three shapes are inhabited, each named by its derived **grain** label:
+Four shapes are inhabited. Three are named by a derived **grain** label read off a declared
+fact; the fourth needs no declared fact at all:
 
 - **partition grain** — a clock and no identity: a complete time-partitioned table, kept current
   by rewriting touched partitions.
@@ -77,7 +81,28 @@ Three shapes are inhabited, each named by its derived **grain** label:
   FROM smelt.raw_events GROUP BY event_id
   ```
 
-Declaring neither fact leaves no maintainable shape. A fourth derived label,
+- **succession grain** — no declared fact: a keyed history table whose validity intervals come
+  from `LEAD`/`LAG` window functions in the model's own SQL, kept current by patching each new
+  row's immediate neighbours. Admission reads the SQL shape directly rather than a `grain:` or
+  `unique_key:`/`timeseries:` declaration — the classifier is the declaration
+  (§"The succession grain").
+
+  ```sql
+  ---
+  refresh: incremental
+  ---
+  SELECT
+      customer_id,
+      tier,
+      region,
+      effective_ts AS valid_from,
+      LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to,
+      LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) IS NULL AS is_current
+  FROM smelt.customer_changes
+  ```
+
+Declaring neither `timeseries:` nor `unique_key:`, and having a SQL shape the succession
+classifier does not recognise, leaves no maintainable shape. A further derived label,
 `key_per_partition` (the key recurs across partitions, storing a per-partition trajectory), is
 derived-only: declaring it is a hard error, and the derived label currently refuses at plan
 derivation (§Known Divergences).
@@ -86,7 +111,11 @@ The shapes are not modes to choose between — they are what the declared facts 
 and they compose. Declaring `unique_key` on a clocked table does not bolt "dedup" onto it; it
 makes the output key-addressable, which unlocks keyed maintenance for dimension corrections
 while new-data arrival still rewrites partitions. Several capabilities exist *only* in the
-composed shape (§"Key temporal locality (the time-partitioned output)").
+composed shape (§"Key temporal locality (the time-partitioned output)"). The succession grain
+does not compose with the other three: it is admitted by a distinct SQL shape (window functions
+in the projection) that the partition and key grains each independently forbid or cannot
+express, so a model is a succession-grain model or a partition/key/composed model, never a
+blend of both.
 
 The examples throughout draw from the running warehouse of `incremental_models.md` §Overview
 ("The running example"): sources `orders`, `order_events`, `raw_events` (redelivery-prone,
@@ -100,6 +129,7 @@ derived in each model that reads it. Models:
 | `order_lifecycle` | identity | key grain (bare) |
 | `order_facts` | clock + identity (joins `customers`) | composed — the per-cell-addressing example |
 | `event_dedupe` | clock + identity | composed — the locality example |
+| `customer_history` | none — SQL shape only, over `customer_changes` | succession grain |
 
 Reading guide: *what can I declare, and what errors can I get?* → §Surface. *What does a run of
 my shape actually do?* → §Semantics, one chapter per shape. *Why is the shape designed this
@@ -348,6 +378,56 @@ sugar for the overwrite, once-write, and plain-overwrite families. They ship as 
 admitted on exactly the same terms as hand-written calls. Promotion to built-ins is a possible
 later step, not part of this surface (§Future Extensions).
 
+### Succession-grain admission (no declaration)
+
+Opt-in: `refresh: incremental` alone, with **no** `unique_key`, no `timeseries:`, and no
+`grain:` value. Nothing is declared because nothing needs to be — the model's SQL shape *is*
+the declaration, read by the keyed-succession classifier (`model_properties.md` §"Keyed-
+succession classification"). `customer_history` from the running example (§Overview):
+
+```sql
+---
+refresh: incremental
+---
+SELECT
+    customer_id,
+    tier,
+    region,
+    effective_ts AS valid_from,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) IS NULL AS is_current
+FROM smelt.customer_changes
+```
+
+The classifier's admission rules are owned by `model_properties.md` §"Keyed-succession
+classification" and are not restated here. In outline, the admitted scope is:
+
+```
+SELECT <row-local columns, including k and t> , <LEAD(t)/LAG(t) OVER (PARTITION BY k ORDER BY t) and scalar expressions over them>
+FROM smelt.<one append_only, clocked source>
+[WHERE <one deterministic row-local predicate>]          -- optional lateness clamp
+[QUALIFY NOT <NOT NULL boolean column>]                  -- optional delete-flag filter
+```
+
+and nothing else: no join, CTE, subquery, or set operation in `FROM`; no `DISTINCT`,
+`GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the scope; no aggregate, ranking, or
+frame-based window. Every clause outside the outline is refused by the named code that
+covers it (§"Diagnostics"), with `SuccessionPatternUnrecognized` as the fallback for a scope
+clause no more specific rule names (`DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`).
+The source's `partition_column` is the run axis and its `event_time_column` the succession
+clock; the two may differ (§"The succession grain" §"Run shape and late events").
+
+The derived output identity is `(k, t)` — one row per key per event, addressed by the pair the
+window functions themselves partition and order by. No `unique_key` is declared or inferable
+from a `GROUP BY`, because there is none: this shape has no aggregation.
+
+A model matching none of the three admitted grains — no `unique_key` (ruling out the key
+grain), no `timeseries:` (ruling out the partition grain), and a SQL shape the succession
+classifier does not recognise — has no maintainable shape under `refresh: incremental` and
+refuses (`SuccessionPatternUnrecognized`, below), naming the nearest declared route
+(`refresh: full`, `refresh: materialized_view`, or declaring `unique_key`/`timeseries` to reach
+one of the other three grains).
+
 ### Diagnostics
 
 All codes are catalogued in `diagnostics.md`; this spec owns the semantics of the shape-local
@@ -387,6 +467,25 @@ chooser").
 | `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window, and the repair family cannot admit a per-group recompute for the change; names the failing repair obligation and points at `--full-refresh` (§"Reprocessing", `incremental_models.md` §"The repair family"). |
 | `KeyedRecurrenceDeclarationMismatch` | Plan time: a declared `key_recurrence` disagrees with the recurrence bound derived from the SQL. Names both values; the derived value is authoritative and the declaration must be corrected or removed (key-grain rule 16). |
 | `KeyedRecurrenceBoundViolated` | Runtime, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice. The run's transaction rolls back; reports the violation count and sample keys (§"Key temporal locality (the time-partitioned output)"). |
+
+**Succession-grain codes.** Each names the specific clause that broke admission — a
+`refresh: incremental` model with none of the three grains' declared facts never falls back
+silently; it refuses with the nearest fix (§"Succession-grain admission (no declaration)").
+
+| Code | Fires when |
+|---|---|
+| `SuccessionWindowFunctionNotLead` | A window function appears in the projection that is not `LEAD(t)`/`LAG(t)` over the clock column with the default offset of 1, or not a scalar expression over one — including `LEAD`/`LAG` over a non-clock column, or with an explicit offset or default argument; names the offending call. |
+| `SuccessionPartitionKeyMismatch` | Two or more window functions in the projection partition by different column sets, partition by a column set the classifier cannot resolve to a stable per-row key, or partition by a column not proven `NOT NULL` (a NULL key row belongs to no key's sequence). |
+| `SuccessionOrderNotMonotoneClock` | A window's `ORDER BY` column does not trace as a **strictly** monotone clock to the driving source's declared `event_time_column` (`model_properties.md` §"Event-time monotonicity trace" returns `NotTraceable`, `Traceable` without `is_strict`, or `Traceable` to a different source column), is not proven `NOT NULL`, or the `ORDER BY` is descending or carries a second sort key; names the column and the trace's refusal reason, the non-strict layer, the traced column, or the offending sort clause. |
+| `SuccessionRowLocalColumnViolation` | A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local; names the column. |
+| `SuccessionIdentityNotProjected` | A key column or the clock column does not appear row-locally in the projection, so the derived `(k, t)` identity is not recoverable from the presented table; names the missing column. |
+| `SuccessionSingleSourceOnly` | The `FROM` clause is not exactly one source reference — a join, CTE, subquery, or set operation is present; names the offending clause (§"Succession-grain admission (no declaration)"). |
+| `SuccessionDrivingSourceNotAppendOnly` | The driving source does not declare `mutation_profile.kind: append_only`, or declares no `timeseries:` block; names the source and its declared kind or the missing block (§"The succession grain" §"Run shape and late events"). |
+| `SuccessionPreFilterNotRowLocal` | A filter precedes the window projection but is not a deterministic row-local predicate over the driving source's own columns — it references a window-derived column, an aggregate, a subquery, another relation, or a run-nondeterministic function; or more than one such filter is present. Names the offending predicate (§"The succession grain" §"Run shape and late events"). |
+| `SuccessionDeleteFilterMisplaced` | A `QUALIFY` clause exists but is not exactly `QUALIFY NOT <row-local boolean column>` — it filters a non-boolean, non-row-local, or window-derived expression, is not a negated single column, or names a column not proven `NOT NULL` (a NULL flag drops the row under `NOT` without marking it a delete); or a `WHERE` predicate tests a window-derived column, which no same-scope `WHERE` can do (§"The succession grain" §"Delete events"). |
+| `SuccessionPreFilterNegatesFlag` (warning) | The pre-window `WHERE` is a bare negated boolean column (`WHERE NOT <col>`). Admitted unchanged — it is a legitimate clamp — but named because a CDC delete flag filtered here never closes its predecessor's interval; suggests `QUALIFY NOT <col>` if the column is a delete flag (§"The succession grain" §"Delete events"). Advisory: never feeds admission. |
+| `SuccessionPatternUnrecognized` | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the succession rules above individually names — a `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the scope, or a model that does not resemble any admitted grain at all. Names the offending clause where there is one, and the three declared routes as fixes. |
+| `SuccessionClockTie` | Runtime: a delta presents two non-identical events with equal `(k, t)`; an event whose `(k, t)` matches a presented row with different row-local content or delete flag; or a delete and a non-delete at one `(k, t)` in either direction (against a stored tombstone only the delete flag is comparable). The run's transaction rolls back; reports the key, the clock value, and a sample. Identical rows are a redelivery and fold once (§"The succession grain" §"Run shape and late events"). |
 
 ## Semantics
 
@@ -974,6 +1073,271 @@ additive models refuse re-processing of ledgered windows (`KeyedReprocessedWindo
 to `--full-refresh`. **Snapshot-reconcile:** the model is always-stale; every `--auto` run
 reconciles.
 
+### The succession grain
+
+The one inferred shape: a keyed history table, one row per `(k, t)` pair, kept current by
+inserting each new event and patching the `LEAD`/`LAG`-derived columns of its immediate
+neighbours within the key. Admitted surface: §"Succession-grain admission (no declaration)".
+
+| Kind | What the profile composes | Home |
+|---|---|---|
+| **Output shape / grain** | `(k, t)` — one row per key per event, addressed by the pair the projection's window functions partition and order by; not a `unique_key` (no `GROUP BY` exists) | this spec |
+| **Properties (required)** | the keyed-succession classifier (window-function shape, row-local column check, single-source check, delete-filter admission); event-time monotonicity trace of the driving source, certifying the `ORDER BY` column strictly monotone | `model_properties.md` |
+| **World-facts (consumed)** | the driving source's clock (`timeseries:`, through the trace) and its `mutation_profile.kind: append_only` posture — no declared `unique_key`, `functional_dependencies:`, or model-level `timeseries:` | `sources.md`, `timeseries.md` |
+| **Default plan** | succession-patch keyed `MERGE`: insert each non-delete event's row, record each delete event in the tombstone ledger, patch the `LEAD`/`LAG`-derived columns of the event's neighbours located over the presented rows and the ledger together | `model_transforms.md` |
+| **Run shape** | window-forward over the driving source's clock; re-run tolerant and order-independent, so reprocessing a covered window is admitted, never refused | this spec, §"Run shape and late events" |
+| **Admission** | the classifier itself — a leaf verdict the composition walk invokes, not a per-cell admission matrix lookup (there is only one cell: insert-plus-neighbour-patch) | `model_properties.md` |
+| **Invariant upheld** | end-state equivalence — the projection's own `LEAD`/`LAG` over the full processed input is the executable oracle, identically to the key grain's SQL-is-the-oracle rule | `incremental_models.md` §"The equivalence invariant" |
+
+#### The tombstone ledger (hidden state)
+
+The succession grain keeps one piece of hidden state beside the presented table: the
+**tombstone ledger**, a backend-resident table holding `(k, t)` for every **delete** event ever
+folded into the model — and nothing else. Non-delete events are represented by their presented
+rows alone. The **event sequence** of a key, as the SQL's `LEAD`/`LAG` see it, is the union of
+that key's presented rows and its ledger rows ordered by `t`; every neighbour lookup the
+technique performs runs over that union, never the presented table alone.
+
+The ledger exists because delete events have no presented row. The model's SQL computes
+`LEAD(t)` over *all* rows and only then filters deletes out, so a tombstone's `t` is load-bearing
+for its neighbours' derived columns even though the tombstone itself is never presented. Without
+a record of it, two sequences diverge from the oracle: a later event arriving after a delete
+would locate the deleted key's last presented row as its predecessor and re-open an interval the
+tombstone closed; and a late event splicing in *before* a delete would find no stored `t` above
+its own and present itself as current for an entity that no longer exists. Recording the
+tombstones makes "immediate predecessor" and "immediate successor" a pure function of stored
+state, exactly as the SQL's `LEAD`/`LAG` compute them. Recording only the tombstones keeps the
+ledger proportional to deletes, which are rare, rather than to the whole history.
+
+The ledger is written in the **same transaction** as the presented table's `MERGE` — a
+correctness structure in `state.md`'s classification, on the same terms as the key grain's
+merge ledger (§"The transactional frontier write (merge ledger)"). Where the backend or the
+project's state posture offers no substrate for it, availability resolution downgrades the
+model to full refresh and records `MaintenanceStateDowngraded` (`state.md` §"The degradation
+contract") — never a succession patch against the presented table alone. It is invisible to
+consumers on the same terms as rung-2 state columns (§"Decomposed state (rung 2) in keyed
+models" — presentation projection); `smelt explain` renders it as internal state. Unlike rung-2
+state *columns*, it is a sibling table rather than hidden columns on the presented rows, because
+a tombstone has no presented row to carry columns on (§"Succession-grain design"). The presented
+table is therefore exactly the oracle's output for every reader, inside or outside smelt.
+
+**Lifecycle.** The ledger is always a pure function of the processed input: its contents are
+exactly `SELECT k, t FROM <source> WHERE <pre-filter> AND <delete flag>` over every window
+ever folded. Every path that rebuilds presented state rebuilds the ledger from that
+definition, in the same transaction: a `--full-refresh` rebuilds both from the whole source;
+`smelt repair` over a range re-derives the ledger rows whose run-axis partition lies in that
+range alongside the presented rows; a definition delta that touches the key, the clock, the
+delete flag, or the pre-window filter changes what the ledger *is* and is a skeleton change —
+a new relation, ledger included (`definition_deltas.md` §"Skeleton changes are a new
+relation"). A definition delta that touches only row-local payload columns leaves the ledger
+untouched. The ledger-rebuild `SELECT` is the third emitter output of the succession-patch
+technique (`model_transforms.md`), never authored by a backend. Ledger size is proportional
+to the number of delete events ever folded and is never compacted: a tombstone stays
+load-bearing for as long as a later-arriving event could splice next to it, which under the
+default contract point is forever.
+
+#### The maintenance theorem (bounded footprint)
+
+When a batch of new events is processed, the only presented rows whose output changes are the
+new rows themselves (inserted, unless delete-flagged) and, for each new event, its **immediate
+neighbours within its key** in the event sequence's `t` order: its **predecessor** (the event
+with the greatest `t` below the new event's) for every `LEAD`-derived column, and its
+**successor** (the least `t` above) for every `LAG`-derived column. A model projecting only
+`LEAD` touches at most two presented rows per event; one projecting both `LEAD` and `LAG` at
+most three. Both neighbours are located over the **neighbour domain**: the union of the
+presented rows, the tombstone ledger (§"The tombstone ledger (hidden state)"), and the other
+events of the same batch — two new events in one batch may be each other's neighbours, so a
+batch is folded as if its events were applied one at a time in `t` order. A neighbour that is
+a tombstone is found and correctly contributes its `t` even though it has no presented row to
+patch.
+
+The theorem is **arrival-order independent**. An event that splices into the middle of a key's
+history patches exactly its predecessor (whose `LEAD(t)` becomes the new event's `t`) and its
+successor (whose `LAG(t)` likewise), and takes its own derived columns from those same two
+neighbours — the same rule whether the event is on time or arbitrarily late. The write footprint
+is a constant number of rows, never a function of how late the event is, and no derived
+horizon or clamp participates in the write. Every write is also **idempotent**: re-folding an
+event already in the event sequence re-derives the same neighbour patches and the same
+presented row (or ledger row), so a window may be re-run without harm (§"Run shape and late
+events").
+
+#### Delete events
+
+A delete-flagged row (a CDC tombstone in the change stream `customer_history` reads) must still
+close out its predecessor's validity interval before it is dropped from the output — deleting a
+version ends the previous version's currency without opening a new one. The classifier admits
+this by permitting one `QUALIFY NOT <boolean column>` clause — the one single-scope filter
+SQL evaluates *after* window functions (`SuccessionDeleteFilterMisplaced` otherwise,
+`model_properties.md` §"Keyed-succession classification"). `customer_history` with a CDC
+delete flag:
+
+```sql
+SELECT
+    customer_id,
+    tier,
+    region,
+    effective_ts AS valid_from,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) IS NULL AS is_current
+FROM smelt.customer_changes
+QUALIFY NOT is_deleted
+```
+
+The `LEAD` is computed over every row including deletes, so a deleted row still contributes
+its timestamp to its predecessor's `valid_to`, and only then is it filtered from the
+materialised output. A `WHERE NOT is_deleted` in the same scope is **not** refused — it is a
+legitimate pre-window clamp under rule 1a and equivalence-preserving, since the row never
+enters the sequence in oracle or state — but it means something different: the tombstone's
+timestamp never reaches its predecessor, so the previous version stays open. Because that is
+the classic mistake, the classifier warns when a pre-window filter is a bare negated boolean
+column (`SuccessionPreFilterNegatesFlag`, advisory only — it never changes admission),
+naming `QUALIFY` as the delete-flag spelling. On a backend
+without native `QUALIFY` the dialect layer lowers the clause to a wrapping subquery
+(`multi_backend.md`, `supports_qualify`), so the full-refresh oracle runs unchanged everywhere. The succession-patch `MERGE` (`model_transforms.md`)
+reflects this: a delete event is recorded in the tombstone ledger and contributes neighbour
+patches but no presented insert. Because the ledger remembers the tombstone, every later
+event — whether it arrives after the delete or splices in before it — sees the tombstone as a
+neighbour exactly as the SQL's `LEAD`/`LAG` would (§"The tombstone ledger (hidden state)").
+
+This is a self-contained widening of the pattern grammar, not a dependency on the driving
+source declaring a change feed (`sources.md`) or on general change-feed/CDF consumption — the
+delete flag is an ordinary row-local boolean column in an already-consumed input, no different
+in kind to the classifier than any other tracked-attribute column.
+
+#### Run shape and late events
+
+The succession grain has exactly one run shape: **window-forward** over the driving source's
+`timeseries.partition_column`, sequenced by the same windowed-keyed-maintenance driver as the
+key grain (§"The two run shapes (derived, never declared)"). Snapshot-reconcile is never
+admitted — a snapshot carries no event stream to succeed over (§"What stays out of this
+grain"). The driving source must declare `mutation_profile.kind: append_only`
+(`SuccessionDrivingSourceNotAppendOnly` otherwise): the theorem folds each event exactly once
+into the event sequence, and a source that can rewrite or retract an already-folded event
+would leave the stored sequence disagreeing with the oracle. The declaration is paired with
+its usual verification mechanism, the append-only posture probe (`sources.md` §Semantics,
+`SourceMutationProfileViolated`).
+
+**Two axes, deliberately distinct.** The **run axis** is the source's `partition_column` —
+what a window covers and what the driver steps. The **succession clock** is the `ORDER BY`
+column, which traces to the source's `event_time_column` (`timeseries.md` — the two may
+differ). The technique never computes `LEAD`/`LAG` inside a window's delta `SELECT`; a
+window's rows are *events*, projected row-locally, and their derived columns come from the
+patch against stored state. So the run axis places an event in a run, and the clock places it
+in its key's sequence, and the two are independent. Which column the source partitions by is
+therefore the single fact that decides how late events reach this grain:
+
+- **Arrival-partitioned** (`partition_column` is a landing/ingest date; `event_time_column`
+  is the event's own time) — the intended posture for a change stream. Every append lands in
+  the *open* arrival partition, so the append-only probe's closed-partition fingerprint leg
+  (gated to partitions strictly below the recorded maximum, `model_properties.md` §"Probe
+  obligation") never fires on a late event, and a late event *is simply an event in a later arrival
+  window*: the ordinary window-forward step presents it, the theorem folds it, no discovery
+  mechanism beyond the landed delta is involved. The running example's `customer_changes`
+  declares `partition_column: ingested_date, event_time_column: effective_ts`.
+- **Event-time-partitioned** (`partition_column` is the clock's date) — admitted, and late
+  events still reach the grain, by the framework's general rule rather than by construction:
+  the append-only posture probe classifies a row-count *increase* in a closed partition as a
+  late arrival to re-process, never as a violation (`model_properties.md` §Constraints
+  "Declared lateness is orchestration-only"), so the late row surfaces as an observed delta
+  on that closed partition and the window covering it is re-presented. Because this grain is
+  re-run tolerant (below), re-presenting the window is a no-op for every event already
+  folded and a correct fold for the late one. The cost is the re-presentation of a closed
+  partition, which arrival partitioning never incurs.
+
+`smelt explain` names the run axis and the clock and states which of the two the source has,
+so an author can see whether late events cost a closed-partition re-presentation.
+This is the partition grain's default-point doctrine applied to a keyed history — arrival
+time places the row, the model's own SQL decides what counts (`incremental_models.md`
+§"Windowed maintenance and the horizon", late arrivals at the default point) — and it is why
+the grain needs neither a weaker `append_only` sub-fact nor a lateness-gated probe
+(§"Succession-grain design").
+
+**The lateness clamp is the SQL, and it is optional.** An author who wants versions arriving
+too long after their event time *not* to count writes that as a deterministic row-local
+predicate over the driving source's own columns, **before** the window:
+
+```sql
+FROM smelt.customer_changes
+WHERE ingested_at < effective_ts + INTERVAL '7 days'
+```
+
+A row the predicate drops never enters the event sequence — in the oracle or in the
+maintained state — so equivalence holds by construction, and the taint rule that bars
+`CURRENT_DATE` from row placement (§"Safety checks (per-cell admission for recompute-a-region)")
+bars it here too: the clamp compares the feed's own columns, never the run clock. The
+classifier admits one such pre-window filter (`SuccessionPreFilterNotRowLocal` otherwise,
+`model_properties.md` §"Keyed-succession classification"). Nothing requires it — the write
+footprint is constant without it — it is how an author bounds *semantics*, not cost.
+
+Two derived execution postures follow from the theorem and are surfaced by `smelt explain`,
+never declared. The grain is **re-run tolerant**: a window already folded may be folded again,
+because the `MERGE` addresses presented rows by `(k, t)` and the ledger dedupes on the same
+identity, so the second fold is a no-op. It is **order-independent but serial**: windows may
+apply in any temporal order, because neighbours are located in the stored event sequence
+rather than assumed to be the last-folded row — but never concurrently, since two windows
+folding events with a shared neighbour would race on that neighbour's patch and the later
+commit could carry the wrong `t`. Consequently **reprocessing is admitted, not refused** —
+there is no `KeyedReprocessedWindow` analogue here. The model keeps the window-forward
+driver's per-model frontier (§"The transactional frontier write (merge ledger)") at the
+re-run-tolerant grade — bookkeeping for `--auto` staleness, never a refusal structure.
+
+Consumption is the framework's ordinary window-forward step over the driving source's landed
+delta on the run axis (`sources.md` §"Landed-delta (derived, recorded)"): a run folds the
+events the delta presents. Under arrival partitioning that is every event, however late its
+clock value, in the open partition; under event-time partitioning a late event arrives as an
+observed delta on a closed partition and that window is re-presented. Either way, presenting
+an event is always safe and always cheap, and a window may be re-presented — by the probe's
+late-arrival classification, a re-run, an explicit `--landed` range, or `smelt repair` —
+without refusal.
+
+**Clock ties.** The derived identity `(k, t)` requires that no two distinct events share a key
+and a clock value. At admission the trace must certify the `ORDER BY` column **strictly**
+monotone (`is_strict`, `model_properties.md` §"Event-time monotonicity trace"); a clock
+expression that can collapse distinct source times onto one value — a truncation, a
+date-cast — refuses (`SuccessionOrderNotMonotoneClock`, naming non-strictness). Strictness
+is a property of the clock *expression* — it says the expression never maps two distinct source
+times to one value — not of the source's rows, so a source that genuinely carries two distinct
+events at one `(k, t)` is caught only at runtime. There, a delta presenting two
+non-identical rows with equal `(k, t)`, a row whose `(k, t)` matches a presented row with
+different row-local content or delete flag, or a delete whose `(k, t)` matches a presented row
+(and vice versa), fails the run transactionally (`SuccessionClockTie`): each is an identity
+collision the SQL's `LEAD` would resolve nondeterministically, or a source mutation
+`append_only` forbids. A delete and an insert at the same `(k, t)` — which some CDC feeds
+emit for a replace — is refused on the same grounds: the oracle's `LEAD` order between them
+is undefined. Against a stored tombstone only the delete flag is comparable, since the ledger
+carries no row-local content.
+
+A row **identical** to one already folded — matching a presented row's `(k, t)` and every
+row-local value, or a stored tombstone's `(k, t)` and delete flag — is always a
+**re-presentation** and a no-op: a re-run, an explicit `--landed` range, or a repair
+re-presents exactly such rows, and the technique cannot and need not distinguish that from a
+source redelivery. (Against a tombstone only the flag is comparable, so a redelivered delete
+whose payload changed is accepted silently; nothing in the oracle depends on a tombstone's
+payload.) Two identical rows **within one delta** are read through the source's declared
+`redelivery` sub-fact (`sources.md` §"`mutation_profile`"). Under `redelivery: at_least_once`
+(the default) they are a redelivery and fold once; this equals the oracle over the
+*deduplicated* input, the same footing every fold technique stands on under redelivery, and
+a feed in which two genuinely distinct events share both `(k, t)` and every row-local value
+is indistinguishable from redelivery, so the zero-length interval the raw oracle would emit
+for it is not produced — a declared boundary of the grain (§Constraints), not a divergence
+to close. Under `redelivery: none` the source has promised that no row arrives twice within
+a delivery, so two identical rows in one delta are two events at one `(k, t)` and refuse
+(`SuccessionClockTie`) like any other collision.
+
+#### What stays out of this grain
+
+**SCD2 over mutable snapshots** is never admitted here regardless of SQL shape: deriving a
+change stream by diffing successive scans of a mutable snapshot source would stamp version
+boundaries with the scan time — the run clock — making the history depend on when `smelt build`
+happened to run, which breaks the replay-safety the equivalence invariant demands
+(`incremental_models.md` §"The equivalence invariant"). The succession grain requires a source
+that already carries change events with their own event times; a snapshot-to-change-stream
+facility, if ever wanted, is a source-layer concern (`sources.md`), never this profile's.
+
+**Non-succession window functions** — a running total, a ranking function, a frame-based
+aggregate — are not this grain; they either fail the classifier and stay on `refresh: full`, or
+belong to a different, not-yet-admitted pattern family entirely (§Future Extensions).
+
 ## Design
 
 Each paragraph records one load-bearing decision and what was rejected. Deeper derivations live
@@ -1108,6 +1472,132 @@ windowed-keyed-maintenance driver (`model_transforms.md`), parameterised by
 drift risk; a consequence is that every consumer inherits the driver's granularity support
 (day and week today — widening is driver work, §Future Extensions).
 
+### Succession-grain design
+
+**Recognition, not declaration.** A declared `versioning: interval` profile — smelt-managed
+hidden validity columns, a tracked-attribute change detector, a bespoke "interval-keyed"
+equivalence contract — was rejected in favour of reading the shape directly off the model's own
+`LEAD`/`LAG` SQL. The declared profile bought exactly one feature and carried its own open
+questions (hidden column surface, NULL vs. far-future sentinel, tracked-attribute selection);
+the classifier buys the family of `LEAD`/`LAG`-over-clock-within-key models — SCD2 today,
+next-event features and inter-event durations by the grammar widenings named in §Future
+Extensions — with no declaration surface at all, and the user's SQL already states every one
+of the declared profile's open questions explicitly. This is the same
+"derive from the SQL, never restate in frontmatter" principle the key grain's column families
+already apply, taken one step further: here even the *grain itself* is inferred, not merely the
+per-column combiner. (`docs/research/20260723-scd2-succession-pattern.md`.)
+
+**The first inference-only shape, deliberately narrow.** The partition and key grains stay
+declared: `grain: partition`/`grain: key` (or the `timeseries:`/`unique_key:` facts they derive
+from) are not made optional by this shape's existence, and no general "infer any grain from SQL
+alone" admission path is introduced. The succession grain earns inference because its SQL shape
+(window functions in the outermost projection) is one the other two grains already positively
+forbid or cannot express (`KeyedForbidsWindowFunctions`; partition grain has no per-key window
+semantics at all), so there is no ambiguity to resolve between a declared and an inferred
+reading of the same SQL. Extending inference to a shape that could plausibly be either declared
+or inferred is future work, not decided here (§Future Extensions).
+
+**Bounded footprint, not a horizon.** Every other windowed shape in this spec bounds its reach
+with a *derived horizon* — a margin past which a late fact is excluded from the output for
+good. The succession grain excludes nothing: its maintenance theorem names a constant
+footprint (the new row and its immediate neighbours) for every event regardless of how late
+it arrives, so a late event folds correctly whenever it is presented, and there is nothing
+to derive a bound over.
+
+**Late events arrive on the run axis; arrival partitioning makes them free.** Under an
+event-time-partitioned source, a late append lands in a closed partition, which the
+append-only posture probe classifies as a late arrival to re-process (`model_properties.md`
+§Constraints "Declared lateness is orchestration-only"): correct, but it costs a
+closed-partition re-presentation per late batch, and a feed with routine lateness would
+re-present old partitions on most runs. Two alternatives to that cost were considered and
+rejected: a grain-local rescan margin (a per-model restatement of a source fact,
+`sources.md` §Design "World-facts live on the source, never per model") and making the
+source's declared `lateness` a probe input (reverses the orchestration-only decision in
+`docs/research/20260904-decision-track.md`). The chosen answer separates the **run axis**
+from the **succession clock**: a change stream partitioned by *arrival* puts every append
+into the open partition, so a late event is merely an event in a later window and no closed
+partition is ever re-presented. This is already the framework's default-point lateness
+doctrine — arrival time places the row, the SQL decides what counts (`incremental_models.md`
+§"Windowed maintenance and the horizon") — and it needs no new source vocabulary and no
+discovery mechanism beyond the landed delta. The cost is a declaration on the source
+(`partition_column` ≠ `event_time_column`), which `timeseries.md` already admits and which
+states a true fact about the feed. An event-time-partitioned source is admitted on equal
+terms — the theorem does not depend on which axis the source uses — and `smelt explain`
+reports which one is in force, so the difference is cost, never correctness or a refusal.
+
+**The lateness clamp is SQL, admitted as a pre-window filter.** A declared `max_lateness:`
+on the model was rejected — it would be a frontmatter fact restating something the SQL can
+state exactly (`models.md` §Design "The declaration law: declared, derived, implied"). Admitting one
+deterministic row-local `WHERE` between the driving source and the window projection costs
+one classifier rule and one refusal code, keeps the oracle and the maintained state trivially
+equal (a dropped row is dropped in both), and reuses the existing determinism taint rule to
+keep the run clock out of it. The filter is optional because, unlike the partition grain's
+horizon, nothing about this grain's cost depends on it.
+
+**The tombstone ledger is a sibling table holding only deletes.** Rung-2 state in the key
+grain lives as `__part` columns on the presented rows (§"Decomposed state (rung 2) in keyed
+models"). That layout was rejected here because the load-bearing hidden rows are exactly the
+ones with no presented row — tombstones. Three alternatives were rejected. Storing tombstones
+as hidden rows *in* the presented table with a `__deleted` marker: the rung-2 presentation
+projection hides *columns*, and extending it to hide *rows* would force a predicate into every
+consumer read (`SELECT *`, `COUNT(*)`, joins, pipe queries) rather than a select-list rewrite,
+and any reader outside smelt would see rows the oracle excludes. Presenting the model through
+a filtering *view* over a differently-named physical table: the same `ref()`-resolves-to-a-view
+and second-relation-in-every-DDL-path objection that rejected a presentation view for rung-2
+state. Locating neighbours against the presented table alone, with a marker on the closed
+predecessor: unsound, since a late event splicing between two tombstones, or arriving after a
+key's only events were deletes, has no presented row from which to recover the tombstone's
+`t`. A ledger of *every* event's `(k, t, is_delete)` was considered and narrowed: non-delete
+events are already fully represented by their presented rows, so recording them again
+duplicates the whole history for no information gain; the union of presented rows and a
+deletes-only ledger is the same event sequence at a fraction of the state.
+
+**One driving source, append-only, clock-only unit-offset ascending windows.** The grammar
+admits exactly one source reference and no joins, requires `append_only`, admits `LEAD`/`LAG`
+only over the clock column with the default offset of 1 and an ascending single-key `ORDER
+BY`, and requires the key and clock columns to be projected. The offset and direction
+restrictions are what make "immediate neighbour" the theorem's footprint — `LEAD(t, 2)` would
+touch the second predecessor, `ORDER BY t DESC` would swap the roles of `LEAD` and `LAG` —
+and each could be admitted later by widening the patch to the offset-th neighbour or swapping
+the roles, but neither buys anything SCD2 needs. Projecting `k` and `t` is required rather
+than carried as hidden rung-2 columns because a history table that does not expose its own
+key and version time is not a usable history table, and hidden identity columns would make
+the presented schema differ from the SQL's. Each of the source-side narrowings is a
+deliberate choice with a named widening path. Joins were excluded
+because the skeleton-source closure proof (`model_properties.md`) rules a join feeding a
+window `Open` in its non-aggregating-scope restriction, so nothing can yet prove an enrichment side cannot add, drop,
+or duplicate a version row; admitting joins is a closure widening first. `append_only` is
+required because the theorem folds each event once and a mutated or retracted event would
+leave the stored event sequence disagreeing with the oracle; a `change_feed` driving source,
+whose retractions could be folded as removals from the sequence, waits on offset-based
+change-feed consumption (`sources.md` §Known Divergences). `LEAD(other_col)` — the
+next-event-feature form — was excluded because a tombstone neighbour's `other_col` would have
+to be carried in the ledger too, widening the state per projected column; the clock-only form
+keeps the ledger at the fixed `(k, t)` pair (§Future Extensions).
+
+**Delete admission is a grammar widening, not a change-feed dependency, and it is
+negation-only.** Recognising `QUALIFY NOT <boolean column>` as a permitted post-window
+filter was chosen over requiring the
+driving source to declare a change feed (`sources.md`) or waiting on general change-feed/CDF
+consumption (`incremental_models.md` §Future Extensions "Live change-feed folds"): the delete
+flag is already an ordinary row in the input the model reads, so admitting it needs only a
+classifier rule, not new source-layer or delta-typing machinery. Coupling SCD2 delete-handling
+to the unrelated, unscheduled CDF work would have blocked a self-contained feature on a much
+larger one. The clause is admitted only as a negation (`QUALIFY NOT <col>`), not as a bare
+`QUALIFY <col>`, because the classifier must know which polarity marks a tombstone to write
+the ledger: `NOT is_deleted` says `TRUE` is a delete; an un-negated `QUALIFY is_active`
+would require the classifier to infer that `FALSE` is, which is a guess. Admitting both
+polarities with the polarity carried on the verdict is a straightforward later widening.
+
+**The output declares neither a clock nor an identity — a known composition cost.** A
+succession model declares no `timeseries:` and no `unique_key`, so to a downstream consumer
+its output has no clock and no identity (`model_properties.md`): every consumer inherits
+whole-model dirt on any change, even though a history table with `valid_from` is the
+archetypal clocked upstream. Deriving an output clock from the projected clock column (it is
+`t`, already proven strictly monotone) and an output identity from `(k, t)` is the obvious
+widening, deferred so that the first inferred grain does not also introduce the first
+inferred *output* facts (§Future Extensions).
+
 ## Constraints & Invariants
 
 ### Partition-grain constraints
@@ -1232,6 +1722,59 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
     comparison anywhere in locality reasoning is order-independent: a key is a set of columns,
     never a list.
 
+### Succession-grain constraints
+
+1. **Admission is the classifier; there is no declared surface.** No `grain:`, `unique_key`, or
+   `timeseries:` value changes succession-grain admission or behaviour. A future declared knob
+   for this shape would be a spec change, not a frontmatter addition silently consumed here.
+2. **The output identity is `(k, t)`, never a `unique_key`.** A model admitted to this grain has
+   no `GROUP BY` and derives no single-row-per-key identity; downstream consumers see a history
+   table, one row per event.
+3. **The write footprint is a constant per processed event: the new row and its immediate
+   neighbours within its key** — the predecessor for `LEAD`-derived columns, the successor for
+   `LAG`-derived columns. No derived horizon, no lateness bound, and no declared margin ever
+   widens or narrows it — late arrivals are admitted by the same rule as on-time ones.
+4. **Neighbours are located over the neighbour domain — presented rows, the tombstone ledger,
+   and the batch's own events — never the presented table alone.** Every folded delete event
+   is recorded as `(k, t)` in the ledger, written in the same transaction as the presented
+   `MERGE`; a backend that cannot hold it downgrades the model to full refresh
+   (`MaintenanceStateDowngraded`), never to a patch that ignores tombstones. The ledger holds
+   deletes only — a non-delete event is represented by its presented row and nowhere else.
+5. **The run shape is window-forward only; the grain is re-run tolerant, order-independent,
+   and serial; reprocessing is admitted.** Windows never apply concurrently. Snapshot-reconcile
+   is never admitted.
+6. **The driving source is exactly one `append_only`, `timeseries:`-declaring source
+   reference**, verified by the append-only posture probe; joins, CTEs, subqueries, and set
+   operations refuse. The run axis is the source's `partition_column`; the clock is its
+   `event_time_column`; late events reach the grain through the run axis, never through a
+   weakened posture or a grain-local rescan.
+6a. **At most one pre-window filter, deterministic and row-local over the driving source's
+    own columns.** It is the only lateness clamp the grain has, and it is optional.
+7. **`(k, t)` is a strict identity, and both `k` and `t` are projected.** The clock traces
+   strictly monotone at admission; the key columns and the clock column each appear
+   row-locally in the projection so the `MERGE` can address presented rows; a runtime
+   collision — two distinct events at one `(k, t)` — rolls the run back
+   (`SuccessionClockTie`). A row identical to stored state is always a re-presentation and a
+   no-op; two identical rows within one delta fold once under `redelivery: at_least_once`
+   and refuse under `redelivery: none`.
+8. **The classifier is fail-closed.** A window function that is not `LEAD(t)`/`LAG(t)` (or an
+   expression over one, or with an offset other than the default 1), a non-row-local
+   non-window projection, an unresolvable or nullable partition key, a non-strict or
+   descending `ORDER BY`, an unprojected key or clock, a second source, a non-append-only
+   source, a non-row-local or nondeterministic pre-window filter, or a misplaced or nullable
+   delete filter each refuses with a named diagnostic (§"Diagnostics") — never falls back to
+   an approximate or partial maintenance.
+9. **End-state equivalence holds with the model's own SQL as the oracle**, identically to the
+   key grain's rule: `full_refresh(model SQL)` over the same processed inputs is the executable
+   correctness definition, with no bespoke interval-keyed specialisation.
+10. **Delete admission is exactly one grammar shape.** Only `QUALIFY NOT <row-local boolean
+    column>` is admitted; any other post-window filter shape refuses
+    (`SuccessionDeleteFilterMisplaced`). `WHERE` is always pre-window and never the delete
+    filter.
+11. **SCD2-over-mutable-snapshots is never admitted, regardless of SQL shape** — this grain
+    requires a source that already carries change events with their own event times
+    (§"What stays out of this grain").
+
 ## Known Divergences / Open Questions
 
 Live gaps between this spec and the implementation, and questions where intent itself is
@@ -1317,6 +1860,31 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   at plan derivation (`MaintenanceUnsupportedGrain`); trajectory support is tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 
+### The succession grain
+
+- **No implementation exists yet.** The classifier (`model_properties.md` §"Keyed-succession
+  classification"), the succession-patch technique (`model_transforms.md`), and this profile's
+  admission rules are specified but unimplemented; `refresh: incremental` over a
+  keyed-succession-shaped model today refuses with the ordinary "no maintainable shape" error
+  rather than the named diagnostics above. No plan exists yet — this spec diff is the input to
+  one.
+- **The generative conformance recipes this profile's splice and delete claims depend on do not
+  exist yet.** §"The maintenance theorem (bounded footprint)" and §"Delete events" are proved on
+  paper; the recipe families that will check them against the full-refresh oracle via
+  `cargo test -p smelt-cli --test maintenance_conformance` (`incremental_models.md`
+  §References) are: late-arriving splice (an event inserted between two folded events), delete
+  then later insert on the same key, late insert splicing before an already-folded delete, a key
+  whose only events are deletes, `LAG`-projecting models under each of those, out-of-order and
+  repeated window application, and an equal-`(k, t)` collision expecting `SuccessionClockTie`.
+  Until they exist, this profile's theorem is a design claim, not a verified one.
+- **The conformance pool has no arrival-partitioned source recipe.** The late-splice claims
+  above are only reachable through an arrival-partitioned driving source (§"Run shape and
+  late events"), and the typed recipe generator today partitions every clocked source by its
+  event time. The succession recipe family needs a source recipe whose `partition_column` is
+  a landing date distinct from `event_time_column`, with lateness schedules that land old
+  event times in new arrival windows — and a leg with the optional pre-window lateness clamp,
+  asserting the clamped-out rows are absent from both oracle and maintained state.
+
 ## Future Extensions
 
 Ideas for widening the admission space that are **not decided**. Nothing here is surface;
@@ -1352,6 +1920,27 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
 - **Promoting the pattern functions to built-ins.** `smelt.latest`/`smelt.once`/
   `smelt.current` ship as a `smelt.define` template file; a registry surface is worth its
   cost only if adoption proves the names.
+- **Widening the succession grammar.** Three narrowings in §"Succession-grain design" each
+  have a named widening path, none specified: `LEAD(other_col)`/`LAG(other_col)` (next-event
+  features, inter-event durations) by carrying the referenced columns in the tombstone ledger;
+  an enrichment join once skeleton-source closure can prove a join feeding a window `Closed`;
+  a `change_feed` driving source, folding its retractions as removals from the event sequence, once
+  offset-based change-feed consumption exists (`sources.md`). A dedupe-before-`LEAD` CTE — the
+  `LAG`-comparison filter that drops no-op change events — is a fourth: the classifier is a
+  leaf over one scope, and recognising a succession projection above a row-local filter
+  scope is a walk-composition question. A fifth is un-negated `QUALIFY <col>` with the
+  polarity carried on the verdict.
+- **Derived output facts for the succession grain.** The succession model's output could
+  carry a derived clock (`t`, already proven strictly monotone) and a derived identity
+  (`(k, t)`) so downstream consumers see a clocked, keyed upstream rather than an opaque one
+  (§"Succession-grain design"). Not specified: whether inferred output facts should exist at
+  all is a design question broader than this grain.
+- **Widening inference beyond the succession grain.** The succession-grain classifier recognises
+  exactly one window-function shape (`LEAD`/`LAG`-over-clock-within-key). Other window shapes —
+  session-gap detection, running ranks — could plausibly earn their own inferred grain by the
+  same method; none is specified. Extending inference to a shape the partition or key grain
+  could also plausibly claim (rather than one they positively forbid) is a harder design
+  question, deliberately left open (§"Succession-grain design").
 - **Metric expansion in partition-grain bodies.** The `PartitionGrainForbidsMetrics` refusal
   stands until the composition of metric expansion with time-filter injection is specified,
   when metrics work resumes.
@@ -1445,3 +2034,16 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   boundary); `docs/research/20260703-model-updates.md`;
   `docs/research/20260705-refresh-as-maintenance-plan/` (the shape-profile demotion and
   per-cell admission this spec composes).
+
+### The succession grain
+
+- **Research**: `docs/research/20260723-scd2-succession-pattern.md` (the full design sketch this
+  profile specifies: the pattern, the maintenance theorem, the four-layer machinery breakdown,
+  the two hard parts, and the case for recognition over declaration).
+- **Related specs**: `model_properties.md` §"Keyed-succession classification" (the classifier);
+  `model_transforms.md` (the succession-patch keyed `MERGE`); `incremental_models.md` §Limitations
+  "SCD2 recognition is bounded to the keyed-succession pattern" (the boundary of what this
+  profile admits vs. what stays plain SQL); `sources.md` (the `append_only` posture and its
+  probe); `state.md` (the tombstone ledger's degradation contract); `diagnostics.md` §"Succession
+  grain" (the code catalogue).
+- **Plans (history)**: none yet — this spec diff is the input to the first one.

@@ -124,6 +124,18 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             .collect()
     };
 
+    let bound_ctx = smelt_cli::explain::build_bound_context(&canonical, &graph, &config);
+    let profile = smelt_runtime::diagnostics::build_model_profile(
+        model,
+        &bound_ctx,
+        &result.plan.cells,
+        &result.column_groups,
+        &result.plan.refusals,
+        &[],
+        contract_cfg,
+    )
+    .expect("build_model_profile");
+
     Some(
         build_maintenance_plan_report(
             &canonical,
@@ -139,6 +151,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &edge_delta_types,
             None,
             own_output_delta.as_ref(),
+            &profile,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -1082,6 +1095,26 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         is_snapshot_reconcile: None,
         comparability: vec![],
     };
+    let properties = smelt_logical::analysis::profile::PropertySet::derive(
+        "non_repair_fixture",
+        "SELECT 1 AS max_val",
+        &[],
+        &smelt_logical::analysis::source_bounds::BoundContext::default(),
+    )
+    .expect("PropertySet::derive");
+    let contract_points: Vec<smelt_logical::contract::ContractPointView> = result
+        .plan
+        .cells
+        .iter()
+        .map(|_| smelt_logical::contract::effective_contract(None, "", &[]).into())
+        .collect();
+    let profile = smelt_logical::analysis::profile::PropertyProfile::assemble(
+        properties,
+        &result.plan.cells,
+        &contract_points,
+        &result.plan.refusals,
+        &[],
+    );
     let report = build_maintenance_plan_report(
         "non_repair_fixture",
         &result,
@@ -1096,6 +1129,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         &[],
         None,
         None,
+        &profile,
     )
     .expect("build_maintenance_plan_report");
 
@@ -1422,6 +1456,116 @@ fn device_user_edges_admits_a_key_addressed_cell() {
     );
 }
 
+/// A `grain: partition` model joining a clocked, append-only driving source
+/// with a second, unclocked `mutable_snapshot` source — the second source's
+/// scan cannot be partition-bounded, so the plan refuses admission for it
+/// (`MaintenanceScanUnbounded`) rather than silently shipping a full-table
+/// write (`incremental_models.md` §"Partition-local maintenance (the K8
+/// guardrail)").
+fn stage_scan_unbounded_project(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(project_dir.join("models/sources")).expect("create dirs");
+
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        "name: scan_unbounded_fixture\n\
+         version: 1\n\
+         paths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    )
+    .expect("write smelt.yml");
+
+    std::fs::write(
+        project_dir.join("models/sources/clocked.yml"),
+        "description: clocked append-only source\n\
+         mutation_profile: append_only\n\
+         timeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\n\
+         columns:\n\
+         - name: d\n  type: DATE\n\
+         - name: id\n  type: INTEGER\n",
+    )
+    .expect("write clocked.yml");
+
+    std::fs::write(
+        project_dir.join("models/sources/unclocked.yml"),
+        "description: unclocked mutable source, no clock to bound its scan\n\
+         mutation_profile: mutable_snapshot\n\
+         columns:\n\
+         - name: id\n  type: INTEGER\n\
+         - name: val\n  type: INTEGER\n",
+    )
+    .expect("write unclocked.yml");
+
+    std::fs::write(
+        project_dir.join("models/joined.sql"),
+        "---\n\
+         timeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         ---\n\
+         SELECT c.d, c.id, u.val\n\
+         FROM smelt.sources.clocked c\n\
+         JOIN smelt.sources.unclocked u ON c.id = u.id\n",
+    )
+    .expect("write joined.sql");
+
+    project_dir
+}
+
+/// `smelt explain <model> --json`'s `refusals` array carries the same
+/// admission refusal the text report's "Refusals" section prints — read
+/// verbatim from the property profile
+/// (`docs/specs/property_diff.md` §"The property profile", test 6 of
+/// `docs/outcomes/20260905-property-diff/phases/02-plan.md`).
+#[test]
+fn explain_json_carries_refusals() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let project_dir = stage_scan_unbounded_project(&tmp);
+
+    let report = build_report_for(&project_dir, "joined").expect("joined has a maintenance plan");
+    assert!(
+        report.contains("MaintenanceScanUnbounded") || report.contains("ScanUnbounded"),
+        "expected the text report to print the ScanUnbounded refusal: {report}"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("joined")
+        .arg("--json")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt explain joined --json");
+    assert!(
+        output.status.success(),
+        "smelt explain joined --json failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("parse JSON");
+
+    let refusals = json["refusals"]
+        .as_array()
+        .expect("refusals must be an array");
+    assert!(
+        !refusals.is_empty(),
+        "expected at least one refusal in --json output: {json}"
+    );
+    assert!(
+        refusals
+            .iter()
+            .all(|r| r["code"].as_str() == Some("MaintenanceScanUnbounded")),
+        "expected every refusal here to be MaintenanceScanUnbounded: {refusals:?}"
+    );
+    assert!(
+        refusals.iter().any(|r| r["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("ScanUnbounded") && t.contains("unclocked"))),
+        "expected the refusal text to name the unclocked source: {refusals:?}"
+    );
+}
+
 // --- Phase 6 (`docs/outcomes/20260904-state-residency/outcome.md`): the
 // recorded `state_downgrade` becomes visible `smelt explain` surface. ---
 
@@ -1633,5 +1777,112 @@ fn docs_reference_documents_the_headline() {
     assert!(
         explain_section.contains("delta_signature"),
         "expected the `delta_signature` JSON object documented in the `smelt explain` section"
+    );
+}
+
+/// C1 (`docs/outcomes/20260905-property-diff/phases/05-plan.md` D7): the
+/// text report's `technique:` line must come from the property PROFILE, not
+/// the raw plan cell — proven here by constructing a profile whose
+/// `cell_verdicts[0].technique` deliberately differs from the raw
+/// `PlanCell::technique` it was built from, and asserting the report shows
+/// the profile's technique.
+#[test]
+fn text_report_technique_matches_the_profile_technique() {
+    use std::collections::BTreeSet;
+
+    use smelt_cli::explain::RelationContractView;
+    use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::analysis::profile::PropertyProfile;
+    use smelt_logical::analysis::source_bounds::BoundContext;
+    use smelt_logical::maintenance::{
+        ColumnGroup, Corner, MaintenancePlan, PartitionLocal, PlanCell, RowIdentity,
+        RowIdentityVerdict, Technique, Trigger,
+    };
+
+    let cell = PlanCell {
+        group: "{amount}".to_string(),
+        trigger: Trigger::UpstreamMutation {
+            source: "orders".to_string(),
+        },
+        corner: Corner::ColumnMerge,
+        technique: Technique::KeyedFold,
+        partition_local: PartitionLocal::Yes,
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::Key(vec!["id".to_string()]),
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: Default::default(),
+        key_scope: None,
+        state_downgrade: None,
+    };
+    let result = MaintenancePlanResult {
+        plan: MaintenancePlan {
+            cells: vec![cell],
+            refusals: vec![],
+            key_locality: None,
+        },
+        column_groups: vec![ColumnGroup {
+            columns: vec!["amount".to_string()],
+            mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        degenerate: vec![],
+        state_columns: vec![],
+        execution_postures: None,
+        is_snapshot_reconcile: None,
+        comparability: vec![],
+    };
+
+    // Build the profile from a cell whose technique deliberately differs
+    // (`DeleteInsert` vs the raw plan's `KeyedFold`) — this is what a stale
+    // "renders the raw plan" implementation would fail to reflect.
+    let mut downgraded_cell = result.plan.cells[0].clone();
+    downgraded_cell.technique = Technique::DeleteInsert;
+    let properties = smelt_logical::analysis::profile::PropertySet::derive(
+        "technique_fixture",
+        "SELECT 1 AS amount",
+        &[],
+        &BoundContext::default(),
+    )
+    .expect("PropertySet::derive");
+    let contract_points: Vec<smelt_logical::contract::ContractPointView> =
+        vec![smelt_logical::contract::effective_contract(None, "", &[]).into()];
+    let profile = PropertyProfile::assemble(
+        properties,
+        std::slice::from_ref(&downgraded_cell),
+        &contract_points,
+        &[],
+        &[],
+    );
+
+    let report = build_maintenance_plan_report(
+        "technique_fixture",
+        &result,
+        &RelationContractView::from_facts(None, None),
+        &[],
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        smelt_core::config::ProbeCadence::PerRun,
+        &[],
+        None,
+        None,
+        &profile,
+    )
+    .expect("build_maintenance_plan_report");
+
+    assert!(
+        report.contains("technique: DeleteInsert"),
+        "the text report must render the profile's technique, not the raw \
+         plan cell's KeyedFold: {report}"
+    );
+    assert!(
+        !report.contains("technique: KeyedFold"),
+        "the raw plan's technique must not leak into the text report: {report}"
     );
 }

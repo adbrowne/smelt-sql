@@ -29,6 +29,7 @@ The smelt LSP server registers the following capabilities:
 | Rename | ✓ |
 | Prepare Rename | ✓ |
 | Code Actions | ✓ |
+| Code Lens | see `property_diff.md` §"Editor" |
 
 Text document synchronization is **full** (not incremental). Each file change sends the complete new text.
 
@@ -50,6 +51,10 @@ The watcher follows the project-wide-discovery + exclude rule rather than hardco
 ## Semantics
 
 ### Diagnostics
+
+`PropertyDowngrade` is an editor-only diagnostic derived from a git-baseline property diff rather
+than from a single file's Salsa queries; see `property_diff.md` §"Editor" and §"Diagnostics" for
+its trigger, anchoring, and the baseline-watch rule.
 
 On every file change the server republishes diagnostics for **the changed file plus every file whose Salsa-derived diagnostics changed as a result** — at minimum all open files in the same project, since an upstream edit can stale a downstream file's diagnostics. Publishing only the changed file would leave consumers of the edited entity showing diagnostics computed against the old text. All diagnostics for a file are derived from the Salsa incremental computation database; only affected queries are re-run, so the set of files whose diagnostics actually changed is exactly the set Salsa recomputes.
 

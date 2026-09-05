@@ -2976,116 +2976,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let plan_diags = maintenance_plan(db, workspace, file);
         let body_start = rowan::TextSize::from(sql_offset as u32);
         for refusal in &plan_diags.refusals {
-            let (severity, code, message) = match refusal {
-                crate::queries::maintenance::MaintenanceRefusal::ScanUnbounded { source, why } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::MaintenanceScanUnbounded,
-                    format!("maintenance scan over '{source}' cannot be partition-bounded: {why}"),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::NoAdmissibleTechnique {
-                    trigger,
-                    why,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::MaintenanceNoAdmissibleTechnique,
-                    format!("no maintenance technique admits trigger {trigger}: {why}"),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
-                    message,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::KeyedForbidsTimeseries,
-                    message.clone(),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::KeyedRecurrenceDeclarationMismatch {
-                    message,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::KeyedRecurrenceDeclarationMismatch,
-                    message.clone(),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::IdentityNotDerivable {
-                    message,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::GrainAssertionMismatch,
-                    message.clone(),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::SkeletonChanged { column } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::MaintenanceSkeletonChanged,
-                    format!(
-                        "column '{column}' occupies a row-membership/identity (skeleton) \
-                         position — a grain change, never a column backfill (EX-39, \
-                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
-                    ),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::SkeletonClauseChanged {
-                    reason,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::MaintenanceSkeletonChanged,
-                    format!(
-                        "the model's skeleton clause changed against its deployed schema \
-                         snapshot: {reason} — a grain change, never a column backfill (EX-39, \
-                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
-                    ),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::PartitionColumnChanged {
-                    from,
-                    to,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::MaintenancePartitionColumnChanged,
-                    format!(
-                        "declared timeseries.partition_column changed from '{from}' to '{to}' \
-                         since this model was last deployed — the recorded address every \
-                         partition-grain maintenance write targets no longer matches; this is a \
-                         pre-execution refusal that no run flag bypasses (the analyzer gate \
-                         blocks on any Error-severity diagnostic unconditionally), so delete the \
-                         model's recorded snapshot (.smelt/targets/<target>/schemas/<model>.json) \
-                         and re-run `smelt run` to re-address the table under the new column",
-                    ),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
-                    grain,
-                    tracking_plan,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::MaintenanceUnsupportedGrain,
-                    format!(
-                        "grain: {grain} is not yet supported by maintenance-plan derivation \
-                         (tracked in {tracking_plan}); declare a supported grain \
-                         (partition or key) or use refresh: full",
-                    ),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::DefinitionChangeNotBackfillable {
-                    columns,
-                    why,
-                } => (
-                    DiagnosticSeverity::Warning,
-                    DiagnosticCode::MaintenanceColumnAddNotBackfillable,
-                    format!(
-                        "added column(s) {} cannot be backfilled in place: {why} — the run will \
-                         ALTER them in and leave historical rows NULL until `smelt migrate` \
-                         backfills them",
-                        columns.join(", "),
-                    ),
-                ),
-                crate::queries::maintenance::MaintenanceRefusal::KeyedRetractableContribution {
-                    source,
-                    columns,
-                    why,
-                } => (
-                    DiagnosticSeverity::Error,
-                    DiagnosticCode::KeyedRetractableContribution,
-                    format!(
-                        "enrichment join against '{source}' feeds a retractable contribution to \
-                         column(s) {}: {why} — use `refresh: materialized_view`, or compose the \
-                         enrichment as a separate model",
-                        columns.join(", "),
-                    ),
-                ),
+            // Single owner of the refusal → diagnostic mapping (ruling R2,
+            // F2): `crate::queries::maintenance::diagnostic_for_refusal` is
+            // also what the `refusal_codes` agreement gate drives its
+            // assertions from, so the two can never drift.
+            let Some((severity, code, message)) =
+                crate::queries::maintenance::diagnostic_for_refusal(refusal)
+            else {
+                continue;
             };
             DiagnosticAcc(Diagnostic {
                 severity,

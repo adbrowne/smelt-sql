@@ -1,7 +1,7 @@
 ---
 feature: property_diff
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -33,10 +33,13 @@ and §Constraints & Invariants — on any conflict, those win.*
 smelt proves things about a model from its SQL: whether it has a grain, how far a run must
 reach into each source, which maintenance technique each cell of the model is allowed to use.
 Those proofs are what make `refresh: incremental` cheap and correct. They are also fragile in
-a way that is invisible at edit time: replacing `SUM` with `MAX`, joining a second source
-without a clock, or adding a `DISTINCT` can silently demote a model from a keyed fold to a
-full recompute, and can demote every model downstream of it, without a single diagnostic firing —
-because the new SQL is perfectly valid, just more expensive to maintain.
+a way that is invisible at edit time: joining a second source without a clock, or adding a
+`DISTINCT`, can silently demote a model from a keyed fold to a full recompute, and can demote
+every model downstream of it, without a single diagnostic firing — because the new SQL is
+perfectly valid, just more expensive to maintain. Swapping a cell's combiner (`SUM` for `MAX`,
+say) is the same class of risk, but only bites where invertibility is load-bearing — a
+correction cell maintained over a source declared mutable — never over a `NewData` fold on an
+append-only source, which never needs to retract a value it already folded.
 
 The property diff closes that gap. It renders the same per-model **property profile** the
 maintenance report already prints, at two versions of the project, and diffs the profiles. The
@@ -48,19 +51,19 @@ $ smelt explain --diff
 property diff vs merge-base(main) = 3e9c1a4a (2 files changed, 3 models shifted)
 
   staging/orders                 (edited)
-    ▼ cell revenue@orders: technique KeyedFold → DeleteInsert
-        reason: SUM(amount) → MAX(amount) — combiner is a monoid, not a group
-    ▼ reach orders: bounded(7 days) → unbounded
+    ▼ cell_technique revenue@orders: KeyedFold → DeleteInsert
+    ▼ source_bound orders: bounded(7 days) → unbounded
 
   marts/order_facts              (downstream of staging/orders)
-    ▼ cell net_amount@staging/orders: technique KeyedFold → DeleteInsert
-    ▼ refusal added: MaintenanceScanUnbounded
+    ▼ cell_technique net_amount@staging/orders: KeyedFold → DeleteInsert
+    ▼ refusal_added MaintenanceScanUnbounded
+        reason: incremental maintenance requires a bounded reach; the source's reach just became unbounded
 
   marts/customer_ltv             (downstream of staging/orders)
-    ▼ contract point: default → frozen_horizon: 90 days
-    ● column added: net_amount
+    ▼ contract_point customer_ltv: default → frozen_horizon: 90 days
+    ● column_added net_amount
 
-4 downgrades, 0 upgrades, 1 neutral.
+5 downgrades, 0 upgrades, 1 neutral.
 ```
 
 The same list feeds a machine-readable `--json` form, a `--markdown` form a CI job posts as one
@@ -91,7 +94,7 @@ line.
 | `--json` | off | Emit the diff as JSON (schema below). |
 | `--markdown` | off | Emit the diff as GitHub-flavoured Markdown, ready for `gh pr comment --body-file`. Exclusive with `--json`. |
 | `--fail-on <direction>` | none | `downgrade` exits `1` when any downgrade is present; `any` exits `1` when any model shifted. Without the flag the exit code is `0` whenever the diff was computed. |
-| `--select <selector>` | all models | Restricts the *reported* set, not the compared set: every model is still derived at both versions so that attribution stays correct. |
+| `--select <selector>` | all models | Restricts the *reported* set, not the compared set: every model is still derived at both versions so that attribution stays correct. The summary counts and `--fail-on` are computed over the **reported** set — narrowed by `--select` when given — so the printed counts always match the printed blocks; the compared set (used only for attribution) is unaffected. |
 | `--project-dir <path>` | cwd | The project root. Must be inside a git work tree. |
 
 `--diff` is exclusive with the positional `<model>` argument, `--show-sql`, `--period`, and
@@ -123,13 +126,21 @@ and neutrals. When nothing shifted the whole output is the single line
   "models": [
     {
       "model": "<name>",
-      "cause": { "kind": "edited" | "added" | "removed" | "downstream", "of": ["<model>", ...] },
+      "cause": {
+        "kind": "edited" | "added" | "removed" | "downstream",
+        "of": ["<model>", ...],
+        "reason": "<one line>"          // omitted except for the `of: []` project-configuration
+                                          // case and a derivation failure (see below)
+      },
       "changes": [
         {
           "dimension": "grain" | "row_identity" | "source_bound" | "cell_technique"
-                     | "cell_corner" | "cell_added" | "cell_removed" | "refusal_added"
-                     | "refusal_removed" | "contract_point" | "probe_added" | "probe_removed"
-                     | "column_added" | "column_removed" | "determinism" | "discriminant",
+                     | "cell_corner" | "cell_row_identity" | "cell_added" | "cell_removed"
+                     | "refusal_added" | "refusal_removed" | "contract_point" | "probe_added"
+                     | "probe_removed" | "column_added" | "column_removed" | "determinism"
+                     | "discriminant" | "comparability" | "fd_added" | "fd_removed"
+                     | "literal_column" | "set_op_barrier" | "fan_out_join"
+                     | "maintenance_lost" | "maintenance_gained" | "state_downgrade",
           "subject": "<cell group@source | source name | column name | probe fact>",
           "direction": "downgrade" | "upgrade" | "neutral",
           "old": <json value or null>,
@@ -150,16 +161,45 @@ ordered as in the text form.
 summary counts, one collapsible `<details>` block per shifted model (open by default when it
 contains a downgrade), a table of changes with the same columns as the JSON `changes` entries,
 and a trailing HTML comment marker `<!-- smelt-property-diff -->` so a workflow can find and
-replace its previous comment instead of stacking new ones.
+replace its previous comment instead of stacking new ones. The marker and the heading are
+emitted **even when nothing shifted**: the body is the same `property diff vs <ref>: no models
+shifted` line the text form prints, followed by the marker. This is what lets the documented job
+(below) update a stale downgrade comment to the cleared state once the regression is fixed,
+instead of leaving it standing after the code it warned about no longer exists.
+
+Each `<details>` block's `<summary>` names the model, its cause, and its per-model change counts:
+`<model name> — <cause> — N downgrades, M upgrades, K neutral`, with `<cause>` the same string
+the text form's block header uses (`edited`, `added`, `removed`, or `downstream of <model>[,
+<model>…]`).
+
+GitHub rejects an issue comment body over 65,536 characters. The rendered Markdown body is
+bounded to keep any diff, however large, postable: it renders at most the first 50 shifted
+models in full, and lists any remainder by name only inside one final `<details>` block
+(`… and N more shifted models`). The marker is always the last line, so the workflow can still
+find and update the comment on a capped body. The cap applies to the rendered Markdown body
+only — it never changes `summary`, `--fail-on`, or the JSON form, all of which report every
+shifted model regardless of size.
 
 ### Pull-request comment
 
 smelt ships a documented GitHub Actions job (`docs-site/docs/guide/ci.md`) that runs
 `smelt explain --diff "$BASE_SHA" --markdown` on the pull request's merge commit and posts or
-updates one comment via `gh pr comment`. The job is text, not code: it composes the CLI surface
-above and the `gh` CLI, and its only smelt-specific knowledge is the marker comment. This
+updates one comment via `gh pr comment`/`gh api`. The job is text, not code: it composes the CLI
+surface above and the `gh` CLI, and its only smelt-specific knowledge is the marker comment. This
 repository runs the same job over `examples/` on every pull request as its own dogfood, so the
 Markdown form is exercised in CI.
+
+A `pull_request` event triggered from a fork receives a read-only `GITHUB_TOKEN`, so the
+documented job always writes the rendered body to the job summary (which needs no write
+permission) and posts or updates the PR comment only when the head repository is the base
+repository — the same fork guard `gh` write operations need everywhere in this repository's
+workflows. The job does not gate the build by default: `--fail-on` is documented as an opt-in a
+user's own project can add, with the tradeoff that a repository whose tracked examples shift
+routinely will find a default-on gate goes red on legitimate work and gets bypassed, defeating
+the signal it exists for. This repository's own dogfood job runs without `--fail-on` for exactly
+that reason: its build-failing assertion is that `smelt explain --diff --markdown` exits `0` — a
+broken renderer or an example that fails to derive breaks the job; a legitimate property shift
+does not.
 
 ### Editor
 
@@ -175,6 +215,24 @@ workspace load and re-resolved when `HEAD` or the ref it points at changes (watc
 work tree, or whose baseline cannot be resolved, shows no lens and no `PropertyDowngrade`
 diagnostics — and logs the reason at `info`, never as a user diagnostic (an un-versioned
 workspace is not an error).
+
+The lens's `<short ref>` is the baseline's `ref` string, except when that string is a full 40-hex
+commit sha, in which case its 7-character abbreviation.
+
+The diff is recomputed on workspace load, on a model file being saved or changed outside the
+editor, and when the resolved baseline commit changes — never on every keystroke. Open buffers
+override on-disk contents for **model files** on the working-tree side; an unsaved `smelt.yml` or
+source-YAML buffer takes effect only once it is saved.
+
+While a derivation is running, the editor shows the previously computed diff if one exists, and
+nothing at all on first load. It never shows a half-computed diff.
+
+A change's anchor is only as narrow as its `subject` supports: a change whose `subject` names a
+column anchors at that SELECT-list item (its alias when aliased, the whole item otherwise); a
+change whose `subject` names a source or upstream model anchors at that `FROM`/`JOIN` item; every
+other change — a maintenance cell's `<group>@<trigger>` subject, a refusal's free-text subject, or
+a whole-model dimension with no subject at all — has no narrower anchor available and anchors at
+the model's first SQL token.
 
 ### Diagnostics
 
@@ -193,16 +251,29 @@ A model's **property profile** is the pure, serialisable record of every composi
 verdict the maintenance report prints for that model. It is one value per model per project
 version, derived by the same pure functions the report is built from, and it contains exactly:
 
-1. `columns` — output column names in projection order.
-2. `grain` — the proven grain key (`PropertyGrain`), and `row_identity` (`RowIdentityVerdict`).
-3. `source_bounds` — per upstream source, the `BoundResult` (bound/reach verdict and its
-   derived interval or `Unbounded`).
-4. `determinism` and `discriminants` per column.
-5. `cells` — for a maintained model, each `PlanCell`'s `(group, trigger, corner, admitted
-   technique, contract point)`; for an unmaintained model, empty.
-6. `refusals` — the set of maintenance admission refusals (`DiagnosticCode` plus the refusal
-   text), as the maintenance-plan gate would report them.
-7. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`, `cadence`).
+1. `properties` — the model's derived property set (`PropertySet`): output columns in
+   projection order, the proven grain key (`Grain`) and `row_identity` (`RowIdentityVerdict`),
+   per-upstream-source `source_bounds` (bound/reach verdict and its derived interval or
+   `Unbounded`), and per-column `determinism`, `comparability`, and `discriminants`. These
+   verdicts are derived together, by one pure function, and are never split back into separate
+   profile fields — doing so would fork the derivation.
+2. `cell_verdicts` — for a maintained model, each `PlanCell`'s `(group, trigger, corner, admitted
+   technique, row identity, contract point, state downgrade)`; for an unmaintained model, empty.
+   A cell's state downgrade (`incremental_models.md`, `state.md` §"The degradation contract") is
+   present when the technique the plan actually admits was forced down from a cheaper one because
+   a state structure the cheaper technique needs has no realisation on the target — a state
+   downgrade is by definition a downgrade, and the diff must see it appear or disappear the same
+   way it sees a `cell_technique` change. Named
+   `cell_verdicts` rather than `cells` because the model-diagnostics response
+   (`ui_model_diagnostics.md` §Surface) already carries an unrelated `cells` key (the
+   technique-preview set) beside the flattened profile. A cell's contract point carries, in
+   addition to its display strings, the `frozen_horizon`/`deferral` windows as a machine-comparable
+   number of seconds — the interval a `contract_point` diff widens or narrows is decided from
+   these seconds, never by re-parsing the display string.
+3. `refusals` — the set of maintenance admission refusals (the diagnostic code's name — absent for
+   a refusal that raises no diagnostic today — plus the refusal text), as the maintenance-plan
+   gate would report them.
+4. `probes` — the declared-fact probe set (`fact`, `probe`, `cell`).
 
 The profile omits everything that is a *rendering* rather than a verdict: emitted statements,
 technique previews for non-admitted techniques, presentation expressions for decomposed state,
@@ -214,14 +285,44 @@ extras; the diff never reads the report, only the profile.
 Given the profile maps `P_old` (baseline) and `P_new` (working tree), keyed by model name:
 
 - A model in `P_new` but not `P_old` is **added**; every profile field is reported as a change
-  with `old = null`, and the whole entry has cause `added`.
-- A model in `P_old` but not `P_new` is **removed**, symmetrically.
+  with `old = null`, and the whole entry has cause `added`. Every such change is graded `neutral`
+  regardless of its dimension's ordinary rule — a per-dimension direction is noise for a model
+  that is wholly new or gone; the `cause` already says so, and grading it would inflate the
+  summary counts and `--fail-on` with a signal the dimension's rule was never meant to answer for
+  this case. When the model is absent from one side not because it is genuinely new or deleted
+  but because its profile could not be *derived* on that side (§Constraints item 6), the entry
+  still carries cause `added`/`removed` as above, but `cause.reason` carries the derivation
+  failure text verbatim, so a reader can distinguish "this model doesn't exist here" from "this
+  model's SQL doesn't derive here".
+- A model in `P_old` but not `P_new` is **removed**, symmetrically (also all `neutral`).
 - A model in both with `P_old[m] == P_new[m]` is **unshifted** and is not reported.
 - Otherwise the model is **shifted**, and its changes are the per-dimension differences, computed
   field by field with the following matching rules: cells match on `(group, trigger)`, source
   bounds on source name, columns on name, probes on `(fact, cell)`, refusals on `(code, text)`.
+  A refusal's `code` is absent for the three admission refusals that raise no diagnostic today
+  (§"The property profile" item 3), so the matching key is actually `(code: Option<string>, text)`:
+  a `None`-coded refusal matches another `None`-coded refusal with the same `text`, and never
+  matches a `Some(_)`-coded one even with identical text — collapsing the three onto one shared
+  placeholder key would hide a refusal changing kind. In JSON, a `refusal_added`/`refusal_removed`
+  change's `old`/`new` for one of these three carries `code: null`.
   A cell present on one side only is `cell_added`/`cell_removed`; a matched cell whose technique,
-  corner, or contract point differs yields one change per differing field.
+  corner, row identity, or contract point differs yields one change per differing field.
+- Every field of the profile that is not already named above as a matched-cell field is still
+  covered by its own dimension, so that a model can never be reported shifted with an empty
+  `changes` array (§Constraints item 6): a `PropertySet`'s functional dependencies (`fd_added`/
+  `fd_removed`, matched on `(key, determines)`), comparability (`comparability`, per column),
+  literal columns (`literal_column`, matched on column name), set-operation barrier and fan-out
+  join (`set_op_barrier`, `fan_out_join`, whole-model booleans), and a cell's row identity
+  (`cell_row_identity`) all produce a change whenever they differ.
+- A model going from having at least one maintained cell to having none at all — no longer
+  incrementally maintained — is reported once, as `maintenance_lost`, never only as N individual
+  `cell_removed` changes (which stay `cell_added`/`cell_removed`'s ordinary per-cell dimension,
+  graded `neutral` in this case — see §Direction). The symmetric case (no cells to at least one)
+  is `maintenance_gained`. This is deliberate: some admission paths (a `refresh: incremental` →
+  `refresh: full` edit, in particular) produce an empty cell list with **no** refusal at all, so
+  without a dedicated dimension the model's most consequential possible change — losing
+  incremental maintenance entirely — could surface as a page of neutral lines with zero
+  downgrades.
 
 Renames are not detected: a renamed column or model is a removal plus an addition. This is
 fail-loud by construction (§Constraints) — a rename that changes nothing else still surfaces.
@@ -235,14 +336,17 @@ are data in `smelt-logical`, not spread across renderers:
 |-----------|----------------|--------------|
 | `cell_technique` | new technique is lower on the ladder `KeyedFold` ≻ `ColumnScopedMerge` ≻ `InPlaceUpdate` ≻ `PerGroupRecompute` ≻ `DeleteInsert` | higher |
 | `cell_added` / `cell_removed` | a cell is removed from a still-maintained model (a column group lost its maintenance route) | a cell is added |
-| `source_bound` | `Bounded` → `Unbounded`, or a bounded interval widened | narrower, or `Unbounded` → `Bounded` |
-| `grain` | a non-empty grain became empty, or lost a key column | gained a proven grain |
-| `row_identity` | `Declared`/`Proven` → `WholeRow` | the reverse |
+| `maintenance_lost` / `maintenance_gained` | the model's cell list went from non-empty to empty — no cell survived at all, so it is no longer incrementally maintained | empty to non-empty (maintenance regained) |
+| `state_downgrade` | a cell's state downgrade appeared (the target gained a technique it can no longer realise the required state structure for) | a cell's state downgrade disappeared |
+| `source_bound` | `Bounded` → `Unbounded`, or a bounded interval widened (`before + after` grew) | narrower, or `Unbounded` → `Bounded`. `NotDerivable` orders with `Unbounded`: `Bounded` ≻ `{Unbounded, NotDerivable}`, and a change between `Unbounded` and `NotDerivable` in either direction is `neutral` — both force a full read, so neither is worse than the other |
+| `grain` / `row_identity` / `cell_row_identity` | a non-empty grain became empty or lost a key column; a row identity moved `Key` → `WholeRow` | gained a proven grain; `WholeRow` → `Key` |
 | `refusal_added` / `refusal_removed` | a refusal appeared | one disappeared |
-| `contract_point` | a relaxation appeared or its interval widened (`default` → `frozen_horizon: 90 days`) | a relaxation was removed or narrowed |
+| `contract_point` | a relaxation appeared or its interval widened (`default` → `frozen_horizon: 90 days`, using the profile's machine-comparable seconds, never the display string), or `retain_departed` went from absent to present (per `EffectiveContract::is_default`) | a relaxation was removed or narrowed, or `retain_departed` went from present to absent. A change of `retain_departed`'s *shape* only (`Bool` → `Tombstone`, or a different tombstone column, presence unchanged) is `neutral` — there is no interval to widen |
 | `probe_added` / `probe_removed` | a probe was **removed** (a declared fact lost its runtime check) | one was added |
-| `determinism` | a column went from run-deterministic to nondeterministic | the reverse |
-| `column_added` / `column_removed` / `discriminant` / `cell_corner` | — | — (always `neutral`) |
+| `determinism` | a column moved up the lattice `Clean < Run < Row` | moved down it |
+| `comparability` | a column moved `Comparable` → `Incomparable` | `Incomparable` → `Comparable` |
+| `set_op_barrier` / `fan_out_join` | the flag went `false` → `true` (a new FD/keying barrier appeared) | `true` → `false` |
+| `column_added` / `column_removed` / `discriminant` / `cell_corner` / `fd_added` / `fd_removed` / `literal_column` | — | — (always `neutral`) |
 
 The technique ladder above is the maintenance cost ordering: it ranks a technique by how much it
 must read and write per run, which is what a downgrade costs the operator. It is a distinct
@@ -255,11 +359,19 @@ A `contract_point` relaxation is a downgrade because it weakens the equivalence 
 model promises (`incremental_models.md` §"The contract lattice"); a modeller who intends it
 sees a `▼` line, which is the point — the relaxation is never silent.
 
+A `cell_technique` change's `old`/`new` are the technique's name, unchanged from the
+single-version report's own rendering of that field — a reader cross-referencing the two never
+sees two different spellings for the same technique.
+
 ### Attribution
 
-The **edited set** is the set of model files whose *frontmatter-stripped* SQL text differs
-between the two versions, plus files whose `smelt.yml` model override differs, plus source
-`.yml` files whose declaration changed. A shifted model whose own file is in the edited set has
+The **edited set** is the set of model files whose *frontmatter-stripped* SQL text **or parsed
+frontmatter metadata** differs between the two versions, plus files whose `smelt.yml` model
+override differs, plus source `.yml` files whose declaration changed. Frontmatter is stripped to
+blank lines before the SQL comparison, so a frontmatter edit is invisible to that half of the
+predicate unless it happens to change a line's byte length; comparing the parsed metadata
+directly closes that gap — a `unique_key:`/`refresh:`/`grain:`/`contract:` edit is itself an edit
+to the model, not a downstream effect of something else. A shifted model whose own file is in the edited set has
 cause `edited`. Otherwise its cause is `downstream` and `of` lists the **nearest edited
 ancestors**: walking the working tree's dependency graph upward from the model, every edited
 model or source reached without passing through another edited node. A shifted model with no
@@ -292,9 +404,12 @@ the committed content at the ref.
   snapshot. The `column_added`/`column_removed` dimensions here are neutral precisely because
   schema change has its own owner; they appear only so a reader can see why a cell was added or
   removed.
-- **Salsa purity.** The profile derivation is a pure function over already-loaded workspace data
-  and is wrapped by a thin `smelt-db` query on each side; the diff is a pure function over two
-  profile maps (`architecture.md` §"Salsa purity rule (analysis)").
+- **Salsa purity.** The per-model maintenance-plan derivation the profile is built from stays a
+  thin `smelt-db` query (`maintenance_plan_report`) over pure `smelt-logical` functions,
+  consistent with `architecture.md` §"Salsa purity rule (analysis)". The profile itself is
+  assembled from that report by a single-owner builder in `smelt-runtime`
+  (`build_model_diagnostics`), which both the single-version report and the diff call — there is
+  no second assembly path. The diff is a pure function over two profile maps.
 - **Project isolation.** In a multi-project workspace the editor computes one diff per project;
   the CLI diffs the project at `--project-dir` only (`architecture.md` §"Project isolation rule").
 
@@ -375,11 +490,44 @@ compares verdicts.
 
 ## Known Divergences / Open Questions
 
-- The feature is specified but not yet implemented. Tracking plan:
-  `docs/plans/20260905-property-diff.md`.
 - Whether `column_added` on a *maintained* model should be neutral (as specified) or should
   inherit the direction of the `cell_added` it usually accompanies is open; the current answer
   keeps it neutral so schema change stays owned by `smelt diff`.
+- Three admission refusals (`ReachNotDerivable`, `RepairKeysNotDiscoverable`,
+  `RepairSliceUnbounded`) raise no diagnostic through the ordinary diagnostics pipeline today, so
+  their profile `code` is absent. Whether each deserves its own `DiagnosticCode` catalogue entry
+  is open; tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- A source file with no `smelt.` marker that is not actually a model definition (a DDL or setup
+  script, say) is classified as `EntityKind::Model` by the resolver and genuinely fails
+  `PropertySet::derive`. Today this is harmless: it lands in the derivation-failure set
+  symmetrically on both sides of a diff, never enters `diff.models`, and never reaches
+  user-facing output. It would stop being harmless if such a file were edited on only one side of
+  a diff — that would surface as a spurious `added`/`removed` entry carrying the derivation
+  failure text as its reason, rather than being recognised as "not a model." Tracked in
+  `docs/outcomes/20260905-property-diff/outcome.md`.
+- The editor treats every baseline-resolution failure (not a git work tree, no `main`/`master` to
+  default against, an unresolvable ref, git itself unavailable) uniformly as the "no lens, no
+  diagnostic, logged at info" case. A narrower treatment — distinguishing "genuinely not
+  versioned" from "git is broken in a way the user should probably know about" — is possible but
+  not yet made; both still satisfy "never a user diagnostic for an unresolved baseline." Tracked
+  in `docs/outcomes/20260905-property-diff/outcome.md`.
+- Executing the lens opens the text report for that model in the editor's output channel, but no
+  editor extension yet registers the command the lens emits, so today executing it is a no-op in
+  every editor. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- `CellVerdict.state_downgrade` has a live producer only for a model whose target dialect makes
+  it fire; no model in `examples/timeseries` or `examples/retail_analytics` exercises it, so the
+  diff's `state_downgrade` dimension is proven only by a dual-target unit fixture, not by an
+  example workspace. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- `examples/timeseries` has no fixture demonstrating a *combiner-driven* downgrade (swapping a
+  cell's combiner without otherwise changing row identity). Its own combiner-sensitive cells are
+  `NewData` folds over append-only sources, which never need an invertible combiner (see the
+  outcome's Decision log); a fixture demonstrating this case needs a model whose driving source
+  is declared mutable. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- The LSP refresh coalescer's `pending`-trailing-rerun path (a refresh trigger that arrives while
+  a refresh is already running schedules exactly one more pass on completion) has no test that
+  reliably induces the race — the coalescing gate covers the same-notification burst case, not
+  the cross-notification-concurrent-trigger case. Tracked in
+  `docs/outcomes/20260905-property-diff/outcome.md`.
 
 ## Future Extensions
 
@@ -393,8 +541,8 @@ compares verdicts.
 
 ## References
 
-- **Code**: `crates/smelt-logical/src/analysis/profile.rs` (profile + diff), `crates/smelt-cli/src/commands/explain.rs` (`--diff`), `crates/smelt-lsp/src/` (code lens, `PropertyDowngrade`), `crates/smelt-core/src/workspace.rs` (baseline export helper)
-- **Tests**: `crates/smelt-cli/tests/property_profile_parity.rs`, `crates/smelt-lsp/tests/property_diff_parity.rs`, `crates/smelt-logical/tests/profile_diff.rs`
-- **User docs**: `docs-site/docs/reference/smelt-explain.md`, `docs-site/docs/guide/ci.md`
-- **Plans (history)**: `docs/plans/20260905-property-diff.md`
+- **Code**: `crates/smelt-logical/src/analysis/profile.rs` (`PropertyProfile`), `crates/smelt-logical/src/analysis/diff.rs` (`diff_profiles`, the direction table), `crates/smelt-logical/src/analysis/diff_render.rs` (text/Markdown rendering, shared by the CLI and the editor), `crates/smelt-core/src/baseline.rs` (ref/merge-base resolution, `git archive` materialisation, cleanup), `crates/smelt-core/src/workspace.rs` (`load_workspace`, consumed by both sides), `crates/smelt-runtime/src/profile.rs` and `crates/smelt-runtime/src/property_diff.rs` (`build_model_diagnostics`, `profiles_for_workspace`, the `work_side`/`baseline_side`/`report` pipeline shared by the CLI and the LSP), `crates/smelt-cli/src/commands/explain_diff.rs` (`smelt explain --diff`), `crates/smelt-lsp/src/property_diff.rs` (`ProjectDiffState`, `anchor_for`, `diagnostics_for_model`, `refresh`)
+- **Tests**: `crates/smelt-cli/tests/property_profile_parity.rs`, `crates/smelt-cli/tests/property_diff_cli.rs`, `crates/smelt-cli/tests/property_diff_ci_docs.rs`, `crates/smelt-logical/tests/diff_purity.rs`, `crates/smelt-core/tests/baseline.rs`, `crates/smelt-runtime/tests/profile_workspace.rs`, `crates/smelt-lsp/tests/property_diff_parity.rs`, `crates/smelt-lsp/tests/property_diff_refresh.rs`, `crates/smelt-lsp/tests/property_diff_coalescing.rs`, `crates/smelt-lsp/tests/property_diff_overlay.rs`
+- **User docs**: `docs-site/docs/reference/smelt-explain.md`, `docs-site/docs/guide/ci.md`, `docs-site/docs/guide/editor-features.md`
+- **Plans (history)**: no separate implementation plan was written for this feature; it was driven end-to-end from `docs/outcomes/20260905-property-diff/outcome.md`, whose phase table and decision log record how each part of the surface landed.
 - **Related specs**: `model_properties.md`, `incremental_models.md`, `definition_deltas.md`, `cli.md`, `lsp.md`, `ui_model_diagnostics.md`, `diagnostics.md`, `architecture.md`

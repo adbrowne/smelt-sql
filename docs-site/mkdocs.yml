@@ -102,6 +102,7 @@ nav:
     - Testing: guide/testing.md
     - Targets & Backends: guide/targets.md
     - Production Deployment: guide/deployment.md
+    - Continuous Integration: guide/ci.md
     - Orchestration: guide/orchestration.md
     - Web UI: guide/web-ui.md
     - Model Diagnostics: guide/model-diagnostics.md

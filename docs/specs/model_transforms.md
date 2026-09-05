@@ -1,7 +1,7 @@
 ---
 feature: model_transforms
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-05
 owners: [andrew]
 ---
 
@@ -64,6 +64,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Delta-restricted enrichment join | skeleton-source closure (`model_properties.md`) + an exact upstream delta on the driving-side model edge | restrict the enrichment recompute's driving scan to the delta's key set via a semi-join, replacing the widened scan for that cell; restricts recompute *breadth* under an exact delta, never what is scanned into `S` — composes with, but is licensed independently of, write suppression | *partial* (maintained-model edges only) |
 | Delegate-to-native-IVM | `supports_native_ivm` + engine gate | emit the backend's own maintained object; hard error if the engine rejects the query | *partial* |
 | DAG composition | litmus rule (`models.md`) | express a mode combination as two composed models at two grains, not a new mode | mechanism exists |
+| Succession-patch keyed `MERGE` | keyed-succession classification (`model_properties.md`) + an `append_only` driving source | three emitter outputs, all pure functions of the classifier verdict: per window, the **event delta `SELECT`** — the model's pre-window filter and row-local projection over the window's source rows, with no window function (the model SQL itself is never executed incrementally; it is only the oracle) — and the `MERGE` it feeds; and on full refresh or repair, the **tombstone-ledger rebuild `SELECT`** (`k, t` of every delete-flagged row passing the pre-filter over the rebuilt range). In one transaction: insert each non-delete event's presented row, record each delete event's `(k, t)` in the model's tombstone ledger, and patch the `LEAD`-derived columns of the event's immediate predecessor and the `LAG`-derived columns of its successor (`valid_to`, `is_current`-shaped columns), both located over the union of presented rows and the ledger; a delete event contributes the ledger record and neighbour patches but no presented insert; idempotent on `(k, t)`, so a re-folded window is a no-op (`incremental_shapes.md` §"The succession grain") | unbuilt |
 | Full refresh | — (universal fallback) | drop and rebuild the whole output; the honest verdict for an unmaintainable declared mode | **built** |
 | Backend lowering / emulation | backend capability flags | lower a logical primitive to the engine (native `INSERT OVERWRITE` / create-or-replace, or DELETE+INSERT emulation; cross-engine `read_parquet`) | **built** |
 
@@ -576,4 +577,5 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **User docs**: the per-mode refresh pages under `docs-site/docs/`.
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Related specs**: `incremental_models.md`, `model_properties.md`, `models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.
+- **Related specs**: `incremental_models.md`, `model_properties.md`, `models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`, `incremental_shapes.md` §"The succession grain" (the succession-patch `MERGE`'s consumer).
+- **Design research**: `docs/research/20260723-scd2-succession-pattern.md` (the succession-patch technique).

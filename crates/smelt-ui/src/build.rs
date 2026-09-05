@@ -341,15 +341,25 @@ pub fn build_model_diagnostics_response(
     let bound_ctx = build_bound_context(name, graph, config);
 
     let ws = smelt_db::Workspace::try_get(db);
-    let (plan_cells, column_groups): (
+    let (plan_cells, column_groups, refusals, key_locality): (
         Vec<smelt_logical::maintenance::PlanCell>,
         Vec<smelt_logical::maintenance::ColumnGroup>,
+        Vec<smelt_logical::maintenance::Refusal>,
+        Option<smelt_logical::maintenance::KeyLocality>,
     ) = match (ws, db.source_file(&model.path)) {
         (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file)
-            .map(|result| (result.plan.cells, result.column_groups))
+            .map(|result| {
+                (
+                    result.plan.cells,
+                    result.column_groups,
+                    result.plan.refusals,
+                    result.plan.key_locality,
+                )
+            })
             .unwrap_or_default(),
-        _ => (Vec::new(), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new(), None),
     };
+    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
 
     let default_target = config.targets.keys().next().cloned().unwrap_or_default();
     let target = config.get_target(name, model.metadata.as_deref(), &default_target);
@@ -406,6 +416,23 @@ pub fn build_model_diagnostics_response(
 
     let source_timeseries = smelt_runtime::build_source_timeseries_map(graph, &source_infos);
 
+    // The declared-fact probe plan (`docs/specs/model_properties.md`
+    // §"Probe obligation"), mirroring `smelt-cli::commands::explain`'s own
+    // call to the same shared, offline builder — never re-derived here.
+    let probe_entries = smelt_runtime::probe_plan::probe_plan_for_model(
+        name,
+        &schema,
+        &model.db_name_owned(),
+        model.metadata.as_deref(),
+        model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()),
+        model,
+        &source_infos,
+        &target,
+        &plan_cells,
+        key_locality.as_ref(),
+        dialect,
+    );
+
     let diagnostics = smelt_runtime::diagnostics::build_model_diagnostics(
         model,
         &models,
@@ -421,6 +448,9 @@ pub fn build_model_diagnostics_response(
         &source_timeseries,
         &unique_key,
         &column_groups,
+        &refusals,
+        &probe_entries,
+        contract_cfg,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 

@@ -24,3 +24,8 @@ docs/outcomes/20260809-probe-backed-facts
 docs/outcomes/20260809-output-delta-typing
 docs/outcomes/20260809-contract-lattice-v1
 docs/outcomes/20260809-incremental-spec-redraft
+# --- queued feature work (runs after every entry above is done/blocked) ---
+# Listed after the done section so this line merges cleanly against the
+# hygiene loop branch's own edits to the section above. Depends only on
+# state-residency (done); promote by moving the line up once that branch lands.
+docs/outcomes/20260906-scd2-keyed-succession

@@ -520,6 +520,34 @@ struct ExplainArgs {
     /// every technique's preview regardless of this flag.
     #[arg(long = "technique", requires = "show_sql")]
     technique: Option<String>,
+
+    /// Diff the project's property profile between a git baseline and the
+    /// working tree (`docs/specs/property_diff.md`). The optional value is
+    /// any revision `git rev-parse` accepts; without one, the baseline
+    /// defaults to `merge-base(HEAD, main)` (or `master`). Exclusive with
+    /// the positional model name, `--show-sql`, `--period`, and
+    /// `--technique` — combining them is a usage error (exit `2`).
+    #[arg(
+        long = "diff",
+        num_args = 0..=1,
+        conflicts_with_all = ["model_name", "show_sql", "period", "technique"]
+    )]
+    diff: Option<Option<String>>,
+
+    /// Gate the exit code on the diff's shifted models
+    /// (`docs/specs/property_diff.md` §Surface): `downgrade` exits `1` when
+    /// any downgrade is present; `any` exits `1` when any model shifted at
+    /// all. Only meaningful with `--diff`.
+    #[arg(long = "fail-on", value_parser = ["downgrade", "any"], requires = "diff")]
+    fail_on: Option<String>,
+
+    /// Emit the diff as GitHub-flavoured Markdown — a single comment body
+    /// carrying the `<!-- smelt-property-diff -->` marker
+    /// (`docs/specs/property_diff.md` §Surface "Markdown"), ready for
+    /// `gh pr comment --body-file`. Only meaningful with `--diff`;
+    /// exclusive with `--json`.
+    #[arg(long = "markdown", requires = "diff", conflicts_with = "json")]
+    markdown: bool,
 }
 
 #[derive(Parser)]

@@ -1,0 +1,13 @@
+description: payments
+mutation_profile: append_only
+timeseries:
+  event_time_column: pay_date
+  partition_column: pay_date
+  granularity: day
+columns:
+- name: user_id
+  type: INTEGER
+- name: pay_date
+  type: DATE
+- name: amount
+  type: DOUBLE

@@ -4,6 +4,13 @@
 # Patterns: unwrap  expect  println
 # Regenerate with: .claude/scripts/hardening-budget.sh --update
 #
+# Sign-off (CLAUDE.md "unwrap/expect ratchet" — a raised count needs a
+# reviewer sign-off note here, not only in the commit body):
+# 2026-09-06 andrew: smelt-cli println 174 -> 175 (commit c0062160,
+#   docs/outcomes/20260905-property-diff/ phase 5). The one new println! is
+#   the `--json` branch of `smelt explain --diff`, matching the existing
+#   single-model `--json` pattern — legitimate user-facing CLI stdout.
+#
 smelt-backend-bigquery expect 0
 smelt-backend-bigquery println 0
 smelt-backend-bigquery unwrap 0
@@ -23,7 +30,7 @@ smelt-bench expect 3
 smelt-bench println 27
 smelt-bench unwrap 8
 smelt-cli expect 42
-smelt-cli println 174
+smelt-cli println 175
 smelt-cli unwrap 0
 smelt-core expect 6
 smelt-core println 0
