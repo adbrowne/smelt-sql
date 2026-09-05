@@ -494,6 +494,121 @@ pub enum Refusal {
     },
 }
 
+/// The diagnostic-code **name** a refusal of this shape raises through the
+/// ordinary diagnostics pipeline (`smelt-db/src/lib.rs`'s `MaintenanceRefusal`
+/// → `DiagnosticCode` match). `smelt_db::diagnostics_types::DiagnosticCode`
+/// is unreachable from here — it lives in `smelt-db`, above `smelt-logical`
+/// (layered single-ownership, `CLAUDE.md` §Architectural invariants) — so
+/// `analysis::profile::ProfileRefusal` carries the code's name as
+/// `&'static str` rather than the enum value itself. This match is
+/// exhaustive with **no wildcard arm**: a new [`Refusal`] variant is a
+/// compile error here until it is given a name, which is what buys back the
+/// compile-time guarantee `DiagnosticCode` would otherwise have given for
+/// free (ruling R2, `docs/outcomes/20260905-property-diff/phases/02-plan.md`).
+///
+/// Every name returned here is asserted, by
+/// `smelt-db`'s `refusal_code_names_are_real_variants` test, to parse to a
+/// real `DiagnosticCode` variant — and, for the variants
+/// `smelt-db/src/queries/maintenance.rs` actually maps onto a diagnostic
+/// today, to equal the code `smelt-db/src/lib.rs` emits for that refusal.
+/// Three variants (`ReachNotDerivable`, `RepairKeysNotDiscoverable`,
+/// `RepairSliceUnbounded`) have no `DiagnosticCode` of their own yet
+/// (`smelt-db/src/queries/maintenance.rs`'s own doc comments: "no
+/// `DiagnosticCode` variant yet ... a future phase's own diagnostic lands
+/// it"); until that lands, this names the closest real code that already
+/// covers the same failure to admit a technique —
+/// `MaintenanceNoAdmissibleTechnique` — rather than inventing a code here
+/// or leaving the match non-exhaustive. That is a placeholder, not an
+/// agreement claim: `smelt-db` does not emit `MaintenanceNoAdmissibleTechnique`
+/// for these three refusals today, and the agreement test does not assert
+/// it does.
+pub fn refusal_code(refusal: &Refusal) -> &'static str {
+    match refusal {
+        Refusal::SkeletonChanged { .. } => "MaintenanceSkeletonChanged",
+        Refusal::SkeletonClauseChanged { .. } => "MaintenanceSkeletonChanged",
+        Refusal::PartitionColumnChanged { .. } => "MaintenancePartitionColumnChanged",
+        Refusal::ScanUnbounded { .. } => "MaintenanceScanUnbounded",
+        Refusal::NoAdmissibleTechnique { .. } => "MaintenanceNoAdmissibleTechnique",
+        Refusal::ReachNotDerivable { .. } => "MaintenanceNoAdmissibleTechnique",
+        Refusal::UnsupportedGrain { .. } => "MaintenanceUnsupportedGrain",
+        Refusal::LocalityNotEstablished { .. } => "KeyedForbidsTimeseries",
+        Refusal::IdentityNotDerivable { .. } => "GrainAssertionMismatch",
+        Refusal::RepairKeysNotDiscoverable { .. } => "MaintenanceNoAdmissibleTechnique",
+        Refusal::RepairSliceUnbounded { .. } => "MaintenanceNoAdmissibleTechnique",
+        Refusal::DefinitionChangeNotBackfillable { .. } => "MaintenanceColumnAddNotBackfillable",
+        Refusal::KeyedRetractableContribution { .. } => "KeyedRetractableContribution",
+    }
+}
+
+#[cfg(test)]
+mod refusal_code_tests {
+    use super::*;
+
+    /// Every [`Refusal`] variant returns a non-empty code — a future variant
+    /// added to the enum without a matching arm here is a compile error, not
+    /// a silent gap (ruling R2).
+    #[test]
+    fn every_refusal_has_a_code() {
+        let sample: Vec<Refusal> = vec![
+            Refusal::SkeletonChanged {
+                column: "c".to_string(),
+            },
+            Refusal::SkeletonClauseChanged {
+                reason: "r".to_string(),
+            },
+            Refusal::PartitionColumnChanged {
+                from: "a".to_string(),
+                to: "b".to_string(),
+            },
+            Refusal::ScanUnbounded {
+                source: "s".to_string(),
+                why: "w".to_string(),
+            },
+            Refusal::NoAdmissibleTechnique {
+                trigger: "t".to_string(),
+                why: "w".to_string(),
+            },
+            Refusal::ReachNotDerivable {
+                edge: "e".to_string(),
+                why: "w".to_string(),
+            },
+            Refusal::UnsupportedGrain {
+                grain: "g".to_string(),
+                tracking_plan: "p".to_string(),
+            },
+            Refusal::LocalityNotEstablished {
+                message: "m".to_string(),
+            },
+            Refusal::IdentityNotDerivable {
+                message: "m".to_string(),
+            },
+            Refusal::RepairKeysNotDiscoverable {
+                source: "s".to_string(),
+                why: "w".to_string(),
+            },
+            Refusal::RepairSliceUnbounded {
+                source: "s".to_string(),
+                why: "w".to_string(),
+            },
+            Refusal::DefinitionChangeNotBackfillable {
+                columns: vec!["c".to_string()],
+                why: "w".to_string(),
+            },
+            Refusal::KeyedRetractableContribution {
+                source: "s".to_string(),
+                columns: vec!["c".to_string()],
+                why: "w".to_string(),
+            },
+        ];
+        for r in &sample {
+            assert!(
+                !refusal_code(r).is_empty(),
+                "refusal_code returned an empty code for {r:?}"
+            );
+        }
+    }
+}
+
 /// The admitted key-temporal-locality verdict for a `grain: key` model that
 /// also declares a `timeseries:` block
 /// (`locality::establish_locality`'s admitted result, plus the derived
