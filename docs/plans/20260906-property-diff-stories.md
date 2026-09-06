@@ -3,7 +3,7 @@
 **Date**: 2026-09-06
 **Spec**: [`docs/specs/property_diff.md`](../specs/property_diff.md)
 **Spec diff**: `eaf7065f..d71ea605 -- docs/specs/property_diff.md` (commit `d71ea605`)
-**Tracking PR / branch**: `property-diff-narration`
+**Tracking PR / branch**: PR #193 (`property-diff-narration`)
 **Docs**: code+docs
 
 ---
