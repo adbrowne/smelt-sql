@@ -119,6 +119,17 @@ all: ~313 test binaries at ~2s each is ~660 CPU-seconds, which over 32 cores is
 DuckDB/Arrow/salsa. (#149 committed a mold config and #150 reverted it for a
 different reason — CI had no mold.)
 
+**Parallelism.** `mise.toml` sets `CARGO_BUILD_JOBS=12`. Cargo otherwise defaults
+`-j` to the core count, so several agent sessions in several worktrees fan out to
+N x nproc rustc processes on one machine. Measured on the 32-core dev box: a
+clean `cargo test --no-run` is **197s idle and 987s with three sessions building
+concurrently** — a 5x penalty from oversubscription, not from the test suite. If
+a slow build surprises you, check `uptime` before concluding anything about the
+suite. Working alone, override with `CARGO_BUILD_JOBS=32 cargo test` or a
+`.mise.local.toml`. `.claude/scripts/cargo-queue-shim.sh` is an *inactive*
+prototype that additionally serialises builds machine-wide via `flock`; read its
+header before putting it on `PATH`.
+
 **Toolchain.** `rust-toolchain.toml` pins `1.95.0`, matching `[tools] rust` in
 `mise.toml`. mise exports `RUSTUP_TOOLCHAIN`, which takes precedence; the file
 exists so a *bare* shell (no mise) resolves to the same toolchain instead of
