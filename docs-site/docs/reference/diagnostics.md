@@ -69,3 +69,53 @@ UnsupportedOnBackend: this model uses 2 constructs the DuckDB backend cannot exp
   `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
   `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
 ```
+
+#### A template's spelling cannot carry a modifier
+
+A built-in whose target spelling is a fixed template over its own positional arguments — DuckDB's
+`DATE_SUB(d, i)`, spelled `d - i` — has no place in that spelling for a call modifier: `DISTINCT`,
+`FILTER (WHERE …)`, `WITHIN GROUP (ORDER BY …)`, an `ORDER BY` inside the argument list, `IGNORE
+NULLS`/`RESPECT NULLS`, a named (`=>`) argument, or a `*` argument. Dropping the modifier would
+change the answer — a dropped `DISTINCT` counts duplicates the author excluded — so the call is
+refused at compile time rather than silently stripped.
+
+**Example** — targeting DuckDB, `DATE_SUB` carrying `DISTINCT`:
+
+```sql
+SELECT DATE_SUB(DISTINCT d, INTERVAL 1 DAY) AS x FROM events
+```
+
+<!-- unsupported-on-backend-template-modifier-refusal-text -->
+```text
+UnsupportedOnBackend: this model uses 1 construct the DuckDB backend cannot express:
+  `DATE_SUB` — this built-in's target spelling is a fixed template over positional arguments; DISTINCT cannot be expressed by a template (a dropped DISTINCT would count duplicates the author excluded) and is refused rather than silently dropped
+```
+
+**Fix**: Rewrite the query without the modifier — for example, deduplicate the input rows in a CTE
+before calling the function — or pick a target backend whose registry entry for that built-in is
+not a template.
+
+#### A verdict that depends on operand type
+
+Some built-ins lower differently depending on the type of the values passed to them, not only on
+where they're called. `//` is DuckDB's native floor/true division operator, but Spark and BigQuery
+have no infix `//`: on Spark, `a // b` lowers to `a DIV b` when both operands are integral and to
+plain `a / b` when both are floating-point or decimal. When an operand's type cannot be resolved at
+compile time, smelt refuses rather than guess — guessing wrong here would silently compute a
+*different number*, not fail loudly.
+
+**Example** — targeting Spark, `//` over a column whose type cannot be resolved:
+
+```sql
+SELECT a // b AS x FROM t
+```
+
+<!-- unsupported-on-backend-operand-class-refusal-text -->
+```text
+UnsupportedOnBackend: this model uses 1 construct the Spark SQL backend cannot express:
+  `//` — Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)
+```
+
+**Fix**: Give the operands a resolvable type — for example, by declaring the upstream column's type
+or wrapping the operand in an explicit `CAST` — or rewrite the expression as a typed `FLOOR(a / b)`
+or `DIV(a, b)` call.

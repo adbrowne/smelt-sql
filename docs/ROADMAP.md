@@ -36,16 +36,21 @@ consumes delta signatures; wire backbuild behind `smelt migrate`; lattice v2; pr
 
 **Parallel track (2026-07-18):** the **quality-grind programme** ([master plan](plans/20260718-quality-grind.md)) works the small root-caused deferred items (parser ledger categories, VALUES arity, UTF-8 positions, registry gaps, doc gaps) and the well-understood larger ones (generator deferred coverage, smelt-planner↔smelt-logical consolidation, the cold-Salsa benchmark regression) via a second autonomy loop on `worktree-roadmap_todo`; decision-gated items are queued in the master's "Tier 3 — decision queue".
 
-**Parallel track (2026-09-04) — dialect emission vocabulary.** The BigQuery work showed the
-per-dialect lowering model runs out of vocabulary, not structure: closing the 81 open gaps
-(#177/#178/#179) with today's `Emission` enum would mean one hand-written printer function per
-built-in. [`multi_backend.md`](specs/multi_backend.md) §"Template emission" and
-§"Operand-conditional verdicts" add a declarative `Template` verdict (registry data, one generic
-interpreter) and arity/operand-class–guarded arms settled on the compile path. Queued as
-[`docs/outcomes/20260904-dialect-emission-vocabulary`](outcomes/20260904-dialect-emission-vocabulary/outcome.md)
-at the end of the outcome backlog; pays the DuckDB and Spark gap ratchets down to the
-type-inference rows and retires the unverified PostgreSQL emission column (#181, closed
-2026-09-04). BigQuery's rows need a human-run sweep afterwards.
+✅ **Dialect emission vocabulary (September 6, 2026).** The BigQuery work showed the per-dialect
+lowering model ran out of vocabulary, not structure: closing the 81 open gaps (#177/#178/#179)
+with the old `Emission` enum would have meant one hand-written printer function per built-in.
+[`multi_backend.md`](specs/multi_backend.md) §"Template emission" and §"Operand-conditional
+verdicts" added a declarative `Template` verdict (registry data, one generic printer interpreter
+that knows no function names) and arity/operand-class–guarded `Conditional` arms settled on the
+compile path, worked through
+[`docs/outcomes/20260904-dialect-emission-vocabulary`](outcomes/20260904-dialect-emission-vocabulary/outcome.md).
+Measured outcome: `dialect_gaps_duckdb` 12 → 4, `dialect_gaps_spark` 27 → 4, the unverified
+PostgreSQL emission column retired (#181, closed 2026-09-04); #177 and #178 closed with no
+remaining DuckDB/Spark emission verdict missing. What remains: BigQuery's 42 rows (#179, plus the
+BigQuery arms of #173/#174) await the human-run `scripts/bigquery-dialect-audit.sh` sweep — its
+value leg executes against a live warehouse and bills, so it is never run speculatively — and four
+`#175`/`#176` type-inference rows per dialect (DuckDB and Spark) that are inference bugs, not
+missing lowerings.
 
 **Decision track (2026-09-04) — incremental programme product calls.** The eight open product
 calls the closure report left were decided in one session

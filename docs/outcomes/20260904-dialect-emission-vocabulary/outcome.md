@@ -1,7 +1,7 @@
 # Outcome: Dialect emission vocabulary — templates and operand-conditional verdicts
 
 **Created:** 2026-09-04
-**Status:** active
+**Status:** done
 **Source:** `docs/specs/multi_backend.md` §"Template emission", §"Operand-conditional verdicts" (spec commit `03828a14`); GitHub issues #173, #174, #177, #178, #179, #181
 **Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Emission is scoped to call position", §"Template emission", §"Operand-conditional verdicts", §"Cross-engine emission audit", §Constraints ("Template interpretation is generic", "Operand-conditional verdicts are settled on the compile path"); `docs/specs/architecture.md` §Constraints item 14
 
@@ -81,7 +81,7 @@ audit before it is claimed — never from documentation.
 | 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
 | 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | done |
 | 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap`; also validate a `Conditional` arm's `Template` verdict at registry construction | done |
-| 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | planned |
+| 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | done |
 
 ## Decision log
 
@@ -382,6 +382,22 @@ audit before it is claimed — never from documentation.
   emission verdict on DuckDB/Spark — is fully paid down; the four surviving rows per dialect belong
   to #175/#176, which stay open), while #173/#174/#179 get comments only, since their BigQuery arms
   need the human-run billing sweep the outcome placed out of scope.
+
+- 2026-09-06 (implement 10) — phase 10 done, outcome done. `architecture.md` item 14 and CLAUDE.md's
+  Function-registry single-ownership bullet name `Template`/`Conditional` and the compile-path
+  settlement rule; `dialect_seam.rs`'s doc-quote extraction is now a shared
+  `assert_doc_quote_matches_live_diagnostic(marker, model_sql, backend)` helper, and two new tests
+  pin `docs-site/docs/reference/diagnostics.md` against the live `DATE_SUB(DISTINCT …)` template
+  refusal and the live `a // b` Spark operand-class refusal — both doc blocks captured from actual
+  compiler output, never hand-written. `targets.md` gained a short "Per-operand-type lowering"
+  note. ROADMAP flipped to ✅ with the measured gap counts. #177/#178 closed on GitHub; #173/#174/#179
+  commented with what remains (the human-run BigQuery sweep, out of scope here). `verify-phase.sh`
+  green except the pre-existing `smelt-core --test baseline` scratch-dir flake, confirmed unrelated
+  by an isolated `--test-threads=1` rerun (21/21 passed). `git diff --stat` touched only docs +
+  the test file — no baseline or emission-row change. All 10 phases and the outcome itself are
+  `done`; the outcome loop should advance to the next backlog entry
+  (`docs/outcomes/20260904-decision-residue`, already `done`, so the loop's actual next work is
+  whichever entry after it is first non-done/blocked per `.claude/outcome-backlog`).
 
 ## Blocked
 
