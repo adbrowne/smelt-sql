@@ -21,6 +21,10 @@ pub(super) struct WindowCall {
     pub(super) func: smelt_parser::FunctionCall,
     pub(super) window: smelt_parser::WindowSpec,
     pub(super) enclosing: SyntaxNode,
+    /// The `WINDOW_SPEC` node's own text range (`(PARTITION BY ... ORDER BY
+    /// ...)`) — captured here since [`smelt_parser::WindowSpec`] exposes no
+    /// `syntax()` accessor of its own.
+    pub(super) window_range: smelt_parser::TextRange,
 }
 
 /// Every window-function call (`OVER` present) in `expr`'s own subtree: a
@@ -48,6 +52,7 @@ fn find_window_calls_rec(node: &SyntaxNode, out: &mut Vec<WindowCall>) {
         }
     }
     if let (Some(func_node), Some(window_node)) = (func_child, window_child) {
+        let window_range = window_node.text_range();
         if let (Some(func), Some(window)) = (
             smelt_parser::FunctionCall::cast(func_node),
             smelt_parser::WindowSpec::cast(window_node),
@@ -56,6 +61,7 @@ fn find_window_calls_rec(node: &SyntaxNode, out: &mut Vec<WindowCall>) {
                 func,
                 window,
                 enclosing: node.clone(),
+                window_range,
             });
             return;
         }
@@ -182,6 +188,39 @@ pub(super) fn record_window(
         lag_cols.push(alias.to_string());
     }
     Ok(())
+}
+
+/// Build the `{lead}`/`{lag}` expression template
+/// (`crate::maintenance::emit::DerivedColumn`'s own convention) for one
+/// projected window item: `item_expr`'s own text with the window call's
+/// span (its `FUNCTION_CALL` through the end of its `WINDOW_SPEC` —
+/// contiguous, since the parser always places `OVER` directly after the
+/// call) replaced by the literal token, offset relative to `item_expr`'s own
+/// range start so the splice is correct even when `item_expr` is a
+/// scalar-wrapped expression whose range starts before the window call's
+/// own (e.g. `LEAD(t) OVER (...) IS NULL`).
+pub(super) fn derived_template(item_expr: &Expr, window_call: &WindowCall) -> String {
+    let text = item_expr.text();
+    let base = u32::from(item_expr.syntax().text_range().start());
+    let call_start = u32::from(window_call.func.syntax().text_range().start()) - base;
+    let call_end = u32::from(window_call.window_range.end()) - base;
+    let token = if window_call
+        .func
+        .name()
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("LEAD")
+    {
+        "{lead}"
+    } else {
+        "{lag}"
+    };
+    format!(
+        "{}{token}{}",
+        &text[..call_start as usize],
+        &text[call_end as usize..]
+    )
+    .trim()
+    .to_string()
 }
 
 /// Validate a scalar expression wrapping exactly one succession window

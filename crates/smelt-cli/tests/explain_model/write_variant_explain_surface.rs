@@ -82,6 +82,7 @@ fn report_for_with_overrides(
         is_snapshot_reconcile: None,
         comparability,
         succession_advisories: vec![],
+        succession_recipe: None,
     };
     let profile = synthetic_profile(&result, "write_variant_fixture");
     build_maintenance_plan_report(

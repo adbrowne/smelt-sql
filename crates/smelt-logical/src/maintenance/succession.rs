@@ -33,6 +33,84 @@ pub struct SuccessionDerivation {
     pub output: OutputSpec,
     pub plan: MaintenancePlan,
     pub advisories: Vec<SuccessionAdvisory>,
+    /// Every argument the four `maintenance::emit::succession` emitters take
+    /// beyond the caller-supplied window predicate, presented table and
+    /// dialect — `None` on a `NotSuccession` verdict, since there is nothing
+    /// to maintain. The single owner of the emitters' inputs
+    /// (`CLAUDE.md` §"Maintenance-plan purity"): a consumer (the runtime
+    /// driver, `smelt-db`) takes this recipe, never the model's SQL.
+    pub recipe: Option<SuccessionRecipe>,
+}
+
+/// Every emitter input the keyed-succession classifier's verdict already
+/// holds, assembled once so no consumer re-parses the model's SQL
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/05a-plan.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuccessionRecipe {
+    /// The driving source's comparison spelling
+    /// (`SuccessionVerdict::Recognized::source`), suitable as the emitters'
+    /// `source_table` argument once the caller resolves it to a physical
+    /// name (the runtime driver's job, not this recipe's).
+    pub source_table: String,
+    pub pre_filter: Option<String>,
+    pub key_cols: Vec<String>,
+    pub clock_col: String,
+    /// Row-local, non-key/non-clock/non-derived columns the presented table
+    /// stores — `row_local` aliases minus `key_cols`, `clock_col`, and every
+    /// `lead_derived`/`lag_derived` alias, in the model's own projection
+    /// order.
+    pub payload_columns: Vec<String>,
+    /// The full row-local projection (`(alias, source expr)`), in the
+    /// model's own column order — feeds `emit_succession_event_delta`'s
+    /// `row_local_projection` argument directly.
+    pub row_local_projection: Vec<(String, String)>,
+    pub lead_derived: Vec<(String, String)>,
+    pub lag_derived: Vec<(String, String)>,
+    pub delete_flag_expr: Option<String>,
+}
+
+impl SuccessionRecipe {
+    /// Assemble the recipe from a `Recognized` verdict. Pure: no I/O, no
+    /// re-derivation of anything the verdict does not already carry.
+    pub fn from_verdict(verdict: &SuccessionVerdict) -> Option<Self> {
+        let SuccessionVerdict::Recognized {
+            source,
+            pre_filter,
+            key_cols,
+            clock_col,
+            delete_flag_expr,
+            row_local,
+            lead_derived,
+            lag_derived,
+            ..
+        } = verdict
+        else {
+            return None;
+        };
+        let excluded: BTreeSet<&str> = key_cols
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(clock_col.as_str()))
+            .chain(lead_derived.iter().map(|(alias, _)| alias.as_str()))
+            .chain(lag_derived.iter().map(|(alias, _)| alias.as_str()))
+            .collect();
+        let payload_columns = row_local
+            .iter()
+            .filter(|(alias, _)| !excluded.contains(alias.as_str()))
+            .map(|(alias, _)| alias.clone())
+            .collect();
+        Some(SuccessionRecipe {
+            source_table: source.clone(),
+            pre_filter: pre_filter.clone(),
+            key_cols: key_cols.clone(),
+            clock_col: clock_col.clone(),
+            payload_columns,
+            row_local_projection: (**row_local).clone(),
+            lead_derived: (**lead_derived).clone(),
+            lag_derived: (**lag_derived).clone(),
+            delete_flag_expr: (**delete_flag_expr).clone(),
+        })
+    }
 }
 
 /// Derive the one-cell succession plan (or the refusal plan) from the
@@ -103,6 +181,7 @@ pub fn derive_succession_plan(verdict: &SuccessionVerdict, table: &str) -> Succe
                     key_locality: None,
                 },
                 advisories: advisories.clone(),
+                recipe: SuccessionRecipe::from_verdict(verdict),
             }
         }
         SuccessionVerdict::NotSuccession { reason } => SuccessionDerivation {
@@ -115,6 +194,7 @@ pub fn derive_succession_plan(verdict: &SuccessionVerdict, table: &str) -> Succe
             },
             plan: succession_refused_plan(reason.clone()),
             advisories: Vec::new(),
+            recipe: None,
         },
     }
 }
@@ -134,6 +214,13 @@ mod tests {
             lag_cols: vec![],
             delete_flag: None,
             advisories,
+            row_local: Box::new(vec![
+                ("customer_id".to_string(), "customer_id".to_string()),
+                ("changed_at".to_string(), "changed_at".to_string()),
+            ]),
+            lead_derived: Box::new(vec![("next_changed_at".to_string(), "{lead}".to_string())]),
+            lag_derived: Box::new(vec![]),
+            delete_flag_expr: Box::new(None),
         }
     }
 
@@ -245,5 +332,75 @@ mod tests {
             without_derivation.output.skeleton_columns
         );
         assert_ne!(with_derivation.advisories, without_derivation.advisories);
+    }
+
+    #[test]
+    fn recipe_payload_columns_exclude_key_clock_and_derived() {
+        let verdict = SuccessionVerdict::Recognized {
+            source: "customer_changes".to_string(),
+            pre_filter: None,
+            key_cols: vec!["customer_id".to_string()],
+            clock_col: "changed_at".to_string(),
+            lead_cols: vec!["valid_to".to_string()],
+            lag_cols: vec![],
+            delete_flag: None,
+            advisories: vec![],
+            row_local: Box::new(vec![
+                ("customer_id".to_string(), "customer_id".to_string()),
+                ("changed_at".to_string(), "changed_at".to_string()),
+                ("region".to_string(), "region".to_string()),
+                ("is_deleted".to_string(), "is_deleted".to_string()),
+            ]),
+            lead_derived: Box::new(vec![("valid_to".to_string(), "{lead}".to_string())]),
+            lag_derived: Box::new(vec![(
+                "is_current".to_string(),
+                "{lead} IS NULL".to_string(),
+            )]),
+            delete_flag_expr: Box::new(None),
+        };
+        let recipe = SuccessionRecipe::from_verdict(&verdict).expect("recipe on Recognized");
+        assert_eq!(
+            recipe.payload_columns,
+            vec!["region".to_string(), "is_deleted".to_string()]
+        );
+    }
+
+    #[test]
+    fn recipe_is_none_for_not_succession() {
+        let verdict = SuccessionVerdict::NotSuccession {
+            reason: NotSuccessionReason::PatternUnrecognized("no window at all".to_string()),
+        };
+        assert!(SuccessionRecipe::from_verdict(&verdict).is_none());
+    }
+
+    #[test]
+    fn derive_succession_plan_carries_the_recipe_on_recognition() {
+        let verdict = recognized(vec![]);
+        let derivation = derive_succession_plan(&verdict, "customer_history");
+        let recipe = derivation.recipe.expect("recipe on Recognized");
+        assert_eq!(recipe.source_table, "customer_changes");
+        assert_eq!(recipe.key_cols, vec!["customer_id".to_string()]);
+        assert_eq!(recipe.clock_col, "changed_at");
+    }
+
+    #[test]
+    fn derive_succession_plan_recipe_is_none_on_refusal() {
+        let reason = NotSuccessionReason::PatternUnrecognized("no window at all".to_string());
+        let verdict = SuccessionVerdict::NotSuccession { reason };
+        let derivation = derive_succession_plan(&verdict, "customer_history");
+        assert!(derivation.recipe.is_none());
+    }
+
+    /// The `SuccessionPreFilterNegatesFlag` advisory never suppresses or
+    /// alters the recipe (the advisory never changes admission).
+    #[test]
+    fn advisory_only_model_still_yields_recipe() {
+        let with_advisory = recognized(vec![SuccessionAdvisory::PreFilterNegatesFlag {
+            column: "is_deleted".to_string(),
+        }]);
+        let without_advisory = recognized(vec![]);
+        let with_derivation = derive_succession_plan(&with_advisory, "customer_history");
+        let without_derivation = derive_succession_plan(&without_advisory, "customer_history");
+        assert_eq!(with_derivation.recipe, without_derivation.recipe);
     }
 }

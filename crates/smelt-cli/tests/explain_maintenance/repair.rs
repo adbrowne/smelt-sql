@@ -134,6 +134,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         is_snapshot_reconcile: None,
         comparability: vec![],
         succession_advisories: vec![],
+        succession_recipe: None,
     };
     let properties = smelt_logical::analysis::profile::PropertySet::derive(
         "non_repair_fixture",

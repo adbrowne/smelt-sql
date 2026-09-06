@@ -151,7 +151,7 @@ out-of-order and repeated windows, and the clamp.
 | 3b | Gate hygiene (test-file blind spot): this branch's large-file splits turned `#[cfg(test)] mod tests { … }` blocks into whole files that no gate's `#[cfg(test)]`-span scan can see, so test-only code is scanned as production — red in `join_context_reach::every_production_join_context_new_is_tagged`, `walk_coverage::admission_paths_have_no_raw_text_scans`, and `hardening_budget::gate_detects_regression` (`smelt-logical` `expect` 14 vs baseline 1). Fix the file *selection* in all three via one shared "declared under `#[cfg(test)] mod <stem>;`" rule (not a tag on any call site), and prove each still catches a real untagged production site | done |
 | 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | done |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; the `statement_parity` structural no-authoring leg widened to the succession shapes; the `maintenance_plan_conformance` SCD2 **append-only** matrix cell inhabited with the emitter-backed CLAIMED entry (columns 2/3 stay known gaps — both are out of this grain) | done |
-| 5a | Emitter inputs, derived purely: widen `SuccessionVerdict::Recognized` to carry the classifier's own expression material (row-local `(alias, source expr)` projection, `{lead}`/`{lag}` templates per derived column, the delete-flag expression) and add the pure `SuccessionRecipe` assembler in `smelt-logical`'s maintenance layer that turns a verdict + presented column set into every argument the phase-4 emitters take; carry it out of `derive_model_maintenance_plan` on `MaintenancePlanResult` so no consumer re-parses model SQL | planned |
+| 5a | Emitter inputs, derived purely: widen `SuccessionVerdict::Recognized` to carry the classifier's own expression material (row-local `(alias, source expr)` projection, `{lead}`/`{lag}` templates per derived column, the delete-flag expression) and add the pure `SuccessionRecipe` assembler in `smelt-logical`'s maintenance layer that turns a verdict + presented column set into every argument the phase-4 emitters take; carry it out of `derive_model_maintenance_plan` on `MaintenancePlanResult` so no consumer re-parses model SQL | done |
 | 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | pending |
 | 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
@@ -510,6 +510,22 @@ out-of-order and repeated windows, and the clamp.
   fixed — none are this phase's own target. This phase's own diff also grew nine files past
   the large-file ratchet baseline (same shape as phases 2b/3); left to the loop's dedicated
   shrink step per `docs/outcome_loop.md`. See `phases/03a-summary.md`.
+
+- 2026-09-07 (implement phase 5a): shipped as planned. `SuccessionVerdict::Recognized`
+  now carries `row_local`/`lead_derived`/`lag_derived`/`delete_flag_expr`; the classifier's
+  window-processing loop builds each `{lead}`/`{lag}` template by splicing the literal
+  token over the window call's own span within the select item's full text (a new
+  `WindowCall::window_range` field, since `smelt_parser::WindowSpec` has no `syntax()`
+  accessor). `SuccessionRecipe::from_verdict` assembles every phase-4 emitter argument;
+  `SuccessionDerivation.recipe` and `smelt-db`'s `MaintenancePlanResult.succession_recipe`
+  carry it to consumers. One scope-neutral fix mid-phase: `clippy::large_enum_variant`
+  forced boxing the four new `Recognized` fields (`NotSuccession` is ~32 bytes;
+  `Recognized` would otherwise be ~9x that) — `SuccessionRecipe`'s own fields stay
+  unboxed, so this is invisible outside the classifier. `verify-phase.sh` is green except
+  the large-file ratchet (six files this phase's diff grew), left to the loop's dedicated
+  shrink step per phases 2b/3/3a precedent — confirmed via `cargo test --workspace
+  --no-fail-fast` that it is the only failing test in the whole workspace. See
+  `phases/05a-summary.md`.
 
 ## Blocked
 

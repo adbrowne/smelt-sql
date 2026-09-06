@@ -14,10 +14,14 @@
 
 use duckdb::Connection;
 
+use smelt_logical::analysis::input_delta::MutationProfile;
+use smelt_logical::analysis::succession::{classify_keyed_succession, SuccessionContext};
+use smelt_logical::analysis::walk::{QueryNode, QueryTree};
 use smelt_logical::maintenance::emit::{
     emit_succession_clock_tie_probe, emit_succession_event_delta, emit_succession_patch,
     DerivedColumn, MaintenanceDialect, StatementGroup,
 };
+use smelt_logical::maintenance::succession::SuccessionRecipe;
 
 const PRESENTED: &str = "main.customer_history";
 const TOMBSTONES: &str = "main.customer_history__tombstones";
@@ -484,5 +488,90 @@ fn clock_tie_probe_fires_on_a_non_identical_collision_and_is_silent_on_a_redeliv
     assert!(
         violation_count2 > 0,
         "a non-identical row at the same (k, t) must fire the clock-tie probe"
+    );
+}
+
+/// Build the recipe from a *classified* model — not hand-written emitter
+/// arguments — proving the phase-5a derivation itself, not just the
+/// emitters' own shape (`docs/outcomes/20260906-scd2-keyed-succession/
+/// phases/05a-plan.md` test 7).
+fn recipe_for(sql: &str) -> SuccessionRecipe {
+    let ctx = SuccessionContext {
+        source_name: "customer_changes".to_string(),
+        mutation_profile: Some(MutationProfile::AppendOnly),
+        event_time_column: Some("changed_at".to_string()),
+        not_null_columns: ["customer_id", "changed_at"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    };
+    let tree = QueryTree::from_sql(sql).expect("sql parses to a query tree");
+    let QueryNode::Select(node) = &tree.root else {
+        panic!("expected a top-level SELECT scope, got {:?}", tree.root);
+    };
+    let verdict = classify_keyed_succession(node, &ctx);
+    SuccessionRecipe::from_verdict(&verdict).expect("model classifies as Recognized")
+}
+
+#[test]
+fn recipe_feeds_emitters_end_to_end() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-03 00:00:00", "silver"),
+        ],
+    );
+
+    let model_sql = "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER (PARTITION BY \
+                      customer_id ORDER BY changed_at) AS valid_to FROM customer_changes";
+    let recipe = recipe_for(model_sql);
+    assert_eq!(recipe.source_table, "customer_changes");
+    assert_eq!(recipe.key_cols, vec!["customer_id".to_string()]);
+    assert_eq!(recipe.clock_col, "changed_at");
+    assert_eq!(recipe.payload_columns, vec!["tier".to_string()]);
+    assert_eq!(
+        recipe.lead_derived,
+        vec![("valid_to".to_string(), "{lead}".to_string())]
+    );
+    assert!(recipe.lag_derived.is_empty());
+    assert_eq!(recipe.delete_flag_expr, None);
+
+    let apply = |predicate: &str| {
+        let event_delta = emit_succession_event_delta(
+            &recipe.source_table,
+            &recipe.row_local_projection,
+            recipe.pre_filter.as_deref(),
+            predicate,
+        );
+        let group = emit_succession_patch(
+            PRESENTED,
+            &recipe.key_cols,
+            &recipe.clock_col,
+            &recipe.payload_columns,
+            &recipe.lead_derived,
+            &recipe.lag_derived,
+            recipe.delete_flag_expr.as_deref(),
+            &event_delta.sql,
+            MaintenanceDialect::DuckDb,
+        );
+        batch_group(&conn, &group);
+    };
+
+    apply("changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-03 00:00:00')");
+
+    // Late event splices between the two already-folded events.
+    insert_events(&conn, &[(1, "2026-01-02 00:00:00", "platinum")]);
+    apply("changed_at = TIMESTAMP '2026-01-02 00:00:00'");
+
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            model_sql,
+        ),
+        "the recipe-driven patch must match the model's own LEAD SQL at full refresh"
     );
 }

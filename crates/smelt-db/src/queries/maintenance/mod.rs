@@ -105,6 +105,15 @@ pub struct MaintenancePlanResult {
     /// carried off it, see `smelt_logical::maintenance::succession::
     /// SuccessionDerivation`'s own doc comment).
     pub succession_advisories: Vec<smelt_logical::analysis::succession::SuccessionAdvisory>,
+    /// Every argument the succession-patch emitters take, derived once from
+    /// the classifier's verdict (`smelt_logical::maintenance::succession::
+    /// SuccessionRecipe::from_verdict`) — populated only on the same
+    /// succession branch as `succession_advisories`, `None` everywhere else
+    /// including a `NotSuccession` verdict on that branch. The runtime
+    /// driver (`docs/outcomes/20260906-scd2-keyed-succession/
+    /// phases/05b-plan.md`) reads this rather than re-parsing the model's
+    /// SQL (`CLAUDE.md` §"Maintenance-plan purity").
+    pub succession_recipe: Option<smelt_logical::maintenance::succession::SuccessionRecipe>,
 }
 
 mod diagnostics;

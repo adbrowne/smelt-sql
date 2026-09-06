@@ -89,6 +89,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         is_snapshot_reconcile: None,
         comparability: vec![],
         succession_advisories: vec![],
+        succession_recipe: None,
     };
     let __profile = synthetic_profile(&result, "daily_events_enriched");
     let report = build_maintenance_plan_report(
@@ -222,6 +223,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         is_snapshot_reconcile: None,
         comparability: vec![],
         succession_advisories: vec![],
+        succession_recipe: None,
     };
     let __profile = synthetic_profile(&result, "events_enriched");
     let report = build_maintenance_plan_report(

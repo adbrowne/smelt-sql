@@ -32,7 +32,9 @@ use crate::analysis::monotonicity::{trace_event_time, EventTimeTrace};
 use crate::analysis::source_bounds::BoundContext;
 use crate::analysis::walk::{InputItem, SelectNode};
 use predicates::{as_bare_not, is_deterministic_row_local, names_match};
-use window::{find_window_calls, record_window, validate_wrapper_operands, window_shape};
+use window::{
+    derived_template, find_window_calls, record_window, validate_wrapper_operands, window_shape,
+};
 
 /// The driving-source facts [`classify_keyed_succession`] reads — the
 /// world-facts a leaf classifier over one already-bounded scope needs but
@@ -123,6 +125,35 @@ pub enum SuccessionVerdict {
         lag_cols: Vec<String>,
         delete_flag: Option<String>,
         advisories: Vec<SuccessionAdvisory>,
+        /// Every row-local (non-window) projected column as `(alias, source
+        /// expression text)`, in the model's own column order — the
+        /// classifier's own expression material, carried forward so
+        /// `maintenance::succession::SuccessionRecipe::from_verdict` (and,
+        /// through it, the emitters in `maintenance::emit::succession`)
+        /// never re-derives it by re-parsing the model's SQL
+        /// (`CLAUDE.md` §"Maintenance-plan purity").
+        /// Boxed for the same reason as `lead_derived` below.
+        row_local: Box<Vec<(String, String)>>,
+        /// One entry per `lead_cols` alias: `(alias, expr_template)`, where
+        /// `expr_template` is the select item's own expression text with the
+        /// `LEAD(...)  OVER (...)` call's span replaced by the literal token
+        /// `{lead}` — e.g. `("valid_to", "{lead}")` for a bare projection or
+        /// `("is_current", "{lead} IS NULL")` for a scalar-wrapped one. Feeds
+        /// [`crate::maintenance::emit::DerivedColumn`] directly.
+        /// Boxed per `clippy::large_enum_variant` — `NotSuccession` carries
+        /// only a reason string, so leaving this Vec inline would roughly
+        /// double every `NotSuccession` allocation-free match arm's stack
+        /// footprint to accommodate a payload it never uses.
+        lead_derived: Box<Vec<(String, String)>>,
+        /// The `LAG` counterpart of `lead_derived`, using the `{lag}` token.
+        /// Boxed for the same reason.
+        lag_derived: Box<Vec<(String, String)>>,
+        /// The `QUALIFY NOT <flag>` operand's own expression text (today
+        /// always a bare column name, since rule 6 admits no other shape),
+        /// or `None` when the model has no `QUALIFY` clause. Feeds the
+        /// emitters' `delete_flag_expr` argument directly. Boxed for the
+        /// same reason.
+        delete_flag_expr: Box<Option<String>>,
     },
     NotSuccession {
         reason: NotSuccessionReason,
@@ -249,6 +280,7 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
     };
     let mut window_items: Vec<(String, smelt_parser::Expr, window::WindowCall)> = Vec::new();
     let mut plain_bare_names: HashSet<String> = HashSet::new();
+    let mut row_local: Vec<(String, String)> = Vec::new();
     for item in select_list.items() {
         let alias = item.column_name().unwrap_or_default();
         let Some(expr) = item.expression() else {
@@ -271,6 +303,7 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
                 if let Some(col) = expr.as_column_ref() {
                     plain_bare_names.insert(col.name().to_string());
                 }
+                row_local.push((alias.clone(), expr.text().trim().to_string()));
             }
         }
     }
@@ -279,8 +312,10 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
     // sharing one PARTITION BY key set and one ascending ORDER BY column.
     let mut lead_cols = Vec::new();
     let mut lag_cols = Vec::new();
+    let mut lead_derived: Vec<(String, String)> = Vec::new();
+    let mut lag_derived: Vec<(String, String)> = Vec::new();
 
-    let Some(((first_alias, _, first_call), rest)) = window_items.split_first() else {
+    let Some(((first_alias, first_expr, first_call), rest)) = window_items.split_first() else {
         return refuse(PatternUnrecognized(
             "no LEAD/LAG window projection found — not a succession shape".into(),
         ));
@@ -308,8 +343,14 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
     ) {
         return refuse(reason);
     }
+    let template = derived_template(first_expr, first_call);
+    if first_shape.is_lead {
+        lead_derived.push((first_alias.clone(), template));
+    } else {
+        lag_derived.push((first_alias.clone(), template));
+    }
 
-    for (alias, _item_expr, window_call) in rest {
+    for (alias, item_expr, window_call) in rest {
         let shape = match window_shape(alias, window_call) {
             Ok(shape) => shape,
             Err(reason) => return refuse(reason),
@@ -329,6 +370,12 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
         if let Err(reason) = record_window(alias, &shape, &clock_col, &mut lead_cols, &mut lag_cols)
         {
             return refuse(reason);
+        }
+        let template = derived_template(item_expr, window_call);
+        if shape.is_lead {
+            lead_derived.push((alias.clone(), template));
+        } else {
+            lag_derived.push((alias.clone(), template));
         }
     }
 
@@ -405,6 +452,7 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
     // Rule 6: at most one post-window filter, exactly `QUALIFY NOT <NOT
     // NULL row-local boolean column>`.
     let mut delete_flag = None;
+    let mut delete_flag_expr = None;
     if let Some(qualify) = select.qualify_clause() {
         let Some(expr) = qualify.expression() else {
             return refuse(DeleteFilterMisplaced(
@@ -430,6 +478,7 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
             )));
         }
         delete_flag = Some(col.name().to_string());
+        delete_flag_expr = Some(negated.text().trim().to_string());
     }
 
     SuccessionVerdict::Recognized {
@@ -441,5 +490,9 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
         lag_cols,
         delete_flag,
         advisories,
+        row_local: Box::new(row_local),
+        lead_derived: Box::new(lead_derived),
+        lag_derived: Box::new(lag_derived),
+        delete_flag_expr: Box::new(delete_flag_expr),
     }
 }

@@ -814,6 +814,59 @@ fn undeclared_grain_incremental_model_derives_the_succession_plan() {
     );
 }
 
+/// `derive_model_maintenance_plan`'s `succession_recipe` field carries the
+/// emitters' assembled inputs for a `Recognized` model, and is `None` for a
+/// `NotSuccession` model (`docs/outcomes/20260906-scd2-keyed-succession/
+/// phases/05a-plan.md` test 8).
+#[test]
+fn plan_result_carries_recipe_for_recognized_model() {
+    let metadata = succession_metadata();
+    let source_refs = vec![(
+        "customer_changes".to_string(),
+        Some(succession_source_info()),
+    )];
+    let result = derive_model_maintenance_plan(
+        SUCCESSION_SQL,
+        "main.customer_history",
+        &metadata,
+        &[],
+        &std::collections::HashSet::new(),
+        None,
+        &[],
+        &[],
+        &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+        None,
+        None,
+        &source_refs,
+    )
+    .expect("recognized succession model must derive a plan");
+    let recipe = result
+        .succession_recipe
+        .expect("Recognized verdict must carry a recipe");
+    assert_eq!(recipe.key_cols, vec!["customer_id".to_string()]);
+    assert_eq!(recipe.clock_col, "changed_at");
+    assert_eq!(recipe.payload_columns, vec!["name".to_string()]);
+
+    let not_succession_sql =
+        "SELECT customer_id, COUNT(*) AS n FROM smelt.sources.customer_changes GROUP BY customer_id";
+    let refused = derive_model_maintenance_plan(
+        not_succession_sql,
+        "main.customer_counts",
+        &metadata,
+        &[],
+        &std::collections::HashSet::new(),
+        None,
+        &[],
+        &[],
+        &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+        None,
+        None,
+        &[],
+    )
+    .expect("undeclared-grain incremental model must still derive a (refused) plan");
+    assert!(refused.succession_recipe.is_none());
+}
+
 #[test]
 fn undeclared_grain_unrecognised_shape_derives_the_succession_refusal() {
     let metadata = succession_metadata();

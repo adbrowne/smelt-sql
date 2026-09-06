@@ -85,6 +85,7 @@ fn text_report_technique_matches_the_profile_technique() {
         is_snapshot_reconcile: None,
         comparability: vec![],
         succession_advisories: vec![],
+        succession_recipe: None,
     };
 
     // Build the profile from a cell whose technique deliberately differs

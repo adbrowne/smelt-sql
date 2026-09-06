@@ -516,3 +516,101 @@ fn refuses_having() {
         matches!(r, NotSuccessionReason::PatternUnrecognized(_))
     });
 }
+
+// ----- Verdict widening (phase 5a): row-local projection, LEAD/LAG
+// templates, delete-flag expression -----
+
+#[test]
+fn verdict_carries_row_local_projection() {
+    let sql = "SELECT customer_id, changed_at, UPPER(region) AS region, \
+                LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_ts \
+                FROM smelt.raw.customer_changes";
+    match classify(sql, &fixture_ctx()) {
+        SuccessionVerdict::Recognized { row_local, .. } => {
+            assert_eq!(
+                *row_local,
+                vec![
+                    ("customer_id".to_string(), "customer_id".to_string()),
+                    ("changed_at".to_string(), "changed_at".to_string()),
+                    ("region".to_string(), "UPPER(region)".to_string()),
+                ]
+            );
+        }
+        other => panic!("expected Recognized, got {other:?}"),
+    }
+}
+
+#[test]
+fn verdict_carries_lead_template() {
+    let sql = "SELECT customer_id, changed_at, \
+                LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS valid_to \
+                FROM smelt.raw.customer_changes";
+    match classify(sql, &fixture_ctx()) {
+        SuccessionVerdict::Recognized { lead_derived, .. } => {
+            assert_eq!(
+                *lead_derived,
+                vec![("valid_to".to_string(), "{lead}".to_string())]
+            );
+        }
+        other => panic!("expected Recognized, got {other:?}"),
+    }
+}
+
+#[test]
+fn verdict_carries_wrapped_lead_template() {
+    let sql = "SELECT customer_id, changed_at, \
+                LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) IS NULL AS \
+                is_current FROM smelt.raw.customer_changes";
+    match classify(sql, &fixture_ctx()) {
+        SuccessionVerdict::Recognized { lead_derived, .. } => {
+            assert_eq!(
+                *lead_derived,
+                vec![("is_current".to_string(), "{lead} IS NULL".to_string())]
+            );
+        }
+        other => panic!("expected Recognized, got {other:?}"),
+    }
+}
+
+#[test]
+fn verdict_carries_lag_template() {
+    let sql = "SELECT customer_id, changed_at, \
+                LAG(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS \
+                previous_ts FROM smelt.raw.customer_changes";
+    match classify(sql, &fixture_ctx()) {
+        SuccessionVerdict::Recognized { lag_derived, .. } => {
+            assert_eq!(
+                *lag_derived,
+                vec![("previous_ts".to_string(), "{lag}".to_string())]
+            );
+        }
+        other => panic!("expected Recognized, got {other:?}"),
+    }
+}
+
+#[test]
+fn verdict_carries_delete_flag_expression() {
+    let sql = "SELECT customer_id, changed_at, is_deleted, \
+                LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_ts \
+                FROM smelt.raw.customer_changes QUALIFY NOT is_deleted";
+    match classify(sql, &fixture_ctx()) {
+        SuccessionVerdict::Recognized {
+            delete_flag_expr, ..
+        } => {
+            assert_eq!(*delete_flag_expr, Some("is_deleted".to_string()));
+        }
+        other => panic!("expected Recognized, got {other:?}"),
+    }
+
+    let sql_no_qualify = "SELECT customer_id, changed_at, \
+                LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_ts \
+                FROM smelt.raw.customer_changes";
+    match classify(sql_no_qualify, &fixture_ctx()) {
+        SuccessionVerdict::Recognized {
+            delete_flag_expr, ..
+        } => {
+            assert_eq!(*delete_flag_expr, None);
+        }
+        other => panic!("expected Recognized, got {other:?}"),
+    }
+}
