@@ -123,6 +123,31 @@ jobs:
       - name: Dialect seam (compile-path emission refusal)
         run: cargo test -p smelt-runtime --test dialect_seam
 
+      - name: Architectural invariant gates (parity, walk, projection, census)
+        # These five are named as standing CI gates in CLAUDE.md and
+        # docs/specs/architecture.md but had no workflow step: `cargo test
+        # --lib` above covers only unit tests inside src/, so each of these
+        # integration binaries ran nowhere in CI and was enforced solely by a
+        # developer's local `cargo test`. Each maps to one invariant:
+        #
+        #   statement_parity              — maintenance-plan purity: every executed
+        #                                   maintenance statement comes from a pure
+        #                                   emitter in smelt-logical.
+        #   execute_parity                — run pipeline parity (CLI <-> UI): the
+        #                                   compile+execute pipeline has one owner.
+        #   projection_dialect_invariance — source-derived projection: output columns
+        #                                   are never recovered by re-parsing printed SQL.
+        #   walk_coverage                 — property composition walk: verdicts come
+        #                                   from the shared walk, not ad hoc scans.
+        #   unknown_census                — fail-loud: every DataType::Unknown site is
+        #                                   classified in .claude/unknown-census.toml.
+        run: |
+          cargo test -p smelt-runtime --test statement_parity
+          cargo test -p smelt-runtime --test execute_parity
+          cargo test -p smelt-runtime --test projection_dialect_invariance
+          cargo test -p smelt-logical --test walk_coverage
+          cargo test -p smelt-types --test unknown_census
+
       - name: Run LSP integration tests
         # All integration tests under crates/smelt-lsp/tests/ — completion,
         # diagnostics, e2e, example_workspaces, goto_definition, hover,
