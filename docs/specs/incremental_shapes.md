@@ -1,7 +1,7 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -1136,6 +1136,20 @@ to the number of delete events ever folded and is never compacted: a tombstone s
 load-bearing for as long as a later-arriving event could splice next to it, which under the
 default contract point is forever.
 
+**Physical shape.** The ledger is a **per-model sibling table**, never the shared
+`_smelt_ledger`: the neighbour lookup runs `LEAD`/`LAG` over the union of presented rows and
+ledger rows ordered by `t`, so `k` and `t` must be stored in the model's own column types — a
+shared VARCHAR-keyed table would force a cast into every neighbour lookup. Its name is derived
+from the presented table: `<presented table>__tombstones`, in the model's own schema.
+`__tombstones` is a **reserved relation-name suffix**, on the same terms as the reserved `__`
+column suffix that §"Decomposed state (rung 2) in keyed models" establishes for hidden state
+columns. Its columns are **exactly** `k ∪ {t}` — the classifier verdict's `key_cols` then
+`clock_col`, in that order, each in the model's own inferred type, each `NOT NULL` — with primary
+key `(k, t)`; no payload, no delete flag (every row is a delete by construction), and no
+run-metadata column. Its lifecycle is tied to the presented table: created with it, dropped with
+it, rebuilt in the same transaction on `--full-refresh` and `smelt repair`, and replaced wholesale
+by a skeleton change, per the Lifecycle paragraph above.
+
 #### The maintenance theorem (bounded footprint)
 
 When a batch of new events is processed, the only presented rows whose output changes are the
@@ -1774,6 +1788,16 @@ inferred *output* facts (§Future Extensions).
 11. **SCD2-over-mutable-snapshots is never admitted, regardless of SQL shape** — this grain
     requires a source that already carries change events with their own event times
     (§"What stays out of this grain").
+12. **`contract.frozen_horizon` and `contract.retain_departed` are refused on a succession
+    model by the existing rules, naming the succession grain; `contract.deferral` is admitted
+    with unchanged semantics.** `frozen_horizon` is admitted only on the partition grain
+    (`ContractFrozenHorizonInvalid`); `retain_departed` is admitted only on a keyed shape
+    consuming a `mutable_snapshot`, which this grain never does (`ContractRetainDepartedInvalid`).
+    Neither refusal is grain-specific machinery — both are the partition-grain-only and
+    mutable-snapshot-only rules already stated for those points, applied here. `deferral`
+    measures frontier lag against the model's clock, a grain-independent measurement, and a
+    succession model always carries a clock (its `clock_col`), so it is admitted unchanged.
+    No new contract-lattice point is defined for this grain.
 
 ## Known Divergences / Open Questions
 
@@ -1884,6 +1908,10 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   a landing date distinct from `event_time_column`, with lateness schedules that land old
   event times in new arrival windows — and a leg with the optional pre-window lateness clamp,
   asserting the clamped-out rows are absent from both oracle and maintained state.
+- **A hand-authored model whose derived table name ends in the reserved `__tombstones` suffix
+  collides silently** with a succession model's ledger table, with no dedicated collision
+  diagnostic — the reserved-suffix collision the key grain's `__` state-column suffix already
+  has a diagnostic for (`KeyedStateColumnCollision`) has no relation-name counterpart here.
 
 ## Future Extensions
 

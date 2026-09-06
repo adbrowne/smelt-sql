@@ -1,7 +1,7 @@
 ---
 feature: state
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -69,7 +69,7 @@ structure's format and semantics; this table owns only its class.
 | Reconciliation ledger (frontier record) | correctness | backend table, transactional with the fold | `incremental_models.md` §"The frontier record (reconciliation ledger)" |
 | Observed output deltas | correctness | backend table, transactional with the conditional write | `incremental_models.md` §"The graph layer" |
 | Fingerprint sidecar | correctness | backend table (digest refresh in the maintenance run) | `sources.md` §"The fingerprint sidecar" |
-| Tombstone ledger (succession grain) | correctness | backend table, transactional with the succession-patch `MERGE` | `incremental_shapes.md` §"The tombstone ledger (hidden state)" |
+| Tombstone ledger (succession grain) | correctness | per-model sibling table `<presented table>__tombstones`, transactional with the succession-patch `MERGE` | `incremental_shapes.md` §"The tombstone ledger (hidden state)" |
 | Run manifests + run reports | observability | `.smelt/targets/<t>/runs/`, `reports/` | `run_state.md` |
 | Interval ledger | observability | `.smelt/targets/<t>/intervals.json` | `run_state.md` |
 | Landed-delta record | observability | `.smelt/targets/<t>/landed_deltas.json` | `run_state.md` |

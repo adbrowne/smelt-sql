@@ -137,7 +137,7 @@ out-of-order and repeated windows, and the clamp.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | planned |
+| 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | done |
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | pending |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
@@ -207,6 +207,13 @@ out-of-order and repeated windows, and the clamp.
   fall to the existing refusals, `deferral` is admitted unchanged. A reserved-suffix
   relation collision is recorded as a residual divergence rather than a twelfth code,
   to hold the outcome's stated code budget.
+
+- 2026-09-06 (phase 1 done): all four spec edits landed as planned, no reshape needed. Found a
+  pre-existing, unrelated flaky test (`smelt-core`'s
+  `checkout_scratch_is_deleted_when_materialization_fails`, races on shared `/tmp` scratch-dir
+  listing under parallel test threads) — confirmed unrelated via a docs-only diff and an
+  isolated `--test-threads=1` pass; not fixed here (out of this phase's spec-only scope, not a
+  success criterion). See `phases/01-summary.md`.
 
 ## Blocked
 
