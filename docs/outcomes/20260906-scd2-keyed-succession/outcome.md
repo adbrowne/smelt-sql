@@ -152,7 +152,7 @@ out-of-order and repeated windows, and the clamp.
 | 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | done |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; the `statement_parity` structural no-authoring leg widened to the succession shapes; the `maintenance_plan_conformance` SCD2 **append-only** matrix cell inhabited with the emitter-backed CLAIMED entry (columns 2/3 stay known gaps — both are out of this grain) | done |
 | 5a | Emitter inputs, derived purely: widen `SuccessionVerdict::Recognized` to carry the classifier's own expression material (row-local `(alias, source expr)` projection, `{lead}`/`{lag}` templates per derived column, the delete-flag expression) and add the pure `SuccessionRecipe` assembler in `smelt-logical`'s maintenance layer that turns a verdict + presented column set into every argument the phase-4 emitters take; carry it out of `derive_model_maintenance_plan` on `MaintenancePlanResult` so no consumer re-parses model SQL | done |
-| 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | pending |
+| 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | planned |
 | 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
 | 7 | Testkit and conformance: arrival-partitioned `SourceRecipe`, `SuccessionRecipe` family with the model-SQL oracle and every listed leg; state-deletion and repair legs widened; seeded sample green | pending |
@@ -161,6 +161,20 @@ out-of-order and repeated windows, and the clamp.
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (plan phase 5b): **no reshape.** Phase 5a's summary left exactly one open
+  item for this phase — resolving `SuccessionRecipe::source_table`'s classifier spelling to a
+  physical table name — which is dispatch work already inside 5b's row, not new scope. The
+  remaining rows (5c, 6–10) are unchanged. Two design questions the plan settles rather than
+  defers: the succession loop is a **new module** rather than a `WindowedKeyedRule` impl (that
+  trait's seams are keyed-fold shaped — `WriteSuppression`, `KeyedWriteMechanism`, a
+  `CREATE TABLE AS` create arm — and succession needs a pre-write probe, a two-statement
+  transactional group and a second table's DDL), and **every** window including the first goes
+  through the patch path over an empty bootstrapped shell, so refold and either-order
+  convergence are structurally one code path rather than two. Phase 4's whole-key-history
+  patch (vs the spec's bounded-footprint theorem) stays a phase-10 residual-gap wording
+  question, not a new row: criterion 4 asks only for the presented ∪ ledger ∪ batch neighbour
+  domain, which phase 4 shipped.
 
 - 2026-09-07 (plan phase 5): **reshape — phase 5 split into 5a / 5b / 5c.** Phase 4's summary
   left the emitters' `{lead}`/`{lag}` templates, row-local projection and payload-column list as
