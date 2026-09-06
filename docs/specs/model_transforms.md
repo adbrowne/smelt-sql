@@ -517,7 +517,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   restriction never changes what is scanned into `S`, only which rows the enrichment recompute
   re-derives. `smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction`
   reads the recorded delta and dispatches between the two forms against a real backend, and the
-  runtime's own per-batch execution loop (`crates/smelt-runtime/src/execute.rs`) now calls it for
+  runtime's own per-batch execution loop (`crates/smelt-runtime/src/execute/`) now calls it for
   every model-edge-sourced, `DeleteInsert`-strategy creation cell over an already-materialized
   target on a DuckDB run — the same dispatch decision (`resolve_live_delta_restriction_facts` +
   `build_delete_insert_group_dispatched`) also backs the `--dry-run`/`smelt explain` reporting
