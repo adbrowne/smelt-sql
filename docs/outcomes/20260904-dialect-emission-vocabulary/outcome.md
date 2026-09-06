@@ -81,7 +81,7 @@ audit before it is claimed — never from documentation.
 | 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
 | 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | done |
 | 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap`; also validate a `Conditional` arm's `Template` verdict at registry construction | done |
-| 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
+| 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | planned |
 
 ## Decision log
 
@@ -369,6 +369,19 @@ audit before it is claimed — never from documentation.
   race (`materialize_tests::checkout_scratch_is_deleted_when_materialization_fails`), confirmed
   unrelated via `git diff --stat -- crates/smelt-core/` (empty) and a clean 21/21
   single-threaded rerun. See `phases/09-summary.md`.
+
+- 2026-09-06 (plan 10) — **No reshape.** Phase 9's summary explicitly says phase 10 is unaffected by
+  its scope, and every other row is `done`. Two design points fixed inside phase 10's own scope.
+  (a) The two *new* families of `UnsupportedOnBackend` reason this outcome introduced — a template
+  call carrying one of the seven refused modifiers, and a `Conditional`'s `otherwise -> Unsupported`
+  arm (`//` on Spark with a non-numeric operand) — are documented with **pinned** example blocks,
+  extending `dialect_seam`'s existing `docs_quoted_refusal_text_matches_the_live_diagnostic`
+  marker mechanism to two more markers rather than hand-copying message text; a doc quoting a
+  message the compiler does not emit is the same unverified claim the outcome exists to remove.
+  (b) Issue disposition is split by subject: #177 and #178 are *closed* (their subject — a missing
+  emission verdict on DuckDB/Spark — is fully paid down; the four surviving rows per dialect belong
+  to #175/#176, which stay open), while #173/#174/#179 get comments only, since their BigQuery arms
+  need the human-run billing sweep the outcome placed out of scope.
 
 ## Blocked
 
