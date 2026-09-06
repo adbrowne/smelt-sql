@@ -161,7 +161,7 @@ out-of-order and repeated windows, and the clamp.
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | blocked |
 | 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | done |
 | 6b | Deferral frontier for succession (criterion 6 residue from phase 7d): the succession window-forward driver never writes `IntervalStore`, so `contract_probes::resolve_deferral_frontiers` always reads a `None` maintained frontier and `deferral::run_license` can never license a skip for a succession model. Record the driver's maintained arrival frontier after each successful fold (or teach the resolver a succession-aware frontier source), then re-add phase 7d's tests 6–7 as written in `phases/07d-plan.md` (the executed-skip `contract_points.rs` deferral leg) | done |
-| 6c | Append-only probe dispatch for the succession grain (criterion 7; subsumes blocked phase 6): `dispatch_and_record_append_only_postures`/`append_only_posture_probes` are called only from the ordinary `match plan.incremental` sites in `crates/smelt-runtime/src/execute/project/mod.rs`, so a succession model's declared `mutation_profile: append_only` posture is never verified at runtime and its `ModelRunRecord` hardcodes `probes: Vec::new()`. Wire the dispatch into the succession window-forward loop (persisting the refreshed `SourcePostureStore` baseline as the ordinary path does), with unit tests, then land phase 6's two conformance `probes.rs` legs on top: a late append into a closed event-time partition re-presents its covering window, and a genuine in-place mutation fails with `SourceMutationProfileViolated` (not an incidental `SuccessionClockTie`) | pending |
+| 6c | Append-only probe dispatch for the succession grain (criterion 7; subsumes blocked phase 6): `dispatch_and_record_append_only_postures`/`append_only_posture_probes` are called only from the ordinary `match plan.incremental` sites in `crates/smelt-runtime/src/execute/project/mod.rs`, so a succession model's declared `mutation_profile: append_only` posture is never verified at runtime and its `ModelRunRecord` hardcodes `probes: Vec::new()`. Wire the dispatch into the succession window-forward loop (persisting the refreshed `SourcePostureStore` baseline as the ordinary path does), with unit tests, then land phase 6's two conformance `probes.rs` legs on top: a late append into a closed event-time partition re-presents its covering window, and a genuine in-place mutation fails with `SourceMutationProfileViolated` (not an incidental `SuccessionClockTie`) | planned |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
 | 9 | Fixture and docs: example workspace `customer_changes`/`customer_history` with zero diagnostics; docs-site guide page and diagnostics reference | pending |
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
@@ -736,6 +736,16 @@ out-of-order and repeated windows, and the clamp.
   `maintenance_conformance` sample: 99 passed (up from 97).
   `verify-phase.sh` ALL GREEN. Criterion 6's contract-lattice `deferral` leg
   is now fully closed. See `phases/06b-summary.md`.
+
+- 2026-09-07 (phase 6c planning): no reshape of the remaining rows. Phase 6b's
+  summary closed criterion 6's `deferral` leg outright and left one open note —
+  whether a late append landing in an already-processed succession window could
+  briefly leave `resolve_deferral_frontiers` reading a maintained frontier ahead
+  of the re-presented window's fold state. That is not a criterion gap: the
+  succession frontier write happens once per completed window-forward step, the
+  same granularity the ordinary `plan.incremental` path relies on, so it inherits
+  that path's guarantee rather than needing its own. Recorded here rather than
+  given a row. Rows 6c, 8, 9, 10 stand as written.
 
 ## Blocked
 
