@@ -1964,7 +1964,7 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-runtime/src/windowing.rs` — `PartitionPoint`, `IncrementalBatch` axis dispatch (calendar / unit-step integer)
   - `crates/smelt-logical/src/maintenance/derive.rs` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
   - `crates/smelt-state/src/schema_tracking.rs` — `DeployedSchema::partition_column`
-  - `crates/smelt-db/src/lib.rs` — `model_source_clamps`
+  - `crates/smelt-db/src/maintenance_refs.rs` — `model_source_clamps`
 - **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI
   integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition
   full-refresh-equivalence harness; `crates/smelt-cli/tests/partition_residue_probes.rs`;

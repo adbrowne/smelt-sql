@@ -5,6 +5,7 @@ use super::*;
 use crate::test_harness::TestDb;
 use line_index::LineIndex;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[test]
 fn test_schema_extraction_simple_columns() {
