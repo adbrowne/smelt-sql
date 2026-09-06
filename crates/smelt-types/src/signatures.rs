@@ -455,7 +455,7 @@ pub enum Position {
 }
 
 /// A structural rewrite the printer implements. Enumerable by construction, so
-/// the set of rewrites is knowable without reading `printer.rs`.
+/// the set of rewrites is knowable without reading the printer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RewriteId {
     /// `MEDIAN(x)` → `PERCENTILE_CONT(x, 0.5)` in window position, an
@@ -4958,7 +4958,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_kind(ExprKind::Agg)
         .with_emission(&[
             // GoogleSQL has no `MEDIAN`; the printer lowers it to an exact
-            // form per position (`printer.rs::print_bigquery_median`). The
+            // form per position (`printer/registry_emit.rs::print_bigquery_median`). The
             // aggregate and whole-partition-window forms are both exact
             // lowerings. A running `MEDIAN(x) OVER (PARTITION BY g ORDER BY
             // t)` has no exact GoogleSQL form — `PERCENTILE_CONT` forbids a

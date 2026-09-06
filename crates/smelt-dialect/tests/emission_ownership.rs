@@ -5,7 +5,61 @@
 //! never from a `match dialect` / `eq_ignore_ascii_case` chain in the printer.
 //! This is the sibling gate to `registry_consistency`.
 
-const PRINTER_SRC: &str = include_str!("../src/printer.rs");
+use std::sync::LazyLock;
+
+/// Every source file of the `printer` module, read at test time rather than
+/// `include_str!`-ed one by one: the gate is about the printer's *content*,
+/// so a new submodule dropped into `src/printer/` must be covered the moment
+/// it exists, never only once someone remembers to list it here.
+fn printer_files() -> Vec<(String, String)> {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/printer");
+    let mut files: Vec<(String, String)> = std::fs::read_dir(dir)
+        .expect("smelt-dialect must have a `src/printer` module directory")
+        .map(|e| e.expect("readable dir entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+        .map(|p| {
+            let name = p
+                .file_name()
+                .expect("file has a name")
+                .to_string_lossy()
+                .into_owned();
+            (
+                name,
+                std::fs::read_to_string(&p).expect("readable source file"),
+            )
+        })
+        .collect();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "no printer sources found — the gate would pass vacuously"
+    );
+    files
+}
+
+/// The printer module's whole source, concatenated — for the `contains`
+/// checks, which ask whether a spelling appears anywhere in the printer.
+static PRINTER_SRC: LazyLock<String> = LazyLock::new(|| {
+    printer_files()
+        .into_iter()
+        .map(|(_, src)| src)
+        .collect::<Vec<_>>()
+        .join("\n")
+});
+
+/// The printer module's lines, each tagged `file.rs:line` — for the
+/// line-scanning checks, whose failure messages must point at a real place.
+fn printer_lines() -> Vec<(String, String)> {
+    printer_files()
+        .into_iter()
+        .flat_map(|(name, src)| {
+            src.lines()
+                .enumerate()
+                .map(|(i, l)| (format!("{name}:{}", i + 1), l.trim().to_string()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
 
 /// Case-folded comparisons that are **not** per-dialect emission facts, and so
 /// cannot move into `Signature::emission`.
@@ -33,16 +87,14 @@ const NON_EMISSION_CASE_FOLDS: &[&str] = &[
 
 #[test]
 fn the_printer_matches_no_function_name() {
-    let hits: Vec<(usize, &str)> = PRINTER_SRC
-        .lines()
-        .enumerate()
+    let hits: Vec<(String, String)> = printer_lines()
+        .into_iter()
         .filter(|(_, l)| l.contains("eq_ignore_ascii_case"))
         .filter(|(_, l)| !NON_EMISSION_CASE_FOLDS.iter().any(|a| l.contains(a)))
-        .map(|(i, l)| (i + 1, l.trim()))
         .collect();
     assert!(
         hits.is_empty(),
-        "printer.rs matches function names by string. Per-dialect spelling is \
+        "the printer module matches function names by string. Per-dialect spelling is \
          registry data (`Signature::emission`); move the fact into \
          `crates/smelt-types/src/signatures.rs` rather than re-adding an arm here.\n{hits:#?}"
     );
@@ -55,7 +107,7 @@ fn every_allowlisted_case_fold_is_still_present() {
     for allowed in NON_EMISSION_CASE_FOLDS {
         assert!(
             PRINTER_SRC.contains(allowed),
-            "allowlisted non-emission case-fold `{allowed}` no longer appears in printer.rs — \
+            "allowlisted non-emission case-fold `{allowed}` no longer appears in the printer module — \
              delete the entry from NON_EMISSION_CASE_FOLDS rather than leaving a dead exemption"
         );
     }
@@ -63,9 +115,8 @@ fn every_allowlisted_case_fold_is_still_present() {
 
 #[test]
 fn the_printer_branches_on_no_dialect_variant() {
-    let hits: Vec<(usize, &str)> = PRINTER_SRC
-        .lines()
-        .enumerate()
+    let hits: Vec<(String, String)> = printer_lines()
+        .into_iter()
         .filter(|(_, l)| {
             [
                 "SqlDialect::DuckDB",
@@ -75,11 +126,10 @@ fn the_printer_branches_on_no_dialect_variant() {
             .iter()
             .any(|v| l.contains(v))
         })
-        .map(|(i, l)| (i + 1, l.trim()))
         .collect();
     assert!(
         hits.is_empty(),
-        "printer.rs branches on a concrete dialect. Emission facts belong in \
+        "the printer module branches on a concrete dialect. Emission facts belong in \
          `Signature::emission`; capability-shaped differences belong in \
          `BackendCapabilities`.\n{hits:#?}"
     );
@@ -145,7 +195,7 @@ fn every_rewrite_id_is_dispatched() {
     for id in declared_rewrite_ids() {
         assert!(
             PRINTER_SRC.contains(&format!("RewriteId::{id}")),
-            "RewriteId::{id} is declared in the registry but never dispatched in printer.rs"
+            "RewriteId::{id} is declared in the registry but never dispatched in the printer module"
         );
     }
 }
@@ -164,7 +214,7 @@ fn every_restructure_id_is_dispatched() {
         assert!(
             PRINTER_SRC.contains(&format!("RestructurePlan::{id}")),
             "RestructureId::{id} is declared in the registry but its RestructurePlan \
-             counterpart is never dispatched in printer.rs"
+             counterpart is never dispatched in the printer module"
         );
     }
 }
@@ -183,15 +233,13 @@ fn every_restructure_id_is_dispatched() {
 #[test]
 fn the_printer_derives_no_position_itself() {
     let forbidden = ["next_sibling", "SyntaxKind::WINDOW_SPEC", "WINDOW_SPEC"];
-    let hits: Vec<(usize, &str)> = PRINTER_SRC
-        .lines()
-        .enumerate()
+    let hits: Vec<(String, String)> = printer_lines()
+        .into_iter()
         .filter(|(_, l)| forbidden.iter().any(|f| l.contains(f)))
-        .map(|(i, l)| (i + 1, l.trim()))
         .collect();
     assert!(
         hits.is_empty(),
-        "printer.rs inspects sibling nodes or a WINDOW_SPEC directly to tell \
+        "the printer module inspects sibling nodes or a WINDOW_SPEC directly to tell \
          a call's position — that is `position::classify`'s question to \
          answer, once, before the printer ever sees the call. Pass the \
          classified `Position` in instead of re-deriving it here.\n{hits:#?}"
@@ -264,19 +312,17 @@ fn every_rewrite_id_states_why_it_is_not_a_template() {
 /// cannot ask for one").
 #[test]
 fn printer_holds_no_type_context() {
-    let hits: Vec<(usize, &str)> = PRINTER_SRC
-        .lines()
-        .enumerate()
+    let hits: Vec<(String, String)> = printer_lines()
+        .into_iter()
         .filter(|(_, l)| {
             ["DataType", "TypeContext", "OperandClass"]
                 .iter()
                 .any(|needle| l.contains(needle))
         })
-        .map(|(i, l)| (i + 1, l.trim()))
         .collect();
     assert!(
         hits.is_empty(),
-        "printer.rs references a type or type-context symbol — the printer must consume only \
+        "the printer module references a type or type-context symbol — the printer must consume only \
          pre-settled `SettledEmission` verdicts, never resolve one itself.\n{hits:#?}"
     );
 }
@@ -286,19 +332,17 @@ fn printer_holds_no_type_context() {
 /// `Conditional` arm or calls the settlement functions itself.
 #[test]
 fn printer_never_resolves_an_arm() {
-    let hits: Vec<(usize, &str)> = PRINTER_SRC
-        .lines()
-        .enumerate()
+    let hits: Vec<(String, String)> = printer_lines()
+        .into_iter()
         .filter(|(_, l)| {
             ["Emission::Conditional", "settle_at", "settle_emissions"]
                 .iter()
                 .any(|needle| l.contains(needle))
         })
-        .map(|(i, l)| (i + 1, l.trim()))
         .collect();
     assert!(
         hits.is_empty(),
-        "printer.rs resolves a `Conditional` arm itself — that is \
+        "the printer module resolves a `Conditional` arm itself — that is \
          `Signature::settle_at`'s job, run once on the compile path before printing.\n{hits:#?}"
     );
 }
@@ -317,7 +361,7 @@ fn the_template_interpreter_holds_no_target_text() {
     ] {
         let start = PRINTER_SRC
             .find(needle)
-            .unwrap_or_else(|| panic!("printer.rs must declare `{fn_name}`"));
+            .unwrap_or_else(|| panic!("the printer module must declare `{fn_name}`"));
         let body = &PRINTER_SRC[start..];
         let end = body
             .find("\n}\n")
