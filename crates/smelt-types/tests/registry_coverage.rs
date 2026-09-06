@@ -1458,3 +1458,62 @@ fn intdiv_settles_per_operand_class_on_spark() {
         }
     );
 }
+
+/// Phase 8 (docs/outcomes/20260904-dialect-emission-vocabulary) closed every
+/// remaining #178 Spark schema-gap ledger row with an explicit registry
+/// verdict — never falling through to the implicit `Native` default, which
+/// would say nothing was ever measured. (`DATE_ADD` is #176, untouched by
+/// this phase, and is not in this list.)
+#[test]
+fn spark_schema_gap_names_have_an_explicit_verdict() {
+    let closed_names = [
+        "AGE",
+        "DATE_SUB",
+        "GLOB",
+        "JSON_ARRAY",
+        "JSON_ARRAY_LENGTH",
+        "JSON_CONTAINS",
+        "JSON_OBJECT",
+        "JSON_OBJECT_KEYS",
+        "MAKE_TIME",
+        "MAKE_TIMESTAMPTZ",
+        "QUOTE_IDENT",
+        "QUOTE_LITERAL",
+        "TO_SECONDS",
+        "TRUNCATE",
+        "GROUP_CONCAT",
+    ];
+    for name in closed_names {
+        let sig = BuiltinRegistry::resolve(name).unwrap_or_else(|| panic!("{name} is registered"));
+        let has_explicit_spark_row = sig
+            .emission
+            .iter()
+            .any(|(d, _, _)| *d == DialectId::SparkSql);
+        assert!(
+            has_explicit_spark_row,
+            "{name} has no explicit SparkSql emission row — resolves to the implicit Native \
+             default, which is not a measured verdict"
+        );
+    }
+}
+
+/// Guards the constraint phase 8 leaned on repeatedly: a signature whose
+/// arity is still the permissive variadic `any_args()` shape cannot carry a
+/// `Template`, because a fixed `{n}` placeholder can't name a variadic tail
+/// (`validate_template`'s `TemplateOnVariadicSignature` error, already
+/// exercised directly above by `template_on_a_variadic_signature_is_rejected`).
+/// This test pins that the constraint holds for a *real* registry row this
+/// phase left `Unsupported` for exactly this reason (`GROUP_CONCAT`), not
+/// just the synthetic `variadic_signature()` fixture.
+#[test]
+fn a_variadic_signature_still_rejects_a_template() {
+    let sig = BuiltinRegistry::resolve("GROUP_CONCAT").expect("GROUP_CONCAT is registered");
+    let err = validate_template("concat_ws({1}, collect_list({0}))", sig, Position::Any)
+        .expect_err("a template over a variadic signature must be rejected");
+    assert_eq!(
+        err,
+        TemplateError::VariadicSignature {
+            signature: sig.name.clone(),
+        }
+    );
+}

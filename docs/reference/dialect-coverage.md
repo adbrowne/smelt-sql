@@ -56,7 +56,7 @@ the exact reverse.
 | `//` | infix | native | conditional(a0:integral,a1:integral→template:{0} DIV {1} | a0:floating,a1:floating→template:{0} / {1} | a0:decimal,a1:decimal→template:{0} / {1} | otherwise→unsupported) | unsupported |
 | `ABS` | call | native | native | native |
 | `ACOS` | call | native | native | native |
-| `AGE` | call | native | native (gap #178) | native (gap #179) |
+| `AGE` | call | native | template:{0} - {1} (gap divergent) | native (gap #179) |
 | `ANY_VALUE` | call | native | native | native |
 | `APPROX_COUNT_DISTINCT` | call | native | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #179) |
 | `ARG_MAX` | call | native | rename:MAX_BY | agg:rename:MAX_BY; win:restructure:WindowToCte; run:unsupported (gap #179) |
@@ -91,7 +91,7 @@ the exact reverse.
 | `DATE` | call | native | native | native |
 | `DATE_ADD` | special | native (gap #176) | native (gap #176) | native (gap #176, divergent) |
 | `DATE_PART` | call | native | native | native (gap #179) |
-| `DATE_SUB` | special | template:{0} - {1} (gap #176) | native (gap #178) | native (gap #176) |
+| `DATE_SUB` | special | template:{0} - {1} (gap #176) | template:{0} - {1} (gap #176, divergent) | native (gap #176) |
 | `DATE_TRUNC` | call | native | native | native (gap #179) |
 | `DAY` | call | native | native | native (gap #179) |
 | `DAYOFWEEK` | call | native | template:DAYOFWEEK({0}) - 1 | native (gap #179) |
@@ -104,22 +104,22 @@ the exact reverse.
 | `FIRST` | call | native (gap #175) | native (gap #175) | native (gap #179) |
 | `FIRST_VALUE` | call | native | native | native |
 | `FLOOR` | call | native | native | native |
-| `GLOB` | infix | native | native (gap #178) | native (gap #179) |
+| `GLOB` | infix | native | unsupported | native (gap #179) |
 | `GREATEST` | call | native | native | native (gap divergent) |
-| `GROUP_CONCAT` | call | native | native (gap #178) | rename:STRING_AGG |
+| `GROUP_CONCAT` | call | native | unsupported | rename:STRING_AGG |
 | `IFNULL` | call | native | native | native |
 | `ILIKE` | infix | native | native | native (gap #179) |
 | `IN` | special | native | native | native |
 | `INITCAP` | call | unsupported | native | native |
 | `IS_NOT_NULL` | postfix | native | native | native |
 | `IS_NULL` | postfix | native | native | native |
-| `JSON_ARRAY` | call | native | native (gap #178) | native |
-| `JSON_ARRAY_LENGTH` | call | native | native (gap #178) | native (gap #179) |
-| `JSON_CONTAINS` | call | native | native (gap #178) | native (gap #179) |
+| `JSON_ARRAY` | call | native | unsupported | native |
+| `JSON_ARRAY_LENGTH` | call | native | native (gap divergent) | native (gap #179) |
+| `JSON_CONTAINS` | call | native | unsupported | native (gap #179) |
 | `JSON_EXTRACT` | call | native | rename:GET_JSON_OBJECT | native |
 | `JSON_EXTRACT_TEXT` | call | rename:JSON_EXTRACT_STRING | rename:GET_JSON_OBJECT | rename:JSON_VALUE |
-| `JSON_OBJECT` | call | native | native (gap #178) | native |
-| `JSON_OBJECT_KEYS` | call | rename:JSON_KEYS | native (gap #178) | native (gap #179) |
+| `JSON_OBJECT` | call | native | unsupported | native |
+| `JSON_OBJECT_KEYS` | call | rename:JSON_KEYS | native (gap divergent) | native (gap #179) |
 | `LAG` | call | native | native | native |
 | `LAST` | call | native (gap #175) | native (gap #175) | native (gap #179) |
 | `LAST_VALUE` | call | native | native | native |
@@ -137,12 +137,12 @@ the exact reverse.
 | `LPAD` | call | native | native | native |
 | `LTRIM` | call | native | native | native |
 | `MAKE_DATE` | call | native | native | rename:DATE |
-| `MAKE_TIME` | call | native | native (gap #178) | rename:TIME |
+| `MAKE_TIME` | call | native | unsupported | rename:TIME |
 | `MAKE_TIMESTAMP` | call | native | native | rename:DATETIME |
-| `MAKE_TIMESTAMPTZ` | call | native | native (gap #178) | native (gap #179) |
+| `MAKE_TIMESTAMPTZ` | call | native | unsupported | native (gap #179) |
 | `MAX` | call | native | native | native |
 | `MD5` | call | native | native | native (gap #179, divergent) |
-| `MEDIAN` | call | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | agg:rewrite:BigQueryMedian; win:rewrite:BigQueryMedian; run:unsupported (gap #179) |
+| `MEDIAN` | call | native | agg:native; win:restructure:WindowToCte; run:unsupported | agg:rewrite:BigQueryMedian; win:rewrite:BigQueryMedian; run:unsupported (gap #179) |
 | `MIN` | call | native | native | native |
 | `MOD` | call | native | native | native |
 | `MODE` | call | native | native | native (gap #179) |
@@ -151,16 +151,16 @@ the exact reverse.
 | `NTH_VALUE` | call | native | native | native |
 | `NTILE` | call | native | native | native |
 | `NULLIF` | call | native | native | native |
-| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
-| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
+| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
+| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
 | `PERCENT_RANK` | call | native | native | native |
 | `PI` | call | native | native | native (gap #179) |
 | `POSITION` | call | native | native | native (gap #179) |
 | `POW` | call | native | native | native |
 | `POWER` | call | native | native | native (gap divergent) |
 | `QUARTER` | call | native | native | native (gap #179) |
-| `QUOTE_IDENT` | call | unsupported | native (gap #178) | native (gap #179) |
-| `QUOTE_LITERAL` | call | unsupported | native (gap #178) | native (gap #179) |
+| `QUOTE_IDENT` | call | unsupported | unsupported | native (gap #179) |
+| `QUOTE_LITERAL` | call | unsupported | unsupported | native (gap #179) |
 | `RANDOM` | call | native | native | rename:RAND |
 | `RANK` | call | native | native | native |
 | `REGR_SLOPE` | call | native | native (gap divergent) | native (gap #179) |
@@ -189,11 +189,11 @@ the exact reverse.
 | `TANH` | call | native | native | native |
 | `TO_CHAR` | call | unsupported | native | native (gap #179) |
 | `TO_JSON` | call | native | conditional(a0:composite→native | otherwise→unsupported) | native (gap divergent) |
-| `TO_SECONDS` | call | native | native (gap #178) | native (gap #179) |
+| `TO_SECONDS` | call | native | template:make_interval(0, 0, 0, 0, 0, 0, {0}) (gap divergent) | native (gap #179) |
 | `TRANSLATE` | call | native | native | native |
 | `TRIM` | call | native | native | native |
 | `TRUNC` | call | conditional(arity=2,a0:temporal,a1:string→unsupported | otherwise→native) | conditional(arity=2,a0:temporal,a1:string→native | otherwise→unsupported) | native (gap #179) |
-| `TRUNCATE` | call | rename:TRUNC | native (gap #178) | rename:TRUNC (gap #179) |
+| `TRUNCATE` | call | rename:TRUNC | unsupported | rename:TRUNC (gap #179) |
 | `UNNEST` | table-fn | native (gap #176) | rename:EXPLODE (gap #176) | native (gap #179) |
 | `UPPER` | call | native | native | native |
 | `VARIANCE` | call | native | native | native |

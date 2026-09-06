@@ -5558,11 +5558,23 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         // DuckDB spells interval subtraction infix; its own
         // `date_sub(VARCHAR, ts, ts)` is a different function entirely.
         // Verified live 2026-09-06.
-        .with_emission(&[(
-            DialectId::DuckDb,
-            Position::Any,
-            Emission::Template("{0} - {1}"),
-        )]),
+        .with_emission(&[
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Template("{0} - {1}"),
+            ),
+            // Spark's own `date_sub(date, days: INT)` is a different function
+            // (integer days, not an INTERVAL); infix `DATE - INTERVAL '5' DAY`
+            // is what actually accepts this signature's second argument.
+            // Verified live 2026-09-06 (phase 8):
+            // `DATE '2026-01-02' - INTERVAL '5' DAY` = `2025-12-28`.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Template("{0} - {1}"),
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -5606,25 +5618,47 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             ),
         ]),
     );
-    insert(Signature::new(
-        "AGE",
-        vec![],
-        vec![
-            concrete(DataType::Timestamp {
-                with_timezone: false,
-            }),
-            concrete(DataType::Timestamp {
-                with_timezone: false,
-            }),
-        ],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
-    ));
-    insert(Signature::new(
-        "TO_SECONDS",
-        vec![],
-        vec![concrete(DataType::Double)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
-    ));
+    insert(
+        Signature::new(
+            "AGE",
+            vec![],
+            vec![
+                concrete(DataType::Timestamp {
+                    with_timezone: false,
+                }),
+                concrete(DataType::Timestamp {
+                    with_timezone: false,
+                }),
+            ],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
+        )
+        // Spark has no `age` routine; plain timestamp subtraction is its
+        // interval-difference form. Verified live 2026-09-06 (phase 8):
+        // `TIMESTAMP '2026-01-02 01:00:00' - TIMESTAMP '2026-01-01 00:00:00'`
+        // = `1 01:00:00.000000000` (a day-time interval).
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Template("{0} - {1}"),
+        )]),
+    );
+    insert(
+        Signature::new(
+            "TO_SECONDS",
+            vec![],
+            vec![concrete(DataType::Double)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
+        )
+        // Spark has no `to_seconds`; `make_interval` with every field but
+        // seconds zeroed is the fixed-shape equivalent. Verified live
+        // 2026-09-06 (phase 8): `make_interval(0, 0, 0, 0, 0, 0, 60.0)` =
+        // `1 minutes`.
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Template("make_interval(0, 0, 0, 0, 0, 0, {0})"),
+        )]),
+    );
 
     // ─── Function-registry consolidation: remaining recognised built-ins ─────
     //
@@ -5782,6 +5816,22 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 Position::Any,
                 Emission::Rename("STRING_AGG"),
             ),
+            // Spark has no `group_concat`/`string_agg`; the equivalent is
+            // `concat_ws(sep, collect_list(x))`, which reorders and wraps
+            // the argument rather than renaming the call, and whose arity
+            // (bare value vs. value+separator) a fixed-arity template can't
+            // express while this signature's typing is still the permissive
+            // variadic `any_args()` shape. Verified live 2026-09-06 (phase 8):
+            // no `group_concat` routine resolves.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "no `group_concat`/`string_agg`; Spark spells it \
+                             `concat_ws(sep, collect_list(x))`, a shape change no rename or \
+                             fixed-arity template over this variadic signature can express",
+                },
+            ),
         ]),
     );
     // First-argument identity aggregates (typing stays in the exception list).
@@ -5824,6 +5874,19 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 DialectId::BigQuery,
                 Position::Any,
                 Emission::Rename("TRUNC"),
+            ),
+            // Spark's own `TRUNC` is date-only (`Position::Any` here, per phase
+            // 7, is `Conditional` and already refuses a numeric first argument
+            // with `DATATYPE_MISMATCH`); no numeric truncation routine exists
+            // under any name. Verified live 2026-09-06 (phase 8):
+            // `trunc(3.14159, 2)` fails, requiring a DATE first argument.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "no numeric truncation routine in Spark under any name; its own \
+                             `trunc` is date-only",
+                },
             ),
         ]),
     );
@@ -5952,13 +6015,24 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             any_args(),
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
-        .with_emission(&[(
-            DialectId::DuckDb,
-            Position::Any,
-            Emission::Unsupported {
-                reason: "a builtin from another SQL dialect entirely, with no DuckDB equivalent",
-            },
-        )]),
+        .with_emission(&[
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Unsupported {
+                    reason:
+                        "a builtin from another SQL dialect entirely, with no DuckDB equivalent",
+                },
+            ),
+            // Verified live 2026-09-06 (phase 8): no `quote_ident` routine on Spark.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "a builtin from another SQL dialect entirely, with no Spark equivalent",
+                },
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -5967,13 +6041,24 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             any_args(),
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
-        .with_emission(&[(
-            DialectId::DuckDb,
-            Position::Any,
-            Emission::Unsupported {
-                reason: "a builtin from another SQL dialect entirely, with no DuckDB equivalent",
-            },
-        )]),
+        .with_emission(&[
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Unsupported {
+                    reason:
+                        "a builtin from another SQL dialect entirely, with no DuckDB equivalent",
+                },
+            ),
+            // Verified live 2026-09-06 (phase 8): no `quote_literal` routine on Spark.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "a builtin from another SQL dialect entirely, with no Spark equivalent",
+                },
+            ),
+        ]),
     );
     // 1-based string search position → BigInt.
     insert(Signature::new(
@@ -6019,16 +6104,44 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_emission(&[
             // GoogleSQL's `TIME(h, m, s)`. Verified live 2026-08-24.
             (DialectId::BigQuery, Position::Any, Emission::Rename("TIME")),
+            // Verified live 2026-09-06 (phase 8): no `make_time` routine on
+            // Spark, and no TIME-typed constructor under any name.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "no `make_time`, and no TIME-typed constructor under any name",
+                },
+            ),
         ]),
     );
-    insert(Signature::new(
-        "MAKE_TIMESTAMPTZ",
-        vec![],
-        any_args(),
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
-            with_timezone: true,
-        })),
-    ));
+    insert(
+        Signature::new(
+            "MAKE_TIMESTAMPTZ",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+                with_timezone: true,
+            })),
+        )
+        // Spark's nearest equivalent is `make_timestamp_ltz(y, m, d, h, mi,
+        // s, tz)` — a different name taking an extra fixed timezone argument,
+        // a shape change a fixed-arity template can't express while this
+        // signature's typing is still the permissive variadic `any_args()`
+        // shape. Verified live 2026-09-06 (phase 8): no `make_timestamptz`
+        // routine resolves; `make_timestamp_ltz(2024,1,1,1,1,1,'UTC')`
+        // succeeds but is a different call shape.
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "no `make_timestamptz`; Spark's `make_timestamp_ltz` takes a \
+                         differently-shaped call (an extra fixed timezone argument), which a \
+                         rename or fixed-arity template over this variadic signature can't \
+                         express",
+            },
+        )]),
+    );
     // JSON built-ins. Aliases per canonical name (dialect side-channel
     // consolidated into the registry per architecture.md §Constraints #14):
     // JSON_BUILD_OBJECT (Postgres) → JSON_OBJECT, JSON_BUILD_ARRAY (Postgres)
@@ -6036,21 +6149,52 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     // JSON_EXTRACT_PATH (Postgres) → JSON_EXTRACT, JSON_EXTRACT_STRING
     // (DuckDB) / JSON_EXTRACT_PATH_TEXT (Postgres) / GET_JSON_OBJECT (Spark
     // Hive) / JSON_VALUE (SQL-standard/Snowflake) → JSON_EXTRACT_TEXT.
-    let json_text_aliases: &[(&str, &[&str])] = &[
-        ("JSON_OBJECT", &["JSON_BUILD_OBJECT"]),
-        ("JSON_ARRAY", &["JSON_BUILD_ARRAY"]),
-    ];
-    for (name, aliases) in json_text_aliases {
-        insert(
-            Signature::new(
-                name,
-                vec![],
-                any_args(),
-                TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
-            )
-            .with_aliases(aliases),
-        );
-    }
+    //
+    // JSON_OBJECT and JSON_ARRAY each carry their own emission verdict (see
+    // below), so neither is in a shared alias loop.
+    insert(
+        Signature::new(
+            "JSON_OBJECT",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_aliases(&["JSON_BUILD_OBJECT"])
+        // Spark builds this via `to_json(named_struct(...))` — a variadic
+        // restructuring into a nested call with reordered/paired arguments,
+        // not a rename or a fixed-arity template over this variadic
+        // signature. Verified live 2026-09-06 (phase 8): no `json_object`
+        // routine resolves.
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "no `json_object`; Spark builds JSON via \
+                         `to_json(named_struct(...))`, a variadic restructuring no rename or \
+                         fixed-arity template can express",
+            },
+        )]),
+    );
+    insert(
+        Signature::new(
+            "JSON_ARRAY",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_aliases(&["JSON_BUILD_ARRAY"])
+        // Same shape-change problem as `JSON_OBJECT`: Spark builds this via
+        // `to_json(array(...))`. Verified live 2026-09-06 (phase 8): no
+        // `json_array` routine resolves.
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "no `json_array`; Spark builds JSON via `to_json(array(...))`, a \
+                         variadic restructuring no rename or fixed-arity template can express",
+            },
+        )]),
+    );
     // Lifted out of the alias loop above so it can carry its own emission
     // verdict. Spark's `TO_JSON` takes a struct, array, map or variant, not a
     // scalar. Verified live 2026-09-06: `to_json(struct(1 as a, 2 as b))` =
@@ -6134,12 +6278,22 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ]),
     );
 
-    insert(Signature::new(
-        "JSON_ARRAY_LENGTH",
-        vec![],
-        any_args(),
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
-    ));
+    insert(
+        Signature::new(
+            "JSON_ARRAY_LENGTH",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        // Spark has `json_array_length` under the identical name and shape —
+        // an explicit `Native` verdict, not the implicit default, records
+        // that this was measured rather than assumed. Verified live
+        // 2026-09-06 (phase 8): `json_array_length('{"k": 1}')` resolves and
+        // returns a BIGINT. Its value diverges from DuckDB's for a
+        // non-array JSON argument (0 vs. NULL) — recorded as a `divergent`
+        // ledger row, not a schema gap.
+        .with_emission(&[(DialectId::SparkSql, Position::Any, Emission::Native)]),
+    );
     insert(
         Signature::new(
             "JSON_OBJECT_KEYS",
@@ -6159,14 +6313,32 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 Position::Any,
                 Emission::Rename("JSON_KEYS"),
             ),
+            // Spark has `json_object_keys` under the identical name and
+            // shape. Verified live 2026-09-06 (phase 8):
+            // `json_object_keys('{"k": 1}')` = `["k"]`, matching DuckDB's
+            // `json_keys('{"k": 1}')` = `[k]`.
+            (DialectId::SparkSql, Position::Any, Emission::Native),
         ]),
     );
-    insert(Signature::new(
-        "JSON_CONTAINS",
-        vec![],
-        any_args(),
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
+    insert(
+        Signature::new(
+            "JSON_CONTAINS",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        // Verified live 2026-09-06 (phase 8): no `json_contains` routine on
+        // Spark, and no simple placeholder-expressible equivalent for
+        // arbitrary JSON containment.
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "no `json_contains` in Spark, and no template-expressible equivalent \
+                         for arbitrary JSON containment",
+            },
+        )]),
+    );
 
     // ─── Phase 50: Operator stubs ────────────────────────────────────────────
     //
@@ -6199,7 +6371,21 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![concrete(DataType::Text), concrete(DataType::Text)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
         )
-        .with_syntax_form(SyntaxForm::Infix),
+        .with_syntax_form(SyntaxForm::Infix)
+        // Verified live 2026-09-06 (phase 8): `'abc' GLOB 'a*'` is a parse
+        // error on Spark — no `GLOB` operator. `LIKE`/`RLIKE` exist, but
+        // translating a shell-style glob pattern into either pattern
+        // language is a text transform on the pattern argument's own
+        // literal, not a placeholder substitution a template can express.
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Unsupported {
+                reason: "no `GLOB` operator; Spark's `LIKE`/`RLIKE` use a different pattern \
+                         language, and translating a glob pattern into either isn't a \
+                         placeholder substitution",
+            },
+        )]),
     );
     insert(
         Signature::new(

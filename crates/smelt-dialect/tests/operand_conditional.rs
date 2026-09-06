@@ -136,6 +136,47 @@ fn dayofweek_prints_the_shift_template_on_spark() {
     );
 }
 
+/// Phase 8's Spark `Emission::Template` rows — `AGE`, `DATE_SUB`,
+/// `TO_SECONDS` — closing #178. Each is call-shaped, so its own arguments
+/// substitute bare (no extra wrapping); `AGE`/`DATE_SUB` land on a
+/// `BINARY_EXPR`-equivalent shape and their whole non-call output is
+/// parenthesised, matching `DAYOFWEEK`'s precedent above.
+#[test]
+fn age_prints_the_spark_form() {
+    assert_eq!(
+        print_with(
+            "SELECT AGE(a, b) FROM t",
+            &SqlDialect::SparkSQL,
+            &BackendCapabilities::spark()
+        ),
+        "SELECT (a - b) FROM t"
+    );
+}
+
+#[test]
+fn date_sub_prints_the_spark_form() {
+    assert_eq!(
+        print_with(
+            "SELECT DATE_SUB(a, b) FROM t",
+            &SqlDialect::SparkSQL,
+            &BackendCapabilities::spark()
+        ),
+        "SELECT (a - b) FROM t"
+    );
+}
+
+#[test]
+fn to_seconds_prints_the_spark_form() {
+    assert_eq!(
+        print_with(
+            "SELECT TO_SECONDS(a) FROM t",
+            &SqlDialect::SparkSQL,
+            &BackendCapabilities::spark()
+        ),
+        "SELECT make_interval(0, 0, 0, 0, 0, 0, a) FROM t"
+    );
+}
+
 #[test]
 fn trunc_and_to_json_settle_by_first_argument_class() {
     let trunc_sig = BuiltinRegistry::resolve("TRUNC").expect("TRUNC is registered");

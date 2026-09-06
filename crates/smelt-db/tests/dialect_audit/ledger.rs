@@ -311,52 +311,33 @@ static ROWS: &[LedgerRow] = &[
     // semantics. Each is a lowering smelt owes — a `Rename` where Spark spells
     // it differently, a `Rewrite` where the shape differs, or an
     // `Unsupported` verdict where neither is possible.
-    gap("AGE", DialectId::SparkSql, "#178", "no `age`; Spark expresses interval difference as `ts1 - ts2`"),
     gap("DATE_ADD", DialectId::SparkSql, "#176", "Spark's `date_add(date, days)` takes an integer, not an INTERVAL"),
-    gap("DATE_SUB", DialectId::SparkSql, "#178", "Spark's `date_sub(date, days)` takes an integer, not an INTERVAL"),
-    gap("GLOB", DialectId::SparkSql, "#178", "no `GLOB` operator; Spark has `LIKE` and `RLIKE`"),
-    gap("JSON_ARRAY", DialectId::SparkSql, "#178", "no `json_array`; Spark builds JSON with `to_json(array(...))`"),
-    gap("JSON_ARRAY_LENGTH", DialectId::SparkSql, "#178", "Spark's `json_array_length` wants a JSON string, not a number"),
-    gap("JSON_CONTAINS", DialectId::SparkSql, "#178", "no `json_contains` in Spark"),
-    gap("JSON_OBJECT", DialectId::SparkSql, "#178", "no `json_object`; Spark builds JSON with `to_json(named_struct(...))`"),
-    gap("JSON_OBJECT_KEYS", DialectId::SparkSql, "#178", "Spark reaches object keys through `from_json`, not a scalar function"),
-    gap("MAKE_TIME", DialectId::SparkSql, "#178", "no `make_time` in Spark"),
-    gap("MAKE_TIMESTAMPTZ", DialectId::SparkSql, "#178", "no `make_timestamptz`; Spark has `make_timestamp`"),
-    gap("QUOTE_IDENT", DialectId::SparkSql, "#178", "PostgreSQL-only builtin"),
-    gap("QUOTE_LITERAL", DialectId::SparkSql, "#178", "PostgreSQL-only builtin"),
-    gap("TO_SECONDS", DialectId::SparkSql, "#178", "no `to_seconds` in Spark"),
-    gap("TRUNCATE", DialectId::SparkSql, "#178", "no `truncate` scalar in Spark"),
-    gap("GROUP_CONCAT", DialectId::SparkSql, "#178", "Spark spells it `concat_ws(sep, collect_list(x))`"),
-    // `MEDIAN` works as an aggregate on Spark, and a whole-partition window
-    // now restructures around a grouped CTE; only the running-window case
-    // remains a gap, so the row is scoped to that position.
-    gap_at(
-        "MEDIAN",
+    // Same registry-wiring gap as `DATE_SUB` on DuckDB (phase 4): no
+    // `SqlFunction` enum variant, so `infer_function_type` never reaches the
+    // registry and infers Unknown(Dynamic). Surfaced for the first time here
+    // because this phase gave `DATE_SUB` its first Spark emission verdict
+    // (`Emission::Template("{0} - {1}")`), which made its type leg run at
+    // all — same bail-out the plan named in advance. Spark's own `{0} -
+    // {1}` on a DATE/INTERVAL pair returns DATE, not TIMESTAMP (measured
+    // live 2026-09-06: `DATE '2026-01-02' - INTERVAL '5' DAY` = DATE
+    // `2025-12-28`), unlike DuckDB's TIMESTAMP-widening subtraction.
+    type_gap(
+        "DATE_SUB",
         DialectId::SparkSql,
-        Position::Window,
-        "#178",
-        "Spark has `median` as an aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
+        "#176", "`DATE_SUB` has no `SqlFunction` enum variant, so `infer_function_type` never \
+                 reaches the registry; infers Unknown(Dynamic) while Spark returns DATE",
     ),
-    // Spark accepts the ordered-set `WITHIN GROUP` form as an aggregate, and
-    // a whole-partition window now restructures around a grouped CTE; only
-    // the running-window form is missing, so the row is scoped to that
-    // position.
-    gap_at(
-        "PERCENTILE_CONT",
+    //
+    // Value-leg divergence: same name, same shape, permanent semantic
+    // difference for a non-array JSON argument. Not a schema gap — see the
+    // `JSON_ARRAY_LENGTH` `Emission::Native` registry comment
+    // (docs/outcomes/20260904-dialect-emission-vocabulary phase 8, verified
+    // live 2026-09-06): DuckDB's `json_array_length('{"k": 1}')` = `0`;
+    // Spark's = `NULL`.
+    divergent(
+        "JSON_ARRAY_LENGTH",
         DialectId::SparkSql,
-        Position::Window,
-        "#178",
-        "Spark has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
-    ),
-    gap_at(
-        "PERCENTILE_DISC",
-        DialectId::SparkSql,
-        Position::Window,
-        "#178",
-        "Spark has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
+        "Spark returns NULL for `json_array_length` on a non-array JSON value where DuckDB returns 0.",
     ),
     //
     // Type-leg gaps. The same two inference families DuckDB surfaces, confirmed
@@ -611,6 +592,26 @@ static ROWS: &[LedgerRow] = &[
         "REGR_SLOPE",
         DialectId::SparkSql,
         "Spark returns NULL for a degenerate regression where DuckDB returns NaN.",
+    ),
+    divergent(
+        "AGE",
+        DialectId::SparkSql,
+        "Spark renders a zero day-time interval as `0 00:00:00.000000000`; DuckDB renders it `0 secs`. Same interval, different textual representation.",
+    ),
+    divergent(
+        "TO_SECONDS",
+        DialectId::SparkSql,
+        "Spark renders `make_interval`'s output as `1.5 seconds`; DuckDB renders the equivalent interval `1.500000000 secs`. Same interval, different textual representation.",
+    ),
+    divergent(
+        "DATE_SUB",
+        DialectId::SparkSql,
+        "Spark's `{0} - {1}` on a DATE/INTERVAL pair stays a DATE; DuckDB widens to TIMESTAMP. Both name the same day — the same type_gap this phase registered for the schema leg.",
+    ),
+    divergent(
+        "JSON_OBJECT_KEYS",
+        DialectId::SparkSql,
+        "Spark renders a TEXT[] as JSON array syntax (`[\"k\"]`); DuckDB renders it its own array literal syntax (`[k]`). Same elements, different textual representation.",
     ),
 ];
 

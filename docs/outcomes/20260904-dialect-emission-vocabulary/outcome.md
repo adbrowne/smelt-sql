@@ -79,7 +79,7 @@ audit before it is claimed — never from documentation.
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
 | 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
-| 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | planned |
+| 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | done |
 | 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap` | pending |
 | 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
@@ -312,6 +312,24 @@ audit before it is claimed — never from documentation.
   schema rows have `any_args()` signatures, on which `validate_template` rejects a template
   outright: for those the vocabulary offers only `Rename` or `Unsupported { reason }`, so the
   phase is predominantly a measured-`Unsupported` paydown rather than a lowering-authoring one.
+
+- 2026-09-06 (implement 08) — phase 8 done. `dialect_gaps_spark` 23 → 6. All 15 `gap(...)`
+  #178 rows closed with live-verified `Emission::Template`/`Native`/`Unsupported` verdicts; the
+  3 redundant `gap_at(..., Position::Window)` rows deleted. `JSON_ARRAY_LENGTH`/
+  `JSON_OBJECT_KEYS` turned out to already work under their own name — the original "wants a
+  JSON string, not a number" gap was a probe-shape bug (an un-overridden `any_args()` probe
+  picking a numeric fixture column), fixed with two new `overrides.rs` rows, not a real
+  emission gap. `DATE_SUB` on Spark surfaced the same missing-`SqlFunction`-enum-variant
+  `type_gap` phase 4 found for it on DuckDB — the bail-out clause this phase's plan named in
+  advance — left for phase 9. Five `divergent` rows record pure textual-representation
+  mismatches with no semantic gap. `verify-phase.sh`: fmt/clippy/example_diagnostics green; the
+  full-workspace `cargo test` leg's only failures were the pre-existing python-discovery
+  test-isolation flake (`smelt-runtime`'s `python::tests::*` / `tests/combined_loop.rs`),
+  confirmed unrelated via `--test-threads=1` (216/216, 5/5). Every dialect/registry-specific
+  gate green, including the live `dialect_audit` Spark legs. Surfaced but not fixed:
+  `validate_conditional` never validates a `SettledEmission::Template` arm's placeholders, so a
+  future `Conditional`+`Template`-arm combination (considered and rejected here for
+  `GROUP_CONCAT`) would have no build-time guard. See `phases/08-summary.md`.
 
 ## Blocked
 
