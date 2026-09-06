@@ -1,65 +1,10 @@
-//! The git-surface half of baseline materialisation: resolving a baseline
-//! ref and exporting the project subtree at that commit into a scratch
-//! directory. See `super` for the module-level contract this half upholds
-//! (Constraint 8 "no repository mutation", the cleanup guarantee).
+//! Resolving a baseline ref: explicit, or the merge-base with
+//! `main`/`master`, verified against the project's presence at that
+//! commit. See `super` for the module-level contract.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 
-/// Errors the baseline-git surface can produce
-/// (`docs/specs/property_diff.md` §"Baseline materialisation",
-/// §Constraints item 6 "Fail-loud"). Every variant names what the user
-/// must do; none is recoverable into an empty diff.
-#[derive(Debug, thiserror::Error)]
-pub enum BaselineError {
-    #[error("{} is not inside a git work tree", .dir.display())]
-    NotAGitWorkTree { dir: PathBuf },
-    #[error("unknown git ref '{git_ref}': {stderr}")]
-    UnknownRef { git_ref: String, stderr: String },
-    #[error(
-        "no `main` or `master` branch found to resolve the default baseline against; pass an explicit ref"
-    )]
-    NoBaseBranch,
-    #[error("could not compute the merge-base with '{base}': {stderr}")]
-    MergeBaseFailed { base: String, stderr: String },
-    #[error(
-        "baseline commit {commit} has no smelt.yml or smelt.yaml at project path '{rel}'; the project did not exist there at that ref"
-    )]
-    NoProjectAtRef { commit: String, rel: String },
-    #[error("git is not available or could not be run: {0}")]
-    GitUnavailable(std::io::Error),
-    #[error("could not resolve the real path of '{}': {source}", .path.display())]
-    PathResolutionFailed {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("`git archive` failed: {stderr}")]
-    Archive { stderr: String },
-    #[error("failed to extract the baseline archive: {0}")]
-    Unpack(std::io::Error),
-    #[error("failed to create a scratch directory for the baseline checkout: {0}")]
-    Scratch(std::io::Error),
-}
-
-/// Run one git subcommand rooted at `repo_root`, capturing stdout/stderr.
-/// `GIT_OPTIONAL_LOCKS=0` means no invocation can refresh or write
-/// `.git/index` — half of Constraint 8 ("no repository mutation") for free.
-fn run_git(repo_root: &Path, args: &[&str]) -> Result<Output, BaselineError> {
-    Command::new("git")
-        .args(args)
-        .current_dir(repo_root)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .map_err(BaselineError::GitUnavailable)
-}
-
-fn stderr_of(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).trim().to_string()
-}
-
-fn stdout_trimmed(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
+use super::{run_git, stderr_of, stdout_trimmed, BaselineError};
 
 /// Whether `resolve_baseline`'s default ref was resolved by explicit
 /// request or by falling back to the merge-base with `main`/`master`
@@ -71,7 +16,7 @@ pub enum ResolvedAs {
 }
 
 /// A resolved baseline ref: the commit to export, plus enough of the repo
-/// layout ([`materialize`] needs `repo_root`/`rel`) to export it without
+/// layout (`materialize` needs `repo_root`/`rel`) to export it without
 /// re-deriving them.
 #[derive(Debug, Clone)]
 pub struct ResolvedBaseline {
@@ -80,10 +25,10 @@ pub struct ResolvedBaseline {
     pub requested: String,
     pub commit: String,
     pub resolved_as: ResolvedAs,
-    repo_root: PathBuf,
+    pub(super) repo_root: PathBuf,
     /// `project_dir` relative to `repo_root`, forward-slash separated,
     /// empty when the project *is* the repo root.
-    rel: String,
+    pub(super) rel: String,
 }
 
 /// Resolve `project_dir`'s git work-tree root and its path relative to
@@ -251,22 +196,6 @@ pub fn resolve_baseline(
     })
 }
 
-/// A materialised baseline checkout: the extracted project subtree, held
-/// alive by a scratch [`tempfile::TempDir`] whose `Drop` deletes it (see
-/// the module doc comment for the honest limits of that guarantee).
-#[derive(Debug)]
-pub struct BaselineCheckout {
-    // Held only for its `Drop` (deletes the scratch directory) — never read.
-    _scratch: tempfile::TempDir,
-    project_root: PathBuf,
-}
-
-impl BaselineCheckout {
-    pub fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-}
-
 impl ResolvedBaseline {
     /// The git work-tree root this baseline was resolved in
     /// (`docs/outcomes/20260905-property-diff/phases/07-plan.md` D2). Used
@@ -295,112 +224,4 @@ pub fn git_watch_paths(resolved: &ResolvedBaseline) -> Vec<PathBuf> {
         git_dir.join("refs"),
         git_dir.join("packed-refs"),
     ]
-}
-
-/// Export `resolved`'s commit's project subtree into a fresh scratch
-/// directory via `git archive`, streamed through `tar` (never
-/// `Command::output()`, which would deadlock a pipe on a large project),
-/// and scrub any committed `.smelt/` (`docs/specs/property_diff.md`
-/// §"Baseline materialisation": "Nothing under `.smelt/` at the baseline is
-/// read even if it is committed" — `ingest_loaded_workspace` reads
-/// `.smelt/` from disk, so the baseline copy must not have one).
-///
-/// Delegates to [`materialize_in`] with `std::env::temp_dir()` as the
-/// scratch parent.
-pub fn materialize(resolved: &ResolvedBaseline) -> Result<BaselineCheckout, BaselineError> {
-    materialize_in(resolved, &std::env::temp_dir())
-}
-
-/// [`materialize`] with an explicit scratch parent, rather than
-/// `std::env::temp_dir()`. Exists because a shared temp dir is not
-/// observable in isolation: any concurrent `materialize` call anywhere on
-/// the box — same process or another — creates and drops its own
-/// `smelt-baseline-*` entries there, so a test asserting scratch hygiene
-/// against the system temp dir races every other `materialize` caller in
-/// the workspace. Callers that need to *observe* scratch creation/cleanup
-/// (rather than just get a checkout) should pass a private directory.
-///
-/// The scratch [`tempfile::TempDir`] is created **first**, before any
-/// fallible step, so every error path below unwinds through its `Drop` and
-/// leaves no directory behind (module doc comment; tested by
-/// `checkout_scratch_is_deleted_when_materialization_fails`).
-pub fn materialize_in(
-    resolved: &ResolvedBaseline,
-    scratch_parent: &Path,
-) -> Result<BaselineCheckout, BaselineError> {
-    let scratch = tempfile::Builder::new()
-        .prefix("smelt-baseline-")
-        .tempdir_in(scratch_parent)
-        .map_err(BaselineError::Scratch)?;
-
-    let mut args: Vec<String> = vec![
-        "archive".to_string(),
-        "--format=tar".to_string(),
-        resolved.commit.clone(),
-    ];
-    if !resolved.rel.is_empty() {
-        args.push("--".to_string());
-        args.push(resolved.rel.clone());
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    let mut child = Command::new("git")
-        .args(&arg_refs)
-        .current_dir(&resolved.repo_root)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(BaselineError::GitUnavailable)?;
-
-    let mut stdout = match child.stdout.take() {
-        Some(s) => s,
-        None => {
-            return Err(BaselineError::Archive {
-                stderr: "git archive produced no stdout pipe".to_string(),
-            });
-        }
-    };
-    let unpack_result = tar::Archive::new(&mut stdout).unpack(scratch.path());
-
-    // Drain whatever `git` has left to write before dropping the read end.
-    // `tar` stops at the end-of-archive marker, but `git archive` still emits
-    // the trailing block padding after it; closing the pipe first kills git
-    // with `SIGPIPE`, which surfaced as an intermittent "`git archive` failed"
-    // with an EMPTY stderr whenever the machine was loaded enough for git to
-    // still be writing (issue #194).
-    let _ = std::io::copy(&mut stdout, &mut std::io::sink());
-    drop(stdout);
-
-    let status = child.wait().map_err(BaselineError::GitUnavailable)?;
-    if !status.success() {
-        let mut stderr_text = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            use std::io::Read;
-            let _ = stderr.read_to_string(&mut stderr_text);
-        }
-        return Err(BaselineError::Archive {
-            stderr: stderr_text.trim().to_string(),
-        });
-    }
-    unpack_result.map_err(BaselineError::Unpack)?;
-
-    let project_root = if resolved.rel.is_empty() {
-        scratch.path().to_path_buf()
-    } else {
-        scratch.path().join(&resolved.rel)
-    };
-
-    // D6: scrub any committed `.smelt/` — the profile is a function of
-    // sources only, and `ingest_loaded_workspace` reads `.smelt/` from disk
-    // if present.
-    let dot_smelt = project_root.join(".smelt");
-    if dot_smelt.exists() {
-        std::fs::remove_dir_all(&dot_smelt).map_err(BaselineError::Unpack)?;
-    }
-
-    Ok(BaselineCheckout {
-        _scratch: scratch,
-        project_root,
-    })
 }
