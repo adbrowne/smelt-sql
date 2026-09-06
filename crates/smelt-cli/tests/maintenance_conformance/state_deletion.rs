@@ -8,12 +8,17 @@
 //! drive loop; the only new behaviour is
 //! `LinkCProject::with_state_deletion(StateDeletion::BetweenRuns)`.
 
+use chrono::NaiveDate;
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 
+use smelt_maintenance_testkit::gate_succession::{
+    drive_succession_window_and_assert_for, stage_succession_recipe_for, SuccessionEventRow,
+};
 use smelt_maintenance_testkit::link_c_harness::StateDeletion;
 use smelt_maintenance_testkit::recipe::{
-    arb_keyed_combiner, arb_keyed_schedule, arb_recipe, KeyedRecipe, RecipePool,
+    arb_keyed_combiner, arb_keyed_schedule, arb_recipe, ConformanceTarget, KeyedRecipe, RecipePool,
+    SuccessionRecipe,
 };
 use smelt_maintenance_testkit::schedule_gen::arb_schedule_for;
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
@@ -192,5 +197,86 @@ fn deletion_leg_is_not_vacuous() {
 
     panic!(
         "deterministic sample admitted zero cases in 20 draws — generator/derivation regression"
+    );
+}
+
+/// `succession_recipe_upholds_equivalence_with_state_deleted` (phase 7d test
+/// 4): the keyed-succession (SCD2) family still upholds full-refresh-oracle
+/// equivalence with `.smelt/` removed between every run — the tombstone
+/// ledger is engine-resident (a sibling table), not file-resident, so
+/// deleting `.smelt/` must not affect the succession patch's neighbour
+/// domain any more than it affects the keyed pool's fold ledger.
+#[tokio::test]
+async fn succession_recipe_upholds_equivalence_with_state_deleted() {
+    let recipe = SuccessionRecipe::new_lead().with_delete_filter();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+        .expect("stage succession recipe")
+        .with_state_deletion(StateDeletion::BetweenRuns);
+
+    // Window 1: two events for the same key, in order.
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "succession-state-deletion-1",
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        &[SuccessionEventRow::new(
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "bronze",
+        )],
+    )
+    .await
+    .expect("window 1 with .smelt/ deleted between runs");
+
+    // Window 2: a late-arriving splice for the same key — a row whose
+    // event_time falls between window 1's event and window 3's delete, but
+    // whose arrival lands in this later window.
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "succession-state-deletion-2",
+        NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(),
+        &[SuccessionEventRow::late(
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 2)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "silver",
+            NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        )],
+    )
+    .await
+    .expect("window 2 (late splice) with .smelt/ deleted between runs");
+
+    // Window 3: a delete for the same key.
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "succession-state-deletion-3",
+        NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+        &[SuccessionEventRow::deleted(
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 4)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "silver",
+        )],
+    )
+    .await
+    .expect("window 3 (delete) with .smelt/ deleted between runs");
+
+    assert!(
+        project.nonempty_deletions_observed() > 0,
+        "the succession leg never observed a non-empty .smelt/ deletion — the leg is not \
+         exercising state-residency"
     );
 }

@@ -61,10 +61,13 @@ pub fn render_succession_model_body(recipe: &SuccessionRecipe) -> String {
 /// The full succession model file: `refresh: incremental` frontmatter — no
 /// declared `grain:` (`incremental_shapes.md` §"Succession-grain admission
 /// (no declaration)": the succession grain is recognised, never declared) —
-/// followed by [`render_succession_model_body`].
+/// plus an optional `contract:` block (phase 7d, reusing `render.rs`'s own
+/// [`render_contract_block`] rather than a second comparator) — followed by
+/// [`render_succession_model_body`].
 pub fn render_succession_model_file(recipe: &SuccessionRecipe) -> String {
     format!(
-        "---\nrefresh: incremental\n---\n{body}\n",
+        "---\nrefresh: incremental\n{contract}---\n{body}\n",
+        contract = render_contract_block(recipe.contract.as_ref()),
         body = render_succession_model_body(recipe)
     )
 }
@@ -327,5 +330,64 @@ mod tests {
         assert!(oracle.contains("QUALIFY NOT is_deleted"));
         assert!(!oracle.contains(&format!("smelt.sources.{}", recipe.source.name)));
         assert!(oracle.contains("FROM oracle_customer_changes"));
+    }
+
+    /// `succession_contract_block_renders_deferral` (phase 7d test 1): a
+    /// [`SuccessionRecipe`] with `contract: Some(ContractDecl::Deferral {
+    /// days })` renders `contract:\n  deferral: 'N days'` into the model
+    /// frontmatter, and a `contract: None` recipe renders byte-identically
+    /// to before this field existed.
+    #[test]
+    fn succession_contract_block_renders_deferral() {
+        let plain = crate::recipe::SuccessionRecipe::new_lead();
+        let deferred = plain
+            .clone()
+            .with_contract(crate::recipe::ContractDecl::Deferral { days: 3 });
+
+        let plain_file = render_succession_model_file(&plain);
+        assert_eq!(
+            plain_file,
+            format!(
+                "---\nrefresh: incremental\n---\n{body}\n",
+                body = render_succession_model_body(&plain)
+            ),
+            "a contract: None recipe must render byte-identically to before the field existed"
+        );
+
+        let deferred_file = render_succession_model_file(&deferred);
+        assert!(
+            deferred_file.contains("contract:\n  deferral: '3 days'\n"),
+            "expected a rendered deferral contract block in:\n{deferred_file}"
+        );
+    }
+
+    /// `succession_deferral_recipe_is_admitted_not_refused` (phase 7d test
+    /// 2): a deferral-declared succession model still derives one
+    /// `SuccessionPatch` cell with no refusal diagnostic (criterion 3's
+    /// `deferral` clause, executed).
+    #[test]
+    fn succession_deferral_recipe_is_admitted_not_refused() {
+        let recipe = crate::recipe::SuccessionRecipe::new_lead()
+            .with_contract(crate::recipe::ContractDecl::Deferral { days: 3 });
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("db.duckdb");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        stage_succession_for_target(&recipe, &project_dir, &db_path, ConformanceTarget::DuckDb)
+            .expect("stage succession recipe with a declared deferral contract");
+
+        let plan = classify_succession_plan(&project_dir, &recipe.model_name);
+        assert!(
+            plan.refusals.is_empty(),
+            "a declared contract.deferral must not refuse the succession cell: {:?}",
+            plan.refusals
+        );
+        assert!(
+            plan.cells
+                .iter()
+                .any(|c| c.technique == smelt_logical::maintenance::Technique::SuccessionPatch),
+            "expected an admitted Technique::SuccessionPatch cell under a declared deferral \
+             contract, got: {plan:#?}"
+        );
     }
 }

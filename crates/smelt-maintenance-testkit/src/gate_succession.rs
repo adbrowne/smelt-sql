@@ -26,7 +26,7 @@
 //! staging, not this quartet's shape.
 
 use anyhow::Result;
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime};
 
 use crate::link_c_harness::{base_request, LinkCProject};
 use crate::oracle::multiset_equal_via_backend;
@@ -189,6 +189,128 @@ pub async fn assert_succession_equivalence_for(
     Ok(())
 }
 
+/// [`assert_succession_equivalence_for`] parameterised by contract-lattice
+/// point (phase 7d), mirroring `crates/smelt-cli/tests/
+/// maintenance_conformance/gate/partition_pool.rs::assert_equivalence_at_point_with_frontier`'s
+/// dispatch on `smelt_logical::contract::oracle_obligation` rather than
+/// re-deriving a per-point comparator: `Exact`/`ExactOverRestrictedS` (the
+/// succession grain has no `frozen_horizon` posture of its own, but the
+/// dispatch stays exhaustive over `OracleObligation` for symmetry with the
+/// keyed pool's own comparator) delegate to
+/// [`assert_succession_equivalence_for`]'s unrestricted oracle;
+/// `ExactOverProcessedSWithLagBound` (`deferral`) compares against
+/// [`render::render_succession_oracle_body_over`] evaluated over the
+/// PROCESSED source restriction (`arrival < processed_arrival_frontier`,
+/// reusing that function's own relation-substitution seam — no second
+/// comparator), then calls
+/// [`smelt_logical::contract::deferral::settled_lag_bound`] over the
+/// landed-but-unprocessed event times (rows whose arrival is at/after the
+/// processed frontier) read back from the source. `processed_arrival_frontier`
+/// is the caller-tracked maintained frontier (days-from-CE, over the
+/// source's declared arrival/partition column) — the succession family has
+/// no `STracker` to derive it from, so the caller (which knows which window
+/// it last drove) supplies it directly. `input_frontier` is only consulted
+/// for the deferral obligation, exactly like the keyed pool's own signature.
+pub async fn assert_succession_equivalence_at_point(
+    project: &LinkCProject,
+    recipe: &SuccessionRecipe,
+    point: &smelt_logical::contract::ContractPoint,
+    processed_arrival_frontier: i64,
+    input_frontier: Option<i64>,
+) -> Result<()> {
+    use smelt_logical::contract::{oracle_obligation, ContractPoint, OracleObligation};
+
+    match oracle_obligation(point) {
+        OracleObligation::Exact | OracleObligation::ExactOverRestrictedS => {
+            assert_succession_equivalence_for(project, recipe).await
+        }
+        OracleObligation::ExactOverProcessedSWithLagBound => {
+            let d = match point {
+                ContractPoint::Deferral { d } => *d,
+                _ => anyhow::bail!(
+                    "ExactOverProcessedSWithLagBound is only licensed for \
+                     ContractPoint::Deferral, got {point:?}"
+                ),
+            };
+
+            let backend = project.backend().await?;
+            let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+            let source_ref = format!("main.sources_{}", recipe.source.name);
+            let partition_col = recipe
+                .source
+                .partition_column
+                .as_deref()
+                .unwrap_or(&recipe.source.clock_column);
+            let frontier_date =
+                NaiveDate::from_num_days_from_ce_opt(processed_arrival_frontier as i32)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                    "invalid processed_arrival_frontier {processed_arrival_frontier} (not a \
+                     valid days-from-CE date)"
+                )
+                    })?;
+            let frontier_date_str = frontier_date.format("%Y-%m-%d");
+            let processed_source_ref = format!(
+                "(SELECT * FROM {source_ref} WHERE {partition_col} < DATE '{frontier_date_str}')"
+            );
+            let oracle_sql =
+                render::render_succession_oracle_body_over(recipe, &processed_source_ref);
+            let equal =
+                multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await?;
+            if !equal {
+                anyhow::bail!(
+                    "succession equivalence violated for model {:?} under point {point:?}: \
+                     maintained ({maintained_sql:?}) != oracle ({oracle_sql:?})",
+                    recipe.model_name
+                );
+            }
+
+            let input_frontier = input_frontier.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "point {point:?} has an ExactOverProcessedSWithLagBound oracle obligation \
+                     but no input_frontier was supplied"
+                )
+            })?;
+
+            let conn = project.connect()?;
+            let clock_col = &recipe.source.clock_column;
+            // `duckdb`'s `FromSql` has no chrono impl in this crate's feature
+            // set, so the event time's date component is read back as text
+            // (`strftime`) and parsed rather than bound to a `NaiveDateTime`
+            // column type.
+            let mut stmt = conn.prepare(&format!(
+                "SELECT strftime(CAST({clock_col} AS DATE), '%Y-%m-%d') FROM {source_ref} WHERE \
+                 {partition_col} >= DATE '{frontier_date_str}'"
+            ))?;
+            let unprocessed_event_times: Vec<i64> = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|s| {
+                    NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+                        .map(|d| d.num_days_from_ce() as i64)
+                        .map_err(|e| {
+                            anyhow::anyhow!("parse event-time date {s:?} for {clock_col}: {e}")
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            smelt_logical::contract::deferral::settled_lag_bound(
+                &unprocessed_event_times,
+                input_frontier,
+                d,
+            )
+            .map_err(|violation| {
+                anyhow::anyhow!(
+                    "deferral lag bound violated for succession model {:?}: {violation:?}",
+                    recipe.model_name
+                )
+            })?;
+            Ok(())
+        }
+    }
+}
+
 /// Drive one window's worth of `rows` against `project`/`recipe` through the
 /// real `execute_project` pipeline (`LinkCProject::run_quiet`), then assert
 /// end-state equivalence — the succession-family counterpart of
@@ -295,6 +417,65 @@ mod tests {
     use crate::recipe::{ConformanceTarget, SourceRecipe, SuccessionRecipe};
 
     use super::*;
+
+    /// `succession_equivalence_at_default_point_matches_the_unrestricted_oracle`
+    /// (phase 7d test 3): harness self-check —
+    /// [`assert_succession_equivalence_at_point`] under
+    /// `ContractPoint::Default` is byte-for-byte
+    /// [`assert_succession_equivalence_for`]'s own behaviour: both succeed
+    /// after a clean window, and both fail identically once the maintained
+    /// table is corrupted.
+    #[tokio::test]
+    async fn succession_equivalence_at_default_point_matches_the_unrestricted_oracle() {
+        let recipe = SuccessionRecipe::new_lead();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+            .expect("stage succession recipe");
+
+        drive_succession_window_and_assert_for(
+            &project,
+            &recipe,
+            "succession-default-point-1",
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+            &[SuccessionEventRow::new(
+                1,
+                NaiveDate::from_ymd_opt(2026, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(8, 0, 0)
+                    .unwrap(),
+                "gold",
+            )],
+        )
+        .await
+        .expect("window 1 must succeed and match the oracle");
+
+        let point = smelt_logical::contract::ContractPoint::Default;
+        assert_succession_equivalence_at_point(&project, &recipe, &point, 0, None)
+            .await
+            .expect(
+                "assert_succession_equivalence_at_point(Default) must hold whenever \
+                 assert_succession_equivalence_for holds",
+            );
+
+        // Corrupt the maintained table: both comparators must now fail.
+        let backend = project.backend().await.expect("backend");
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("DELETE FROM main.{}", recipe.model_name),
+        )
+        .await
+        .expect("delete every row from the maintained table");
+
+        let unrestricted_result = assert_succession_equivalence_for(&project, &recipe).await;
+        let at_point_result =
+            assert_succession_equivalence_at_point(&project, &recipe, &point, 0, None).await;
+        assert!(
+            unrestricted_result.is_err() && at_point_result.is_err(),
+            "both comparators must reject the corrupted state: unrestricted={unrestricted_result:?}, \
+             at_point={at_point_result:?}"
+        );
+    }
 
     /// `succession_event_row_deleted_carries_the_flag` (phase 7b test 11):
     /// [`SuccessionEventRow::deleted`]/[`SuccessionEventRow::deleted_late`]

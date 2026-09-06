@@ -6,7 +6,7 @@
 //! module — a struct's fields cannot be declared across files — but every
 //! succession-specific constructor, type, and unit test lives here.
 
-use super::{KeyShape, SourcePosture, SourceRecipe};
+use super::{ContractDecl, KeyShape, SourcePosture, SourceRecipe};
 
 impl SourceRecipe {
     /// The append-only, arrival-partitioned, delete-flagged succession
@@ -77,6 +77,11 @@ pub struct SuccessionRecipe {
     pub clamp: Option<String>,
     /// Whether the model applies `QUALIFY NOT <source.delete_flag_column>`.
     pub delete_filter: bool,
+    /// An optional `contract:` relaxation to render onto this recipe's model
+    /// file (phase 7d) — `None` for every named constructor, so every
+    /// existing recipe renders byte-identically to before this field was
+    /// added.
+    pub contract: Option<ContractDecl>,
 }
 
 impl SuccessionRecipe {
@@ -97,6 +102,7 @@ impl SuccessionRecipe {
             lag_cols: vec![],
             clamp: None,
             delete_filter: false,
+            contract: None,
             source,
         }
     }
@@ -117,6 +123,7 @@ impl SuccessionRecipe {
             lag_cols: vec!["valid_from".to_string()],
             clamp: None,
             delete_filter: false,
+            contract: None,
             source,
         }
     }
@@ -141,6 +148,15 @@ impl SuccessionRecipe {
     /// [`SourceRecipe::succession_events_event_time_partitioned`]).
     pub fn with_source(mut self, source: SourceRecipe) -> Self {
         self.source = source;
+        self
+    }
+
+    /// Attach a `contract:` relaxation to render onto this recipe's model
+    /// file (phase 7d) — `deferral` is the only point this grain admits
+    /// executed coverage for; `frozen_horizon`/`retain_departed` are refused
+    /// by the plan deriver rather than exercised here.
+    pub fn with_contract(mut self, contract: ContractDecl) -> Self {
+        self.contract = Some(contract);
         self
     }
 }

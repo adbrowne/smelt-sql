@@ -163,17 +163,19 @@ pub fn render_model_file_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> Str
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,
-        contract = render_contract_block(recipe),
+        contract = render_contract_block(recipe.contract.as_ref()),
         body = render_model_body_with_edit(recipe, edit),
     )
 }
 
-/// The `contract:` frontmatter block for `recipe.contract`, or the empty
-/// string when no relaxation is declared (phase 6) — every recipe
+/// The `contract:` frontmatter block for a declared relaxation, or the
+/// empty string when `None` (phase 6; generalized off `&ModelRecipe` in
+/// phase 7d so [`succession::render_succession_model_file`] can render the
+/// same block without a [`ModelRecipe`] wrapper) — every recipe
 /// [`arb_recipe`] draws has `contract: None`, so this renders byte-
 /// identically to before the field was added.
-fn render_contract_block(recipe: &ModelRecipe) -> String {
-    match recipe.contract {
+fn render_contract_block(contract: Option<&ContractDecl>) -> String {
+    match contract {
         None => String::new(),
         Some(ContractDecl::FrozenHorizon { days }) => {
             format!("contract:\n  frozen_horizon: '{days} days'\n")
@@ -208,7 +210,7 @@ pub fn render_model_file(recipe: &ModelRecipe) -> String {
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,
-        contract = render_contract_block(recipe),
+        contract = render_contract_block(recipe.contract.as_ref()),
         body = render_model_body(recipe),
     )
 }
