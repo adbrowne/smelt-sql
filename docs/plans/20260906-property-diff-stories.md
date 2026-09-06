@@ -67,7 +67,7 @@ Dogfooding the property-diff PR comment on this repository's own pull requests (
 | 2     | done     | a8559476 | 2026-09-06 |
 | 3     | done     | c546129b | 2026-09-06 |
 | 4     | done     | 4c0a6960 | 2026-09-06 |
-| 5     | pending  |        |      |
+| 5     | done     |        | 2026-09-06 |
 
 ---
 
@@ -272,6 +272,8 @@ Dogfooding the property-diff PR comment on this repository's own pull requests (
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - 2026-09-06 (Phase 1): `crates/smelt-runtime/src/python.rs` test module has an intermittent isolation flake — concurrent Python-model tests (`python_discovery_runs_in_runtime`, `python_multimodel_delimiter_not_a_section`, `python_name_mismatch_blocks_and_retains_other_keys`) collide on a shared tmp path and read each other's `unstable.py` counter. Reproduces on `main`; unrelated to this plan. Fix separately.
+- 2026-09-06 (Phase 5): `crates/smelt-cli/tests/property_diff_cli.rs::a_join_induced_downgrade_propagates_to_the_named_downstream_model` failed once under parallel execution during validation and passed on rerun — same test-isolation class; the temp-repo fixtures may share state. Investigate separately.
+- 2026-09-06 (Phase 5): lens hover is unimplemented (pre-existing; now recorded in the spec's Known Divergences and the editor guide).
 
 ## Verification
 

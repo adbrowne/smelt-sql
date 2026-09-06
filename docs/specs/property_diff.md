@@ -670,6 +670,9 @@ compares verdicts.
 - Executing the lens opens the text report for that model in the editor's output channel, but no
   editor extension yet registers the command the lens emits, so today executing it is a no-op in
   every editor. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
+- Hovering the lens shows nothing: no hover provider serves the per-model block the Editor table
+  promises, so the stories-then-verdicts block is reachable today only through `smelt explain
+  --diff`. Tracked in `docs/outcomes/20260905-property-diff/outcome.md`.
 - `CellVerdict.state_downgrade` has a live producer only for a model whose target dialect makes
   it fire; no model in `examples/timeseries` or `examples/retail_analytics` exercises it, so the
   diff's `state_downgrade` dimension is proven only by a dual-target unit fixture, not by an

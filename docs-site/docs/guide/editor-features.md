@@ -131,8 +131,8 @@ anchored as precisely as the story's subject allows: a story about a column anch
 in the `SELECT` list, a story about a source or an upstream model anchors on the `FROM`/`JOIN`
 clause that names it, and anything else (a maintenance cell, a refusal, a whole-model story with no
 narrower subject) anchors on the model's first line, since it has no narrower home in the file's
-text. Hovering over the lens shows the same per-model block `smelt explain --diff`'s text form
-prints — the stories first, then the verdicts they fold.
+text. The full per-model block — the stories first, then the verdicts they fold — is available
+from `smelt explain --diff`'s text form; the lens itself does not yet serve it on hover.
 
 The baseline defaults to the merge-base with `main`, exactly like the CLI. The diff refreshes when
 the workspace loads, when a model file is saved or changed on disk outside the editor, and when
