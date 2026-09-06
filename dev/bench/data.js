@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788683584530,
+  "lastUpdate": 1788683588413,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.355538,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "81b5abb96029ebfe3af69398fdd182e0481c54e1",
+          "message": "Merge pull request #196 from adbrowne/worktree-build-speed\n\nbuild: cap cargo parallelism, add missing CI gates, and measure the verify suite",
+          "timestamp": "2026-09-06T18:28:36+10:00",
+          "tree_id": "b02ac9a11b74da313092d7aaa7d8a6cb5d70915f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/81b5abb96029ebfe3af69398fdd182e0481c54e1"
+        },
+        "date": 1788683586939,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.01345041892543,
+            "unit": "MB/s"
           }
         ]
       }
