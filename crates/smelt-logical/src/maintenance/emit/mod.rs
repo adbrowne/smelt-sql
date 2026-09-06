@@ -29,6 +29,7 @@ mod probes;
 mod projection;
 mod recompute;
 mod staged;
+mod succession;
 mod types;
 
 pub use bootstrap::*;
@@ -38,4 +39,5 @@ pub use probes::*;
 pub use projection::*;
 pub use recompute::*;
 pub use staged::*;
+pub use succession::*;
 pub use types::*;

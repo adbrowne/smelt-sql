@@ -51,7 +51,8 @@ use duckdb::Connection;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::emit::{
-    emit_delete_insert, emit_keyed_fold, MaintenanceDialect, Region, StatementGroup,
+    emit_delete_insert, emit_keyed_fold, emit_succession_event_delta, emit_succession_patch,
+    DerivedColumn, MaintenanceDialect, Region, StatementGroup,
 };
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, SourceFacts, Technique, Trigger,
@@ -378,6 +379,103 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// SCD2 / versioned intervals, append-only column — the succession-patch
+// technique (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md`
+// phase 4): derive the plan from a recognised keyed-succession verdict,
+// emit via `emit_succession_patch`, execute on DuckDB, and prove multiset
+// equality against the model's own `LEAD` SQL at full refresh. Columns 2
+// (EX-29, snapshot-derived) and 3 (EX-28, change feed) of this matrix row
+// stay `KNOWN_GAPS` below — both are out of the succession grain by
+// construction (`incremental_shapes.md` §"What stays out of this grain").
+// ---------------------------------------------------------------------------
+
+#[test]
+fn described_technique_matches_execution_succession_patch() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE customer_changes (customer_id INTEGER, changed_at TIMESTAMP, tier TEXT);
+         CREATE TABLE main.customer_history (customer_id INTEGER, changed_at TIMESTAMP, tier \
+         TEXT, valid_to TIMESTAMP);
+         CREATE TABLE main.customer_history__tombstones (customer_id INTEGER, changed_at \
+         TIMESTAMP);
+         INSERT INTO customer_changes VALUES
+           (1, TIMESTAMP '2026-01-01 00:00:00', 'gold'),
+           (1, TIMESTAMP '2026-01-03 00:00:00', 'silver');",
+    )
+    .expect("stage");
+
+    let sql = "SELECT customer_id, changed_at, tier, \
+               LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS valid_to \
+               FROM smelt.raw.customer_changes";
+    let tree = smelt_logical::analysis::walk::QueryTree::from_sql(sql).expect("sql parses");
+    let smelt_logical::analysis::walk::QueryNode::Select(node) = &tree.root else {
+        panic!("expected a top-level SELECT scope, got {:?}", tree.root);
+    };
+    let ctx = smelt_logical::analysis::succession::SuccessionContext {
+        source_name: "raw.customer_changes".to_string(),
+        mutation_profile: Some(smelt_logical::analysis::input_delta::MutationProfile::AppendOnly),
+        event_time_column: Some("changed_at".to_string()),
+        not_null_columns: ["customer_id", "changed_at"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    };
+    let verdict = smelt_logical::analysis::succession::classify_keyed_succession(node, &ctx);
+    let derivation = smelt_logical::maintenance::succession::derive_succession_plan(
+        &verdict,
+        "customer_history",
+    );
+    // The described technique: a recognised keyed-succession verdict derives
+    // the succession-patch cell — assert this *before* running any SQL.
+    assert!(
+        derivation.plan.refusals.is_empty(),
+        "refusals: {:?}",
+        derivation.plan.refusals
+    );
+    assert_eq!(
+        derivation.plan.cells[0].technique,
+        Technique::SuccessionPatch
+    );
+
+    let projection = vec![
+        ("customer_id".to_string(), "customer_id".to_string()),
+        ("changed_at".to_string(), "changed_at".to_string()),
+        ("tier".to_string(), "tier".to_string()),
+    ];
+    let event_delta = emit_succession_event_delta(
+        "customer_changes",
+        &projection,
+        None,
+        "changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-03 00:00:00')",
+    );
+    let lead: Vec<DerivedColumn> = vec![("valid_to".to_string(), "{lead}".to_string())];
+    let group = emit_succession_patch(
+        "main.customer_history",
+        &["customer_id".to_string()],
+        "changed_at",
+        &["tier".to_string()],
+        &lead,
+        &[],
+        None,
+        &event_delta.sql,
+        MaintenanceDialect::DuckDb,
+    );
+    batch_group(&conn, &group);
+
+    let oracle = "SELECT customer_id, changed_at, tier, \
+                  LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS \
+                  valid_to FROM customer_changes";
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            oracle,
+        ),
+        "the succession-patch technique's emitted MERGE must reproduce a full refresh"
+    );
+}
+
 fn batch_group(conn: &Connection, group: &StatementGroup) {
     for stmt in &group.statements {
         conn.execute_batch(&stmt.sql)
@@ -599,7 +697,15 @@ const MATRIX: &[(&str, [Cell; 7])] = &[
     ),
     (
         "SCD2 / versioned intervals",
-        [None, None, Some("EX-29"), Some("EX-28"), None, None, None],
+        [
+            Some("succession-patch"),
+            None,
+            Some("EX-29"),
+            Some("EX-28"),
+            None,
+            None,
+            None,
+        ],
     ),
     (
         "engine-maintained (MV)",
@@ -709,6 +815,11 @@ const CLAIMED: &[(&str, usize, &str)] = &[
         "INTERSECT / EXCEPT (set operations)",
         0,
         "coverage_matrix_gaps.rs::ex41_ex42_intersect_no_payload_column_still_delete_insert + ..._derives_per_arm_provenance (pins the real per-arm classification)",
+    ),
+    (
+        "SCD2 / versioned intervals",
+        0,
+        "maintenance_plan_conformance.rs::described_technique_matches_execution_succession_patch (succession-patch, HOLDS — an append-only keyed-succession model's emitted MERGE reproduces a full refresh); production-execution byte+result parity via crates/smelt-runtime/tests/statement_parity.rs's structural no-authoring leg (executed-vs-emitted parity for this family needs the phase-5 runtime driver)",
     ),
 ];
 

@@ -764,11 +764,12 @@ crates/smelt-logical/src/maintenance/edge_type.rs 361
 crates/smelt-logical/src/maintenance/emit/bootstrap.rs 129
 crates/smelt-logical/src/maintenance/emit/fingerprint.rs 977
 crates/smelt-logical/src/maintenance/emit/merge.rs 784
-crates/smelt-logical/src/maintenance/emit/mod.rs 41
+crates/smelt-logical/src/maintenance/emit/mod.rs 43
 crates/smelt-logical/src/maintenance/emit/probes.rs 803
 crates/smelt-logical/src/maintenance/emit/projection.rs 619
 crates/smelt-logical/src/maintenance/emit/recompute.rs 526
 crates/smelt-logical/src/maintenance/emit/staged.rs 520
+crates/smelt-logical/src/maintenance/emit/succession.rs 592
 crates/smelt-logical/src/maintenance/emit/types.rs 117
 crates/smelt-logical/src/maintenance/granularity.rs 130
 crates/smelt-logical/src/maintenance/grouping.rs 1099
@@ -838,7 +839,7 @@ crates/smelt-logical/tests/maintenance_grouping.rs 1072
 crates/smelt-logical/tests/maintenance_merged_group.rs 200
 crates/smelt-logical/tests/maintenance_new_data_enrich_only_waiver.rs 271
 crates/smelt-logical/tests/maintenance_plan_admission.rs 536
-crates/smelt-logical/tests/maintenance_plan_conformance.rs 842
+crates/smelt-logical/tests/maintenance_plan_conformance.rs 953
 crates/smelt-logical/tests/maintenance_plan_refusals.rs 47
 crates/smelt-logical/tests/maintenance_propagation_adjoint.rs 885
 crates/smelt-logical/tests/maintenance_referential_integrity.rs 340
@@ -863,6 +864,7 @@ crates/smelt-logical/tests/skeleton_closure_pinned.rs 85
 crates/smelt-logical/tests/skeleton_closure.rs 140
 crates/smelt-logical/tests/skew_self_exclusion.rs 245
 crates/smelt-logical/tests/story_coverage.rs 550
+crates/smelt-logical/tests/succession_emit.rs 488
 crates/smelt-logical/tests/support/module_source.rs 142
 crates/smelt-logical/tests/support/test_only_files.rs 172
 crates/smelt-logical/tests/typed_edge_spec.rs 74
@@ -1125,7 +1127,7 @@ crates/smelt-runtime/tests/statement_parity/main.rs 492
 crates/smelt-runtime/tests/statement_parity/region_and_keyed_fold.rs 874
 crates/smelt-runtime/tests/statement_parity/repair_and_key_addressed.rs 934
 crates/smelt-runtime/tests/statement_parity/staged_candidate_conditional.rs 773
-crates/smelt-runtime/tests/statement_parity/structural_and_ledger.rs 950
+crates/smelt-runtime/tests/statement_parity/structural_and_ledger.rs 961
 crates/smelt-runtime/tests/state_posture_seam.rs 39
 crates/smelt-runtime/tests/surface_audit.rs 88
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1120
@@ -1144,7 +1146,7 @@ crates/smelt-runtime/tests/web_analytics_session_delta_restriction.rs 831
 crates/smelt-runtime/tests/windowing_ordered.rs 292
 crates/smelt-runtime/tests/windowing_parity.rs 1150
 crates/smelt-state/src/ddl_bigquery.rs 607
-crates/smelt-state/src/ddl_duckdb.rs 1787
+crates/smelt-state/src/ddl_duckdb.rs 1883
 crates/smelt-state/src/ddl_spark.rs 1708
 crates/smelt-state/src/file_store.rs 1690
 crates/smelt-state/src/frozen_band_baselines.rs 104

@@ -312,7 +312,18 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
             // enough to catch a re-authored difference/branch INSERT).
             || line.contains("ALTER TABLE ")
             || line.contains("CREATE OR REPLACE TABLE ")
-            || line.contains("__backbuild_diff");
+            || line.contains("__backbuild_diff")
+            // The succession-patch family (`docs/outcomes/
+            // 20260906-scd2-keyed-succession/phases/04-plan.md`): `MERGE
+            // INTO `/`DELETE FROM ` above already catch the presented
+            // `MERGE` and any hand-authored delete; `__tombstones` is the
+            // reserved tombstone-ledger table-name suffix
+            // (`smelt_logical::maintenance::emit::tombstone_table_name`),
+            // a distinctive marker for the ledger insert and the
+            // ledger-rebuild `SELECT` alike, on the same "unique marker
+            // string" footing as `__backbuild_diff` above (a bare `SELECT
+            // ...` has no unique shape to scan for).
+            || line.contains("__tombstones");
         if !forbidden {
             continue;
         }

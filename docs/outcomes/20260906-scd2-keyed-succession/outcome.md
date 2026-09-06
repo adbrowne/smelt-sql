@@ -150,7 +150,7 @@ out-of-order and repeated windows, and the clamp.
 | 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | done |
 | 3b | Gate hygiene (test-file blind spot): this branch's large-file splits turned `#[cfg(test)] mod tests { … }` blocks into whole files that no gate's `#[cfg(test)]`-span scan can see, so test-only code is scanned as production — red in `join_context_reach::every_production_join_context_new_is_tagged`, `walk_coverage::admission_paths_have_no_raw_text_scans`, and `hardening_budget::gate_detects_regression` (`smelt-logical` `expect` 14 vs baseline 1). Fix the file *selection* in all three via one shared "declared under `#[cfg(test)] mod <stem>;`" rule (not a tag on any call site), and prove each still catches a real untagged production site | done |
 | 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | done |
-| 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; the `statement_parity` structural no-authoring leg widened to the succession shapes; the `maintenance_plan_conformance` SCD2 **append-only** matrix cell inhabited with the emitter-backed CLAIMED entry (columns 2/3 stay known gaps — both are out of this grain) | planned |
+| 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; the `statement_parity` structural no-authoring leg widened to the succession shapes; the `maintenance_plan_conformance` SCD2 **append-only** matrix cell inhabited with the emitter-backed CLAIMED entry (columns 2/3 stay known gaps — both are out of this grain) | done |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; the `statement_parity` succession family leg (executed == emitted, which needs this phase's driver); `execute_parity` | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
 | 7 | Testkit and conformance: arrival-partitioned `SourceRecipe`, `SuccessionRecipe` family with the model-SQL oracle and every listed leg; state-deletion and repair legs widened; seeded sample green | pending |
@@ -159,6 +159,14 @@ out-of-order and repeated windows, and the clamp.
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (implement phase 4): shipped the four emitters, tombstone DDL, and the
+  append-only SCD2 conformance cell per the plan. One scope decision the plan left implicit:
+  `emit_succession_patch` recomputes `LEAD`/`LAG` over a touched key's *whole* stored history
+  (presented ∪ ledger ∪ batch), not the maintenance theorem's minimal immediate-neighbour
+  footprint — correct (unaffected rows re-write identically) but not yet the theorem's
+  constant-footprint optimisation, which needs a self-join-based neighbour restriction. Flagged
+  as a phase-5-or-later follow-up, not a correctness gap. See `phases/04-summary.md`.
 
 - 2026-09-07 (plan phase 4): one reshape, one clarification. **Reshape:** the
   `statement_parity` *executed == emitted* succession family leg moved from phase 4 to phase 5.
