@@ -685,14 +685,15 @@ fn apply_join_downgrade_edit(tmp: &Path) {
     std::fs::write(&model_path, edited).expect("write edited user_daily_spend.sql");
 }
 
-/// `--markdown` reports the join downgrade in an open `<details>` block for
-/// both the directly-edited model and its downstream dependent. Fails
-/// against a renderer whose open-state or cause string is wrong, and
+/// `--markdown` reports the join downgrade as a story bullet for both the
+/// directly-edited model and its downstream dependent, with the raw
+/// verdicts collapsed under `Verdict table` — never `<details open>`.
+/// Fails against a renderer whose story text or cause string is wrong, and
 /// against a `print!` branch wired after the `--fail-on` early return
 /// (there's no `--fail-on` here, so this alone only covers the render
 /// path — test 10 covers the ordering hazard).
 #[test]
-fn markdown_reports_the_join_downgrade_in_an_open_details() {
+fn markdown_reports_the_join_downgrade_as_stories() {
     let tmp = tempfile::tempdir().expect("tempdir");
     stage_timeseries_repo(tmp.path());
     apply_join_downgrade_edit(tmp.path());
@@ -715,12 +716,21 @@ fn markdown_reports_the_join_downgrade_in_an_open_details() {
         "expected the marker: {stdout}"
     );
     assert!(
-        stdout.contains("<details open>\n<summary>user_daily_spend"),
-        "expected an open details block naming user_daily_spend: {stdout}"
+        !stdout.contains("<details open>"),
+        "no model block may ever render <details open>: {stdout}"
     );
     assert!(
-        stdout.contains("<details open>\n<summary>user_spend_running_total"),
-        "expected an open details block naming user_spend_running_total: {stdout}"
+        stdout.contains("**user_daily_spend** (edited)"),
+        "expected a bold model header naming user_daily_spend: {stdout}"
+    );
+    assert!(
+        stdout.contains("**user_spend_running_total** (downstream of user_daily_spend)"),
+        "expected a bold model header naming user_spend_running_total: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("<summary>Verdict table</summary>").count(),
+        2,
+        "expected one collapsed verdict table per shifted model: {stdout}"
     );
 }
 
@@ -868,6 +878,70 @@ fn new_unclocked_join_is_a_cell_added_downgrade() {
         !changes.iter().any(|c| c["direction"] == "upgrade"),
         "a new dependency must never report an upgrade: {changes:?}"
     );
+}
+
+/// `docs/specs/property_diff.md` §Surface "Markdown": the web-analytics
+/// devices-join edit (same fixture as
+/// [`new_unclocked_join_is_a_cell_added_downgrade`]) renders as stories: a
+/// `dependency` cost story naming `raw.devices`, and an `info` schema
+/// story — one collapsed `Verdict table` per model, no `P7D` window-code
+/// leakage.
+#[test]
+fn markdown_comment_for_the_web_analytics_edit_reads_as_stories() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_web_analytics_repo(tmp.path());
+
+    let model_path = tmp.path().join("models/gold/eventstream_with_identity.sql");
+    let original =
+        std::fs::read_to_string(&model_path).expect("read eventstream_with_identity.sql");
+    let edited = original
+        .replace(
+            "FROM smelt.silver.events_deduped e\nJOIN smelt.silver.sessions s",
+            "FROM smelt.silver.events_deduped e\nJOIN smelt.sources.raw.devices d ON e.device_id = d.device_id\nJOIN smelt.silver.sessions s",
+        )
+        .replace(
+            "    s.session_id,\n    COALESCE(f.forward_only_amplitude_id,",
+            "    s.session_id,\n    d.device_type,\n    COALESCE(f.forward_only_amplitude_id,",
+        );
+    assert_ne!(
+        original, edited,
+        "the fixture's SELECT/FROM text must match what this test replaces"
+    );
+    std::fs::write(&model_path, edited).expect("write edited eventstream_with_identity.sql");
+
+    let output = smelt()
+        .args(["explain", "--diff", "--markdown", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --markdown");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("⚠️ **New dependency read in full.** raw.devices"),
+        "expected the dependency story bullet: {stdout}"
+    );
+    assert!(
+        stdout.contains("ℹ️ **Schema.** Adds device_type."),
+        "expected the schema story bullet: {stdout}"
+    );
+    assert_eq!(
+        stdout
+            .matches("<details>\n<summary>Verdict table</summary>")
+            .count(),
+        1,
+        "expected exactly one collapsed verdict table for the one shifted model: {stdout}"
+    );
+    assert!(
+        !stdout.contains("P7D"),
+        "the reads story must humanise the window, never leak the raw ISO-8601 code: {stdout}"
+    );
+    assert!(stdout.trim_end().ends_with("<!-- smelt-property-diff -->"));
 }
 
 /// `docs/specs/property_diff.md` §"Direction" grain row: widening the grain

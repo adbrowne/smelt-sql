@@ -262,12 +262,16 @@ $ smelt explain --diff
 property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
 
   user_daily_spend  (edited)
-    ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
+    [cost] Costlier maintenance: Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.
+    verdicts:
+      ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
 
   user_spend_running_total  (downstream of user_daily_spend)
-    ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
+    [cost] Maintenance route lost: {running_total} no longer has a maintenance route for changes from user_daily_spend.
+    verdicts:
+      ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
 
-1 downgrades, 0 upgrades, 0 neutral.
+2 model(s) shifted · 2 read more per run
 ```
 
 When nothing shifted, the whole output is one line: `property diff vs <ref>: no models shifted`.
@@ -279,7 +283,7 @@ When nothing shifted, the whole output is one line: `property diff vs <ref>: no 
   "baseline": { "ref": "<as given>", "commit": "<sha>", "resolved_as": "merge_base" | "explicit" },
   "edited_files": ["<project-relative path>", ...],
   "summary": { "downgrades": 1, "upgrades": 0, "neutral": 0, "shifted_models": 2 },
-  "headline": "2 model(s) shifted · 1 read more per run",
+  "headline": "2 model(s) shifted · 2 read more per run",
   "models": [
     {
       "model": "<name>",
@@ -347,21 +351,26 @@ correctness risks, models that read more per run, and models that only improved 
 model, as `<n> risk(s), <n> costlier vs <ref>` (or `changed vs <ref>` when the model has neither).
 
 **Markdown** (`--diff --markdown`): a single comment body suitable for `gh pr comment
---body-file`, with one collapsible block per shifted model (open by default when it holds a
-downgrade) and a trailing `<!-- smelt-property-diff -->` marker a CI job uses to update its
-previous comment instead of stacking a new one on every push. The marker is emitted even when
-nothing shifted, so a stale downgrade comment can be cleared once the regression is fixed. See
+--body-file`, leading with the headline and one bullet per story, each model's raw verdicts
+collapsed under a `Verdict table` — never open by default — and a trailing
+`<!-- smelt-property-diff -->` marker a CI job uses to update its previous comment instead of
+stacking a new one on every push. The marker is emitted even when nothing shifted, so a stale
+downgrade comment can be cleared once the regression is fixed. See
 [Continuous integration](../guide/ci.md) for the documented GitHub Actions job.
 
 ```
 $ smelt explain --diff --markdown
 
-### property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+### property diff vs merge-base(main) @ 3e9c1a4a
 
-1 downgrades, 0 upgrades, 0 neutral.
+**2 model(s) shifted · 2 read more per run**
 
-<details open>
-<summary>user_daily_spend — edited — 1 downgrades, 0 upgrades, 0 neutral</summary>
+**user_daily_spend** (edited)
+
+- ⚠️ **Costlier maintenance.** Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.
+
+<details>
+<summary>Verdict table</summary>
 
 | dimension | subject | direction | old | new | reason |
 |---|---|---|---|---|---|
@@ -369,8 +378,12 @@ $ smelt explain --diff --markdown
 
 </details>
 
-<details open>
-<summary>user_spend_running_total — downstream of user_daily_spend — 1 downgrades, 0 upgrades, 0 neutral</summary>
+**user_spend_running_total** (downstream of user_daily_spend)
+
+- ⚠️ **Maintenance route lost.** {running_total} no longer has a maintenance route for changes from user_daily_spend.
+
+<details>
+<summary>Verdict table</summary>
 
 | dimension | subject | direction | old | new | reason |
 |---|---|---|---|---|---|

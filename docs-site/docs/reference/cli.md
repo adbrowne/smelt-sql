@@ -1217,29 +1217,39 @@ upstream edit broke its row identity, say) gets caught before it ships, includin
 nobody touched directly — a shifted model whose own file was not edited is reported
 `(downstream of <model>)`, naming the nearest edited ancestor.
 
+A reviewer reads the **stories** first: a handful of severity-ranked sentences answering "is it
+still maintained incrementally?", "what does a run read now?", and "what can smelt no longer
+guarantee?" The raw per-dimension verdicts sit underneath, for cross-reference, and the report
+ends with a one-line **headline**.
+
 ```
 $ smelt explain --diff
 
 property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
 
   user_daily_spend  (edited)
-    ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
+    [cost] Costlier maintenance: Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.
+    verdicts:
+      ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
 
   user_spend_running_total  (downstream of user_daily_spend)
-    ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
+    [cost] Maintenance route lost: {running_total} no longer has a maintenance route for changes from user_daily_spend.
+    verdicts:
+      ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
 
-1 downgrades, 0 upgrades, 0 neutral.
+2 model(s) shifted · 2 read more per run
 ```
 
 `--json` emits the same diff as a JSON object with `baseline` (the resolved ref, its commit, and
 whether it was explicit or defaulted), `edited_files`, `summary` (downgrade/upgrade/neutral
-counts and the shifted-model count), and `models` (one entry per shifted model, each with a
-`cause` and its `changes`). See `docs/specs/property_diff.md` §Surface "JSON" for the full
-schema. `--markdown` emits a single GitHub-flavoured Markdown comment body instead, with a
-trailing `<!-- smelt-property-diff -->` marker — see [`smelt explain` §Property
-diff](smelt-explain.md#property-diff) and [Continuous integration](../guide/ci.md) for the
-documented job that posts it. `--select` narrows the *reported* set only — every model is still
-compared at both versions so attribution stays correct — and the summary counts follow the
+counts and the shifted-model count), `headline`, and `models` (one entry per shifted model, each
+with a `cause`, its `stories`, and its raw `changes`). See `docs/specs/property_diff.md` §Surface
+"JSON" for the full schema. `--markdown` emits a single GitHub-flavoured Markdown comment body
+instead — the headline in bold, one bullet per story, each model's verdicts collapsed under a
+`Verdict table` — with a trailing `<!-- smelt-property-diff -->` marker — see [`smelt explain`
+§Property diff](smelt-explain.md#property-diff) and [Continuous integration](../guide/ci.md) for
+the documented job that posts it. `--select` narrows the *reported* set only — every model is
+still compared at both versions so attribution stays correct — and the summary counts follow the
 reported set.
 
 Exit codes: `0` whenever the diff was computed (whether or not anything shifted); `1` only under

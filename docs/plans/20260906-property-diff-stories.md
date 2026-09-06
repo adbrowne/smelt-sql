@@ -65,7 +65,7 @@ Dogfooding the property-diff PR comment on this repository's own pull requests (
 |-------|----------|--------|------|
 | 1     | done     | b25fc2fe | 2026-09-06 |
 | 2     | done     | a8559476 | 2026-09-06 |
-| 3     | pending  |        |      |
+| 3     | done     |        | 2026-09-06 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 
