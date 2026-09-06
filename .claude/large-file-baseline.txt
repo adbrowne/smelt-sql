@@ -298,7 +298,10 @@ crates/smelt-cli/tests/tutorial_freshness.rs 752
 crates/smelt-cli/tests/ui_network_hardening.rs 89
 crates/smelt-cli/tests/web_analytics_incremental_classification.rs 139
 crates/smelt-core/src/baseline/edited_set.rs 191
-crates/smelt-core/src/baseline/git.rs 388
+crates/smelt-core/src/baseline/git/error.rs 38
+crates/smelt-core/src/baseline/git/materialize.rs 132
+crates/smelt-core/src/baseline/git/mod.rs 46
+crates/smelt-core/src/baseline/git/resolve.rs 227
 crates/smelt-core/src/baseline/mod.rs 44
 crates/smelt-core/src/config.rs 3909
 crates/smelt-core/src/discovery.rs 1090
@@ -332,9 +335,11 @@ crates/smelt-core/src/workspace.rs 425
 crates/smelt-core/tests/address_map.rs 239
 crates/smelt-core/tests/baseline/edited_set_tests.rs 229
 crates/smelt-core/tests/baseline/fixtures.rs 99
-crates/smelt-core/tests/baseline/main.rs 8
-crates/smelt-core/tests/baseline/materialize_tests.rs 267
+crates/smelt-core/tests/baseline/main.rs 10
+crates/smelt-core/tests/baseline/materialize_tests.rs 119
+crates/smelt-core/tests/baseline/repo_mutation_tests.rs 118
 crates/smelt-core/tests/baseline/resolve_baseline_tests.rs 108
+crates/smelt-core/tests/baseline/scratch_hygiene_tests.rs 85
 crates/smelt-core/tests/check_tests.rs 130
 crates/smelt-core/tests/config_refresh_axis.rs 96
 crates/smelt-core/tests/contract_deferral.rs 107
