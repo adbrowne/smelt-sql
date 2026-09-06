@@ -193,7 +193,7 @@ pub fn render() -> String {
     out.push_str(
         "How every built-in smelt recognises is spelled on each backend. Each cell is the\n\
          `Emission` verdict the registry carries for that `(entry, dialect)` pair\n\
-         (`crates/smelt-types/src/signatures.rs`), which is the single place the printer\n\
+         (`crates/smelt-types/src/signatures/`), which is the single place the printer\n\
          reads — there is no name-matched dialect arm in the printer.\n\n",
     );
     out.push_str("Cell vocabulary:\n\n");

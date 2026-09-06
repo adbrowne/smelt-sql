@@ -1097,7 +1097,39 @@ fn window_verdict_totality() {
 
 // ─── Retired dialects
 
-const SIGNATURES_SRC: &str = include_str!("../src/signatures.rs");
+/// The whole `signatures` module source, concatenated — read at test time
+/// rather than `include_str!`-ed one file at a time, so a new submodule
+/// dropped into `src/signatures/` (or `src/signatures/builtins/`) is scanned
+/// the moment it exists, never only once someone remembers to list it here.
+fn signatures_src() -> String {
+    fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .expect("readable signatures module directory")
+            .map(|e| e.expect("readable dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                read_dir_recursive(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let src = std::fs::read_to_string(&path).expect("readable source file");
+                out.push((path, src));
+            }
+        }
+    }
+    let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/signatures"));
+    let mut files = Vec::new();
+    read_dir_recursive(dir, &mut files);
+    assert!(
+        !files.is_empty(),
+        "no signatures sources found — the gate would pass vacuously"
+    );
+    files
+        .into_iter()
+        .map(|(_, src)| src)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 #[test]
 fn no_registry_row_names_a_retired_dialect() {
@@ -1106,10 +1138,11 @@ fn no_registry_row_names_a_retired_dialect() {
     // arm reintroducing it would carry an unverifiable claim. This scans the
     // registry source directly rather than `DialectId::ALL` (which would
     // trivially be silent about a variant that no longer compiles).
+    let src = signatures_src();
     for spelling in ["PostgreSql", "PostgreSQL"] {
         assert!(
-            !SIGNATURES_SRC.contains(spelling),
-            "signatures.rs names the retired dialect spelling {spelling:?}"
+            !src.contains(spelling),
+            "the signatures module names the retired dialect spelling {spelling:?}"
         );
     }
 }

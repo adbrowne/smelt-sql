@@ -135,7 +135,44 @@ fn the_printer_branches_on_no_dialect_variant() {
     );
 }
 
-const SIGNATURES_SRC: &str = include_str!("../../smelt-types/src/signatures.rs");
+/// The whole `smelt-types::signatures` module source, concatenated — read at
+/// test time rather than `include_str!`-ed one file at a time, so a new
+/// submodule dropped into `signatures/` (or into `signatures/builtins/`) is
+/// covered the moment it exists, never only once someone remembers to list it
+/// here. Mirrors `printer_files` above.
+static SIGNATURES_SRC: LazyLock<String> = LazyLock::new(|| {
+    fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .expect("readable signatures module directory")
+            .map(|e| e.expect("readable dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                read_dir_recursive(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let src = std::fs::read_to_string(&path).expect("readable source file");
+                out.push((path, src));
+            }
+        }
+    }
+    let dir = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../smelt-types/src/signatures"
+    ))
+    .to_path_buf();
+    let mut files = Vec::new();
+    read_dir_recursive(&dir, &mut files);
+    assert!(
+        !files.is_empty(),
+        "no signatures sources found — the gate would pass vacuously"
+    );
+    files
+        .into_iter()
+        .map(|(_, src)| src)
+        .collect::<Vec<_>>()
+        .join("\n")
+});
 
 /// The `RewriteId` variants declared in `smelt-types`, read from the source
 /// rather than restated here — a hand-copied list would go stale exactly when a
