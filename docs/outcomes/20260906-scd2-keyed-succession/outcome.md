@@ -158,13 +158,27 @@ out-of-order and repeated windows, and the clamp.
 | 7b | Conformance leg matrix (the succession family's own legs): late splice, delete-then-later-insert, late insert before a folded delete, delete-only key, `LAG` variants under delete/splice, out-of-order and repeated window application, the pre-window clamp, an event-time-partitioned source, and an equal-`(k, t)` collision expecting a `SuccessionClockTie` rollback; plus the `gate_succession` helper widening each leg needs (delete-flagged and event-time-partitioned row/recipe constructors, a probe-failure drive helper) | done |
 | 7c | Re-run tolerance under deletes: fix the spurious `SuccessionClockTie` phase 7b found — `emit_succession_clock_tie_probe`'s tie signature compares a tombstone row's NULLed payload against the same event's real payload replayed from the source, so refolding any window containing a delete fails. Make a delete row's signature its flag alone (the spec's rule: "against a stored tombstone only the delete flag is comparable"), keeping delete-vs-insert and non-identical-insert collisions firing; restore phase 7b's weakened delete-flagged refold leg and add a rebuild-then-refold leg answering 7b's uninvestigated question about the `--full-refresh`/`repair` ledger path | done |
 | 7d | Conformance cross-suite widening: succession recipes added to `state_deletion.rs` (`.smelt/` deleted between runs), `repair.rs` (a full-refresh rebuild leg co-rebuilding ledger + presented table), and the contract-lattice `deferral` leg (a `contract:` field on `SuccessionRecipe` + its frontmatter rendering, driven against the existing `deferral` oracle transform); full seeded `maintenance_conformance` sample green | done |
-| 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | pending |
+| 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | planned |
 | 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | pending |
+| 6b | Deferral frontier for succession (criterion 6 residue from phase 7d): the succession window-forward driver never writes `IntervalStore`, so `contract_probes::resolve_deferral_frontiers` always reads a `None` maintained frontier and `deferral::run_license` can never license a skip for a succession model. Record the driver's maintained arrival frontier after each successful fold (or teach the resolver a succession-aware frontier source), then re-add phase 7d's tests 6–7 as written in `phases/07d-plan.md` (the executed-skip `contract_points.rs` deferral leg) | pending |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
 | 9 | Fixture and docs: example workspace `customer_changes`/`customer_history` with zero diagnostics; docs-site guide page and diagnostics reference | pending |
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (plan step, phase 6): reshaped — added row **6b** for the succession deferral
+  frontier write. Phase 7d's summary reported its tests 6–7 undeliverable because the
+  succession driver never writes `IntervalStore`, leaving criterion 6's "the contract-lattice
+  `deferral` leg includes one" clause only partially met. That is success-criterion work, so it
+  gets a phase row rather than leaving the outcome; placed after 6a (both are runtime-wiring
+  rows) and before the explain/docs/close phases. No other row changed.
+
+- 2026-09-07 (plan step, phase 6): scoping call inside phase 6 — the late-append leg is paired
+  with an in-place-mutation control on the SAME succession recipe (an `UPDATE` at unchanged row
+  count must still raise `SourceMutationProfileViolated`). Without it a passing late-append leg
+  is indistinguishable from a probe that never dispatched; the pair is what proves the
+  count-gate, not the absence of the probe, is doing the work.
 
 - 2026-09-07 (implement phase 7d): tests 6–7 of the phase's own test list (the
   contract-lattice `deferral` executed-skip leg in `contract_points.rs`) were
