@@ -155,26 +155,15 @@ pub fn short_ref(baseline: &BaselineInfo) -> String {
     }
 }
 
-/// The editor code lens's title
-/// (`docs/specs/property_diff.md` §Surface "Editor"): `N downgrades,
-/// M upgrades vs <short ref>`, counted from `model`'s own changes. Public:
-/// the one primitive that spells the lens title, so the LSP renders it and
-/// the parity gate asserts on the same string rather than a re-derived one.
+/// The editor code lens's title (`docs/specs/property_diff.md` §Surface
+/// "Editor", §"Stories" "Lens title"): `<r> risk(s), <c> costlier vs
+/// <short ref>`, counted from `model`'s own stories. A thin re-export of
+/// [`crate::analysis::diff_stories::lens_title`] — kept here under its
+/// original name so the LSP and the parity gate call one stable path
+/// (§Constraints item 5, "Surface parity") while the actual primitive is
+/// single-owned alongside the rest of the narration in `diff_stories`.
 pub fn lens_title(model: &ModelDiff, baseline: &BaselineInfo) -> String {
-    let downgrades = model
-        .changes
-        .iter()
-        .filter(|c| c.direction == Direction::Downgrade)
-        .count();
-    let upgrades = model
-        .changes
-        .iter()
-        .filter(|c| c.direction == Direction::Upgrade)
-        .count();
-    format!(
-        "{downgrades} downgrades, {upgrades} upgrades vs {}",
-        short_ref(baseline)
-    )
+    super::diff_stories::lens_title(model, baseline)
 }
 
 /// One shifted model's block: header line with its cause, then one line
@@ -374,6 +363,7 @@ mod tests {
             baseline: baseline(),
             edited_files: vec![],
             summary: DiffSummary::default(),
+            headline: String::new(),
             models: vec![],
         }
     }
@@ -447,8 +437,23 @@ mod tests {
         assert_eq!(short_ref(&named_baseline), "merge-base(main)");
     }
 
+    fn story(
+        kind: super::super::diff_stories::StoryKind,
+        severity: super::super::diff_stories::Severity,
+    ) -> super::super::diff_stories::Story {
+        super::super::diff_stories::Story {
+            kind,
+            severity,
+            subject: String::new(),
+            lead: "x".to_string(),
+            detail: "y".to_string(),
+            changes: vec![],
+        }
+    }
+
     #[test]
     fn lens_title_matches_the_summary_counts() {
+        use super::super::diff_stories::{Severity, StoryKind};
         let model = ModelDiff {
             model: "staging.orders".to_string(),
             cause: Cause {
@@ -461,11 +466,35 @@ mod tests {
                 change(Direction::Downgrade),
                 change(Direction::Upgrade),
             ],
+            stories: vec![
+                story(StoryKind::RowKey, Severity::Risk),
+                story(StoryKind::RowKey, Severity::Risk),
+                story(StoryKind::Reads, Severity::Cost),
+            ],
         };
+        // `docs/specs/property_diff.md` §"Stories" "Lens title": `<r>
+        // risk(s), <c> costlier vs <short ref>` — counted from the model's
+        // own risk/cost STORIES, not its raw downgrade/upgrade CHANGES.
         assert_eq!(
             lens_title(&model, &baseline()),
-            "2 downgrades, 1 upgrades vs main"
+            "2 risks, 1 costlier vs main"
         );
+    }
+
+    #[test]
+    fn lens_title_falls_back_to_changed_with_no_risk_or_cost_stories() {
+        use super::super::diff_stories::{Severity, StoryKind};
+        let model = ModelDiff {
+            model: "staging.orders".to_string(),
+            cause: Cause {
+                kind: CauseKind::Edited,
+                of: vec![],
+                reason: None,
+            },
+            changes: vec![change(Direction::Upgrade)],
+            stories: vec![story(StoryKind::Other, Severity::Improvement)],
+        };
+        assert_eq!(lens_title(&model, &baseline()), "changed vs main");
     }
 
     fn model_diff(cause: Cause) -> ModelDiff {
@@ -473,6 +502,7 @@ mod tests {
             model: "staging.orders".to_string(),
             cause,
             changes: vec![change(Direction::Downgrade)],
+            stories: vec![],
         }
     }
 
@@ -521,6 +551,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 2,
             },
+            headline: String::new(),
             models: vec![
                 model_diff(Cause {
                     kind: CauseKind::Edited,
@@ -535,6 +566,7 @@ mod tests {
                         reason: None,
                     },
                     changes: vec![change(Direction::Downgrade)],
+                    stories: vec![],
                 },
             ],
         };
@@ -558,17 +590,29 @@ mod tests {
                 neutral: 0,
                 shifted_models: 1,
             },
-            models: vec![model_diff(Cause {
-                kind: CauseKind::Edited,
-                of: vec![],
-                reason: None,
-            })],
+            headline: "1 model(s) shifted · no downgrades".to_string(),
+            models: vec![ModelDiff {
+                model: "staging.orders".to_string(),
+                cause: Cause {
+                    kind: CauseKind::Edited,
+                    of: vec![],
+                    reason: None,
+                },
+                changes: vec![change(Direction::Downgrade)],
+                stories: vec![story(
+                    super::super::diff_stories::StoryKind::Other,
+                    super::super::diff_stories::Severity::Cost,
+                )],
+            }],
         };
         let v = serde_json::to_value(&report).unwrap();
         let obj = v.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, vec!["baseline", "edited_files", "models", "summary"]);
+        assert_eq!(
+            keys,
+            vec!["baseline", "edited_files", "headline", "models", "summary"]
+        );
         let baseline_obj = v["baseline"].as_object().unwrap();
         let mut bkeys: Vec<&str> = baseline_obj.keys().map(|s| s.as_str()).collect();
         bkeys.sort();
@@ -577,6 +621,21 @@ mod tests {
         // A cause with no reason omits the key (Δ1).
         let cause_json = &v["models"][0]["cause"];
         assert!(cause_json.as_object().unwrap().get("reason").is_none());
+
+        // `docs/specs/property_diff.md` §Surface "JSON": every model carries
+        // `stories`, each with exactly the schema's story keys.
+        let story_json = &v["models"][0]["stories"][0];
+        let mut story_keys: Vec<&str> = story_json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        story_keys.sort();
+        assert_eq!(
+            story_keys,
+            vec!["changes", "detail", "kind", "lead", "severity", "subject"]
+        );
     }
 
     // --- Markdown form (`docs/outcomes/20260905-property-diff/phases/06-plan.md`) ---
@@ -622,6 +681,7 @@ mod tests {
                 neutral: 1,
                 shifted_models: 2,
             },
+            headline: String::new(),
             models: vec![downgraded, neutral_model],
         };
         let body = markdown_report(&report);
@@ -647,6 +707,7 @@ mod tests {
                 neutral: 1,
                 shifted_models: 1,
             },
+            headline: String::new(),
             models: vec![ModelDiff {
                 model: "staging.orders".to_string(),
                 cause: Cause {
@@ -659,6 +720,7 @@ mod tests {
                     change(Direction::Upgrade),
                     change(Direction::Neutral),
                 ],
+                stories: vec![],
             }],
         };
         let text = text_report(&report);
@@ -693,6 +755,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 2,
             },
+            headline: String::new(),
             models: vec![
                 model_diff(Cause {
                     kind: CauseKind::Edited,
@@ -707,6 +770,7 @@ mod tests {
                         reason: None,
                     },
                     changes: vec![change(Direction::Downgrade)],
+                    stories: vec![],
                 },
             ],
         };
@@ -730,6 +794,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 1,
             },
+            headline: String::new(),
             models: vec![model_diff(Cause {
                 kind: CauseKind::Edited,
                 of: vec![],
@@ -754,6 +819,7 @@ mod tests {
                     reason: None,
                 },
                 changes: vec![change(Direction::Downgrade)],
+                stories: vec![],
             })
             .collect();
         let report = DiffReport {
@@ -765,6 +831,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 500,
             },
+            headline: String::new(),
             models,
         };
         let body = markdown_report(&report);

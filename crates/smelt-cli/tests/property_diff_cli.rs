@@ -441,7 +441,10 @@ fn diff_json_top_level_matches_the_schema() {
     let obj = json.as_object().expect("top-level object");
     let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
     keys.sort();
-    assert_eq!(keys, vec!["baseline", "edited_files", "models", "summary"]);
+    assert_eq!(
+        keys,
+        vec!["baseline", "edited_files", "headline", "models", "summary"]
+    );
 
     let baseline = json["baseline"].as_object().expect("baseline object");
     let mut bkeys: Vec<&str> = baseline.keys().map(|s| s.as_str()).collect();

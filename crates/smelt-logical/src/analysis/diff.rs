@@ -135,11 +135,20 @@ pub enum ChangeKind {
     },
     CellTechnique {
         cell: String,
+        /// The cell's column-group display name, read structurally off the
+        /// matched [`CellVerdict`] rather than split back out of `cell`'s
+        /// own `{group}@{trigger:?}` join text.
+        group: String,
+        /// The source a `NewData`/`UpstreamMutation` trigger names, `None`
+        /// for `Backfill`/`ColumnAdded` — mirrors [`CellVerdict::trigger_source`].
+        trigger_source: Option<String>,
         old: Technique,
         new: Technique,
     },
     CellCorner {
         cell: String,
+        group: String,
+        trigger_source: Option<String>,
         old: String,
         new: String,
     },
@@ -228,6 +237,8 @@ pub enum ChangeKind {
     /// §"Direction" "state_downgrade" row).
     StateDowngrade {
         cell: String,
+        group: String,
+        trigger_source: Option<String>,
         old: Option<crate::maintenance::availability::StateDowngrade>,
         new: Option<crate::maintenance::availability::StateDowngrade>,
     },
@@ -629,7 +640,14 @@ pub struct Change {
 }
 
 impl Change {
-    fn from_kind(kind: ChangeKind) -> Self {
+    /// Build a [`Change`] from a typed [`ChangeKind`], deriving `dimension`,
+    /// `subject`, `direction`, `old`/`new`, and `reason` from it — the one
+    /// constructor every [`Change`] goes through, so a caller (including
+    /// `story_coverage`'s generative gate,
+    /// `docs/specs/property_diff.md` §Constraints item 11) can build a
+    /// [`Change`] from a [`ChangeKind`] and get the *real* derived fields
+    /// rather than hand-rolling them.
+    pub fn from_kind(kind: ChangeKind) -> Self {
         Change {
             dimension: kind.dimension(),
             subject: kind.subject(),
@@ -670,6 +688,12 @@ pub struct ModelDiff {
     pub model: String,
     pub cause: Cause,
     pub changes: Vec<Change>,
+    /// The severity-ranked narration of `changes`
+    /// (`docs/specs/property_diff.md` §"Stories"), produced once by
+    /// [`crate::analysis::diff_stories::narrate`] and carried here so every
+    /// renderer reads the same value rather than re-folding the changes
+    /// itself (§Constraints item 10, "Narration single ownership").
+    pub stories: Vec<crate::analysis::diff_stories::Story>,
 }
 
 /// The diff's summary counts (`docs/specs/property_diff.md` §Surface
@@ -723,6 +747,12 @@ pub struct DiffReport {
     pub baseline: BaselineInfo,
     pub edited_files: Vec<String>,
     pub summary: DiffSummary,
+    /// The report's one-line summary (`docs/specs/property_diff.md`
+    /// §"Stories" "Headline"), derived from `models`' own stories by
+    /// [`crate::analysis::diff_stories::headline`] — recomputed by
+    /// [`DiffReport::narrow_to`] whenever `models` is narrowed, so it always
+    /// counts the reported set.
+    pub headline: String,
     pub models: Vec<ModelDiff>,
 }
 
@@ -733,12 +763,15 @@ impl DiffReport {
     /// carried unchanged; this is presentation-envelope assembly, not a
     /// second diff.
     pub fn new(baseline: BaselineInfo, edited_files: Vec<String>, diff: PropertyDiff) -> Self {
-        DiffReport {
+        let mut report = DiffReport {
             baseline,
             edited_files,
             summary: diff.summary,
+            headline: String::new(),
             models: diff.models,
-        }
+        };
+        report.headline = crate::analysis::diff_stories::headline(&report);
+        report
     }
 
     /// Narrow the REPORTED set to `selected` model names
@@ -768,6 +801,7 @@ impl DiffReport {
             }
         }
         self.summary = summary;
+        self.headline = crate::analysis::diff_stories::headline(self);
     }
 }
 
@@ -1166,6 +1200,16 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                 })
             }
             Some(new_v) => {
+                // `group` and `trigger_source` are identical on both sides —
+                // the match key (`group`, `trigger`) already guarantees it —
+                // so either side's `CellVerdict` supplies them once here.
+                // Carried on the matched-cell `ChangeKind` variants below so
+                // a story can name the group/source structurally rather than
+                // recovering them by string-searching the cell key's own
+                // `{group}@{trigger:?}` join text (the re-parse-our-own-
+                // output bug class, `CLAUDE.md` §"Source-derived projection").
+                let group = old_v.group.clone();
+                let trigger_source = old_v.trigger_source.clone();
                 let CellVerdict {
                     group: _,
                     trigger: _,
@@ -1193,6 +1237,8 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                 if old_technique != new_technique {
                     changes.push(ChangeKind::CellTechnique {
                         cell: key.clone(),
+                        group: group.clone(),
+                        trigger_source: trigger_source.clone(),
                         old: *old_technique,
                         new: *new_technique,
                     });
@@ -1200,6 +1246,8 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                 if old_corner != new_corner {
                     changes.push(ChangeKind::CellCorner {
                         cell: key.clone(),
+                        group: group.clone(),
+                        trigger_source: trigger_source.clone(),
                         old: old_corner.clone(),
                         new: new_corner.clone(),
                     });
@@ -1221,6 +1269,8 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                 if old_sd != new_sd {
                     changes.push(ChangeKind::StateDowngrade {
                         cell: key.clone(),
+                        group: group.clone(),
+                        trigger_source: trigger_source.clone(),
                         old: old_sd.clone(),
                         new: new_sd.clone(),
                     });
@@ -1413,16 +1463,19 @@ pub fn diff_profiles(
                     continue;
                 }
                 let attributed = graph.attribute(name);
-                model_diffs.push(ModelDiff {
+                let mut model_diff = ModelDiff {
                     model: (*name).clone(),
                     cause: attributed,
                     changes: diff_profile(old_profile, new_profile),
-                });
+                    stories: Vec::new(),
+                };
+                model_diff.stories = crate::analysis::diff_stories::narrate(&model_diff);
+                model_diffs.push(model_diff);
                 continue;
             }
             (None, None) => continue,
         };
-        model_diffs.push(ModelDiff {
+        let mut model_diff = ModelDiff {
             model: (*name).clone(),
             cause: Cause {
                 kind: cause_kind,
@@ -1430,7 +1483,10 @@ pub fn diff_profiles(
                 reason: None,
             },
             changes,
-        });
+            stories: Vec::new(),
+        };
+        model_diff.stories = crate::analysis::diff_stories::narrate(&model_diff);
+        model_diffs.push(model_diff);
     }
 
     // Order: the graph's topological order (upstream first), then name for
@@ -2121,6 +2177,8 @@ mod tests {
         assert_eq!(
             ChangeKind::CellCorner {
                 cell: "x".to_string(),
+                group: "x".to_string(),
+                trigger_source: None,
                 old: "A".to_string(),
                 new: "B".to_string()
             }
@@ -2286,6 +2344,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: None,
                 new: Some(sd.clone()),
             }
@@ -2295,6 +2355,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: Some(sd.clone()),
                 new: None,
             }
@@ -2308,6 +2370,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: Some(sd),
                 new: Some(sd2),
             }
@@ -2317,6 +2381,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: None,
                 new: None,
             }
@@ -2755,6 +2821,7 @@ mod tests {
                 reason: None,
             },
             changes: vec![],
+            stories: vec![],
         }
     }
 
@@ -2836,6 +2903,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 2,
             },
+            headline: String::new(),
             models: vec![changed, dropped],
         };
         let selected: BTreeSet<String> = ["kept".to_string()].into_iter().collect();
