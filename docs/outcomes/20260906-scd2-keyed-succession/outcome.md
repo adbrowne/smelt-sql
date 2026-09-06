@@ -141,8 +141,9 @@ out-of-order and repeated windows, and the clamp.
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | done |
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
 | 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | done |
-| 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
-| 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
+| 3 | Plan model and derivation: `Grain::Succession { key_cols, clock_col }`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + the full-refresh availability downgrade; the pure succession-plan/refusal deriver in `smelt-logical`; the `resolved_grain()`-is-`None` branch in `smelt-db`'s `derive_model_maintenance_plan` that classifies and derives the one succession cell; `frozen_horizon`/`retain_departed` refusals naming the succession grain, `deferral` admitted | planned |
+| 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | pending |
+| 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg; the `maintenance_plan_conformance` SCD2 matrix cell updated with the emitter-backed CLAIMED entry | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
 | 7 | Testkit and conformance: arrival-partitioned `SourceRecipe`, `SuccessionRecipe` family with the model-SQL oracle and every listed leg; state-deletion and repair legs widened; seeded sample green | pending |
@@ -318,6 +319,27 @@ out-of-order and repeated windows, and the clamp.
   file is out of scope for a hardening-ratchet phase, and `docs/outcome_loop.md` §"The large-file
   shrink step" describes a dedicated non-blocking automated step for exactly this ratchet. See
   `phases/02b-summary.md`.
+
+- 2026-09-06 (plan phase 3): two reshapes, both from reading the code phase 3 has to touch
+  rather than from the 2b summary (which raised only the large-file ratchet the loop's shrink
+  step has since paid down in `73576f00`). **Split row 3 into 3 and 3a.** The row bundled six
+  deliverables across four crates — the plan-model variants, the pure deriver, the `smelt-db`
+  derivation branch, eleven diagnostic codes, eleven `examples/broken` fixtures, and the
+  conformance matrix — and the diagnostics half only has a producer once the plan half emits
+  `Refusal::SuccessionNotRecognized`, so the seam is natural and neither half is deferred out.
+  **Moved the `maintenance_plan_conformance` matrix work to phase 4.** That file's `CLAIMED`
+  list admits only cells with a grounded, executable emitter-backed test; phase 3 derives a plan
+  but emits no SQL, so a phase-3 entry would have to be a `KNOWN_GAPS` line immediately rewritten
+  by phase 4. Also pinned: the succession shape's inhabited cell is the matrix's **append-only**
+  column (0), not the `mutable snapshot` (2) or `change feed` (3) cells the SCD2 row carries
+  today — both of those stay refused/gapped, since a `change_feed` driving source is named out of
+  scope. Design calls made while planning: the `SuccessionContext` reaches `smelt-db` as a
+  side-channel built from the same `(ref, SourceInfo)` pairs (the `build_key_recurrences`
+  precedent), not as two new `SourceFacts` fields with 153 literal construction sites; a
+  succession cell's availability downgrade is `DeleteInsert` (full refresh) rather than
+  `recompute_equivalent`'s keyed `PerGroupRecompute`; and the contract refusals name the grain
+  through a grain *label* owned in `smelt-logical`, since `smelt_core::config::Grain` is the
+  declarable-surface enum and succession is never declared.
 
 ## Blocked
 
