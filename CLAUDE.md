@@ -126,13 +126,18 @@ target" into 2.5s.)
 has actually hit is disk writeback, not compilation: `b` in the hundreds, `wa` at
 99%, `us` near 0. `target/debug/deps` holds ~26 GB of test executables, so the
 build writes tens of GB and a degraded write path stops it dead. The cause here
-was TRIM starvation — `/` should carry `discard=async` in `/etc/fstab`, with
-`fstrim.timer` as the backstop; if both lapse while builds churn ~300 GB/day
-through a 1 TB drive, the
-SSD's free-block pool empties and sustained writes collapse from ~3.6 GB/s to
-~15 MB/s, inflating every build number by ~17x. Confirm with
-`dd if=/dev/zero of=target/ddtest bs=1M count=1024 conv=fsync` (expect GB/s) and
-fix with `sudo fstrim -v /`.
+was TRIM starvation. `/` is ext4, which has no asynchronous discard — the only
+mount options are `discard` (synchronous, and a write-path cost this drive can
+ill afford) and `nodiscard`; `discard=async` is a btrfs option and ext4 rejects
+it. So periodic trim is the mechanism, and `fstrim.timer`'s stock **weekly**
+schedule is too slow here: at ~300 GB/day of cargo churn through a 1 TB drive
+the free-block pool empties within days, every write becomes read-modify-erase
+garbage collection, and sustained writes collapse from ~3.6 GB/s to ~15 MB/s —
+inflating every build number by ~17x. Run the timer **daily**
+(`sudo systemctl edit fstrim.timer` → `[Timer]` / `OnCalendar=` / `OnCalendar=daily`).
+Confirm the drive is healthy with
+`dd if=/dev/zero of=target/ddtest bs=1M count=1024 conv=fsync` (expect GB/s);
+recover with `sudo fstrim -v /`.
 
 **Linker: do not add a mold `.cargo/config.toml`.** Not because mold is slower —
 on a healthy disk it is marginally *faster* (best of three on a 98 MB test
