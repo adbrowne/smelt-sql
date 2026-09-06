@@ -2655,6 +2655,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Property diff">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#stories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stories
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3012,6 +3029,23 @@
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="Property diff">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#stories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stories
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -3443,19 +3477,66 @@ implies one row per <code>(date, user, name)</code>, never the reverse) is a <co
 <a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">  </span><span class="nt">&quot;baseline&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;ref&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;as given&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;commit&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;sha&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;resolved_as&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;merge_base&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;explicit&quot;</span><span class="w"> </span><span class="p">},</span>
 <a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">  </span><span class="nt">&quot;edited_files&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;project-relative path&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span>
 <a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="w">  </span><span class="nt">&quot;summary&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;downgrades&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;upgrades&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;neutral&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;shifted_models&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="p">},</span>
-<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="w">    </span><span class="p">{</span>
-<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="w">      </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;name&gt;&quot;</span><span class="p">,</span>
-<a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="w">      </span><span class="nt">&quot;cause&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;edited&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;added&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;removed&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;downstream&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;of&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;model&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
-<a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="w">      </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;dimension&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cell_technique&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;direction&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;downgrade&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;old&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;KeyedFold&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;new&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DeleteInsert&quot;</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a><span class="w">      </span><span class="p">]</span>
-<a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a><span class="w">    </span><span class="p">}</span>
-<a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a><span class="w">  </span><span class="p">]</span>
-<a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a><span class="p">}</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="w">  </span><span class="nt">&quot;headline&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2 model(s) shifted · 1 read more per run&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="w">    </span><span class="p">{</span>
+<a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="w">      </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;name&gt;&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="w">      </span><span class="nt">&quot;cause&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;edited&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;added&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;removed&quot;</span><span class="w"> </span><span class="err">|</span><span class="w"> </span><span class="s2">&quot;downstream&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;of&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;model&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a><span class="w">      </span><span class="nt">&quot;stories&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a><span class="w">        </span><span class="p">{</span>
+<a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a><span class="w">          </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;technique&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a><span class="w">          </span><span class="nt">&quot;severity&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cost&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a><span class="w">          </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{total_amount}@NewData { source: \&quot;raw.transactions\&quot; }&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a><span class="w">          </span><span class="nt">&quot;lead&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Costlier maintenance&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a><span class="w">          </span><span class="nt">&quot;detail&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-17" name="__codelineno-12-17" href="#__codelineno-12-17"></a><span class="w">          </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+<a id="__codelineno-12-18" name="__codelineno-12-18" href="#__codelineno-12-18"></a><span class="w">        </span><span class="p">}</span>
+<a id="__codelineno-12-19" name="__codelineno-12-19" href="#__codelineno-12-19"></a><span class="w">      </span><span class="p">],</span>
+<a id="__codelineno-12-20" name="__codelineno-12-20" href="#__codelineno-12-20"></a><span class="w">      </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-12-21" name="__codelineno-12-21" href="#__codelineno-12-21"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;dimension&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cell_technique&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;direction&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;downgrade&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;old&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;KeyedFold&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;new&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DeleteInsert&quot;</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-12-22" name="__codelineno-12-22" href="#__codelineno-12-22"></a><span class="w">      </span><span class="p">]</span>
+<a id="__codelineno-12-23" name="__codelineno-12-23" href="#__codelineno-12-23"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-12-24" name="__codelineno-12-24" href="#__codelineno-12-24"></a><span class="w">  </span><span class="p">]</span>
+<a id="__codelineno-12-25" name="__codelineno-12-25" href="#__codelineno-12-25"></a><span class="p">}</span>
 </code></pre></div>
-<p>The full schema — every <code>dimension</code> value, the per-dimension direction rules, and the
-attribution algorithm — is normative in <code>docs/specs/property_diff.md</code>.</p>
+<p>The full schema — every <code>dimension</code> value, the per-dimension direction rules, the story-folding
+rules, and the attribution algorithm — is normative in <code>docs/specs/property_diff.md</code>.</p>
+<h3 id="stories">Stories<a class="headerlink" href="#stories" title="Permanent link">&para;</a></h3>
+<p>Above the raw per-dimension <code>changes</code>, each shifted model carries <strong>stories</strong>: the short list of
+sentences a reviewer reads first. A story folds one or more <code>changes</code> into a <code>lead</code> and a <code>detail</code>
+sentence, and every change belongs to exactly one story — nothing is ever dropped, even a change
+no dedicated rule recognizes (it lands in a catch-all <code>other</code> story).</p>
+<p>Each story carries a <strong>severity</strong>, derived from the directions of the changes it folds rather than
+assigned by hand:</p>
+<ul>
+<li><strong><code>risk</code></strong> — the story folds a downgrade to one of the model's correctness guarantees (its
+  grain, row identity, a maintained cell disappearing entirely, a relaxed contract, a column
+  losing determinism or comparability, and similar). This is what a careful reviewer needs to see
+  before approving.</li>
+<li><strong><code>cost</code></strong> — the story folds a downgrade that makes the model more expensive to maintain (a
+  wider read window, a costlier maintenance technique, a new dependency read in full on every
+  run) without weakening a correctness guarantee.</li>
+<li><strong><code>improvement</code></strong> — the story folds an upgrade and no downgrade at all.</li>
+<li><strong><code>info</code></strong> — everything else: a schema change, a cleared refusal, or any other change with no
+  downgrade or upgrade behind it.</li>
+</ul>
+<p>Because severity is derived this way, <code>--fail-on downgrade</code>, the editor's <code>PropertyDowngrade</code>
+warnings, and the <code>risk</code>/<code>cost</code> stories can never disagree with one another.</p>
+<p>The story <code>kind</code>s are: <code>maintenance_lost</code>/<code>maintenance_gained</code> (a model lost or gained
+incremental maintenance entirely), <code>refusal</code> (a maintenance admission refusal appeared or
+cleared), <code>rows_may_duplicate</code> (a join or row-identity change means rows are no longer
+identifiable by their old key), <code>row_key</code> (the proven row key was lost, gained, widened, or
+narrowed), <code>reads</code> (a source's read window widened or narrowed), <code>dependency</code> (a new or dropped
+upstream dependency, or a maintenance route lost for one that survives), <code>technique</code> (a cell's
+maintenance technique got cheaper or costlier), <code>contract</code> (a contract-lattice relaxation
+tightened or loosened), <code>probe</code> (a runtime check on a declared fact appeared or disappeared),
+<code>column_semantics</code> (a column's determinism or comparability changed), <code>schema</code> (columns were
+added or removed), and <code>other</code> (anything the rules above don't recognize).</p>
+<p>The <strong>headline</strong> is the report's one-line summary, joining the number of shifted models with a
+clause for each thing worth calling out — models that lost incremental maintenance, models with
+correctness risks, models that read more per run, and models that only improved — ending in
+"no downgrades" when the diff is entirely clean. The editor's code lens shows the same idea per
+model, as <code>&lt;n&gt; risk(s), &lt;n&gt; costlier vs &lt;ref&gt;</code> (or <code>changed vs &lt;ref&gt;</code> when the model has neither).</p>
 <p><strong>Markdown</strong> (<code>--diff --markdown</code>): a single comment body suitable for <code>gh pr comment
 --body-file</code>, with one collapsible block per shifted model (open by default when it holds a
 downgrade) and a trailing <code>&lt;!-- smelt-property-diff --&gt;</code> marker a CI job uses to update its
