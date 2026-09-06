@@ -803,7 +803,7 @@ crates/smelt-logical/tests/backbuild_property.rs 1063
 crates/smelt-logical/tests/change_comparability.rs 89
 crates/smelt-logical/tests/composed_output_as_clocked_source.rs 121
 crates/smelt-logical/tests/contract_deferral_cells.rs 48
-crates/smelt-logical/tests/contract_lattice_spec.rs 450
+crates/smelt-logical/tests/contract_lattice_spec.rs 488
 crates/smelt-logical/tests/declared_unique_key_classifier.rs 76
 crates/smelt-logical/tests/definition_change.rs 179
 crates/smelt-logical/tests/diff_patch.rs 335
@@ -863,6 +863,7 @@ crates/smelt-logical/tests/skeleton_closure_pinned.rs 85
 crates/smelt-logical/tests/skeleton_closure.rs 140
 crates/smelt-logical/tests/skew_self_exclusion.rs 245
 crates/smelt-logical/tests/story_coverage.rs 550
+crates/smelt-logical/tests/support/module_source.rs 142
 crates/smelt-logical/tests/support/test_only_files.rs 172
 crates/smelt-logical/tests/typed_edge_spec.rs 74
 crates/smelt-logical/tests/walk_coverage/classify.rs 271

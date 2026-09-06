@@ -2222,7 +2222,7 @@ none of it may be relied on or implemented against until it graduates into
 
 - **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit}.rs` (the per-cell
   derivation); `crates/smelt-logical/src/maintenance/propagate.rs` (the pure graph-layer
-  composition math — `propagate`/`required_inputs`); `crates/smelt-runtime/src/propagation.rs`
+  composition math — `propagate`/`required_inputs`); `crates/smelt-runtime/src/propagation/`
   (the real per-workspace graph assembly, `smelt run --since-upstream` planning, and
   `smelt build --include-upstreams` planning — `build_forward_graph`, `plan_since_upstream`,
   `resolve_build_plan`, all consuming the same `Edge` list);

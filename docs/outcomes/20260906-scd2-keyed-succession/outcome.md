@@ -149,7 +149,7 @@ out-of-order and repeated windows, and the clamp.
 | 3 | Plan model and derivation: `Grain::Succession { key_cols, clock_col }`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + the full-refresh availability downgrade; the pure succession-plan/refusal deriver in `smelt-logical`; the `resolved_grain()`-is-`None` branch in `smelt-db`'s `derive_model_maintenance_plan` that classifies and derives the one succession cell; `frozen_horizon`/`retain_departed` refusals naming the succession grain, `deferral` admitted | done |
 | 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | done |
 | 3b | Gate hygiene (test-file blind spot): this branch's large-file splits turned `#[cfg(test)] mod tests { … }` blocks into whole files that no gate's `#[cfg(test)]`-span scan can see, so test-only code is scanned as production — red in `join_context_reach::every_production_join_context_new_is_tagged`, `walk_coverage::admission_paths_have_no_raw_text_scans`, and `hardening_budget::gate_detects_regression` (`smelt-logical` `expect` 14 vs baseline 1). Fix the file *selection* in all three via one shared "declared under `#[cfg(test)] mod <stem>;`" rule (not a tag on any call site), and prove each still catches a real untagged production site | done |
-| 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | planned |
+| 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | done |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg; the `maintenance_plan_conformance` SCD2 matrix cell updated with the emitter-backed CLAIMED entry | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
@@ -159,6 +159,17 @@ out-of-order and repeated windows, and the clamp.
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (implement phase 3c): fixed the three named gates via a shared
+  `read_module` test helper (resolves `<stem>.rs` or concatenates the
+  non-test-only `.rs` files under `<stem>/`), strengthened the
+  `effective_contract` ownership check to an exactly-once scan, and added a
+  negative-proof test. Swept the six anchor specs for the same `<x>.rs` →
+  `<x>/` drift class and fixed 10 more citations. Raised the
+  `contract_lattice_spec.rs` large-file baseline 450 → 488 lines rather than
+  splitting — the growth is legitimate gate-hygiene test content and the file
+  is well under the 1500-line default cap. `verify-phase.sh` is fully green;
+  no red gate carried to phase 10.
 
 - 2026-09-07 (plan phase 3c): no phase-table reshape — 3b's summary confirmed the three
   named path-drift failures are exactly the pending work, and the pre-scan matched the

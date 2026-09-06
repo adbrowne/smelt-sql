@@ -1822,7 +1822,7 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   `unique_key`** — a `unique_key`-member candidate (bare, or `MAX`/`MIN`-wrapped, with or without
   a fallback) is admitted with no decomposed state and no declared functional dependency (the
   route-2 skip, `crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`, with
-  plan-layer parity in `crates/smelt-db/tests/maintenance_fold_spec_companion.rs` and an
+  plan-layer parity in `crates/smelt-db/tests/maintenance_fold_spec_companion/` and an
   end-to-end DuckDB witness in `crates/smelt-cli/tests/maintenance_conformance/gate.rs::
   once_write_key_fallback_pool_upholds_end_state_equivalence`), but a driving-clock-derived
   payload still takes the decomposed-state route: the classifier resolves no driving source, so
@@ -1990,9 +1990,9 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-logical/src/analysis/partition_axis.rs` — `PartitionAxis`
   - `crates/smelt-logical/src/analysis/source_bounds.rs` — `resolve_scan_window`
   - `crates/smelt-runtime/src/windowing.rs` — `PartitionPoint`, `IncrementalBatch` axis dispatch (calendar / unit-step integer)
-  - `crates/smelt-logical/src/maintenance/derive.rs` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
+  - `crates/smelt-logical/src/maintenance/derive/` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
   - `crates/smelt-state/src/schema_tracking.rs` — `DeployedSchema::partition_column`
-  - `crates/smelt-db/src/maintenance_refs.rs` — `model_source_clamps`
+  - `crates/smelt-db/src/maintenance_refs/` — `model_source_clamps`
 - **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI
   integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition
   full-refresh-equivalence harness; `crates/smelt-cli/tests/partition_residue_probes.rs`;
@@ -2024,12 +2024,12 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   `crates/smelt-logical/src/rules/cumulative.rs` (the built classifier seed — combiner lookup,
   GROUP-BY key derivation, driving-source resolution — and `execution_postures`, the derived
   re-run-tolerance/order-independence/reprocessing-refusal verdicts);
-  `crates/smelt-logical/src/maintenance/derive.rs` (the `KeyedRetractableContribution` classifier
-  seam); `crates/smelt-runtime/src/maintenance_driver.rs` (the windowed-keyed-maintenance driver,
+  `crates/smelt-logical/src/maintenance/derive/` (the `KeyedRetractableContribution` classifier
+  seam); `crates/smelt-runtime/src/maintenance_driver/` (the windowed-keyed-maintenance driver,
   `WindowedKeyedRule`); `crates/smelt-runtime/src/cumulative.rs` (per-window merge execution);
   `crates/smelt-backend/src/lib.rs` (`merge_into`, `Backend::execute_write_with_bookkeeping` —
   the transactional-write seam), impls in `crates/smelt-backend-duckdb` (the transactional
-  override) `/-spark`; `crates/smelt-logical/src/maintenance/availability.rs`
+  override) `/-spark`; `crates/smelt-logical/src/maintenance/availability/`
   (`resolve_availability` — the recorded `MaintenanceStateDowngraded` downgrade a non-DuckDB
   target's ledger-requiring cell carries, surfaced by `smelt explain`; see §Known Divergences).
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`);
