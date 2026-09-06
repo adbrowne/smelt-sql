@@ -263,6 +263,118 @@ async fn succession_full_refresh_executed_statements_match_the_emitters() {
     assert_eq!(rebuild_group.transactional, expected_group.transactional);
 }
 
+/// Phase 6a test: `succession_rebuild_executed_statements_match_the_emitters`
+/// — mirror of test 8 with `request.rebuild = true` (and `full_refresh:
+/// false`): a `smelt rebuild` invocation takes the same full-ledger
+/// `emit_succession_full_rebuild` path as `--full-refresh`
+/// (`docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+/// state)" — Lifecycle).
+#[tokio::test]
+async fn succession_rebuild_executed_statements_match_the_emitters() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    column_scoped_merge::copy_dir_recursive(&succession_fixture_dir(), &project_dir);
+    let db_path = tmp.path().join("run.duckdb");
+    stage_succession_source(&db_path);
+    insert_succession_event(&db_path, 1, "2026-01-01 08:00:00", "2026-01-01", "gold");
+    insert_succession_event(&db_path, 1, "2026-01-02 08:00:00", "2026-01-02", "silver");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+
+    // Run 1: bootstrap via the ordinary patch loop over both windows, so
+    // the rebuild run below rebuilds a table that already exists.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        execute_project(
+            "succession-rebuild-bootstrap".to_string(),
+            column_scoped_merge::select_request(
+                "dev",
+                "customer_history",
+                "2026-01-01",
+                "2026-01-03",
+            ),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &RecordingBackendFactory {
+                db_path: db_path.clone(),
+                backend: Arc::new(Mutex::new(None)),
+            },
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("bootstrap run must succeed");
+    }
+
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let mut request =
+        column_scoped_merge::select_request("dev", "customer_history", "2026-01-01", "2026-01-03");
+    request.full_refresh = false;
+    request.rebuild = true;
+    execute_project(
+        "succession-rebuild-run".to_string(),
+        request,
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("rebuild run must succeed");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        1,
+        "exactly one transactional rebuild group must have executed: {groups:?}"
+    );
+    let rebuild_group = &groups[0];
+
+    let create_prefix = format!("CREATE TABLE {PRESENTED_TABLE} AS ");
+    let model_select_sql = rebuild_group.statements[0]
+        .sql
+        .strip_prefix(&create_prefix)
+        .expect("rebuild group's first statement is the presented CREATE TABLE AS");
+
+    let expected_group = smelt_logical::maintenance::emit::emit_succession_full_rebuild(
+        PRESENTED_TABLE,
+        model_select_sql,
+        SOURCE_TABLE,
+        &["customer_id".to_string()],
+        "changed_at",
+        None,
+        "FALSE",
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        rebuild_group.statements.len(),
+        expected_group.statements.len()
+    );
+    for (actual, expected) in rebuild_group
+        .statements
+        .iter()
+        .zip(expected_group.statements.iter())
+    {
+        assert_eq!(actual.sql, expected.sql);
+    }
+    assert_eq!(rebuild_group.transactional, expected_group.transactional);
+}
+
 /// Test 9: `succession_patch_result_equals_full_refresh` — the Link-C
 /// `multiset_equal` leg every other family in this suite carries: the
 /// presented table a succession-patch run over two windows produces equals

@@ -82,7 +82,7 @@ fn build_db_and_graph(
     )
 }
 
-fn request(start: &str, end: &str) -> ExecuteRequest {
+fn request_with_rebuild(start: &str, end: &str, rebuild: bool) -> ExecuteRequest {
     ExecuteRequest {
         target: "dev".to_string(),
         select: vec!["customer_history".to_string()],
@@ -92,6 +92,7 @@ fn request(start: &str, end: &str) -> ExecuteRequest {
         batch_size_days: None,
         per_partition: false,
         full_refresh: false,
+        rebuild,
         dry_run: false,
         enforce_safety: false,
         allow_column_removal: false,
@@ -153,13 +154,24 @@ fn row_count(db_path: &Path, sql: &str) -> i64 {
 }
 
 async fn run(project_dir: &Path, db_path: &Path, config: &Arc<Config>, start: &str, end: &str) {
+    run_with_rebuild(project_dir, db_path, config, start, end, false).await;
+}
+
+async fn run_with_rebuild(
+    project_dir: &Path,
+    db_path: &Path,
+    config: &Arc<Config>,
+    start: &str,
+    end: &str,
+    rebuild: bool,
+) {
     let backend_factory = DuckDbBackendFactory {
         db_path: db_path.to_path_buf(),
     };
     let (db, graph) = build_db_and_graph(project_dir, config);
     execute_project(
         format!("run-{start}"),
-        request(start, end),
+        request_with_rebuild(start, end, rebuild),
         Arc::clone(config),
         graph,
         db,
@@ -270,4 +282,171 @@ async fn late_event_in_a_later_arrival_window_splices() {
         })
         .expect("row count");
     assert_eq!(row_count_total, 2);
+}
+
+const TOMBSTONE_TABLE: &str = "main.customer_history__tombstones";
+const BOGUS_CUSTOMER_ID: i64 = 999;
+const BOGUS_CHANGED_AT: &str = "2026-06-06 00:00:00";
+
+fn insert_bogus_tombstone(db_path: &Path) {
+    let conn = duckdb::Connection::open(db_path).expect("reopen duckdb");
+    conn.execute_batch(&format!(
+        "INSERT INTO {TOMBSTONE_TABLE} VALUES ({BOGUS_CUSTOMER_ID}, TIMESTAMP \
+         '{BOGUS_CHANGED_AT}')"
+    ))
+    .expect("insert bogus tombstone");
+}
+
+fn bogus_tombstone_count(db_path: &Path) -> i64 {
+    let conn = duckdb::Connection::open(db_path).expect("reopen duckdb");
+    conn.query_row(
+        &format!("SELECT count(*) FROM {TOMBSTONE_TABLE} WHERE customer_id = {BOGUS_CUSTOMER_ID}"),
+        [],
+        |r| r.get(0),
+    )
+    .expect("bogus tombstone count")
+}
+
+fn oracle_diff_count(db_path: &Path) -> i64 {
+    let oracle = format!(
+        "SELECT customer_id, changed_at, tier, \
+         LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS valid_to FROM \
+         {SOURCE_TABLE}"
+    );
+    let forward = row_count(
+        db_path,
+        &format!(
+            "(SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history) EXCEPT \
+             ALL ({oracle})"
+        ),
+    );
+    let reverse = row_count(
+        db_path,
+        &format!(
+            "({oracle}) EXCEPT ALL (SELECT customer_id, changed_at, tier, valid_to FROM \
+             main.customer_history)"
+        ),
+    );
+    forward + reverse
+}
+
+/// Test 2: `rebuild_request_re_derives_the_tombstone_ledger` — a bogus row
+/// planted directly in the ledger is gone after a `rebuild: true` run, and
+/// the presented table still equals the model SQL's full-refresh oracle
+/// (`docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+/// state)" — Lifecycle).
+#[tokio::test]
+async fn rebuild_request_re_derives_the_tombstone_ledger() {
+    let (_tmp, project_dir, db_path) = setup_project();
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+    stage_source(&db_path);
+    insert_event(&db_path, 1, "2026-01-01 08:00:00", "2026-01-01", "gold");
+    insert_event(&db_path, 1, "2026-01-02 08:00:00", "2026-01-02", "silver");
+
+    run(&project_dir, &db_path, &config, "2026-01-01", "2026-01-02").await;
+    run(&project_dir, &db_path, &config, "2026-01-02", "2026-01-03").await;
+
+    insert_bogus_tombstone(&db_path);
+    assert_eq!(
+        bogus_tombstone_count(&db_path),
+        1,
+        "bogus row must be planted"
+    );
+
+    run_with_rebuild(
+        &project_dir,
+        &db_path,
+        &config,
+        "2026-01-02",
+        "2026-01-03",
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        bogus_tombstone_count(&db_path),
+        0,
+        "a rebuild must re-derive the ledger from the whole source, dropping the bogus row"
+    );
+    assert_eq!(
+        oracle_diff_count(&db_path),
+        0,
+        "the presented table must still equal the model SQL's full-refresh oracle"
+    );
+}
+
+/// Test 3: `rebuild_ignores_the_event_time_window` — a succession rebuild's
+/// range selects which models rebuild, never how much of one model's state
+/// is re-derived: window 1's rows, dropped out-of-band, come back even
+/// though the rebuild request only names window 2.
+#[tokio::test]
+async fn rebuild_ignores_the_event_time_window() {
+    let (_tmp, project_dir, db_path) = setup_project();
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+    stage_source(&db_path);
+    insert_event(&db_path, 1, "2026-01-01 08:00:00", "2026-01-01", "gold");
+    insert_event(&db_path, 2, "2026-01-02 08:00:00", "2026-01-02", "silver");
+
+    run(&project_dir, &db_path, &config, "2026-01-01", "2026-01-02").await;
+    run(&project_dir, &db_path, &config, "2026-01-02", "2026-01-03").await;
+
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("reopen duckdb");
+        conn.execute_batch("DELETE FROM main.customer_history WHERE customer_id = 1")
+            .expect("drop window 1 rows out-of-band");
+    }
+    assert_eq!(
+        row_count(
+            &db_path,
+            "SELECT * FROM main.customer_history WHERE customer_id = 1"
+        ),
+        0,
+        "window 1's row must be gone before the rebuild"
+    );
+
+    run_with_rebuild(
+        &project_dir,
+        &db_path,
+        &config,
+        "2026-01-02",
+        "2026-01-03",
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        row_count(
+            &db_path,
+            "SELECT * FROM main.customer_history WHERE customer_id = 1"
+        ),
+        1,
+        "a succession rebuild re-derives the whole source, not just the requested window"
+    );
+    assert_eq!(oracle_diff_count(&db_path), 0);
+}
+
+/// Test 4: `an_ordinary_run_over_the_same_window_still_patches` — the
+/// identical request with `rebuild: false` leaves the bogus tombstone row in
+/// place, proving tests 2/3 discriminate the `rebuild` signal itself rather
+/// than just any re-run over the window.
+#[tokio::test]
+async fn an_ordinary_run_over_the_same_window_still_patches() {
+    let (_tmp, project_dir, db_path) = setup_project();
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+    stage_source(&db_path);
+    insert_event(&db_path, 1, "2026-01-01 08:00:00", "2026-01-01", "gold");
+    insert_event(&db_path, 1, "2026-01-02 08:00:00", "2026-01-02", "silver");
+
+    run(&project_dir, &db_path, &config, "2026-01-01", "2026-01-02").await;
+    run(&project_dir, &db_path, &config, "2026-01-02", "2026-01-03").await;
+
+    insert_bogus_tombstone(&db_path);
+
+    run(&project_dir, &db_path, &config, "2026-01-02", "2026-01-03").await;
+
+    assert_eq!(
+        bogus_tombstone_count(&db_path),
+        1,
+        "an ordinary (non-rebuild) run over the same window must not touch the ledger"
+    );
 }

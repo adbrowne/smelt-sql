@@ -1124,12 +1124,12 @@ table is therefore exactly the oracle's output for every reader, inside or outsi
 **Lifecycle.** The ledger is always a pure function of the processed input: its contents are
 exactly `SELECT k, t FROM <source> WHERE <pre-filter> AND <delete flag>` over every window
 ever folded. Every path that rebuilds presented state rebuilds the ledger from that
-definition, in the same transaction: a `--full-refresh` rebuilds both from the whole source,
-and a range rebuild (`smelt rebuild`) re-derives the ledger **in full** from the whole
-source too, in the same transaction as that range's presented rebuild — the ledger is a pure
-function of the whole (`append_only`, retained) source, so a whole-source re-derive is the
-same relation a range-restricted one would be, and is the only form the ledger's `(k, t)`
-physical shape admits (it carries no run-axis column to restrict by). A definition delta that
+definition, in the same transaction. Both `--full-refresh` and `smelt rebuild` take this same
+whole-source rebuild path for a succession model: neighbour relationships cross window
+boundaries and neither the presented table nor the ledger carries a run-axis column to
+restrict by, so a `smelt rebuild --event-time-start/-end` range selects *which* models
+rebuild, never how much of one model's state is re-derived — both tables are always re-derived
+from the whole (`append_only`, retained) source. A definition delta that
 touches the key, the clock, the delete flag, or the pre-window filter changes what the ledger
 *is* and is a skeleton change — a new relation, ledger included (`definition_deltas.md`
 §"Skeleton changes are a new relation"). A definition delta that touches only row-local
@@ -1150,8 +1150,8 @@ columns. Its columns are **exactly** `k ∪ {t}` — the classifier verdict's `k
 `clock_col`, in that order, each in the model's own inferred type, each `NOT NULL` — with primary
 key `(k, t)`; no payload, no delete flag (every row is a delete by construction), and no
 run-metadata column. Its lifecycle is tied to the presented table: created with it, dropped with
-it, rebuilt in the same transaction on `--full-refresh` and `smelt rebuild`, and replaced wholesale
-by a skeleton change, per the Lifecycle paragraph above.
+it, rebuilt from the whole source in the same transaction on `--full-refresh` and `smelt
+rebuild`, and replaced wholesale by a skeleton change, per the Lifecycle paragraph above.
 
 #### The maintenance theorem (bounded footprint)
 

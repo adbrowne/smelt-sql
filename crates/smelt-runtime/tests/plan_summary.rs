@@ -138,6 +138,7 @@ fn dry_run_request(target: &str) -> ExecuteRequest {
         batch_size_days: None,
         per_partition: false,
         full_refresh: false,
+        rebuild: false,
         dry_run: true,
         enforce_safety: false, // don't fail on simple test models
         allow_column_removal: false,

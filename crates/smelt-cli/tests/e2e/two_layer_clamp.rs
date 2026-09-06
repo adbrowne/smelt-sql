@@ -224,6 +224,7 @@ async fn batched_write_clamp_does_not_widen_to_scan_margin() {
         batch_size_days: Some(1),
         per_partition: false,
         full_refresh: false,
+        rebuild: false,
         dry_run: false,
         enforce_safety: false,
         allow_column_removal: false,

@@ -260,6 +260,7 @@ fn run_request(select: Vec<String>, start: &str, end: &str) -> ExecuteRequest {
         batch_size_days: None,
         per_partition: false,
         full_refresh: false,
+        rebuild: false,
         dry_run: false,
         enforce_safety: false,
         allow_column_removal: false,

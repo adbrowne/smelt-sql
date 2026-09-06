@@ -2293,20 +2293,18 @@ pub async fn execute_project(
         // state-downgraded cell (technique no longer `SuccessionPatch`), so
         // this guard only needs the grain check.
         //
-        // Below, `request.full_refresh || force_full_refresh` takes the
-        // full-ledger `rebuild_succession_state` path (phase 5c); every
-        // other run (including `smelt rebuild`'s windowed re-run, which
-        // always passes `full_refresh: false` —
-        // `crates/smelt-cli/src/commands/rebuild.rs`) takes the ordinary
-        // window-forward patch loop. `ExecuteRequest` carries no signal
-        // that distinguishes a `smelt rebuild` invocation from an ordinary
-        // `smelt run` over the same window, so a `smelt rebuild` of a
-        // succession model does not yet re-derive the tombstone ledger in
-        // full the way `docs/specs/incremental_shapes.md` §"The tombstone
-        // ledger (hidden state)" — "Lifecycle" describes; only
-        // `--full-refresh` does today. Threading a `rebuild_range` signal
-        // through `ExecuteRequest` to close this gap is left to the next
-        // planner (phase 5c plan's own task 5 notes the same fallback).
+        // Below, `request.full_refresh || force_full_refresh || request.rebuild`
+        // takes the full-ledger `rebuild_succession_state` path (phase 5c,
+        // widened in phase 6a); every other run takes the ordinary
+        // window-forward patch loop. `request.rebuild` is set only by
+        // `smelt rebuild` (`crates/smelt-cli/src/commands/rebuild.rs`); per
+        // `docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+        // state)" — "Lifecycle", a succession model has no run-axis column to
+        // restrict a rebuild by, so `smelt rebuild`'s `--event-time-start/-end`
+        // range selects which models rebuild, never how much of one model's
+        // state is re-derived: both the presented table and the ledger are
+        // always re-derived from the whole source, exactly as `--full-refresh`
+        // does.
         if let Some(metadata) = plan
             .model_file
             .metadata
@@ -2353,7 +2351,7 @@ pub async fn execute_project(
                 // transaction — never the window-forward patch loop, which
                 // would leave a full refresh touching neither relation.
                 let (succession_result, strategy, time_range) =
-                    if request.full_refresh || force_full_refresh {
+                    if request.full_refresh || force_full_refresh || request.rebuild {
                         let compiler = compilers.get(model_target);
                         let resolver = &ephemeral_resolvers[model_target];
                         let compiled = compiler.compile_with_sql_and_ephemerals(
