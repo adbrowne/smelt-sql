@@ -16,6 +16,14 @@
 //! `///` doc-comment block of the enclosing function, or in the file's
 //! module-level `//!` doc block (a file-wide tag, used by `temporal.rs`,
 //! whose `EffectiveWindow` walk is a deliberate whole-module divergence).
+//! Whole files declared under `#[cfg(test)]` in their parent module (see
+//! `support/test_only_files.rs`) are excluded from the scanned set entirely —
+//! a `#[cfg(test)] mod tests { .. }` *block* split out into its own file
+//! (e.g. `maintenance/choice/write_variant_tests.rs`) is still test-only even
+//! though nothing inside the file itself carries the attribute.
+
+#[path = "support/test_only_files.rs"]
+mod test_only_files;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,6 +92,7 @@ fn scanned_files(root: &Path) -> Vec<PathBuf> {
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         !KNOWN_NONCOMPLIANT.contains(&rel_str.as_str())
     });
+    files.retain(|rel| !test_only_files::is_test_only(root, rel));
     files.sort();
     files
 }
@@ -355,6 +364,36 @@ fn unclassified_raw_scans(path: &Path) -> Vec<(usize, String)> {
         }
     }
     violations
+}
+
+/// Regression lock for the test-file blind spot: `maintenance/choice/tests.rs`
+/// and `maintenance/choice/write_suppression_tests.rs` are both declared
+/// `#[cfg(test)] mod <stem>;` in `maintenance/choice/mod.rs`, so both must be
+/// excluded from the scanned set, while `maintenance/choice/mod.rs` itself
+/// must still be included.
+#[test]
+fn gate_scans_production_choice_sources() {
+    let root = repo_root();
+    let files = scanned_files(&root);
+    let choice_tests = PathBuf::from("crates/smelt-logical/src/maintenance/choice/tests.rs");
+    let write_suppression_tests =
+        PathBuf::from("crates/smelt-logical/src/maintenance/choice/write_suppression_tests.rs");
+    let choice_mod = PathBuf::from("crates/smelt-logical/src/maintenance/choice/mod.rs");
+    assert!(
+        !files.contains(&choice_tests),
+        "expected {} to be excluded as test-only, got it in the scanned set",
+        choice_tests.display()
+    );
+    assert!(
+        !files.contains(&write_suppression_tests),
+        "expected {} to be excluded as test-only, got it in the scanned set",
+        write_suppression_tests.display()
+    );
+    assert!(
+        files.contains(&choice_mod),
+        "expected {} to remain in the scanned set",
+        choice_mod.display()
+    );
 }
 
 /// The committed tree carries no unclassified raw text-scan in the

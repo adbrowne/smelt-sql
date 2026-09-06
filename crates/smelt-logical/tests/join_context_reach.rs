@@ -15,7 +15,14 @@
 //! Mechanism mirrors `walk_coverage.rs`: scan each target file's *production*
 //! text (every `#[cfg(test)]`-annotated item's span excluded) for the literal
 //! `JoinContext::new()`, and require the tag on the same line or the line
-//! immediately before.
+//! immediately before. Whole files declared under `#[cfg(test)]` in their
+//! parent module (see `support/test_only_files.rs`) are excluded from the
+//! scanned set entirely — a `#[cfg(test)] mod tests { .. }` *block* split out
+//! into its own file is still test-only even though nothing inside the file
+//! itself carries the attribute.
+
+#[path = "support/test_only_files.rs"]
+mod test_only_files;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -60,6 +67,7 @@ fn scanned_files(root: &Path) -> Vec<PathBuf> {
     for dir in SCANNED_DIRS {
         collect_rs_files(root, &root.join(dir), &mut files);
     }
+    files.retain(|rel| !test_only_files::is_test_only(root, rel));
     files.sort();
     files
 }
@@ -158,6 +166,28 @@ fn unclassified_sites(path: &Path) -> Vec<usize> {
         }
     }
     violations
+}
+
+/// Regression lock for the test-file blind spot: `analysis/walk/tests.rs` is
+/// declared `#[cfg(test)] mod tests;` in `analysis/walk/mod.rs`, so it must be
+/// excluded from the scanned set, while `analysis/walk/mod.rs` itself (plain
+/// production module) must still be included.
+#[test]
+fn gate_scans_production_walk_sources() {
+    let root = repo_root();
+    let files = scanned_files(&root);
+    let walk_tests = PathBuf::from("crates/smelt-logical/src/analysis/walk/tests.rs");
+    let walk_mod = PathBuf::from("crates/smelt-logical/src/analysis/walk/mod.rs");
+    assert!(
+        !files.contains(&walk_tests),
+        "expected {} to be excluded as test-only, got it in the scanned set",
+        walk_tests.display()
+    );
+    assert!(
+        files.contains(&walk_mod),
+        "expected {} to remain in the scanned set",
+        walk_mod.display()
+    );
 }
 
 #[test]

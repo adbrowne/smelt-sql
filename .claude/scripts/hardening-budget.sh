@@ -6,6 +6,9 @@
 #   Production code means:
 #     - Excludes files named tests.rs
 #     - Excludes files under any tests/ directory
+#     - Excludes files declared under #[cfg(test)] in their parent module
+#       (e.g. `#[cfg(test)] mod write_variant_tests;` in a mod.rs) — see
+#       _is_test_only_file(), applied transitively up the directory chain
 #     - Excludes lines from the first "#[cfg(test)]" line to end of file
 #       (line-boundary approximation: a file with interleaved prod/test
 #       sections may over-count slightly — the bias is conservative, i.e. it
@@ -27,6 +30,88 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BASELINE_FILE="$REPO_ROOT/.claude/hardening-baseline.txt"
 UPDATE_MODE=false
 [[ "${1:-}" == "--update" ]] && UPDATE_MODE=true
+
+# Shared "is this file test-only?" rule with crates/smelt-logical/tests/
+# support/test_only_files.rs: a file at <dir>/<stem>.rs is test-only when the
+# parent module source (<dir>/mod.rs, else the sibling <dir's-parent>/<dir's
+# own name>.rs) declares "mod <stem>;" under #[cfg(test)] (same line or the
+# nearest non-blank line above), applied transitively up the directory chain.
+# Closes the blind spot large-file splits reopen: a `#[cfg(test)] mod tests
+# { .. }` *block* split into its own file is test-only even though nothing
+# inside the file carries the attribute, so the tests.rs/tests/-dir name
+# heuristic below cannot see it.
+
+# Path to the parent module source for a directory, or empty if neither form
+# exists.
+_parent_module_source() {
+    local dir="$1"
+    if [[ -f "$dir/mod.rs" ]]; then
+        echo "$dir/mod.rs"
+        return
+    fi
+    local name
+    name="$(basename "$dir")"
+    local sibling="$(dirname "$dir")/$name.rs"
+    [[ -f "$sibling" ]] && echo "$sibling"
+}
+
+# Does $1 (a module source file) declare "mod $2;" under #[cfg(test)] (same
+# line, or the nearest non-blank line above it)?
+_declared_cfg_test() {
+    local src_file="$1"
+    local stem="$2"
+    awk -v stem="$stem" '
+        BEGIN { needle = "mod " stem ";" }
+        {
+            trimmed = $0
+            gsub(/^[ \t]+|[ \t]+$/, "", trimmed)
+            if (index(trimmed, needle) > 0) {
+                if (index(trimmed, "#[cfg(test)]") == 1) { print "yes"; exit }
+                for (j = NR - 1; j >= 1; j--) {
+                    p = lines[j]
+                    gsub(/^[ \t]+|[ \t]+$/, "", p)
+                    if (p == "") continue
+                    if (index(p, "#[cfg(test)]") == 1) { print "yes" } else { print "no" }
+                    exit
+                }
+                print "no"
+                exit
+            }
+        }
+        { lines[NR] = $0 }
+    ' "$src_file" | grep -q '^yes$'
+}
+
+# Is $1 (a .rs file path) test-only per the rule above, applied transitively
+# up the directory chain? Fails loud: an unreadable/absent parent module
+# source classifies the file as production, never silently skipped.
+_is_test_only_file() {
+    local file="$1"
+    local dir
+    dir="$(dirname "$file")"
+    local stem
+    stem="$(basename "$file" .rs)"
+
+    local parent_src
+    parent_src="$(_parent_module_source "$dir")"
+    if [[ -n "$parent_src" ]] && _declared_cfg_test "$parent_src" "$stem"; then
+        return 0
+    fi
+
+    local current="$dir"
+    while true; do
+        local name
+        name="$(basename "$current")"
+        local parent
+        parent="$(dirname "$current")"
+        parent_src="$(_parent_module_source "$parent")"
+        [[ -z "$parent_src" ]] && return 1
+        if _declared_cfg_test "$parent_src" "$name"; then
+            return 0
+        fi
+        current="$parent"
+    done
+}
 
 # Count occurrences of a fixed-string pattern in the production portion of one
 # .rs file (everything before the first "#[cfg(test)]" line).
@@ -52,6 +137,9 @@ _count_crate() {
         [[ "$fname" == "tests.rs" ]] && continue
         # Skip files under tests/ subdirectories
         [[ "$file" == */tests/* ]] && continue
+        # Skip files declared under #[cfg(test)] in their parent module (a
+        # `#[cfg(test)] mod tests { .. }` block split into its own file).
+        _is_test_only_file "$file" && continue
         n="$(_count_file "$file" "$pattern")"
         total=$((total + n))
     done < <(find "$src_dir" -name '*.rs' -print0 2>/dev/null)

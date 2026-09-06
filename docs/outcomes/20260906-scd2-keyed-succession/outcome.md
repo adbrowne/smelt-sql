@@ -143,7 +143,7 @@ out-of-order and repeated windows, and the clamp.
 | 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | done |
 | 3 | Plan model and derivation: `Grain::Succession { key_cols, clock_col }`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + the full-refresh availability downgrade; the pure succession-plan/refusal deriver in `smelt-logical`; the `resolved_grain()`-is-`None` branch in `smelt-db`'s `derive_model_maintenance_plan` that classifies and derives the one succession cell; `frozen_horizon`/`retain_departed` refusals naming the succession grain, `deferral` admitted | done |
 | 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | done |
-| 3b | Gate hygiene (test-file blind spot): this branch's large-file splits turned `#[cfg(test)] mod tests { … }` blocks into whole files that no gate's `#[cfg(test)]`-span scan can see, so test-only code is scanned as production — red in `join_context_reach::every_production_join_context_new_is_tagged`, `walk_coverage::admission_paths_have_no_raw_text_scans`, and `hardening_budget::gate_detects_regression` (`smelt-logical` `expect` 14 vs baseline 1). Fix the file *selection* in all three via one shared "declared under `#[cfg(test)] mod <stem>;`" rule (not a tag on any call site), and prove each still catches a real untagged production site | planned |
+| 3b | Gate hygiene (test-file blind spot): this branch's large-file splits turned `#[cfg(test)] mod tests { … }` blocks into whole files that no gate's `#[cfg(test)]`-span scan can see, so test-only code is scanned as production — red in `join_context_reach::every_production_join_context_new_is_tagged`, `walk_coverage::admission_paths_have_no_raw_text_scans`, and `hardening_budget::gate_detects_regression` (`smelt-logical` `expect` 14 vs baseline 1). Fix the file *selection* in all three via one shared "declared under `#[cfg(test)] mod <stem>;`" rule (not a tag on any call site), and prove each still catches a real untagged production site | done |
 | 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg; the `maintenance_plan_conformance` SCD2 matrix cell updated with the emitter-backed CLAIMED entry | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -154,6 +154,16 @@ out-of-order and repeated windows, and the clamp.
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (implement phase 3b): fixed all three named gates with one shared rule
+  (`crates/smelt-logical/tests/support/test_only_files.rs`, included via `#[path = ...]`
+  in `join_context_reach.rs`/`walk_coverage.rs`, plus a bash/awk twin
+  `_is_test_only_file()` in `hardening-budget.sh`). No baseline update was needed —
+  `.claude/hardening-baseline.txt`'s `smelt-logical expect 1` already matched the
+  corrected count; the fix restores the gate's counting to an already-correct baseline
+  rather than requiring the baseline to move. Workspace `cargo test` still fails on
+  `state_docs_freshness::spec_references_are_live` — phase 3c's target, unaffected by
+  this phase's changes, left for 3c per the phase-3b plan.
 
 - 2026-09-07 (plan phase 3b): two reshapes, both forced by the phase-3a summary's
   finding that **five** standing gates are red on this branch, all fallout from its own
