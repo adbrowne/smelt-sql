@@ -3,7 +3,7 @@
 //! Data only — every row is handed to the single `BuiltinRegistry` table
 //! constructed in [`super`].
 
-use super::super::{Emission, Position, Signature, SyntaxForm, TypeConstraint, TypeExpr};
+use super::super::{Emission, Position, Signature, TypeConstraint, TypeExpr};
 use super::concrete;
 use crate::{DataType, DialectId};
 
@@ -36,7 +36,17 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
                 with_timezone: false,
             })),
         )
-        .with_syntax_form(SyntaxForm::Special),
+        // Spark's own `date_add(date, days: INT)` is a different function
+        // (integer days, not an INTERVAL); infix `DATE + INTERVAL '5' DAY`
+        // accepts this signature's second argument, but Spark reports the
+        // bare infix result as `DATE`, not `TIMESTAMP` — the explicit cast
+        // makes the engine agree with smelt's declared return type.
+        // Verified live 2026-09-06 (phase 9).
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Template("CAST({0} + {1} AS TIMESTAMP)"),
+        )]),
     );
     insert(
         Signature::new(
@@ -48,7 +58,6 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
                 with_timezone: false,
             })),
         )
-        .with_syntax_form(SyntaxForm::Special)
         // DuckDB spells interval subtraction infix; its own
         // `date_sub(VARCHAR, ts, ts)` is a different function entirely.
         // Verified live 2026-09-06.
@@ -60,13 +69,15 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
             ),
             // Spark's own `date_sub(date, days: INT)` is a different function
             // (integer days, not an INTERVAL); infix `DATE - INTERVAL '5' DAY`
-            // is what actually accepts this signature's second argument.
-            // Verified live 2026-09-06 (phase 8):
-            // `DATE '2026-01-02' - INTERVAL '5' DAY` = `2025-12-28`.
+            // is what actually accepts this signature's second argument, but
+            // (as with `DATE_ADD` above) Spark reports the bare infix result
+            // as `DATE`, so the explicit cast makes the engine agree with
+            // smelt's declared `TIMESTAMP` return type.
+            // Verified live 2026-09-06 (phase 9).
             (
                 DialectId::SparkSql,
                 Position::Any,
-                Emission::Template("{0} - {1}"),
+                Emission::Template("CAST({0} - {1} AS TIMESTAMP)"),
             ),
         ]),
     );

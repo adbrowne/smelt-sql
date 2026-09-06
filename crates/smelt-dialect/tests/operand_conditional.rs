@@ -155,13 +155,16 @@ fn age_prints_the_spark_form() {
 
 #[test]
 fn date_sub_prints_the_spark_form() {
+    // Phase 9: the bare infix form reports `DATE` on Spark, not smelt's
+    // declared `Timestamp` return type, so the template carries an explicit
+    // cast (docs/outcomes/20260904-dialect-emission-vocabulary phase 9).
     assert_eq!(
         print_with(
             "SELECT DATE_SUB(a, b) FROM t",
             &SqlDialect::SparkSQL,
             &BackendCapabilities::spark()
         ),
-        "SELECT (a - b) FROM t"
+        "SELECT CAST(a - b AS TIMESTAMP) FROM t"
     );
 }
 

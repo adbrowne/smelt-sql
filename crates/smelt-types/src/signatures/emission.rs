@@ -311,6 +311,14 @@ pub enum ConditionalError {
     /// it guards on (or, for an arity-less arm, beyond the signature's own
     /// fixed arity).
     ArgumentIndexOutOfRange { signature: String, index: usize },
+    /// An arm's verdict is a [`SettledEmission::Template`] that fails
+    /// [`validate_template`]'s own checks — the same discipline a top-level
+    /// `Emission::Template` row is held to, applied per arm.
+    InvalidTemplateArm {
+        signature: String,
+        arm_index: usize,
+        error: TemplateError,
+    },
 }
 
 impl std::fmt::Display for ConditionalError {
@@ -331,6 +339,15 @@ impl std::fmt::Display for ConditionalError {
                 "conditional emission for `{signature}` has an arm naming argument index \
                  {index}, beyond the arity it guards on"
             ),
+            ConditionalError::InvalidTemplateArm {
+                signature,
+                arm_index,
+                error,
+            } => write!(
+                f,
+                "conditional emission for `{signature}` has an invalid template at arm \
+                 {arm_index}: {error}"
+            ),
         }
     }
 }
@@ -343,6 +360,7 @@ impl std::error::Error for ConditionalError {}
 pub fn validate_conditional(
     arms: &'static [ConditionalArm],
     sig: &Signature,
+    position: Position,
 ) -> Result<(), ConditionalError> {
     let variadic = matches!(sig.params.last(), Some(SigParam::Variadic(_)));
     let fixed_arity = sig.params.len();
@@ -367,7 +385,7 @@ pub fn validate_conditional(
         });
     }
 
-    for arm in arms {
+    for (arm_index, arm) in arms.iter().enumerate() {
         if let Some(arity) = arm.arity {
             let admitted = if variadic {
                 arity + 1 >= fixed_arity
@@ -389,6 +407,15 @@ pub fn validate_conditional(
                     index: *idx,
                 });
             }
+        }
+        if let SettledEmission::Template(template) = arm.verdict {
+            validate_template(template, sig, position).map_err(|error| {
+                ConditionalError::InvalidTemplateArm {
+                    signature: sig.name.clone(),
+                    arm_index,
+                    error,
+                }
+            })?;
         }
     }
     Ok(())

@@ -102,6 +102,8 @@ pub enum SqlFunction {
     MakeTimestamptz,
     Age,
     ToSeconds,
+    DateAdd,
+    DateSub,
 
     // String functions
     Concat,
@@ -261,6 +263,8 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::MakeTimestamptz,
     SqlFunction::Age,
     SqlFunction::ToSeconds,
+    SqlFunction::DateAdd,
+    SqlFunction::DateSub,
     SqlFunction::Concat,
     SqlFunction::Upper,
     SqlFunction::Lower,
@@ -418,6 +422,8 @@ impl SqlFunction {
             Self::MakeTimestamptz => "MAKE_TIMESTAMPTZ",
             Self::Age => "AGE",
             Self::ToSeconds => "TO_SECONDS",
+            Self::DateAdd => "DATE_ADD",
+            Self::DateSub => "DATE_SUB",
             Self::Concat => "CONCAT",
             Self::Upper => "UPPER",
             Self::Lower => "LOWER",
@@ -555,7 +561,9 @@ impl SqlFunction {
             | Self::MakeTimestamp
             | Self::MakeTimestamptz
             | Self::Age
-            | Self::ToSeconds => FunctionCategory::DateTime,
+            | Self::ToSeconds
+            | Self::DateAdd
+            | Self::DateSub => FunctionCategory::DateTime,
 
             Self::Concat
             | Self::Upper

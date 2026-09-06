@@ -253,27 +253,11 @@ static ROWS: &[LedgerRow] = &[
     // `type_property_tests`, which generates from `core_functions()`, a
     // hand-maintained registry-blind table.
     //
-    // `DATE_ADD`/`DATE_SUB` specifically: the registry's `Concrete(Timestamp)`
-    // return type (corrected to match `binary.rs` and the live engine —
-    // `docs/outcomes/20260904-dialect-emission-vocabulary` phase 4) is never
-    // consulted, because neither name has a `SqlFunction` enum variant, so
-    // `infer_function_type` returns `None` before `try_registry_inference`
-    // ever runs. Not the contingency's assumed unquoted-`INTERVAL`-literal
-    // gap — that literal already infers `Interval` correctly on its own
-    // (measured directly) — a distinct, deeper registry-wiring gap. See
-    // `phases/04-summary.md`.
-    type_gap(
-        "DATE_ADD",
-        DialectId::DuckDb,
-        "#176", "`DATE_ADD` has no `SqlFunction` enum variant, so `infer_function_type` never \
-                 reaches the registry; infers Unknown(Dynamic) while DuckDB returns TIMESTAMP",
-    ),
-    type_gap(
-        "DATE_SUB",
-        DialectId::DuckDb,
-        "#176", "`DATE_SUB` has no `SqlFunction` enum variant, so `infer_function_type` never \
-                 reaches the registry; infers Unknown(Dynamic) while DuckDB returns TIMESTAMP",
-    ),
+    // `DATE_ADD`/`DATE_SUB` on DuckDB: closed in
+    // `docs/outcomes/20260904-dialect-emission-vocabulary` phase 9 — both
+    // gained `SqlFunction` variants and joined `REGISTRY_MIGRATED`, so
+    // `infer_function_type` now reaches the registry's `Concrete(Timestamp)`
+    // return type, matching DuckDB's own reported type.
     type_gap(
         "EXPLODE",
         DialectId::DuckDb,
@@ -311,22 +295,13 @@ static ROWS: &[LedgerRow] = &[
     // semantics. Each is a lowering smelt owes — a `Rename` where Spark spells
     // it differently, a `Rewrite` where the shape differs, or an
     // `Unsupported` verdict where neither is possible.
-    gap("DATE_ADD", DialectId::SparkSql, "#176", "Spark's `date_add(date, days)` takes an integer, not an INTERVAL"),
-    // Same registry-wiring gap as `DATE_SUB` on DuckDB (phase 4): no
-    // `SqlFunction` enum variant, so `infer_function_type` never reaches the
-    // registry and infers Unknown(Dynamic). Surfaced for the first time here
-    // because this phase gave `DATE_SUB` its first Spark emission verdict
-    // (`Emission::Template("{0} - {1}")`), which made its type leg run at
-    // all — same bail-out the plan named in advance. Spark's own `{0} -
-    // {1}` on a DATE/INTERVAL pair returns DATE, not TIMESTAMP (measured
-    // live 2026-09-06: `DATE '2026-01-02' - INTERVAL '5' DAY` = DATE
-    // `2025-12-28`), unlike DuckDB's TIMESTAMP-widening subtraction.
-    type_gap(
-        "DATE_SUB",
-        DialectId::SparkSql,
-        "#176", "`DATE_SUB` has no `SqlFunction` enum variant, so `infer_function_type` never \
-                 reaches the registry; infers Unknown(Dynamic) while Spark returns DATE",
-    ),
+    // `DATE_ADD`/`DATE_SUB` on Spark: closed in
+    // `docs/outcomes/20260904-dialect-emission-vocabulary` phase 9. Both
+    // gained `SqlFunction` variants (closing the type-leg gap `DATE_SUB`
+    // surfaced in phase 8), and both now carry a Spark
+    // `Emission::Template("CAST({0} ± {1} AS TIMESTAMP)")` verdict — the
+    // bare infix form reports DATE on Spark, not smelt's declared
+    // TIMESTAMP, and the explicit cast makes the engine agree.
     //
     // Value-leg divergence: same name, same shape, permanent semantic
     // difference for a non-array JSON argument. Not a schema gap — see the
@@ -602,11 +577,6 @@ static ROWS: &[LedgerRow] = &[
         "TO_SECONDS",
         DialectId::SparkSql,
         "Spark renders `make_interval`'s output as `1.5 seconds`; DuckDB renders the equivalent interval `1.500000000 secs`. Same interval, different textual representation.",
-    ),
-    divergent(
-        "DATE_SUB",
-        DialectId::SparkSql,
-        "Spark's `{0} - {1}` on a DATE/INTERVAL pair stays a DATE; DuckDB widens to TIMESTAMP. Both name the same day — the same type_gap this phase registered for the schema leg.",
     ),
     divergent(
         "JSON_OBJECT_KEYS",

@@ -201,6 +201,34 @@ fn date_sub_lowers_to_infix_subtraction_on_duckdb() {
     );
 }
 
+/// Spark reports the bare infix `DATE + INTERVAL` as `DATE`, not `TIMESTAMP`
+/// — the declared smelt (and DuckDB) return type — so the Spark template
+/// wraps the infix form in an explicit cast. Verified live 2026-09-06
+/// (phase 9 of docs/outcomes/20260904-dialect-emission-vocabulary).
+#[test]
+fn date_add_prints_the_spark_form() {
+    assert_eq!(
+        spark("SELECT DATE_ADD(d, INTERVAL 1 DAY) FROM t"),
+        "SELECT CAST(d + INTERVAL 1 DAY AS TIMESTAMP) FROM t"
+    );
+    // DuckDB is unaffected — `DATE_ADD` keeps its `Native` verdict there.
+    assert_eq!(
+        duckdb("SELECT DATE_ADD(d, INTERVAL 1 DAY) FROM t"),
+        "SELECT DATE_ADD(d, INTERVAL 1 DAY) FROM t"
+    );
+}
+
+/// Same reasoning as `date_add_prints_the_spark_form`, for `DATE_SUB` — the
+/// cast is the spelling whose Spark-reported type matches smelt's declared
+/// `Timestamp` return type, not merely a spelling that parses.
+#[test]
+fn date_sub_spark_form_matches_smelt_return_type() {
+    assert_eq!(
+        spark("SELECT DATE_SUB(d, INTERVAL 1 DAY) FROM t"),
+        "SELECT CAST(d - INTERVAL 1 DAY AS TIMESTAMP) FROM t"
+    );
+}
+
 #[test]
 fn non_call_template_is_wrapped_in_parens() {
     // A template such as `{0} - {1}` is not call-shaped — its output must be

@@ -67,7 +67,7 @@ pub(super) static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new
                     }
                 }
                 if let Emission::Conditional(arms) = emission {
-                    if let Err(e) = validate_conditional(arms, &sig) {
+                    if let Err(e) = validate_conditional(arms, &sig, *position) {
                         panic!("malformed built-in signature: {e}");
                     }
                 }

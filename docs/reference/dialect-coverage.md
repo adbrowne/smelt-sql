@@ -89,9 +89,9 @@ the exact reverse.
 | `CURRENT_DATE` | call | native | native | native |
 | `CURRENT_TIMESTAMP` | call | native | native | native |
 | `DATE` | call | native | native | native |
-| `DATE_ADD` | special | native (gap #176) | native (gap #176) | native (gap #176, divergent) |
+| `DATE_ADD` | call | native | template:CAST({0} + {1} AS TIMESTAMP) | native (gap #176, divergent) |
 | `DATE_PART` | call | native | native | native (gap #179) |
-| `DATE_SUB` | special | template:{0} - {1} (gap #176) | template:{0} - {1} (gap #176, divergent) | native (gap #176) |
+| `DATE_SUB` | call | template:{0} - {1} | template:CAST({0} - {1} AS TIMESTAMP) | native (gap #176) |
 | `DATE_TRUNC` | call | native | native | native (gap #179) |
 | `DAY` | call | native | native | native (gap #179) |
 | `DAYOFWEEK` | call | native | template:DAYOFWEEK({0}) - 1 | native (gap #179) |

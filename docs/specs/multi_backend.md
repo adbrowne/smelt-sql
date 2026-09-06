@@ -320,7 +320,9 @@ carry arbitrary literal text around them. Every argument the call supplies must 
 least once; a template that would silently drop an argument is malformed. Templates are static
 registry data and are validated when the registry is built — every placeholder index within the
 entry's declared arity, balanced parentheses, and no argument unreferenced — so a malformed
-template is a build-time failure, never a runtime one.
+template is a build-time failure, never a runtime one. A template used as an operand-conditional
+arm's verdict (§"Operand-conditional verdicts") is validated by these same rules, at the same
+registry-construction time, against the entry's own signature.
 
 **Substitution preserves precedence.** A placeholder is replaced by the argument's *printed* text —
 lowered for the same dialect, recursively, so nested calls and operators inside an argument receive

@@ -80,7 +80,7 @@ audit before it is claimed — never from documentation.
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
 | 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
 | 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | done |
-| 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap`; also validate a `Conditional` arm's `Template` verdict at registry construction | planned |
+| 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap`; also validate a `Conditional` arm's `Template` verdict at registry construction | done |
 | 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
 ## Decision log
@@ -353,6 +353,22 @@ audit before it is claimed — never from documentation.
   returns `DATE` where smelt (and DuckDB) declare `Timestamp`, so the template carries the cast.
   The plan's contingency — a type-leg `Divergent` row if no measured spelling makes the engine
   agree — is bounded and may only be taken after the cast is attempted live.
+
+- 2026-09-06 (implement 09) — phase 9 done. `DATE_ADD`/`DATE_SUB` gained `SqlFunction` variants
+  and joined `REGISTRY_MIGRATED`, dropped `SyntaxForm::Special`; both now infer `Timestamp`
+  correctly on DuckDB (measured live, DuckDB 1.5.4). Spark got measured `Emission::Template`
+  casts (`CAST({0} ± {1} AS TIMESTAMP)`) — the plan's a-priori guess was confirmed correct
+  against a freshly bootstrapped `.smelt-spark-venv` (this worktree had none; one-time setup
+  from `scripts/README-spark.md`) and live Spark 4.0.0 Connect. `validate_conditional` now
+  validates a `Template`-verdict arm through `validate_template` (new
+  `ConditionalError::InvalidTemplateArm`), closing the criterion-2 hole phase 8 surfaced.
+  `dialect_gaps_duckdb` 6→4, `dialect_gaps_spark` 6→4 — criterion 5 now lands on both engines,
+  each with exactly the four `#175`/`#176` rows. Live `dialect_audit`: 61/61 green (DuckDB +
+  Spark legs). `verify-phase.sh`: fmt/clippy/example_diagnostics green; the workspace `cargo
+  test` leg's only failure is a pre-existing, unrelated `smelt-core --test baseline` temp-file
+  race (`materialize_tests::checkout_scratch_is_deleted_when_materialization_fails`), confirmed
+  unrelated via `git diff --stat -- crates/smelt-core/` (empty) and a clean 21/21
+  single-threaded rerun. See `phases/09-summary.md`.
 
 ## Blocked
 

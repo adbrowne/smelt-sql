@@ -787,8 +787,6 @@ fn dedicated_syntax_entries_are_not_call_form() {
         "IN",
         "EXISTS",
         "CAST",
-        "DATE_ADD",
-        "DATE_SUB",
     ] {
         let sig = BuiltinRegistry::resolve(name).expect(name);
         assert_ne!(
@@ -796,6 +794,23 @@ fn dedicated_syntax_entries_are_not_call_form() {
             SyntaxForm::Call,
             "{name} is dedicated syntax; leaving it Call re-enters it into the \
              callable-function consistency gate"
+        );
+    }
+}
+
+#[test]
+fn date_add_and_date_sub_are_ordinary_calls() {
+    // Phase 9: both names are ordinary two-argument calls on the callable
+    // surface — nothing in production consumes their `SyntaxForm::Special`
+    // classification (`binary.rs` types the infix interval add/sub itself),
+    // so the registry-consistency gate's `SyntaxForm` exemption must no
+    // longer cover them.
+    for name in ["DATE_ADD", "DATE_SUB"] {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_eq!(
+            sig.syntax_form,
+            SyntaxForm::Call,
+            "{name} must be an ordinary callable, not dedicated syntax"
         );
     }
 }
@@ -1341,7 +1356,7 @@ fn a_conditional_without_an_otherwise_arm_fails_validation() {
     const ARMS: &[ConditionalArm] = &[NATIVE_IF_INTEGRAL];
     let sig = one_arg_signature();
     assert_eq!(
-        validate_conditional(ARMS, &sig),
+        validate_conditional(ARMS, &sig, Position::Any),
         Err(ConditionalError::MissingOtherwise {
             signature: sig.name.clone()
         })
@@ -1353,7 +1368,7 @@ fn an_otherwise_arm_not_last_fails_validation() {
     const ARMS: &[ConditionalArm] = &[OTHERWISE_UNSUPPORTED, NATIVE_IF_INTEGRAL];
     let sig = one_arg_signature();
     assert_eq!(
-        validate_conditional(ARMS, &sig),
+        validate_conditional(ARMS, &sig, Position::Any),
         Err(ConditionalError::MissingOtherwise {
             signature: sig.name.clone()
         })
@@ -1372,7 +1387,7 @@ fn a_conditional_naming_an_arity_the_signature_does_not_admit_fails_validation()
     ];
     let sig = one_arg_signature();
     assert_eq!(
-        validate_conditional(ARMS, &sig),
+        validate_conditional(ARMS, &sig, Position::Any),
         Err(ConditionalError::ArityNotAdmitted {
             signature: sig.name.clone(),
             arity: 5
@@ -1392,10 +1407,36 @@ fn a_conditional_naming_an_argument_index_beyond_arity_fails_validation() {
     ];
     let sig = one_arg_signature();
     assert_eq!(
-        validate_conditional(ARMS, &sig),
+        validate_conditional(ARMS, &sig, Position::Any),
         Err(ConditionalError::ArgumentIndexOutOfRange {
             signature: sig.name.clone(),
             index: 3
+        })
+    );
+}
+
+#[test]
+fn a_conditional_arm_template_is_validated() {
+    // Phase 9: a `Conditional` arm's `Template` verdict is held to the same
+    // registry-construction discipline as a top-level `Emission::Template`
+    // row — an out-of-range placeholder must fail to build, not misbehave
+    // silently at print time.
+    const ARMS: &[ConditionalArm] = &[ConditionalArm {
+        arity: None,
+        classes: &[],
+        verdict: SettledEmission::Template("{9}"),
+    }];
+    let sig = one_arg_signature();
+    assert_eq!(
+        validate_conditional(ARMS, &sig, Position::Any),
+        Err(ConditionalError::InvalidTemplateArm {
+            signature: sig.name.clone(),
+            arm_index: 0,
+            error: TemplateError::IndexOutOfRange {
+                signature: sig.name.clone(),
+                index: 9,
+                arity: 1,
+            },
         })
     );
 }
@@ -1410,10 +1451,10 @@ fn the_full_registry_builds_with_conditional_validation() {
     // exercises real registry data, not just a hypothetical future one.
     let names: Vec<&str> = BuiltinRegistry::names().collect();
     for sig in names.iter().filter_map(|n| BuiltinRegistry::resolve(n)) {
-        for (_, _, emission) in sig.emission.iter() {
+        for (_, position, emission) in sig.emission.iter() {
             if let Emission::Conditional(arms) = emission {
                 assert!(
-                    validate_conditional(arms, sig).is_ok(),
+                    validate_conditional(arms, sig, *position).is_ok(),
                     "{}: conditional arms failed validation",
                     sig.name
                 );
