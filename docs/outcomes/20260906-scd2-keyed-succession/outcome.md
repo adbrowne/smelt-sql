@@ -138,7 +138,7 @@ out-of-order and repeated windows, and the clamp.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | done |
-| 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | planned |
+| 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | done |
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | pending |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
@@ -229,6 +229,19 @@ out-of-order and repeated windows, and the clamp.
   re-derivation, and with `SuccessionPreFilterNegatesFlag` carried as an advisory on the
   `Recognized` verdict rather than as a refusal variant (the spec says it never changes
   admission).
+
+- 2026-09-06 (phase 2 done): landed as planned, no reshape. `classify_keyed_succession`
+  (`crates/smelt-logical/src/analysis/succession.rs`) implements rules 1, 1a, 1b, 2–6 with a
+  ten-variant `NotSuccessionReason` (1:1 with the ten admission-changing codes) plus
+  `SuccessionAdvisory::PreFilterNegatesFlag` carried on `Recognized` for the eleventh (Warning)
+  code; wired into `walk.rs` as `model_keyed_succession`, its sole call site. 39 unit tests
+  green (one per named refusal plus 6 recognition cases plus 2 wiring tests); `walk_coverage`
+  green; `rg` confirms no call site outside `succession.rs`/`walk.rs`. One planned test
+  (`refuses_where_over_window_derived_column`) dropped as unimplementable without a fuller
+  source column schema than `SuccessionContext` carries today — noted as a gap, not silently
+  skipped. `verify-phase.sh`'s full `cargo test` leg is red only on the pre-existing, unrelated
+  `smelt-core` baseline flake phase 1 found (confirmed again via an isolated
+  `--test-threads=1` rerun); phase 2a fixes it next. See `phases/02-summary.md`.
 
 ## Blocked
 

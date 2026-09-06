@@ -25,6 +25,7 @@ pub mod presentation;
 pub mod profile;
 pub mod skeleton_closure;
 pub mod source_bounds;
+pub mod succession;
 pub mod temporal;
 pub mod walk;
 pub mod window_independence;

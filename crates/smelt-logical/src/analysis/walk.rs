@@ -2973,6 +2973,33 @@ pub fn model_property_vector(sql: &str, ctx: &JoinContext) -> Option<PropertyVec
     Some(walk(&tree, &PropertyTransfer { ctx }))
 }
 
+use crate::analysis::succession::{
+    classify_keyed_succession, SuccessionContext, SuccessionVerdict,
+};
+
+/// The sole call site of [`classify_keyed_succession`]: apply the
+/// keyed-succession leaf classifier to `tree`'s top scope only. A set
+/// operation or unrecognised construct at the outermost query refuses
+/// outright — a succession-shaped projection nested inside a CTE or
+/// `UNION` arm is future work (`docs/specs/incremental_shapes.md`
+/// §Future Extensions), never silently missed.
+pub fn model_keyed_succession(tree: &QueryTree, ctx: &SuccessionContext) -> SuccessionVerdict {
+    use crate::analysis::succession::NotSuccessionReason;
+    match &tree.root {
+        QueryNode::Select(node) => classify_keyed_succession(node, ctx),
+        QueryNode::SetOp(_) => SuccessionVerdict::NotSuccession {
+            reason: NotSuccessionReason::SingleSourceOnly(
+                "outermost query is a set operation, not a single SELECT scope".into(),
+            ),
+        },
+        QueryNode::Unsupported { reason } => SuccessionVerdict::NotSuccession {
+            reason: NotSuccessionReason::SingleSourceOnly(format!(
+                "unrecognised outermost query construct: {reason}"
+            )),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3652,5 +3679,54 @@ mod tests {
             "one Incomparable arm must dominate the union; got {:?}",
             v.comparability
         );
+    }
+
+    fn succession_fixture_ctx() -> SuccessionContext {
+        use crate::analysis::input_delta::MutationProfile;
+        SuccessionContext {
+            source_name: "raw.customer_changes".to_string(),
+            mutation_profile: Some(MutationProfile::AppendOnly),
+            event_time_column: Some("changed_at".to_string()),
+            not_null_columns: ["customer_id", "changed_at"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn walk_invokes_succession_leaf() {
+        use crate::analysis::succession::classify_keyed_succession;
+
+        let sql = "SELECT customer_id, changed_at, \
+                    LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_ts \
+                    FROM smelt.raw.customer_changes";
+        let ctx = succession_fixture_ctx();
+        let tree = QueryTree::from_sql(sql).expect("sql parses");
+        let QueryNode::Select(node) = &tree.root else {
+            panic!("expected a top-level SELECT scope");
+        };
+        assert_eq!(
+            model_keyed_succession(&tree, &ctx),
+            classify_keyed_succession(node, &ctx),
+            "the walk entry must return exactly the classifier's own verdict for the top scope"
+        );
+    }
+
+    #[test]
+    fn walk_refuses_a_succession_shape_nested_in_a_union_arm() {
+        let sql = "SELECT customer_id, changed_at, \
+                    LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_ts \
+                    FROM smelt.raw.customer_changes \
+                    UNION ALL \
+                    SELECT customer_id, changed_at, \
+                    LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_ts \
+                    FROM smelt.raw.other_changes";
+        let ctx = succession_fixture_ctx();
+        let tree = QueryTree::from_sql(sql).expect("sql parses");
+        assert!(matches!(
+            model_keyed_succession(&tree, &ctx),
+            SuccessionVerdict::NotSuccession { .. }
+        ));
     }
 }
