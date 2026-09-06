@@ -141,9 +141,19 @@ jobs:
         #                                   from the shared walk, not ad hoc scans.
         #   unknown_census                — fail-loud: every DataType::Unknown site is
         #                                   classified in .claude/unknown-census.toml.
+        #
+        # execute_parity runs single-threaded on purpose. The binary contains
+        # `ui_path_runs_python_models`, and with the `python` feature the PyO3
+        # interpreter — and `smelt.core._registered_models` with it — is
+        # process-global, so tests running concurrently in this binary see each
+        # other's models. `test_cli_ui_manifest_parity_with_ephemerals` then
+        # fails with "Table with name src does not exist". Reproduced locally:
+        # 2 cores with default threads fails 3/3, `--test-threads=1` passes 5/5.
+        # That race is issue #189 and is being fixed separately; serialising
+        # here keeps this gate deterministic without taking ownership of it.
         run: |
           cargo test -p smelt-runtime --test statement_parity
-          cargo test -p smelt-runtime --test execute_parity
+          cargo test -p smelt-runtime --test execute_parity -- --test-threads=1
           cargo test -p smelt-runtime --test projection_dialect_invariance
           cargo test -p smelt-logical --test walk_coverage
           cargo test -p smelt-types --test unknown_census
