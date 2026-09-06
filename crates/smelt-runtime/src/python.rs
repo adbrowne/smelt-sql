@@ -56,25 +56,32 @@ fn run_python_model(
         .env("PYTHONPATH", pythonpath)
         .spawn()
         .with_context(|| format!("Failed to execute Python model: {}", file_path.display()))?;
+    let pid = child.id();
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         stdin
             .write_all(project_context_json.as_bytes())
             .with_context(|| {
                 format!(
-                    "Failed to write context to Python model: {}",
+                    "Failed to write context to Python model: {} (pid {pid})",
                     file_path.display()
                 )
             })?;
     }
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("Failed to execute Python model: {}", file_path.display()))?;
+    let output = child.wait_with_output().with_context(|| {
+        format!(
+            "Failed to execute Python model: {} (pid {pid})",
+            file_path.display()
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // The pid is included so a misattributed traceback (this file's error
+        // context paired with another concurrently-spawned child's stderr) is
+        // diagnosable rather than silently confusing — see issue #189.
         return Err(anyhow!(
-            "Python model error in {}:\n{}",
+            "Python model error in {} (pid {pid}):\n{}",
             file_path.display(),
             stderr
         ));

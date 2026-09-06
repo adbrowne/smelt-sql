@@ -114,20 +114,25 @@ When smelt detects an error, it often suggests a fix. The most useful code actio
 
 While you're editing, the LSP compares each model's derived properties (grain, row identity,
 maintenance technique, and the rest — see `docs-site/docs/reference/smelt-explain.md`) against a
-git baseline, the same comparison `smelt explain --diff` prints from the command line. A model
-whose properties have shifted relative to that baseline gets a code lens on its first line:
+git baseline, the same comparison `smelt explain --diff` prints from the command line, and folds
+the shift into the same short list of reviewer-facing **stories** the CLI prints. A model whose
+properties have shifted relative to that baseline gets a code lens on its first line, naming how
+many stories are risks and how many are costlier:
 
 ```
-2 downgrades, 1 upgrades vs main
+1 risk, 1 costlier vs main
 ```
 
 `<short ref>` is the baseline's ref name, or a 7-character commit abbreviation when the baseline
-resolved to a bare commit. Every downgrade also gets its own warning diagnostic, anchored as
-precisely as the shift allows — a column-level change anchors on that column in the `SELECT` list,
-a source-level change anchors on the `FROM`/`JOIN` clause that names it, and anything else (a
-maintenance cell, a refusal, a whole-model verdict) anchors on the model's first line, since those
-changes have no narrower home in the file's text. Hovering over the lens shows the same per-model
-detail `smelt explain --diff`'s text form prints.
+resolved to a bare commit; a model with neither a risk nor a costlier story just reads `changed vs
+main`. Every `risk` or `cost` story also gets its own warning diagnostic — one per story, not one
+per underlying change it folds — with the story's lead sentence and detail as the message,
+anchored as precisely as the story's subject allows: a story about a column anchors on that column
+in the `SELECT` list, a story about a source or an upstream model anchors on the `FROM`/`JOIN`
+clause that names it, and anything else (a maintenance cell, a refusal, a whole-model story with no
+narrower subject) anchors on the model's first line, since it has no narrower home in the file's
+text. The full per-model block — the stories first, then the verdicts they fold — is available
+from `smelt explain --diff`'s text form; the lens itself does not yet serve it on hover.
 
 The baseline defaults to the merge-base with `main`, exactly like the CLI. The diff refreshes when
 the workspace loads, when a model file is saved or changed on disk outside the editor, and when
