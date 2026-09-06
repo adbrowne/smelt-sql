@@ -1,24 +1,42 @@
 //! Compile-path settlement of operand-conditional verdicts
 //! (`docs/specs/multi_backend.md` §"Operand-conditional verdicts").
 //!
-//! No production registry entry is `Conditional` yet (phase 7 populates the
-//! first ones — `LOG`, `TRUNC`, `TO_JSON`, `//` per class). These tests
-//! exercise `settle_emissions`'s walk mechanics — position/arity read off
-//! the source CST, operand class read through the caller's `type_of`
-//! callback, and the result matching a direct `Signature::settle_at` call —
-//! against `//`, the one registered entry whose non-`DuckDB` verdict is
-//! already `Unsupported` wholesale. The arm-selection logic itself (first
-//! match wins, arity guards, class guards, the `otherwise` fallback) is
-//! proven against synthetic signatures in
+//! Phase 7 populated the first production `Conditional` entries — `LOG`,
+//! `TRUNC`, `TO_JSON`, `//` per class — on Spark. These tests exercise
+//! `settle_emissions`'s walk mechanics — position/arity read off the source
+//! CST, operand class read through the caller's `type_of` callback, and the
+//! result matching a direct `Signature::settle_at` call — against `//`, and
+//! (below) the first-argument-class arms of `TRUNC`/`TO_JSON` and the
+//! non-`Conditional` `DAYOFWEEK` template. The arm-selection logic itself
+//! (first match wins, arity guards, class guards, the `otherwise` fallback)
+//! is proven against synthetic signatures in
 //! `crates/smelt-types/tests/registry_coverage.rs`.
 
 use std::collections::{HashMap, HashSet};
 
 use smelt_dialect::emission_settle::settled_verdict_for;
-use smelt_dialect::{settle_emissions, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_dialect::{print, settle_emissions, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::syntax_kind::SyntaxKind;
 use smelt_types::signatures::Position;
 use smelt_types::{BuiltinRegistry, CallFacts, DataType, DialectId, OperandClass, SettledEmission};
+
+fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> String {
+    let parsed = smelt_parser::parse(sql);
+    let ctx = PrintContext {
+        dialect,
+        capabilities: caps,
+        schema: "main",
+        ephemeral_models: HashSet::new(),
+        cross_engine_refs: HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
+        smelt_path_ref: None,
+        smelt_path_call: None,
+        restructure_plans: &[],
+        settled_emissions: &[],
+    };
+    print(&parsed.syntax(), &ctx)
+}
 
 fn floor_divide_root() -> smelt_parser::syntax_kind::SyntaxNode {
     smelt_parser::parse("SELECT a // b FROM t").syntax()
@@ -101,5 +119,63 @@ fn a_settled_verdict_reaches_the_printer_by_range() {
     assert_eq!(
         settled_verdict_for(&node, sig, Position::Any, &ctx_miss),
         SettledEmission::Native
+    );
+}
+
+#[test]
+fn dayofweek_prints_the_shift_template_on_spark() {
+    let sql = "SELECT DAYOFWEEK(d) FROM t";
+    assert_eq!(
+        print_with(sql, &SqlDialect::SparkSQL, &BackendCapabilities::spark()),
+        "SELECT (DAYOFWEEK(d) - 1) FROM t",
+        "the non-call template's whole output must be parenthesised"
+    );
+    assert_eq!(
+        print_with(sql, &SqlDialect::DuckDB, &BackendCapabilities::duckdb()),
+        "SELECT DAYOFWEEK(d) FROM t"
+    );
+}
+
+#[test]
+fn trunc_and_to_json_settle_by_first_argument_class() {
+    let trunc_sig = BuiltinRegistry::resolve("TRUNC").expect("TRUNC is registered");
+    assert_eq!(
+        trunc_sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Temporal, OperandClass::String])
+        ),
+        SettledEmission::Native
+    );
+    assert_eq!(
+        trunc_sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Decimal])
+        ),
+        SettledEmission::Unsupported {
+            reason: "Spark's TRUNC is temporal-only; there is no numeric TRUNC"
+        }
+    );
+
+    let to_json_sig = BuiltinRegistry::resolve("TO_JSON").expect("TO_JSON is registered");
+    assert_eq!(
+        to_json_sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Composite])
+        ),
+        SettledEmission::Native
+    );
+    assert_eq!(
+        to_json_sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Integral])
+        ),
+        SettledEmission::Unsupported {
+            reason: "Spark's TO_JSON requires a struct, array or map argument; there is no \
+                     scalar TO_JSON"
+        }
     );
 }

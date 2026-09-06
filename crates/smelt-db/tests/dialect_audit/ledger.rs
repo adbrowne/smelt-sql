@@ -324,13 +324,9 @@ static ROWS: &[LedgerRow] = &[
     gap("MAKE_TIMESTAMPTZ", DialectId::SparkSql, "#178", "no `make_timestamptz`; Spark has `make_timestamp`"),
     gap("QUOTE_IDENT", DialectId::SparkSql, "#178", "PostgreSQL-only builtin"),
     gap("QUOTE_LITERAL", DialectId::SparkSql, "#178", "PostgreSQL-only builtin"),
-    gap("TO_JSON", DialectId::SparkSql, "#178", "Spark's `to_json` takes a struct or array, not a scalar"),
     gap("TO_SECONDS", DialectId::SparkSql, "#178", "no `to_seconds` in Spark"),
-    gap("TRUNC", DialectId::SparkSql, "#178", "Spark's `trunc(date, fmt)` is temporal; there is no numeric `trunc`"),
     gap("TRUNCATE", DialectId::SparkSql, "#178", "no `truncate` scalar in Spark"),
     gap("GROUP_CONCAT", DialectId::SparkSql, "#178", "Spark spells it `concat_ws(sep, collect_list(x))`"),
-    value_gap("LOG", DialectId::SparkSql, "#174", "Spark's `log(x)` is the natural logarithm; DuckDB's is base 10 - a silently wrong number, closable by a rename to `log10`"),
-    value_gap("DAYOFWEEK", DialectId::SparkSql, "#174", "Spark numbers the week from Sunday=1, DuckDB from Sunday=0 - a silently wrong number, closable by a rewrite"),
     // `MEDIAN` works as an aggregate on Spark, and a whole-partition window
     // now restructures around a grouped CTE; only the running-window case
     // remains a gap, so the row is scoped to that position.

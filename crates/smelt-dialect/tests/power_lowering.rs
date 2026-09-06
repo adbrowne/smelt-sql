@@ -141,15 +141,27 @@ fn floor_divide_is_declared_unsupported_rather_than_lowered() {
          silently approximates: {out}"
     );
 
-    // Registry verdict: Unsupported on Spark and BigQuery.
+    // Registry verdict: BigQuery still refuses `//` wholesale; Spark settles
+    // it per operand class (phase 7), whose `otherwise` arm is the same
+    // declared refusal an unresolvable operand takes.
     let sig = BuiltinRegistry::resolve("//").expect("floor-divide `//` must have a registry entry");
-    for dialect in [SqlDialect::SparkSQL, SqlDialect::BigQuery] {
-        let emission = sig.emission_at(dialect.id(), smelt_types::signatures::Position::Any);
-        assert!(
-            matches!(emission, Emission::Unsupported { .. }),
-            "floor-divide `//` must be Unsupported on {}, got {:?}",
-            dialect.name(),
-            emission
-        );
-    }
+    let bigquery_emission = sig.emission_at(
+        smelt_types::DialectId::BigQuery,
+        smelt_types::signatures::Position::Any,
+    );
+    assert!(
+        matches!(bigquery_emission, Emission::Unsupported { .. }),
+        "floor-divide `//` must be Unsupported on BigQuery, got {bigquery_emission:?}"
+    );
+    assert_eq!(
+        sig.settle_at(
+            smelt_types::DialectId::SparkSql,
+            smelt_types::signatures::Position::Any,
+            &smelt_types::CallFacts::unresolved(2)
+        ),
+        smelt_types::SettledEmission::Unsupported {
+            reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)"
+        },
+        "an unresolved operand on Spark must still be a declared refusal"
+    );
 }

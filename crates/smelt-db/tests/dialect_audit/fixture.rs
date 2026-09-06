@@ -274,6 +274,22 @@ const ROWS: &[Row] = &[
 fn cell(dialect: DialectId, col_idx: usize, value: Option<&str>) -> String {
     let (col, _) = COLUMNS[col_idx];
     let type_name = ty(dialect, col);
+    // Spark's day-time `CAST(<string> AS INTERVAL DAY)` only accepts a bare
+    // signed-integer string (`CAST('1' AS ...)`), not the `'1 day'` text
+    // DuckDB and GoogleSQL both accept — verified live 2026-09-06 (DuckDB
+    // and BigQuery: `CAST('1 day' AS INTERVAL)` parses; Spark:
+    // `INVALID_INTERVAL_FORMAT`). Spark's own `INTERVAL '<n>' DAY` literal
+    // syntax is the one form every engine here accepts, so it replaces the
+    // `CAST(...)` wrapper outright for this column on this dialect alone.
+    if col == "iv_interval" && dialect == DialectId::SparkSql {
+        return match value {
+            None => format!("CAST(NULL AS {type_name})"),
+            Some(v) => {
+                let days = v.trim_matches('\'').split_whitespace().next().unwrap_or(v);
+                format!("INTERVAL '{days}' DAY")
+            }
+        };
+    }
     let literal = match value {
         None => "NULL".to_string(),
         Some(v) if col == "arr_int" => array_lit(dialect, v),

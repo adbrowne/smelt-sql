@@ -959,16 +959,12 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **No registry row is operand-conditional yet.** The `Emission::Conditional` mechanism and its
-  compile-path resolution step exist (`OperandClass`, `ConditionalArm`, `Signature::settle_at`),
-  but no entry uses them: `%` on BigQuery still lowers to `MOD` for every operand and fails at the
-  warehouse on a floating-point one (#173); `//` is still refused wholesale on Spark and BigQuery
-  rather than lowered per operand class; `LOG` is registered at one arity only, so the
-  two-argument form is not recognised and its per-engine base and argument order (#174) are
-  unaddressed; Spark's `TRUNC` and `TO_JSON` carry no class-scoped arm (#178). Populating these
-  rows is tracked in `docs/outcomes/20260904-dialect-emission-vocabulary` phase 7.
-- **`DAYOFWEEK` differs by one on Spark SQL (#174).** Spark numbers the week from Sunday = 1, DuckDB
-  from Sunday = 0. This is a template (`DAYOFWEEK({0}) - 1`), and lands with the template verdict.
+- **`%` on BigQuery still lowers to `MOD` for every operand (#173).** GoogleSQL's `MOD` accepts only
+  `INT64`/`NUMERIC` and fails at the warehouse on a floating-point operand; `Emission::Conditional`
+  exists and is populated for `//`, `LOG`, `TRUNC` and `TO_JSON` on Spark, but `%` on BigQuery has
+  not yet been given the same operand-conditional treatment. `//`'s own per-class arms are stated
+  and verified live (`docs/outcomes/20260904-dialect-emission-vocabulary` phase 7); BigQuery's
+  remains open, tracked in the same outcome.
 
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,

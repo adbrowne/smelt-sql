@@ -31,7 +31,7 @@ use crate::SqlDialect;
 /// The call's argument nodes, in positional order, for either a
 /// `FUNCTION_CALL` or a `BINARY_EXPR` operator node. `None` for a node that
 /// is neither.
-fn call_argument_nodes(node: &SyntaxNode) -> Option<Vec<SyntaxNode>> {
+pub(crate) fn call_argument_nodes(node: &SyntaxNode) -> Option<Vec<SyntaxNode>> {
     match node.kind() {
         SyntaxKind::FUNCTION_CALL => {
             let fc = FunctionCall::cast(node.clone())?;
@@ -56,7 +56,7 @@ fn call_argument_nodes(node: &SyntaxNode) -> Option<Vec<SyntaxNode>> {
 /// [`OperandClass`] via `type_of` (`None` — no inferred type, or `type_of`
 /// itself returning `None` — classifies as [`OperandClass::Unresolved`],
 /// the same fail-safe direction [`OperandClass::of`] gives `Null`/`Unknown`).
-fn call_facts(
+pub(crate) fn call_facts(
     args: &[SyntaxNode],
     type_of: &impl Fn(&SyntaxNode) -> Option<DataType>,
 ) -> CallFacts {

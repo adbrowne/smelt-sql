@@ -861,16 +861,27 @@ fn floor_divide_is_unsupported_everywhere_it_has_no_safe_lowering() {
         sig.emission_at(DialectId::DuckDb, Position::Any),
         Emission::Native
     );
-    for dialect in [DialectId::SparkSql, DialectId::BigQuery] {
-        assert!(
-            matches!(
-                sig.emission_at(dialect, Position::Any),
-                Emission::Unsupported { .. }
-            ),
-            "// on {} must be a declared refusal, not a pass-through",
-            dialect.slug()
-        );
-    }
+    // BigQuery has no per-class lowering at all — flatly unsupported.
+    assert!(
+        matches!(
+            sig.emission_at(DialectId::BigQuery, Position::Any),
+            Emission::Unsupported { .. }
+        ),
+        "// on bigquery must be a declared refusal, not a pass-through"
+    );
+    // Spark settles per operand class (phase 7); an operand whose class
+    // cannot be resolved must still land on a declared refusal, never a
+    // pass-through.
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(2)
+        ),
+        SettledEmission::Unsupported {
+            reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)"
+        }
+    );
 }
 
 #[test]
@@ -1361,9 +1372,9 @@ fn the_full_registry_builds_with_conditional_validation() {
     // Mirrors `the_full_registry_builds`, extended to `Conditional` entries:
     // forcing the registry to build already exercises `validate_conditional`
     // via the seed's `insert` closure (a malformed entry panics at
-    // construction). No production entry is `Conditional` yet (phase 7), so
-    // this loop is currently vacuous — it exists so the day one is added,
-    // this test (not just a runtime panic) documents the gate.
+    // construction). Phase 7 landed the first production `Conditional`
+    // entries (`LOG`, `//`, `TRUNC`, `TO_JSON` on Spark), so this loop now
+    // exercises real registry data, not just a hypothetical future one.
     let names: Vec<&str> = BuiltinRegistry::names().collect();
     for sig in names.iter().filter_map(|n| BuiltinRegistry::resolve(n)) {
         for (_, _, emission) in sig.emission.iter() {
@@ -1376,4 +1387,74 @@ fn the_full_registry_builds_with_conditional_validation() {
             }
         }
     }
+}
+
+#[test]
+fn log_settles_by_arity_on_spark() {
+    let sig = BuiltinRegistry::resolve("LOG").expect("LOG is registered");
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(1)
+        ),
+        SettledEmission::Rename("LOG10")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(2)
+        ),
+        SettledEmission::Native
+    );
+    // DuckDB is unchanged (`Native` at both arities) — it has no emission
+    // row for `LOG` at all.
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &CallFacts::unresolved(1)),
+        SettledEmission::Native
+    );
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &CallFacts::unresolved(2)),
+        SettledEmission::Native
+    );
+}
+
+#[test]
+fn intdiv_settles_per_operand_class_on_spark() {
+    let sig = BuiltinRegistry::resolve("//").expect("// is registered");
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Integral, OperandClass::Integral])
+        ),
+        SettledEmission::Template("{0} DIV {1}")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Floating, OperandClass::Floating])
+        ),
+        SettledEmission::Template("{0} / {1}")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Decimal, OperandClass::Decimal])
+        ),
+        SettledEmission::Template("{0} / {1}")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(2)
+        ),
+        SettledEmission::Unsupported {
+            reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)"
+        }
+    );
 }

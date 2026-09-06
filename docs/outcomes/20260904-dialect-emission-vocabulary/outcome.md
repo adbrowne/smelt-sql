@@ -78,7 +78,7 @@ audit before it is claimed — never from documentation.
 | 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
-| 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | planned |
+| 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
 | 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` to the four surviving `type_gap` rows with a sign-off line | pending |
 | 9 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
@@ -265,6 +265,29 @@ audit before it is claimed — never from documentation.
   `settle_at` with the probe's own facts), so a refused `TRUNC(numeric)` arm closes the ledger
   row outright rather than leaving an arm-scoped `Gap` — which is why 27 → 23 is a firm target
   rather than a range.
+
+- 2026-09-06 (implement 07) — phase 7 done. `LOG` (`arity=1 -> Rename(LOG10)`, `otherwise ->
+  Native`), `DAYOFWEEK` (`Template("DAYOFWEEK({0}) - 1")`), `TRUNC` (`Conditional` on **both**
+  SparkSql and DuckDb — DuckDB turned out to have no temporal `TRUNC` at any arity either,
+  measured live) and `TO_JSON` (`Conditional`, `Composite -> Native`) landed on Spark; `//`'s
+  wholesale Spark `Unsupported` became `Conditional` per operand class
+  (`Integral,Integral -> DIV`; `Floating`/`Decimal -> plain /`). `dialect_gaps_spark` 27 → 23.
+  Measurement surfaced three structural harness bugs, all fixed (not per-entry, so phase 8 needs
+  none of this again): (1) `probe::print_for` never threaded real fixture column types into
+  `settle_emissions`, so any `Conditional` probe printed via the blind arity-only fallback —
+  invisible until this phase because no production `Conditional` entry existed to print; (2) the
+  *ordinary* (non-arm) probe for a `Conditional` entry carried blind `CallFacts::unresolved`,
+  which for `//` disagreed with what `print_for`'s (correct) type-aware settlement actually
+  printed, so the exemption decision and the printed SQL diverged; (3) `conditional_arm_probes`
+  derived a probe's position from the emission table's own `Position::Any` key (a lookup wildcard
+  `suffix()` explicitly cannot render) instead of `sig.kind`'s concrete position(s). Also fixed:
+  the `iv_interval` fixture column's `CAST('1 day' AS INTERVAL DAY)` is invalid on Spark (wants a
+  bare-integer string), which had silently broken `schema_leg_spark`/`value_leg_spark` *wholesale*
+  since phase 6 added the column — nobody had run those live since. `verify-phase.sh`: fmt/clippy/
+  example_diagnostics green; `cargo test` red only on a pre-existing, unrelated `smelt-runtime`
+  python-discovery test flake (temp-file race, 216/216 green single-threaded, confirmed across
+  three runs hitting a different subset of tests each time — flagged for a future outcome, not
+  this one's to fix). Live Spark dialect_audit: 61/61 green. See `phases/07-summary.md`.
 
 ## Blocked
 

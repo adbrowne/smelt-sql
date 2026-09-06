@@ -15,7 +15,11 @@ fn tree(sql: &str) -> SyntaxNode {
 
 #[test]
 fn floor_divide_is_reported_for_bigquery() {
-    let found = unsupported_emissions(&tree("SELECT a // b AS q FROM t"), SqlDialect::BigQuery);
+    let found = unsupported_emissions(
+        &tree("SELECT a // b AS q FROM t"),
+        SqlDialect::BigQuery,
+        |_| None,
+    );
     assert_eq!(found.len(), 1, "expected exactly one refusal: {found:#?}");
     assert_eq!(found[0].name, "//");
     assert_eq!(found[0].dialect, DialectId::BigQuery);
@@ -29,7 +33,12 @@ fn floor_divide_is_reported_for_bigquery() {
 #[test]
 fn the_same_model_is_clean_on_duckdb() {
     assert!(
-        unsupported_emissions(&tree("SELECT a // b AS q FROM t"), SqlDialect::DuckDB).is_empty(),
+        unsupported_emissions(
+            &tree("SELECT a // b AS q FROM t"),
+            SqlDialect::DuckDB,
+            |_| None
+        )
+        .is_empty(),
         "`//` is native on DuckDB"
     );
 }
@@ -41,7 +50,8 @@ fn an_unregistered_function_is_not_reported_here() {
     // double-fire on the same construct.
     assert!(unsupported_emissions(
         &tree("SELECT nonesuch(a) AS q FROM t"),
-        SqlDialect::BigQuery
+        SqlDialect::BigQuery,
+        |_| None
     )
     .is_empty());
 }
@@ -51,6 +61,7 @@ fn every_occurrence_is_reported_with_its_own_range() {
     let found = unsupported_emissions(
         &tree("SELECT a // b AS q, c // d AS r FROM t"),
         SqlDialect::BigQuery,
+        |_| None,
     );
     assert_eq!(found.len(), 2, "{found:#?}");
     assert_ne!(found[0].range, found[1].range);
@@ -61,7 +72,7 @@ fn every_occurrence_is_reported_with_its_own_range() {
 #[test]
 fn the_range_covers_the_offending_expression() {
     let sql = "SELECT a // b AS q FROM t";
-    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery);
+    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery, |_| None);
     let range = found[0].range;
     assert_eq!(&sql[range], "a // b", "range was {range:?}");
 }
@@ -86,7 +97,7 @@ fn function_and_operator_refusals_share_one_walk() {
     for name in unsupported_calls {
         let sql = format!("SELECT {name}(a) AS q FROM t");
         assert!(
-            !unsupported_emissions(&tree(&sql), SqlDialect::BigQuery).is_empty(),
+            !unsupported_emissions(&tree(&sql), SqlDialect::BigQuery, |_| None).is_empty(),
             "`{name}` is declared Unsupported on BigQuery but the walk did not report it"
         );
     }
@@ -103,7 +114,7 @@ fn function_and_operator_refusals_share_one_walk() {
 fn a_nulls_modifier_the_analytic_form_cannot_express_is_refused_at_compile_time() {
     let sql = "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x NULLS LAST) \
                OVER (PARTITION BY g) AS med FROM t";
-    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery);
+    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery, |_| None);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].name, "PERCENTILE_CONT");
     assert!(
@@ -120,7 +131,7 @@ fn a_plain_within_group_sort_key_is_not_reported() {
     let sql = "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) \
                OVER (PARTITION BY g) AS med FROM t";
     assert!(
-        unsupported_emissions(&tree(sql), SqlDialect::BigQuery).is_empty(),
+        unsupported_emissions(&tree(sql), SqlDialect::BigQuery, |_| None).is_empty(),
         "a plain WITHIN GROUP sort key must be admissible"
     );
 }

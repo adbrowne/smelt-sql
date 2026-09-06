@@ -53,7 +53,7 @@ the exact reverse.
 |---|---|---|---|---|
 | `%` | infix | native | native | template:MOD({0}, {1}) (gap #173) |
 | `**` | infix | native | template:POWER({0}, {1}) | template:POWER({0}, {1}) (gap divergent) |
-| `//` | infix | native | unsupported | unsupported |
+| `//` | infix | native | conditional(a0:integral,a1:integral→template:{0} DIV {1} | a0:floating,a1:floating→template:{0} / {1} | a0:decimal,a1:decimal→template:{0} / {1} | otherwise→unsupported) | unsupported |
 | `ABS` | call | native | native | native |
 | `ACOS` | call | native | native | native |
 | `AGE` | call | native | native (gap #178) | native (gap #179) |
@@ -94,7 +94,7 @@ the exact reverse.
 | `DATE_SUB` | special | template:{0} - {1} (gap #176) | native (gap #178) | native (gap #176) |
 | `DATE_TRUNC` | call | native | native | native (gap #179) |
 | `DAY` | call | native | native | native (gap #179) |
-| `DAYOFWEEK` | call | native | native (gap #174) | native (gap #179) |
+| `DAYOFWEEK` | call | native | template:DAYOFWEEK({0}) - 1 | native (gap #179) |
 | `DENSE_RANK` | call | native | native | native |
 | `EVERY` | call | rename:BOOL_AND | native | rename:LOGICAL_AND |
 | `EXISTS` | special | native | native | native |
@@ -130,7 +130,7 @@ the exact reverse.
 | `LIKE` | infix | native | native | native |
 | `LISTAGG` | call | native | native | rename:STRING_AGG |
 | `LN` | call | native | native | native |
-| `LOG` | call | native | native (gap #174) | native (gap #174) |
+| `LOG` | call | native | conditional(arity=1→rename:LOG10 | otherwise→native) | native (gap #174) |
 | `LOG10` | call | native | native | native |
 | `LOG2` | call | native | native | native (gap #179) |
 | `LOWER` | call | native | native | native |
@@ -188,11 +188,11 @@ the exact reverse.
 | `TAN` | call | native | native | native |
 | `TANH` | call | native | native | native |
 | `TO_CHAR` | call | unsupported | native | native (gap #179) |
-| `TO_JSON` | call | native | native (gap #178) | native (gap divergent) |
+| `TO_JSON` | call | native | conditional(a0:composite→native | otherwise→unsupported) | native (gap divergent) |
 | `TO_SECONDS` | call | native | native (gap #178) | native (gap #179) |
 | `TRANSLATE` | call | native | native | native |
 | `TRIM` | call | native | native | native |
-| `TRUNC` | call | native | native (gap #178) | native (gap #179) |
+| `TRUNC` | call | conditional(arity=2,a0:temporal,a1:string→unsupported | otherwise→native) | conditional(arity=2,a0:temporal,a1:string→native | otherwise→unsupported) | native (gap #179) |
 | `TRUNCATE` | call | rename:TRUNC | native (gap #178) | rename:TRUNC (gap #179) |
 | `UNNEST` | table-fn | native (gap #176) | rename:EXPLODE (gap #176) | native (gap #179) |
 | `UPPER` | call | native | native | native |

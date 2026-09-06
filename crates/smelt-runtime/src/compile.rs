@@ -693,15 +693,16 @@ fn print_checked_for(
     // schemas; every class then reads `Unresolved` and every conditional
     // takes its `otherwise` arm, the same fail-safe direction a lookup miss
     // takes in the printer itself.
-    let settled = smelt_dialect::settle_emissions(syntax, *dialect, |node| {
+    let type_of = |node: &smelt_parser::syntax_kind::SyntaxNode| {
         type_ctx.and_then(|tc| {
             Expr::cast(node.clone())
                 .and_then(|e| infer_expression_type(&e, tc))
                 .map(|c| c.data_type)
         })
-    });
+    };
+    let settled = smelt_dialect::settle_emissions(syntax, *dialect, type_of);
 
-    let mut refused = smelt_dialect::unsupported_emissions(syntax, *dialect);
+    let mut refused = smelt_dialect::unsupported_emissions(syntax, *dialect, type_of);
 
     let plans = match smelt_dialect::plan_restructure(syntax, *dialect) {
         Ok(plans) => plans,

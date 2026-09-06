@@ -152,10 +152,22 @@ fn template_unsupported_modifier(node: &SyntaxNode) -> Option<&'static str> {
 
 /// Walk `root` for constructs the registry declares unsupported on `dialect`.
 ///
-/// Pure: no I/O, no printing. A name absent from the registry is *not* reported
-/// here — unrecognised functions are `UnrecognizedFunction`'s business, so the
-/// two diagnostics cannot double-fire on one construct.
-pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<UnsupportedEmission> {
+/// Pure given `type_of` — no I/O, no printing. A name absent from the registry
+/// is *not* reported here — unrecognised functions are `UnrecognizedFunction`'s
+/// business, so the two diagnostics cannot double-fire on one construct.
+///
+/// `type_of` resolves a `Conditional` entry's class-guarded arms exactly like
+/// [`crate::emission_settle::settle_emissions`] — the same operand-type
+/// lookup, so a class a real type resolves away is not misreported as
+/// unsupported here just because this pass runs first. A caller with no type
+/// context (`|_| None`) falls back to arity alone, landing class-guarded arms
+/// on their `otherwise`, the same fail-safe direction the printer's own
+/// lookup-miss takes.
+pub fn unsupported_emissions(
+    root: &SyntaxNode,
+    dialect: SqlDialect,
+    type_of: impl Fn(&SyntaxNode) -> Option<smelt_types::DataType>,
+) -> Vec<UnsupportedEmission> {
     let id = dialect.id();
     root.descendants()
         .filter_map(|node| {
@@ -172,23 +184,11 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
                 _ => return None,
             };
             let sig = BuiltinRegistry::resolve(&name)?;
-            // No type context is threaded into this pre-print pass (it runs
-            // over the bare source CST); a `Conditional` entry's class-guarded
-            // arms are unresolvable here, so this settles with arity alone —
-            // the same fail-safe lookup-miss fallback the printer uses. A
-            // class-guarded arm that a real type would have resolved away is
-            // instead decided by the entry's `otherwise` arm, which the
-            // registry's own validation ties to the safe direction
-            // (`docs/specs/multi_backend.md` §"Operand-conditional
-            // verdicts"). No production entry is `Conditional` yet, so this
-            // has no observable effect until phase 7 populates one.
-            let arity = match node.kind() {
-                SyntaxKind::FUNCTION_CALL => FunctionCall::cast(node.clone())
-                    .map(|fc| fc.arguments().len())
-                    .unwrap_or(0),
-                _ => 2,
+            let facts = match crate::emission_settle::call_argument_nodes(&node) {
+                Some(args) => crate::emission_settle::call_facts(&args, &type_of),
+                None => CallFacts::unresolved(0),
             };
-            match sig.settle_at(id, position, &CallFacts::unresolved(arity)) {
+            match sig.settle_at(id, position, &facts) {
                 SettledEmission::Unsupported { reason } => Some(UnsupportedEmission {
                     name: sig.name.as_str(),
                     dialect: id,

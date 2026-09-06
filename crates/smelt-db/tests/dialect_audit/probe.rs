@@ -7,7 +7,9 @@
 //! things.
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
-use smelt_dialect::{plan_restructure, print, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_dialect::{
+    plan_restructure, print, settle_emissions, BackendCapabilities, PrintContext, SqlDialect,
+};
 use smelt_parser::ast::File;
 pub use smelt_types::signatures::Position;
 use smelt_types::{
@@ -50,9 +52,13 @@ pub struct Probe {
     pub arm: Option<usize>,
     /// The call-site facts this probe's own arguments imply, for
     /// [`Signature::settle_at`] — the arm-derivation's own resolved classes
-    /// for a conditional-arm probe, or `CallFacts::unresolved(arity)` for an
-    /// ordinary probe (whose exact operand classes are not otherwise
-    /// tracked, and do not affect a non-`Conditional` verdict anyway).
+    /// for a conditional-arm probe; for an ordinary probe, each bare-column
+    /// argument's real fixture class (`OperandClass::Unresolved` for an
+    /// override's own non-column expression). This must agree with what
+    /// `print_for` actually settles the printed call to — for a
+    /// `Conditional` entry it is exactly what decides whether the probe is
+    /// exempt from execution, so a blind guess here would check the
+    /// exemption against a different call than the one that runs.
     pub facts: CallFacts,
 }
 
@@ -256,7 +262,7 @@ pub fn conditional_arm_probes(name: &'static str, sig: &Signature) -> (Vec<Probe
     let mut failures = Vec::new();
     let mut seen_arm_sets: Vec<&'static [ConditionalArm]> = Vec::new();
 
-    for (dialect, position, emission) in sig.emission {
+    for (dialect, _table_position, emission) in sig.emission {
         let Emission::Conditional(arms) = emission else {
             continue;
         };
@@ -265,34 +271,88 @@ pub fn conditional_arm_probes(name: &'static str, sig: &Signature) -> (Vec<Probe
         }
         seen_arm_sets.push(arms);
 
-        for (index, arm) in arms.iter().enumerate() {
-            let arity = arm.arity.unwrap_or(sig.params.len());
-            match find_assignment(sig, *dialect, *position, arms, index, arity) {
-                Some(classes) => match expr_for_classes(name, sig, &classes) {
-                    Some(expr) => probes.push(Probe {
-                        name,
-                        position: *position,
-                        expr,
-                        alias: format!("p_{}_{}_a{index}", sanitise(name), suffix(*position)),
-                        schema_only: None,
-                        arm: Some(index),
-                        facts: CallFacts::new(classes),
-                    }),
-                    None => failures.push(NotProbed::Underivable {
+        // The emission table's own position key is routinely `Position::Any`
+        // (a lookup wildcard, never a position a real call occupies — see
+        // `suffix`); the position a probe is actually printed and executed at
+        // is `sig.kind`'s concrete position(s), the same ones `positions`
+        // derives for an ordinary probe. `Signature::settle_at` resolves a
+        // concrete position back to the `Any` row via its own fallback, so
+        // probing at the concrete position exercises exactly the arm the
+        // real compile path would settle on.
+        for position in positions(sig) {
+            for (index, arm) in arms.iter().enumerate() {
+                // An arity-guarded arm has exactly one arity to try. An
+                // arity-less arm (including the mandatory trailing
+                // `otherwise`) matches any arity, so it may be shadowed by a
+                // sibling's explicit-arity guard at the signature's own
+                // fixed arity — the arity a non-variadic signature's `arity:
+                // None` arm would naively be tried at. Sweep a small range
+                // instead of asserting only that one, so an arity-less arm
+                // reachable at a *different* arity (the common shape: two
+                // explicit-arity arms plus a catch-all `otherwise` for every
+                // other arity) is still proven, not falsely reported
+                // unreachable.
+                // An arity-less arm's natural candidate is `sig.params.len()`
+                // (the same default an ordinary probe's `columns_for_param`
+                // uses — see its docstring). That is sufficient for a
+                // class-guarded arm distinguished from its siblings by
+                // operand type alone (`TRUNC`, `TO_JSON`). A trailing
+                // `otherwise` guarding on arity too (`LOG`'s two-argument
+                // form) may be shadowed at that default by an earlier arm's
+                // explicit-arity guard, so the search extends a couple of
+                // arities past the default — never further, so it cannot
+                // wander into an arity the signature itself has no real
+                // support for. An arity too small to hold every index the
+                // arm's own class guards name is never a candidate at all.
+                let default_arity = sig.params.len();
+                let min_arity = arm
+                    .classes
+                    .iter()
+                    .map(|(idx, _)| idx + 1)
+                    .max()
+                    .unwrap_or(0)
+                    .max(default_arity);
+                let candidate_arities: Vec<usize> = match arm.arity {
+                    Some(n) => vec![n],
+                    None => (min_arity..=min_arity + 2).collect(),
+                };
+                let found = candidate_arities.into_iter().find_map(|arity| {
+                    find_assignment(sig, *dialect, position, arms, index, arity)
+                        .map(|classes| (arity, classes))
+                });
+                match found {
+                    Some((_, classes)) => match expr_for_classes(name, sig, &classes) {
+                        Some(expr) => probes.push(Probe {
+                            name,
+                            position,
+                            expr,
+                            alias: format!(
+                                "p_{}_{}_{}_a{index}",
+                                sanitise(name),
+                                dialect.slug(),
+                                suffix(position)
+                            ),
+                            schema_only: None,
+                            arm: Some(index),
+                            facts: CallFacts::new(classes),
+                        }),
+                        None => failures.push(NotProbed::Underivable {
+                            detail: format!(
+                                "{name} arm {index}: classes {classes:?} have no derivable \
+                                 spelling"
+                            ),
+                        }),
+                    },
+                    None => failures.push(NotProbed::UnreachableArm {
+                        index,
                         detail: format!(
-                            "{name} arm {index}: classes {classes:?} have no derivable spelling"
+                            "{name} arm {index} on {}/{:?}: no operand-class assignment makes it \
+                             the first matching arm — shadowed by an earlier arm's broader guard",
+                            dialect.slug(),
+                            position
                         ),
                     }),
-                },
-                None => failures.push(NotProbed::UnreachableArm {
-                    index,
-                    detail: format!(
-                        "{name} arm {index} on {}/{:?}: no operand-class assignment makes it the \
-                         first matching arm — shadowed by an earlier arm's broader guard",
-                        dialect.slug(),
-                        position
-                    ),
-                }),
+                }
             }
         }
     }
@@ -439,7 +499,26 @@ pub fn probe_or_reason(sig: &Signature) -> Result<Vec<Probe>, NotProbed> {
     };
 
     let schema_only = ov.and_then(|o| o.schema_only);
-    let facts = CallFacts::unresolved(args.len());
+    // For a `Conditional` entry, `facts` is not a "do not affect the verdict"
+    // placeholder the way it is for every other entry — it is the very input
+    // `is_declared_unsupported` settles against to decide whether this probe
+    // is exempt from execution. Leaving it blind (`unresolved`) would answer
+    // that question against a *different* call than the one actually
+    // printed, which derives its arm from the real fixture column types via
+    // `print_for`'s own `settle_emissions` — so a bare column argument's
+    // class is looked up the same way here, and only a non-bare argument
+    // (an override's own expression) falls back to `Unresolved`.
+    let column_types: HashMap<&str, DataType> = fixture::column_types().into_iter().collect();
+    let facts = CallFacts::new(
+        args.iter()
+            .map(|a| {
+                column_types
+                    .get(a.as_str())
+                    .map(OperandClass::of)
+                    .unwrap_or(OperandClass::Unresolved)
+            })
+            .collect(),
+    );
     Ok(positions(sig)
         .into_iter()
         .map(|position| Probe {
@@ -503,6 +582,19 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
     let parsed = smelt_parser::parse(smelt_sql);
     let root = parsed.syntax();
     let plans = plan_restructure(&root, sql_dialect).unwrap_or_default();
+    // A probe's argument is always a bare fixture column reference (never a
+    // compound expression) — `fixture::column_types()` is the same table the
+    // type leg infers against, so looking an argument node's own text up in
+    // it settles a `Conditional` entry's class-guarded arms exactly like the
+    // real compile path does with a live `TypeContext`. Without this, every
+    // arm settles blind (`CallFacts::unresolved`) and a class-guarded arm's
+    // probe prints its *un*lowered smelt SQL verbatim — which is exactly the
+    // engine-rejected spelling the arm exists to avoid printing.
+    let column_types: HashMap<&str, smelt_types::DataType> =
+        fixture::column_types().into_iter().collect();
+    let settled = settle_emissions(&root, sql_dialect, |node| {
+        column_types.get(node.text().to_string().trim()).cloned()
+    });
     let ctx = PrintContext {
         dialect: &sql_dialect,
         capabilities: &capabilities,
@@ -514,7 +606,7 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &plans,
-        settled_emissions: &[],
+        settled_emissions: &settled,
     };
     combine_fixture_and_printed(&fixture::fixture_cte(dialect), &print(&root, &ctx))
 }

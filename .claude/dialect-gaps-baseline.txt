@@ -37,5 +37,22 @@
 # (that literal already infers `Interval` correctly on its own, measured
 # directly). Net: 12 - 7 + 1 = 6.
 dialect_gaps_duckdb 6
-dialect_gaps_spark 27
+dialect_gaps_spark 23
 dialect_gaps_bigquery 42
+
+# 2026-09-06 (#174, docs/outcomes/20260904-dialect-emission-vocabulary phase 7,
+# sign-off: Andrew Browne): dialect_gaps_spark 27 -> 23. Closed, each verified
+# live against `scripts/spark-up.sh` (Spark 4.0.0 Connect) and DuckDB 1.5.4:
+# LOG (Emission::Conditional, arity=1 -> Rename("LOG10"), otherwise -> Native —
+# Spark's one-arg `log(x)` is natural log, DuckDB's is base-10; the two-arg
+# `log(base, x)` already agrees), DAYOFWEEK (Emission::Template,
+# `DAYOFWEEK({0}) - 1` — Spark numbers the week from Sunday=1, DuckDB from
+# Sunday=0), TRUNC (Emission::Conditional on both SparkSql and DuckDb: the
+# two-argument temporal form is Native on Spark and Unsupported on DuckDB,
+# which has no temporal `TRUNC` at any arity — verified live; the numeric
+# form is the reverse), TO_JSON (Emission::Conditional, arg0 Composite ->
+# Native, otherwise -> Unsupported — Spark's `to_json` refuses a scalar
+# argument). `//` on Spark also moved from wholesale Unsupported to
+# Emission::Conditional per operand class (Integral -> `{0} DIV {1}`,
+# Floating/Decimal -> `{0} / {1}`, otherwise -> Unsupported) but carried no
+# ledger row of its own, so it does not change this count.

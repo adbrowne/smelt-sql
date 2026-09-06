@@ -4734,12 +4734,37 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         vec![concrete(DataType::Double)],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
     ));
-    insert(Signature::new(
-        "LOG",
-        vec![],
-        vec![concrete(DataType::Double)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
-    ));
+    insert(
+        Signature::new(
+            "LOG",
+            vec![],
+            vec![variadic(concrete(DataType::Double))],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        // `LOG(x)` is base-10 on DuckDB but natural on Spark, so the one-argument
+        // form needs a rename; `LOG(base, x)` is native on Spark at both
+        // engines. Verified live 2026-09-06: DuckDB `log(100)` = `log10(100)` =
+        // 2.0 while Spark's `log(100)` = `ln(100)` = 4.605...; both agree
+        // `log(2, 8)` = 3.0.
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Conditional(&[
+                ConditionalArm {
+                    arity: Some(1),
+                    classes: &[],
+                    verdict: SettledEmission::Rename("LOG10"),
+                },
+                // `otherwise` covers every other arity — in practice, the
+                // two-argument `LOG(base, x)` form, native on both engines.
+                ConditionalArm {
+                    arity: None,
+                    classes: &[],
+                    verdict: SettledEmission::Native,
+                },
+            ]),
+        )]),
+    );
     insert(Signature::new(
         "LN",
         vec![],
@@ -5804,7 +5829,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     );
 
     // Extended math / trig scalars → Double.
-    for name in ["ACOS", "ASIN", "POW", "CEILING", "TRUNC"] {
+    for name in ["ACOS", "ASIN", "POW", "CEILING"] {
         insert(Signature::new(
             name,
             vec![],
@@ -5812,6 +5837,68 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
         ));
     }
+    // Lifted out of the loop above so it can carry its own emission verdict.
+    // Spark's `TRUNC` is temporal-only (`trunc(date, fmt)`); there is no
+    // numeric `TRUNC` on Spark. Verified live 2026-09-06:
+    // `trunc(DATE'2026-09-06', 'MM')` = 2026-09-01, while `trunc(3.14159, 2)`
+    // fails analysis (`the first parameter requires the "DATE" type`).
+    insert(
+        Signature::new(
+            "TRUNC",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_emission(&[
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Conditional(&[
+                    // Spark's temporal `TRUNC` is the two-argument `trunc(date,
+                    // fmt)` form; the arity guard keeps a probe for this arm a
+                    // real, engine-accepted call rather than the single-argument
+                    // shape the (numeric) `otherwise` arm below actually uses.
+                    ConditionalArm {
+                        arity: Some(2),
+                        classes: &[(0, OperandClass::Temporal), (1, OperandClass::String)],
+                        verdict: SettledEmission::Native,
+                    },
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[],
+                        verdict: SettledEmission::Unsupported {
+                            reason: "Spark's TRUNC is temporal-only; there is no numeric TRUNC",
+                        },
+                    },
+                ]),
+            ),
+            // DuckDB's `TRUNC` is numeric-only (verified live 2026-09-06:
+            // `trunc(DATE '2026-09-06', 'MM')` and `trunc(<timestamp>)` both
+            // fail analysis — no candidate overload takes a temporal
+            // argument at any arity). Declared here, rather than left to
+            // reach the engine as a raw binder error, and so the audit's own
+            // DuckDB-as-reference run has a real verdict to settle the
+            // Spark arm's probe against instead of a harness gap.
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Conditional(&[
+                    ConditionalArm {
+                        arity: Some(2),
+                        classes: &[(0, OperandClass::Temporal), (1, OperandClass::String)],
+                        verdict: SettledEmission::Unsupported {
+                            reason: "DuckDB's TRUNC is numeric-only; there is no temporal TRUNC",
+                        },
+                    },
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[],
+                        verdict: SettledEmission::Native,
+                    },
+                ]),
+            ),
+        ]),
+    );
     // Extended text scalars → Text.
     for name in ["REVERSE", "TRANSLATE"] {
         insert(Signature::new(
@@ -5896,7 +5983,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
     ));
     // Date-part extraction scalars → BigInt.
-    for name in ["DAY", "DAYOFWEEK", "MONTH", "QUARTER", "YEAR"] {
+    for name in ["DAY", "MONTH", "QUARTER", "YEAR"] {
         insert(Signature::new(
             name,
             vec![],
@@ -5904,6 +5991,23 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
         ));
     }
+    // Lifted out of the loop above so it can carry its own emission verdict.
+    // Spark numbers the week from Sunday=1; DuckDB from Sunday=0. Verified
+    // live 2026-09-06: Spark's `dayofweek(DATE'2026-09-06')` (a Sunday) = 1,
+    // DuckDB's `dayofweek` for the same date = 0.
+    insert(
+        Signature::new(
+            "DAYOFWEEK",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Template("DAYOFWEEK({0}) - 1"),
+        )]),
+    );
     // Temporal constructors.
     insert(
         Signature::new(
@@ -5935,7 +6039,6 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     let json_text_aliases: &[(&str, &[&str])] = &[
         ("JSON_OBJECT", &["JSON_BUILD_OBJECT"]),
         ("JSON_ARRAY", &["JSON_BUILD_ARRAY"]),
-        ("TO_JSON", &["TO_JSONB", "ROW_TO_JSON"]),
     ];
     for (name, aliases) in json_text_aliases {
         insert(
@@ -5948,6 +6051,39 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             .with_aliases(aliases),
         );
     }
+    // Lifted out of the alias loop above so it can carry its own emission
+    // verdict. Spark's `TO_JSON` takes a struct, array, map or variant, not a
+    // scalar. Verified live 2026-09-06: `to_json(struct(1 as a, 2 as b))` =
+    // `{"a":1,"b":2}`, while `to_json(5)` fails analysis (`Input schema
+    // "INT" must be a struct, an array, a map or a variant`).
+    insert(
+        Signature::new(
+            "TO_JSON",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_aliases(&["TO_JSONB", "ROW_TO_JSON"])
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Conditional(&[
+                ConditionalArm {
+                    arity: None,
+                    classes: &[(0, OperandClass::Composite)],
+                    verdict: SettledEmission::Native,
+                },
+                ConditionalArm {
+                    arity: None,
+                    classes: &[],
+                    verdict: SettledEmission::Unsupported {
+                        reason: "Spark's TO_JSON requires a struct, array or map argument; \
+                                 there is no scalar TO_JSON",
+                    },
+                },
+            ]),
+        )]),
+    );
     // Lifted out of the alias loop above so each can carry its own emission
     // verdict. The alias lists already record what the other engines *call*
     // these; the emission rows are what smelt now *emits*, so resolution and
@@ -6170,16 +6306,40 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_syntax_form(SyntaxForm::Infix)
         .with_emission(&[
             // DuckDB's `//` truncates toward zero for integer operands and
-            // degrades to plain division for floats; the printer carries no
-            // operand types with which to tell those cases apart, so no
-            // substitution is safe. Declaring it unsupported turns an engine-side
-            // syntax error into a compile-time diagnostic.
+            // degrades to plain division for floats; settled per operand
+            // class since a single spelling on Spark cannot be correct for
+            // both. Verified live 2026-09-06: DuckDB `-7 // 2` = `7 // -2` =
+            // -3 (truncation toward zero, matched by Spark's `DIV`); DuckDB
+            // `7.5 // 2.0` = 3.75 and `7 // 2` over `DECIMAL(10,2)` = 3.5
+            // (plain division, matched by Spark's `/`).
             (
                 DialectId::SparkSql,
                 Position::Any,
-                Emission::Unsupported {
-                    reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
-                },
+                Emission::Conditional(&[
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[(0, OperandClass::Integral), (1, OperandClass::Integral)],
+                        verdict: SettledEmission::Template("{0} DIV {1}"),
+                    },
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[(0, OperandClass::Floating), (1, OperandClass::Floating)],
+                        verdict: SettledEmission::Template("{0} / {1}"),
+                    },
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[(0, OperandClass::Decimal), (1, OperandClass::Decimal)],
+                        verdict: SettledEmission::Template("{0} / {1}"),
+                    },
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[],
+                        verdict: SettledEmission::Unsupported {
+                            reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or \
+                                     DIV(a, b)",
+                        },
+                    },
+                ]),
             ),
             (
                 DialectId::BigQuery,

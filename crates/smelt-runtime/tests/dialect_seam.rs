@@ -499,6 +499,27 @@ fn integer_division_with_an_unresolvable_operand_is_refused_on_spark() {
     );
 }
 
+/// The other side of the same axis (phase 7): once both operands' classes
+/// *are* resolvable — here, forced to `INTEGER` by `CAST` — `//` compiles
+/// for Spark via the `Integral, Integral` arm's `{0} DIV {1}` template,
+/// where it previously refused wholesale.
+#[test]
+fn intdiv_over_typed_integer_columns_compiles_on_spark() {
+    let model = make_model(
+        "q",
+        "SELECT CAST(id AS INTEGER) // CAST(2 AS INTEGER) AS halved FROM events",
+    );
+    let compiled = registry()
+        .get("spark")
+        .compile(&model, "main")
+        .expect("both operands are known INTEGER, so `//` has a safe Spark lowering");
+    assert!(
+        compiled.sql.contains("DIV"),
+        "expected the integral-class `DIV` template: {}",
+        compiled.sql
+    );
+}
+
 /// Structural, mirroring `every_compile_path_is_emission_checked`: settlement
 /// of operand-conditional verdicts happens exactly once, inside
 /// `print_checked_for`, before printing — never inside `smelt_dialect::print`
