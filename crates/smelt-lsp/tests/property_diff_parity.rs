@@ -368,16 +368,37 @@ async fn editor_lens_and_diagnostics_agree_with_the_cli_report() {
     );
     let unshifted_model = unshifted_names[0];
 
-    let cli_downgrades_for_user_daily_spend: usize = cli_report
-        .models
+    // The CLI JSON's `stories` for `user_daily_spend` — the same value
+    // `smelt explain --diff --json` prints — is the oracle for both the
+    // lens title and the `PropertyDowngrade` set (§Constraints item 5).
+    let cli_json = serde_json::to_value(&cli_report).expect("DiffReport must serialize");
+    let cli_model_json = cli_json["models"]
+        .as_array()
+        .expect("models must be an array")
         .iter()
-        .find(|m| m.model == "user_daily_spend")
-        .expect("user_daily_spend must be present")
-        .changes
+        .find(|m| m["model"] == "user_daily_spend")
+        .expect("user_daily_spend must be present in the JSON")
+        .clone();
+    let cli_stories_json = cli_model_json["stories"]
+        .as_array()
+        .expect("stories must be an array")
+        .clone();
+    let cli_risk_or_cost_messages: std::collections::BTreeSet<String> = cli_stories_json
         .iter()
-        .filter(|c| c.direction == smelt_logical::analysis::diff::Direction::Downgrade)
-        .count();
-    let cli_lens_title = smelt_logical::analysis::diff_render::lens_title(
+        .filter(|s| s["severity"] == "risk" || s["severity"] == "cost")
+        .map(|s| {
+            format!(
+                "{}: {}",
+                s["lead"].as_str().unwrap(),
+                s["detail"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert!(
+        !cli_risk_or_cost_messages.is_empty(),
+        "fixture must produce at least one risk/cost story for user_daily_spend: {cli_stories_json:?}"
+    );
+    let cli_lens_title = smelt_logical::analysis::diff_stories::lens_title(
         cli_report
             .models
             .iter()
@@ -431,10 +452,13 @@ async fn editor_lens_and_diagnostics_agree_with_the_cli_report() {
         .into_iter()
         .filter(|d| d["code"] == "property-downgrade")
         .collect();
+    let lsp_messages: std::collections::BTreeSet<String> = downgrade_diagnostics
+        .iter()
+        .map(|d| d["message"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(
-        downgrade_diagnostics.len(),
-        cli_downgrades_for_user_daily_spend,
-        "PropertyDowngrade diagnostic count must match the CLI report's downgrade count \
+        lsp_messages, cli_risk_or_cost_messages,
+        "the PropertyDowngrade message set must equal the CLI JSON's risk/cost stories \
          for user_daily_spend: lsp={downgrade_diagnostics:?}"
     );
     assert!(
