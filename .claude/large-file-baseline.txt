@@ -915,7 +915,12 @@ crates/smelt-runtime/tests/contract_late_arrival_probe.rs 263
 crates/smelt-runtime/tests/delta_restricted_recompute.rs 342
 crates/smelt-runtime/tests/departed_key_reconcile.rs 398
 crates/smelt-runtime/tests/diagnostics.rs 1423
-crates/smelt-runtime/tests/dialect_seam.rs 538
+crates/smelt-runtime/tests/dialect_seam/doc_sync.rs 88
+crates/smelt-runtime/tests/dialect_seam/fixtures.rs 94
+crates/smelt-runtime/tests/dialect_seam/main.rs 13
+crates/smelt-runtime/tests/dialect_seam/refusals.rs 210
+crates/smelt-runtime/tests/dialect_seam/seam.rs 110
+crates/smelt-runtime/tests/dialect_seam/structural.rs 64
 crates/smelt-runtime/tests/dry_run_statements.rs 413
 crates/smelt-runtime/tests/execute_parity.rs 712
 crates/smelt-runtime/tests/external_source_delta_restriction.rs 762
