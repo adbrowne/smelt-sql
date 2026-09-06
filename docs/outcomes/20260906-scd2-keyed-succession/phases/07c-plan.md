@@ -1,4 +1,4 @@
-# Phase 7b1 plan — Re-run tolerance under deletes
+# Phase 7c plan — Re-run tolerance under deletes
 
 ## Objective
 
@@ -6,7 +6,7 @@ Fix the spurious `SuccessionClockTie` phase 7b uncovered: refolding any window t
 contains a delete-flagged event fails, because the clock-tie probe's signature compares a
 tombstone row's NULLed payload against the *same* event's real payload replayed from the
 source. This is a direct failure of criterion 5 ("re-folding a window leaves table and
-ledger byte-identical") and blocks criterion 6's `repair.rs` widening in phase 7c, which
+ledger byte-identical") and blocks criterion 6's `repair.rs` widening in phase 7d, which
 re-drives windows after a ledger rebuild.
 
 ## Spec delta
