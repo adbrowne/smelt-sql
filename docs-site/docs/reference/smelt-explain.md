@@ -243,6 +243,17 @@ ancestors — this is how a downgrade that silently propagates into a downstream
 The baseline never touches a warehouse, a deployed snapshot, or the maintenance ledger — it is a
 pure comparison of two source trees.
 
+A new maintenance cell is graded on how it reads its data, not on the fact that it exists: a
+cell whose maintenance is not partition-local — it has no time column to scan, so every run reads
+it in full and any change to it rebuilds the whole model — is a `downgrade` when it's added to a
+model that was already maintained, because the model just gained a dependency that can silently
+force a full rebuild. A partition-local new cell is `neutral` instead; `cell_added` never grades
+`upgrade` on its own — a model going from unmaintained to maintained is reported once, as
+`maintenance_gained`. Symmetrically, a grain that **widens** (its keys now cover a strict
+superset of the old column set, a weaker uniqueness claim — proving one row per `(date, user)`
+implies one row per `(date, user, name)`, never the reverse) is a `downgrade`; a grain that
+**narrows** (a strict subset — a stronger claim) is an `upgrade`.
+
 **Text** (default):
 
 ```

@@ -29,7 +29,9 @@ use crate::analysis::walk::{
 use crate::contract::ContractPointView;
 use crate::maintenance::availability::StateDowngrade;
 use crate::maintenance::derive::row_identity;
-use crate::maintenance::{refusal_code, PlanCell, Refusal, RowIdentityVerdict, Technique};
+use crate::maintenance::{
+    refusal_code, PartitionLocal, PlanCell, Refusal, RowIdentityVerdict, Technique, Trigger,
+};
 
 /// Errors the property-profile derivation can surface. Fail-loud
 /// (`CLAUDE.md` §"Fail-loud discipline"): a model whose SQL cannot be
@@ -186,6 +188,25 @@ pub struct CellVerdict {
     /// when the ideal and degraded techniques happen to match on both sides
     /// of the diff for an unrelated reason.
     pub state_downgrade: Option<StateDowngrade>,
+    /// The source name a `NewData`/`UpstreamMutation` trigger carries,
+    /// exposed structurally so a story can name it without parsing
+    /// `trigger`'s `{:?}` display string (`docs/specs/property_diff.md`
+    /// §"The property profile" item 2). Absent for `Backfill` and
+    /// `ColumnAdded` triggers, which have no per-source address.
+    pub trigger_source: Option<String>,
+    /// The cell's `PartitionLocal` verdict, flattened to a bool: `true` when
+    /// the maintenance scan and footprint both project onto a bounded
+    /// partition interval, `false` when the footprint spans unbounded
+    /// partitions (`docs/specs/property_diff.md` §"The property profile"
+    /// item 2). Read by `cell_added`'s direction rule and the `dependency`
+    /// story.
+    pub partition_local: bool,
+    /// Present when `partition_local` is `false`: the source and the
+    /// derivation's own reason text for why the cell is not partition-local
+    /// (`incremental_models.md` §"Partition-local maintenance (the K8
+    /// guardrail)") — quoted verbatim by a `dependency` story, never
+    /// re-derived.
+    pub locality_reason: Option<(String, String)>,
 }
 
 /// Render one [`PlanCell`]'s [`CellVerdict`] — the single place a cell's
@@ -194,6 +215,14 @@ pub struct CellVerdict {
 /// (`docs/specs/property_diff.md` §"The property profile"). A renderer
 /// consumes this value rather than re-deriving the strings itself.
 pub fn render_cell_verdict(cell: &PlanCell, contract_point: ContractPointView) -> CellVerdict {
+    let trigger_source = match &cell.trigger {
+        Trigger::NewData { source } | Trigger::UpstreamMutation { source } => Some(source.clone()),
+        Trigger::ColumnAdded { .. } | Trigger::Backfill => None,
+    };
+    let (partition_local, locality_reason) = match &cell.partition_local {
+        PartitionLocal::Yes => (true, None),
+        PartitionLocal::No { source, why } => (false, Some((source.clone(), why.clone()))),
+    };
     CellVerdict {
         group: cell.group.clone(),
         trigger: format!("{:?}", cell.trigger),
@@ -202,6 +231,9 @@ pub fn render_cell_verdict(cell: &PlanCell, contract_point: ContractPointView) -
         row_identity: cell.row_identity.clone(),
         contract_point,
         state_downgrade: cell.state_downgrade.clone(),
+        trigger_source,
+        partition_local,
+        locality_reason,
     }
 }
 
@@ -369,6 +401,42 @@ mod tests {
             "GROUP BY customer_id must prove a grain key over customer_id; got {:?}",
             set.grain
         );
+    }
+
+    /// `render_cell_verdict` exposes the trigger source and partition
+    /// locality structurally (`docs/specs/property_diff.md` §"The property
+    /// profile" item 2), rather than leaving a caller to re-parse `trigger`'s
+    /// `{:?}` string.
+    #[test]
+    fn cell_verdict_carries_trigger_source_and_locality() {
+        let mut cell = sample_cell();
+        cell.trigger = Trigger::NewData {
+            source: "raw.devices".to_string(),
+        };
+        cell.partition_local = PartitionLocal::No {
+            source: "raw.devices".to_string(),
+            why: "no partition_column declared".to_string(),
+        };
+        let contract_point =
+            crate::contract::effective_contract(None, "raw.devices", &["amount".to_string()])
+                .into();
+        let verdict = render_cell_verdict(&cell, contract_point);
+        assert_eq!(verdict.trigger_source, Some("raw.devices".to_string()));
+        assert!(!verdict.partition_local);
+        assert_eq!(
+            verdict.locality_reason,
+            Some((
+                "raw.devices".to_string(),
+                "no partition_column declared".to_string()
+            ))
+        );
+
+        let backfill_cell = PlanCell {
+            trigger: Trigger::Backfill,
+            ..sample_cell()
+        };
+        let backfill_verdict = render_cell_verdict(&backfill_cell, ContractPointView::default());
+        assert_eq!(backfill_verdict.trigger_source, None);
     }
 
     #[test]

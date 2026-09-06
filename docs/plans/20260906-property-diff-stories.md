@@ -63,7 +63,7 @@ Dogfooding the property-diff PR comment on this repository's own pull requests (
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-09-06 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -270,6 +270,8 @@ Dogfooding the property-diff PR comment on this repository's own pull requests (
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- 2026-09-06 (Phase 1): `crates/smelt-runtime/src/python.rs` test module has an intermittent isolation flake — concurrent Python-model tests (`python_discovery_runs_in_runtime`, `python_multimodel_delimiter_not_a_section`, `python_name_mismatch_blocks_and_retains_other_keys`) collide on a shared tmp path and read each other's `unstable.py` counter. Reproduces on `main`; unrelated to this plan. Fix separately.
 
 ## Verification
 
