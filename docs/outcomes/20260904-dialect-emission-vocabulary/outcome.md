@@ -80,7 +80,7 @@ audit before it is claimed — never from documentation.
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
 | 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
 | 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | done |
-| 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap` | pending |
+| 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap`; also validate a `Conditional` arm's `Template` verdict at registry construction | planned |
 | 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
 ## Decision log
@@ -330,6 +330,29 @@ audit before it is claimed — never from documentation.
   `validate_conditional` never validates a `SettledEmission::Template` arm's placeholders, so a
   future `Conditional`+`Template`-arm combination (considered and rejected here for
   `GROUP_CONCAT`) would have no build-time guard. See `phases/08-summary.md`.
+
+- 2026-09-06 (plan 09) — **Small reshape: phase 9's row gains the `Conditional`-arm template
+  validation phase 8 surfaced.** `validate_conditional` never calls `validate_template` on a
+  `SettledEmission::Template` arm verdict, so the registry can construct a template with an
+  out-of-range placeholder that only misbehaves at print time. That is a hole in criterion 2
+  ("registry construction validates templates"), so it belongs inside the outcome rather than in
+  a note; it is a ~20-line change and rides along with phase 9 instead of taking a row of its own.
+
+- 2026-09-06 (plan 09, design) — **Phase 8's open question is decided: make the pair genuinely
+  callable, not exclude non-`Call` forms from the probe axis.** Measured while planning: nothing
+  in production consumes the `DATE_ADD`/`DATE_SUB` registry rows — `binary.rs` types the infix
+  interval add/sub itself and never resolves either name — so the `SyntaxForm::Special`
+  classification is simply wrong, not load-bearing. Both names parse as ordinary
+  `FUNCTION_CALL`s in smelt SQL and DuckDB accepts `date_add(DATE, INTERVAL)` (its schema leg
+  already passes), so the probe axis is right and the registry row is the defect. Excluding them
+  from the probe axis would hide a real inference hole rather than close one. Consequences fixed
+  here: the pair joins `REGISTRY_MIGRATED` in the same edit that gives them `SqlFunction`
+  variants, so the `legacy_match_ratchet` count is unchanged; and `architecture.md` item 14's
+  consistency-gate parenthetical, which names them as dedicated-syntax exemptions, is the phase's
+  spec delta. On Spark the closure is a lowering, not a reclassification: bare `DATE ± INTERVAL`
+  returns `DATE` where smelt (and DuckDB) declare `Timestamp`, so the template carries the cast.
+  The plan's contingency — a type-leg `Divergent` row if no measured spelling makes the engine
+  agree — is bounded and may only be taken after the cast is attempted live.
 
 ## Blocked
 
