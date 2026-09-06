@@ -1341,6 +1341,13 @@ to close. Under `redelivery: none` the source has promised that no row arrives t
 a delivery, so two identical rows in one delta are two events at one `(k, t)` and refuse
 (`SuccessionClockTie`) like any other collision.
 
+A succession model's completed window-forward run records its own run window in the interval
+ledger and its driving source's landing on exactly the same terms as every other maintained
+grain (`run_state.md` §"Interval ledger", `sources.md` §"Landed-delta (derived, recorded)"),
+which is what makes `contract.deferral`'s frontier lag measurable for this grain; the
+whole-source rebuild path (`--full-refresh` / `smelt rebuild`) has no run window and records
+neither.
+
 #### What stays out of this grain
 
 **SCD2 over mutable snapshots** is never admitted here regardless of SQL shape: deriving a

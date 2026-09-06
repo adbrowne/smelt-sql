@@ -21,6 +21,9 @@ use smelt_logical::maintenance::{SourceFacts, Technique};
 mod execute;
 pub use execute::{execute_succession_maintenance, rebuild_succession_state};
 
+mod frontier;
+pub(crate) use frontier::{build_succession_run_record, record_succession_frontiers};
+
 #[cfg(test)]
 mod tests;
 

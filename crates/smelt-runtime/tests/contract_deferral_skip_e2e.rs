@@ -858,3 +858,202 @@ async fn a_run_past_the_cell_window_folds_and_advances_the_cell_frontier() {
         "a covering run must advance the declaring cell's frontier to the run's own end"
     );
 }
+
+/// Stages `succession_advancer` (undeclared succession grain, no `contract:`)
+/// plus `succession_deferred` (same shape, `contract.deferral: '2 days'`),
+/// both driving off the same arrival-partitioned `customer_changes` source —
+/// the succession-grain counterpart of [`stage_project`]
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/06b-plan.md`, test
+/// 4). Neither model declares `grain:`, which is the succession grain's own
+/// undeclared-admission shape (`incremental_shapes.md` §"The succession
+/// grain").
+fn stage_succession_deferral_project(project_dir: &Path, db_path: &Path) {
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    let source_yml = r#"description: customer change events, arrival-partitioned
+mutation_profile: append_only
+timeseries:
+  event_time_column: changed_at
+  partition_column: arrival_date
+  granularity: day
+columns:
+- name: customer_id
+  type: INTEGER
+- name: changed_at
+  type: TIMESTAMP
+- name: arrival_date
+  type: DATE
+- name: tier
+  type: VARCHAR
+"#;
+    std::fs::write(
+        project_dir.join("models/sources/customer_changes.yml"),
+        source_yml,
+    )
+    .unwrap();
+
+    let succession_sql = r#"SELECT
+  customer_id,
+  changed_at,
+  tier,
+  LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS valid_to
+FROM smelt.sources.customer_changes
+"#;
+    std::fs::write(
+        project_dir.join("models/succession_advancer.sql"),
+        format!("---\nmaterialization: table\nrefresh: incremental\n---\n{succession_sql}"),
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("models/succession_deferred.sql"),
+        format!(
+            "---\nmaterialization: table\nrefresh: incremental\ncontract:\n  deferral: '2 \
+             days'\n---\n{succession_sql}"
+        ),
+    )
+    .unwrap();
+
+    let smelt_yml = format!(
+        "name: succession_deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  \
+         dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: \
+         table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+}
+
+const SUCCESSION_SOURCE_TABLE: &str = "main.sources_customer_changes";
+
+fn stage_succession_source(db_path: &Path) {
+    let conn = duckdb::Connection::open(db_path).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE {SUCCESSION_SOURCE_TABLE} (customer_id INTEGER, changed_at TIMESTAMP, \
+         arrival_date DATE, tier VARCHAR)"
+    ))
+    .unwrap();
+}
+
+fn insert_succession_event(
+    db_path: &Path,
+    id: i64,
+    changed_at: &str,
+    arrival_date: &str,
+    tier: &str,
+) {
+    let conn = duckdb::Connection::open(db_path).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO {SUCCESSION_SOURCE_TABLE} VALUES ({id}, TIMESTAMP '{changed_at}', DATE \
+         '{arrival_date}', '{tier}')"
+    ))
+    .unwrap();
+}
+
+fn succession_row_count(db_path: &Path, table: &str) -> i64 {
+    let conn = duckdb::Connection::open(db_path).unwrap();
+    conn.query_row(&format!("SELECT COUNT(*) FROM main.{table}"), [], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
+/// Test 4 (`06b-plan.md`): the succession grain's own three-run A/B/C shape
+/// — mirroring [`deferred_run_is_recorded_skipped_and_writes_nothing`] — now
+/// that the window-forward driver records its own maintained-interval and
+/// landed-delta frontiers (phase 6b's fix), a `contract.deferral`-declared
+/// succession model's run can be licensed to skip.
+#[tokio::test]
+async fn succession_deferral_skip_is_licensed_end_to_end() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_succession_deferral_project(&project_dir, &db_path);
+    stage_succession_source(&db_path);
+    insert_succession_event(&db_path, 1, "2026-01-01 08:00:00", "2026-01-01", "gold");
+    insert_succession_event(&db_path, 2, "2026-01-02 08:00:00", "2026-01-02", "silver");
+    insert_succession_event(&db_path, 3, "2026-01-03 08:00:00", "2026-01-03", "bronze");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    // Run A: both succession models establish their maintained frontier at
+    // 2026-01-02 (the requested end), and the shared source's landed-delta
+    // frontier at the same date.
+    run(
+        "run-a",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec![],
+        "2026-01-01",
+        "2026-01-02",
+    )
+    .await
+    .expect("run A must succeed");
+
+    let deferred_rows_after_a = succession_row_count(&db_path, "succession_deferred");
+    assert_eq!(deferred_rows_after_a, 1);
+
+    // Run B: only `succession_advancer` runs, advancing the shared source's
+    // landed-delta frontier to 2026-01-04 while `succession_deferred` never
+    // runs — its own maintained frontier stays at 2026-01-02. Lag is now 2
+    // days, exactly `D`.
+    run(
+        "run-b",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["succession_advancer".to_string()],
+        "2026-01-02",
+        "2026-01-04",
+    )
+    .await
+    .expect("run B must succeed");
+
+    // Run C: `succession_deferred` is selected — the measured lag (2 days)
+    // is within the declared window (`D = 2 days`), so it must be skipped
+    // rather than executed.
+    let outcome = run(
+        "run-c",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["succession_deferred".to_string()],
+        "2026-01-04",
+        "2026-01-05",
+    )
+    .await
+    .expect("run C must succeed (a licensed skip, not a failure)");
+
+    let record = outcome
+        .models
+        .get("succession_deferred")
+        .expect("succession_deferred must have a manifest entry even when skipped");
+    assert_eq!(record.strategy, "skipped_deferral");
+    assert_eq!(record.outcome, RunOutcomeKind::Skipped);
+    assert_eq!(record.row_count, 0);
+
+    assert_eq!(
+        succession_row_count(&db_path, "succession_deferred"),
+        deferred_rows_after_a,
+        "a deferral-licensed skip must not write to the presented table"
+    );
+
+    let file_store = FileStore::new(&project_dir, "dev");
+    let interval_store = file_store.load_intervals().expect("load intervals");
+    let maintained = interval_store
+        .get("succession_deferred")
+        .and_then(|mi| mi.latest_date())
+        .expect("succession_deferred has a recorded interval from run A");
+    assert_eq!(
+        maintained.format("%Y-%m-%d").to_string(),
+        "2026-01-02",
+        "a skipped run must not advance the interval ledger"
+    );
+}

@@ -2408,32 +2408,32 @@ pub async fn execute_project(
                                 run_id,
                             )
                             .await?;
+                        let (start_str, end_str) =
+                            (s.format("%Y-%m-%d").to_string(), e.format("%Y-%m-%d").to_string());
+                        crate::maintenance_driver::succession::record_succession_frontiers(
+                            file_store, state_io_lock, &plan.name,
+                            &compute_model_hash(&plan.sql), &succession_source_facts,
+                            &start_str, &end_str,
+                        )
+                        .await;
                         (
                             result,
                             "succession_patch",
                             Some(TimeRangeRecord {
-                                start: s.format("%Y-%m-%d").to_string(),
-                                end: e.format("%Y-%m-%d").to_string(),
+                                start: start_str,
+                                end: end_str,
                             }),
                         )
                     };
                 manifest_entries.insert(
                     plan.name.clone(),
-                    ModelRunRecord {
-                        strategy: strategy.to_string(),
+                    crate::maintenance_driver::succession::build_succession_run_record(
+                        strategy,
                         time_range,
-                        partitions_updated: vec![],
-                        row_count: succession_result.row_count,
-                        duration_ms: model_start.elapsed().as_millis() as u64,
-                        batch_safety: Some("succession".to_string()),
-                        outcome: smelt_state::RunOutcomeKind::Success,
-                        definition_hash: compute_model_hash(&plan.sql),
-                        error: None,
-                        retry_count: 0,
-                        probes: Vec::new(),
-                        subsumed: None,
-                        deferred_cells: Vec::new(),
-                    },
+                        succession_result.row_count,
+                        model_start.elapsed().as_millis() as u64,
+                        compute_model_hash(&plan.sql),
+                    ),
                 );
                 reporter.model_completed(
                     run_id,

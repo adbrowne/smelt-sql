@@ -14,10 +14,15 @@ use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 
 use smelt_logical::contract::ContractPoint;
+use smelt_maintenance_testkit::gate_succession::{
+    assert_succession_equivalence_at_point, insert_row_succession_for, stage_succession_recipe_for,
+    SuccessionEventRow,
+};
 use smelt_maintenance_testkit::link_c_harness::base_request;
 use smelt_maintenance_testkit::oracle::except_all_row_count_via_backend;
 use smelt_maintenance_testkit::recipe::{
-    arb_recipe, ConstructKind, ContractDecl, ModelRecipe, RecipePool,
+    arb_recipe, ConformanceTarget, ConstructKind, ContractDecl, ModelRecipe, RecipePool,
+    SuccessionRecipe,
 };
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
@@ -432,5 +437,226 @@ fn deferral_comparator_rejects_a_state_the_bracket_admitted() {
         result.is_err(),
         "the restated comparator must reject a maintained state the superseded bracket \
          admitted, but it returned Ok"
+    );
+}
+
+/// Stage a `succession_deferred` model (`contract.deferral: '{d_days} days'`)
+/// plus an undeclared `succession_advancer` sibling over the same driving
+/// source — the succession-grain counterpart of
+/// `deferral_recipe_upholds_restated_oracle_with_a_skipped_run`'s two-model
+/// fixture, re-added per `docs/outcomes/20260906-scd2-keyed-succession/
+/// phases/06b-plan.md` (criterion 6 residue phase 7d recorded: the
+/// window-forward driver did not record a maintained frontier, so this
+/// leg's expected skip never fired — fixed by phase 6b's
+/// `record_succession_frontiers`).
+fn stage_succession_deferral_fixture(
+    d_days: i64,
+    tmp: &tempfile::TempDir,
+) -> anyhow::Result<smelt_maintenance_testkit::link_c_harness::LinkCProject> {
+    let recipe =
+        SuccessionRecipe::new_lead().with_contract(ContractDecl::Deferral { days: d_days });
+    let mut recipe = recipe;
+    recipe.model_name = "succession_deferred".to_string();
+
+    let project = stage_succession_recipe_for(&recipe, tmp, ConformanceTarget::DuckDb)?;
+
+    let mut sibling = SuccessionRecipe::new_lead();
+    sibling.model_name = "succession_advancer".to_string();
+    std::fs::write(
+        project.project_dir.join("models/succession_advancer.sql"),
+        render::render_succession_model_file(&sibling),
+    )?;
+
+    Ok(project)
+}
+
+/// `succession_deferral_recipe_upholds_restated_oracle_with_a_skipped_run`
+/// (`06b-plan.md` test 5, re-adding `07d-plan.md` test 6): the succession
+/// grain's own three-run A/B/C shape — run A establishes both models' own
+/// maintained frontier (and the shared source's landed-delta frontier);
+/// run B (only `succession_advancer`) advances the shared source's
+/// landed-delta frontier alone; run C (`succession_deferred`) measures a lag
+/// exactly `D`, so it must be a licensed skip. The relaxed
+/// `ExactOverProcessedSWithLagBound` oracle
+/// (`assert_succession_equivalence_at_point`) holds throughout.
+#[tokio::test]
+async fn succession_deferral_recipe_upholds_restated_oracle_with_a_skipped_run() {
+    let d_days = 2;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_deferral_fixture(d_days, &tmp).expect("stage fixture");
+    let recipe = {
+        let mut r =
+            SuccessionRecipe::new_lead().with_contract(ContractDecl::Deferral { days: d_days });
+        r.model_name = "succession_deferred".to_string();
+        r
+    };
+    let point = ContractPoint::Deferral { d: d_days };
+
+    // Run A: both models select (empty `select`) over [day0, day1) —
+    // establishes both `succession_deferred`'s own maintained frontier and
+    // the shared source's landed-delta frontier at day1.
+    let row0 = SuccessionEventRow::new(1, day(0).and_hms_opt(8, 0, 0).unwrap(), "gold");
+    insert_row_succession_for(&project, &recipe, &row0).expect("insert row0");
+    let mut request = base_request("dev");
+    request.start = Some(day(0).format("%Y-%m-%d").to_string());
+    request.end = Some(day(1).format("%Y-%m-%d").to_string());
+    project
+        .run_quiet("run-a", request)
+        .await
+        .expect("run A must succeed");
+    let frontier_after_a = days_from_ce(day(1));
+    assert_succession_equivalence_at_point(
+        &project,
+        &recipe,
+        &point,
+        frontier_after_a,
+        Some(frontier_after_a),
+    )
+    .await
+    .expect("relaxed oracle must hold immediately after run A (lag is 0)");
+
+    // Run B: ONLY `succession_advancer` runs over [day1, day3) — the shared
+    // source's landed-delta frontier advances to day3 while
+    // `succession_deferred`'s own maintained frontier stays at day1.
+    let row1 = SuccessionEventRow::new(2, day(1).and_hms_opt(8, 0, 0).unwrap(), "silver");
+    let row2 = SuccessionEventRow::new(
+        3,
+        (day(1) + chrono::Duration::days(1))
+            .and_hms_opt(8, 0, 0)
+            .unwrap(),
+        "bronze",
+    );
+    insert_row_succession_for(&project, &recipe, &row1).expect("insert row1");
+    insert_row_succession_for(&project, &recipe, &row2).expect("insert row2");
+    let mut request = base_request("dev");
+    request.select = vec!["succession_advancer".to_string()];
+    request.start = Some(day(1).format("%Y-%m-%d").to_string());
+    request.end = Some(day(3).format("%Y-%m-%d").to_string());
+    project
+        .run_quiet("run-b", request)
+        .await
+        .expect("run B must succeed");
+    let input_frontier_after_b = days_from_ce(day(3));
+    assert_succession_equivalence_at_point(
+        &project,
+        &recipe,
+        &point,
+        frontier_after_a,
+        Some(input_frontier_after_b),
+    )
+    .await
+    .expect(
+        "restated oracle must hold after run B — the landed-but-unprocessed rows are at/after \
+         the settled cutoff",
+    );
+
+    // Run C: `succession_deferred` is selected over [day3, day4) — the
+    // measured lag (day3 - day1 = 2 days) is exactly `D`, so this run must
+    // be a licensed skip, not a real execution.
+    let mut request = base_request("dev");
+    request.select = vec!["succession_deferred".to_string()];
+    request.start = Some(day(3).format("%Y-%m-%d").to_string());
+    request.end = Some(
+        (day(3) + chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string(),
+    );
+    let outcome = project
+        .run_quiet("run-c", request)
+        .await
+        .expect("run C must succeed (a licensed skip, not a failure)");
+    let record = outcome
+        .models
+        .get("succession_deferred")
+        .expect("succession_deferred must have a manifest entry even when skipped");
+    assert_eq!(record.strategy, "skipped_deferral");
+    assert_eq!(record.outcome, RunOutcomeKind::Skipped);
+    assert_eq!(record.row_count, 0);
+
+    // The skip advances neither the maintained frontier nor the tracked
+    // input frontier (`succession_advancer` was not selected this run) —
+    // the restated oracle must still hold, unchanged.
+    assert_succession_equivalence_at_point(
+        &project,
+        &recipe,
+        &point,
+        frontier_after_a,
+        Some(input_frontier_after_b),
+    )
+    .await
+    .expect("restated oracle must hold after the licensed skip");
+}
+
+/// `succession_deferral_leg_is_not_vacuous` (`06b-plan.md` test 6, re-adding
+/// `07d-plan.md` test 7): METAMORPHIC — the same post-skip state from
+/// [`succession_deferral_recipe_upholds_restated_oracle_with_a_skipped_run`]
+/// FAILS `ContractPoint::Default`, proving the relaxed oracle is genuinely
+/// relaxed rather than silently subsuming the strict one (the strict oracle
+/// expects `succession_deferred`'s maintained table to reflect every row
+/// currently in the source, including the ones only `succession_advancer`
+/// has folded).
+#[tokio::test]
+async fn succession_deferral_leg_is_not_vacuous() {
+    let d_days = 2;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_deferral_fixture(d_days, &tmp).expect("stage fixture");
+    let recipe = {
+        let mut r =
+            SuccessionRecipe::new_lead().with_contract(ContractDecl::Deferral { days: d_days });
+        r.model_name = "succession_deferred".to_string();
+        r
+    };
+
+    let row0 = SuccessionEventRow::new(1, day(0).and_hms_opt(8, 0, 0).unwrap(), "gold");
+    insert_row_succession_for(&project, &recipe, &row0).expect("insert row0");
+    let mut request = base_request("dev");
+    request.start = Some(day(0).format("%Y-%m-%d").to_string());
+    request.end = Some(day(1).format("%Y-%m-%d").to_string());
+    project
+        .run_quiet("run-a", request)
+        .await
+        .expect("run A must succeed");
+
+    let row1 = SuccessionEventRow::new(2, day(1).and_hms_opt(8, 0, 0).unwrap(), "silver");
+    insert_row_succession_for(&project, &recipe, &row1).expect("insert row1");
+    let mut request = base_request("dev");
+    request.select = vec!["succession_advancer".to_string()];
+    request.start = Some(day(1).format("%Y-%m-%d").to_string());
+    request.end = Some(day(3).format("%Y-%m-%d").to_string());
+    project
+        .run_quiet("run-b", request)
+        .await
+        .expect("run B must succeed");
+
+    let mut request = base_request("dev");
+    request.select = vec!["succession_deferred".to_string()];
+    request.start = Some(day(3).format("%Y-%m-%d").to_string());
+    request.end = Some(
+        (day(3) + chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string(),
+    );
+    let outcome = project
+        .run_quiet("run-c", request)
+        .await
+        .expect("run C must succeed (a licensed skip, not a failure)");
+    assert_eq!(
+        outcome
+            .models
+            .get("succession_deferred")
+            .expect("manifest entry")
+            .strategy,
+        "skipped_deferral"
+    );
+
+    let default_result =
+        assert_succession_equivalence_at_point(&project, &recipe, &ContractPoint::Default, 0, None)
+            .await;
+    assert!(
+        default_result.is_err(),
+        "the STRICT/default oracle must FAIL here — it expects `succession_deferred`'s \
+         maintained table to reflect every row in the current source, but the licensed skip \
+         means it never folded run B's row. If this passes, the relaxation is not actually \
+         being exercised."
     );
 }
