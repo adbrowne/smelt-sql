@@ -153,4 +153,9 @@ mod external_source_point_lookup_recompute;
 mod fixture_based;
 mod in_place_update_lowering;
 mod keyed_membership_recompute_e2e;
+/// The succession-patch technique's own real-fixture requirement
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/05b-plan.md`,
+/// tests 10-11): drives `tests/fixtures/succession/` through
+/// `execute_project` itself.
+mod succession_patch_e2e;
 mod write_pattern_registry_pin;

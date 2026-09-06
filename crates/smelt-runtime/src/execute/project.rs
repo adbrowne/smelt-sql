@@ -2588,6 +2588,141 @@ pub async fn execute_project(
             }));
         }
 
+        // ── Succession-patch dispatch (`docs/outcomes/
+        // 20260906-scd2-keyed-succession/phases/05b-plan.md`) ───────────────
+        // A `refresh: incremental` model with no declared/derivable grain
+        // (`metadata.resolved_grain() == None`) is the keyed-succession
+        // grain's own undeclared-admission shape (`docs/specs/
+        // incremental_shapes.md` §"The succession grain") — dispatched here,
+        // before the ordinary `plan.incremental` match, since it carries no
+        // `Grain::Key`/`Grain::Partition` plan at all.
+        // `resolve_live_succession_cell` itself refuses (`Ok(None)`) for a
+        // non-incremental model, a `NotSuccession` classifier verdict, or a
+        // state-downgraded cell (technique no longer `SuccessionPatch`), so
+        // this guard only needs the grain check.
+        if let Some(metadata) = plan
+            .model_file
+            .metadata
+            .as_deref()
+            .filter(|m| m.resolved_grain().is_none())
+        {
+            let db_table_name = plan.model_file.db_name_owned();
+            let clean_sql = smelt_parser::strip_frontmatter(&plan.sql).to_string();
+            let (succession_source_facts, succession_explicitly_mutable) =
+                build_maint_source_facts(&plan.model_file, source_infos);
+            let succession_source_refs =
+                crate::maintenance_driver::succession::build_succession_source_refs(
+                    &plan.model_file,
+                    source_infos,
+                );
+            if let Some(cell) = crate::maintenance_driver::succession::resolve_live_succession_cell(
+                &clean_sql,
+                &db_table_name,
+                metadata,
+                &succession_source_facts,
+                &succession_explicitly_mutable,
+                &succession_source_refs,
+                &availability,
+                schema,
+                model_target,
+                source_infos,
+            )? {
+                let (Some(s), Some(e)) = (start_date, end_date) else {
+                    anyhow::bail!(
+                        "Model '{}' derives the succession grain (`docs/specs/\
+                         incremental_shapes.md` §\"The succession grain\") and was run with no \
+                         event-time window — both --event-time-start/--event-time-end are \
+                         required.",
+                        plan.name
+                    );
+                };
+                let steps = crate::maintenance_driver::driving_steps(
+                    &s.format("%Y-%m-%d").to_string(),
+                    &e.format("%Y-%m-%d").to_string(),
+                    &cell.granularity,
+                )?;
+                let columns: Vec<(String, smelt_types::DataType)> = upstream_schemas_for_bootstrap
+                    .models
+                    .get(&plan.model_file.name)
+                    .map(|cols| {
+                        cols.iter()
+                            .map(|(name, typed)| (name.clone(), typed.data_type.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let succession_retry_policy =
+                    RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                let succession_probe_policy =
+                    probe_policy_for_model(config, prior_runs, &plan.name);
+                let succession_result =
+                    crate::maintenance_driver::succession::execute_succession_maintenance(
+                        backend,
+                        &plan.name,
+                        schema,
+                        &db_table_name,
+                        &steps,
+                        &cell,
+                        &columns,
+                        &succession_retry_policy,
+                        &succession_probe_policy,
+                        reporter,
+                        run_id,
+                    )
+                    .await?;
+                manifest_entries.insert(
+                    plan.name.clone(),
+                    ModelRunRecord {
+                        strategy: "succession_patch".to_string(),
+                        time_range: Some(TimeRangeRecord {
+                            start: s.format("%Y-%m-%d").to_string(),
+                            end: e.format("%Y-%m-%d").to_string(),
+                        }),
+                        partitions_updated: vec![],
+                        row_count: succession_result.row_count,
+                        duration_ms: model_start.elapsed().as_millis() as u64,
+                        batch_safety: Some("succession".to_string()),
+                        outcome: smelt_state::RunOutcomeKind::Success,
+                        definition_hash: compute_model_hash(&plan.sql),
+                        error: None,
+                        retry_count: 0,
+                        probes: Vec::new(),
+                        subsumed: None,
+                        deferred_cells: Vec::new(),
+                    },
+                );
+                reporter.model_completed(
+                    run_id,
+                    &plan.name,
+                    succession_result.row_count,
+                    model_start.elapsed(),
+                );
+                if request.run_checks {
+                    let (outcomes, to_skip) = run_model_checks(
+                        &plan.name,
+                        checks_by_model,
+                        compilers,
+                        backends,
+                        target_assignments,
+                        ephemeral_resolvers,
+                        config.as_ref(),
+                        upstream_map,
+                        selected,
+                        reporter,
+                        run_id,
+                    )
+                    .await;
+                    check_results.extend(outcomes);
+                    skip_set.extend(to_skip);
+                }
+                return Ok(ModelOutcome::Completed(ModelSuccess {
+                    manifest_entries,
+                    check_results,
+                    skip_set,
+                    rows: succession_result.row_count,
+                }));
+            }
+        }
+
         let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
             Some(inc_plan) => {
                 let backend_default_strategy = backend.resolve_strategy(&inc_plan.config);

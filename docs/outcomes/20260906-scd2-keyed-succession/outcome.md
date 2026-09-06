@@ -152,7 +152,7 @@ out-of-order and repeated windows, and the clamp.
 | 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | done |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; the `statement_parity` structural no-authoring leg widened to the succession shapes; the `maintenance_plan_conformance` SCD2 **append-only** matrix cell inhabited with the emitter-backed CLAIMED entry (columns 2/3 stay known gaps — both are out of this grain) | done |
 | 5a | Emitter inputs, derived purely: widen `SuccessionVerdict::Recognized` to carry the classifier's own expression material (row-local `(alias, source expr)` projection, `{lead}`/`{lag}` templates per derived column, the delete-flag expression) and add the pure `SuccessionRecipe` assembler in `smelt-logical`'s maintenance layer that turns a verdict + presented column set into every argument the phase-4 emitters take; carry it out of `derive_model_maintenance_plan` on `MaintenancePlanResult` so no consumer re-parses model SQL | done |
-| 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | planned |
+| 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | done |
 | 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
 | 7 | Testkit and conformance: arrival-partitioned `SourceRecipe`, `SuccessionRecipe` family with the model-SQL oracle and every listed leg; state-deletion and repair legs widened; seeded sample green | pending |
@@ -540,6 +540,20 @@ out-of-order and repeated windows, and the clamp.
   shrink step per phases 2b/3/3a precedent — confirmed via `cargo test --workspace
   --no-fail-fast` that it is the only failing test in the whole workspace. See
   `phases/05a-summary.md`.
+
+- 2026-09-07 (implement phase 5b): shipped as planned. New
+  `crates/smelt-runtime/src/maintenance_driver/succession/{mod,execute,tests}.rs` dispatches
+  succession-patch cells through the window-forward driver, gated in `execute/project.rs` on
+  `metadata.resolved_grain().is_none()`. Deviation not scoped in the 05b plan:
+  `smelt-core::metadata::validate_timeseries`'s hard `GrainRequiredForIncremental` refusal
+  pre-dates the succession classifier and rejected undeclared-grain succession candidates
+  before the classifier ever ran; fixed with a narrow `LEAD(`/`LAG(` text pre-filter that only
+  widens acceptance (the real classifier still fails closed downstream). 11/11 new tests green,
+  `execute_parity`/`statement_parity`/`walk_coverage` green. `verify-phase.sh`'s only failure is
+  the large-file ratchet (9 files, same pattern as 2b/3/3a/5a), left to the loop's shrink step —
+  confirmed the sole failure in `cargo test --workspace`. Follow-up: no diagnostic surfacing yet
+  for `NotSuccession*` classifier codes beyond the `SuccessionPreFilterNegatesFlag` advisory. See
+  `phases/05b-summary.md`.
 
 ## Blocked
 

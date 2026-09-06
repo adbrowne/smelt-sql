@@ -36,6 +36,9 @@
 //! - [`sidecar`] — fingerprint and repair-group sidecar diffing and refresh.
 //! - [`delta_restriction`] — delete+insert with a delta restriction, and the
 //!   live facts that admit it.
+//! - [`succession`] — the succession-patch technique's live-cell resolution
+//!   and window-forward step loop (not a [`driver::WindowedKeyedRule`] impl
+//!   — see the module's own doc comment for why).
 
 mod column_scoped;
 mod delta_restriction;
@@ -46,6 +49,7 @@ mod observed_delta;
 mod repair;
 mod resolve;
 mod sidecar;
+pub mod succession;
 
 #[cfg(test)]
 mod tests;
@@ -59,3 +63,7 @@ pub use observed_delta::*;
 pub use repair::*;
 pub use resolve::*;
 pub use sidecar::*;
+pub use succession::{
+    build_succession_source_refs, execute_succession_maintenance, resolve_live_succession_cell,
+    SuccessionCell,
+};
