@@ -1,0 +1,18 @@
+# Pins the toolchain for entry points that do NOT go through mise.
+#
+# mise.toml's `[tools] rust` exports RUSTUP_TOOLCHAIN=1.95.0, which takes
+# precedence over this file, so a mise-managed shell and every CI job already
+# agree. A bare shell has no such override and falls through to whatever
+# rustup's `default` toolchain happens to be — a *separate* toolchain directory
+# even when it currently holds the same rustc build.
+#
+# Today `default` is also 1.95.0, so the two entry points share cargo
+# fingerprints and neither invalidates the other's artifacts. This file exists
+# so that stays true: the day `rustup update` moves `stable` ahead of the pin,
+# a bare `cargo test` and `mise run test` would otherwise compile with
+# different rustc versions into one 57 GB target directory and rebuild the
+# workspace on every switch between them.
+#
+# Keep `channel` in sync with `rust` in mise.toml.
+[toolchain]
+channel = "1.95.0"
