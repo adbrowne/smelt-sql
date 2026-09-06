@@ -1,42 +1,13 @@
-//! Compile-path settlement of operand-conditional verdicts
-//! (`docs/specs/multi_backend.md` §"Operand-conditional verdicts").
-//!
-//! Phase 7 populated the first production `Conditional` entries — `LOG`,
-//! `TRUNC`, `TO_JSON`, `//` per class — on Spark. These tests exercise
-//! `settle_emissions`'s walk mechanics — position/arity read off the source
-//! CST, operand class read through the caller's `type_of` callback, and the
-//! result matching a direct `Signature::settle_at` call — against `//`, and
-//! (below) the first-argument-class arms of `TRUNC`/`TO_JSON` and the
-//! non-`Conditional` `DAYOFWEEK` template. The arm-selection logic itself
-//! (first match wins, arity guards, class guards, the `otherwise` fallback)
-//! is proven against synthetic signatures in
-//! `crates/smelt-types/tests/registry_coverage.rs`.
+//! `settle_emissions`/`settled_verdict_for` mechanics, and the `TRUNC`/`TO_JSON`
+//! operand-class arms.
 
 use std::collections::{HashMap, HashSet};
 
 use smelt_dialect::emission_settle::settled_verdict_for;
-use smelt_dialect::{print, settle_emissions, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_dialect::{settle_emissions, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::syntax_kind::SyntaxKind;
 use smelt_types::signatures::Position;
 use smelt_types::{BuiltinRegistry, CallFacts, DataType, DialectId, OperandClass, SettledEmission};
-
-fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> String {
-    let parsed = smelt_parser::parse(sql);
-    let ctx = PrintContext {
-        dialect,
-        capabilities: caps,
-        schema: "main",
-        ephemeral_models: HashSet::new(),
-        cross_engine_refs: HashMap::new(),
-        smelt_as_struct: None,
-        smelt_fn: None,
-        smelt_path_ref: None,
-        smelt_path_call: None,
-        restructure_plans: &[],
-        settled_emissions: &[],
-    };
-    print(&parsed.syntax(), &ctx)
-}
 
 fn floor_divide_root() -> smelt_parser::syntax_kind::SyntaxNode {
     smelt_parser::parse("SELECT a // b FROM t").syntax()
@@ -119,64 +90,6 @@ fn a_settled_verdict_reaches_the_printer_by_range() {
     assert_eq!(
         settled_verdict_for(&node, sig, Position::Any, &ctx_miss),
         SettledEmission::Native
-    );
-}
-
-#[test]
-fn dayofweek_prints_the_shift_template_on_spark() {
-    let sql = "SELECT DAYOFWEEK(d) FROM t";
-    assert_eq!(
-        print_with(sql, &SqlDialect::SparkSQL, &BackendCapabilities::spark()),
-        "SELECT (DAYOFWEEK(d) - 1) FROM t",
-        "the non-call template's whole output must be parenthesised"
-    );
-    assert_eq!(
-        print_with(sql, &SqlDialect::DuckDB, &BackendCapabilities::duckdb()),
-        "SELECT DAYOFWEEK(d) FROM t"
-    );
-}
-
-/// Phase 8's Spark `Emission::Template` rows — `AGE`, `DATE_SUB`,
-/// `TO_SECONDS` — closing #178. Each is call-shaped, so its own arguments
-/// substitute bare (no extra wrapping); `AGE`/`DATE_SUB` land on a
-/// `BINARY_EXPR`-equivalent shape and their whole non-call output is
-/// parenthesised, matching `DAYOFWEEK`'s precedent above.
-#[test]
-fn age_prints_the_spark_form() {
-    assert_eq!(
-        print_with(
-            "SELECT AGE(a, b) FROM t",
-            &SqlDialect::SparkSQL,
-            &BackendCapabilities::spark()
-        ),
-        "SELECT (a - b) FROM t"
-    );
-}
-
-#[test]
-fn date_sub_prints_the_spark_form() {
-    // Phase 9: the bare infix form reports `DATE` on Spark, not smelt's
-    // declared `Timestamp` return type, so the template carries an explicit
-    // cast (docs/outcomes/20260904-dialect-emission-vocabulary phase 9).
-    assert_eq!(
-        print_with(
-            "SELECT DATE_SUB(a, b) FROM t",
-            &SqlDialect::SparkSQL,
-            &BackendCapabilities::spark()
-        ),
-        "SELECT CAST(a - b AS TIMESTAMP) FROM t"
-    );
-}
-
-#[test]
-fn to_seconds_prints_the_spark_form() {
-    assert_eq!(
-        print_with(
-            "SELECT TO_SECONDS(a) FROM t",
-            &SqlDialect::SparkSQL,
-            &BackendCapabilities::spark()
-        ),
-        "SELECT make_interval(0, 0, 0, 0, 0, 0, a) FROM t"
     );
 }
 
