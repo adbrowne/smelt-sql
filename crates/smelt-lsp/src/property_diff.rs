@@ -423,7 +423,7 @@ mod tests {
                 Severity::Cost,
                 "",
                 "Reads more per run",
-                "Each run now reads all history of t.",
+                "Each run now reads all history from t.",
             ),
             story(StoryKind::Schema, Severity::Info, "", "Schema", "Adds b."),
         ]);
@@ -437,7 +437,7 @@ mod tests {
             == "Rows may be duplicated: A join can now match more than one row per (id)."));
         assert!(diags
             .iter()
-            .any(|d| d.message == "Reads more per run: Each run now reads all history of t."));
+            .any(|d| d.message == "Reads more per run: Each run now reads all history from t."));
     }
 
     /// §Surface "Editor": a `schema` story is `info` severity and never a
@@ -469,7 +469,7 @@ mod tests {
                 Severity::Cost,
                 "raw.orders",
                 "Reads more per run",
-                "Each run now reads all history of raw.orders.",
+                "Each run now reads all history from raw.orders.",
             ),
             story(
                 StoryKind::RowsMayDuplicate,
