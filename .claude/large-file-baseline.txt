@@ -81,9 +81,9 @@ crates/smelt-lsp/tests/e2e.rs 1406
 crates/smelt-lsp/tests/example_workspaces.rs 1473
 crates/smelt-lsp/tests/integration.rs 4810
 crates/smelt-maintenance-testkit/src/link_c_harness.rs 1024
-crates/smelt-maintenance-testkit/src/recipe.rs 2301
-crates/smelt-maintenance-testkit/src/render.rs 1486
-crates/smelt-maintenance-testkit/src/s_tracker.rs 1146
+crates/smelt-maintenance-testkit/src/recipe.rs 2316
+crates/smelt-maintenance-testkit/src/render.rs 1376
+crates/smelt-maintenance-testkit/src/s_tracker.rs 1148
 crates/smelt-parser/src/ast.rs 5328
 crates/smelt-parser/src/lexer.rs 1144
 crates/smelt-parser/src/parser/expr.rs 2450

@@ -186,8 +186,13 @@ pub fn maintenance_plan(
 /// directly. Still a Salsa-purity-respecting function: it only assembles
 /// inputs from Salsa accessors and calls pure derivation code — it never
 /// re-implements admission, locality, or ledger logic. Returns `None` for a
-/// model with no maintenance plan (not `refresh: incremental`, or no
-/// shape-defining fact declared and no `grain:` to resolve).
+/// model with no maintenance plan at all (not `refresh: incremental`). A
+/// `refresh: incremental` model with `resolved_grain() == None` still has a
+/// plan — the keyed-succession grain's own undeclared-admission shape
+/// (`docs/specs/incremental_shapes.md` §"Succession-grain admission (no
+/// declaration)") — so it is not filtered out here either, matching
+/// [`maintenance_plan`]'s own doc comment; `derive_model_maintenance_plan_with_edges`
+/// below is what decides admission for that case.
 pub fn maintenance_plan_report(
     db: &dyn salsa::Database,
     workspace: Workspace,
@@ -202,9 +207,7 @@ pub fn maintenance_plan_report(
         return None;
     };
     let resolved_grain = metadata.resolved_grain();
-    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
-        || resolved_grain.is_none()
-    {
+    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental) {
         return None;
     }
     let path = file.path(db);

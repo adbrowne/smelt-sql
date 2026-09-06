@@ -24,3 +24,4 @@ mod probes;
 mod registry;
 mod repair;
 mod state_deletion;
+mod succession;
