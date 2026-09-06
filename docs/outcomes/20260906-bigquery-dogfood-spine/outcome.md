@@ -86,7 +86,7 @@ live run surfaces are written down as a punch-list rather than fixed here.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and narrow `.claude/settings.json`'s `bq`/`gcloud` deny so it scopes to the dogfood project while leaving the test project's isolation intact — with a rationale note in the commit | pending |
+| 1 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and narrow `.claude/settings.json`'s `bq`/`gcloud` deny so it scopes to the dogfood project while leaving the test project's isolation intact — with a rationale note in the commit | planned |
 | 2 | Confirm the public dataset's real schema and partitioning, then build the loader: sampled on `MOD(repo.id, 1000)`, column-pruned, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
 | 3 | Export the identical sample to Parquet, reproducibly, as the DuckDB leg's input | pending |
 | 4 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | pending |
