@@ -35,6 +35,32 @@ convention (recommended — one way of talking to BigQuery, already proven here)
 this phase additionally makes `bq` work. If REST, the permission narrowing only has to
 admit `gcloud`, which is a smaller hole.
 
+Answerable cheaply once the guard admits it: `bq version` needs no credentials and either
+prints a version or dies on the pyOpenSSL import. Run it as the first check of task 5.
+
+**D3 — the SDK comes from mise, pinned, as a task.** Google Cloud SDK 580.0.0 (`gcloud`,
+`bq` 2.1.36) is already present at `~/google-cloud-sdk/bin/`, off `PATH`, so this machine
+needs nothing. The next one does, so the install is pinned in `mise.toml` (human decision
+of 2026-09-06 — reproducibility beats reusing the ad hoc path).
+
+It goes in as a **task plus an env pin, not a `[tools]` entry.** Every workflow runs
+`jdx/mise-action@v2` with no arguments, which installs everything in `[tools]`; a `gcloud`
+pin there would pull the ~200MB SDK into all seven CI jobs, none of which use it. The repo
+already has the precedent for a heavy, non-universal dependency — `[tasks.setup-duckdb]`
+with `scripts/mise-setup-duckdb.sh`, and a computed `[env]` var so consumers need no path
+knowledge. Mirror it exactly:
+
+- `[tasks.setup-gcloud]` → `scripts/mise-setup-gcloud.sh`, installing **580.0.0** (match
+  what is on this box so it is a no-op here), idempotent, skipping if already present.
+- an `[env]` entry resolving the SDK's `bin` — preferring a `PATH` hit, falling back to
+  `~/google-cloud-sdk/bin` — so an existing install is adopted rather than duplicated,
+  the way `scripts/mise-duckdb-lib-dir.sh` prefers `/usr/local/lib`.
+- a `CLAUDE.md` line under the mise setup block, next to `mise run setup-duckdb`.
+
+The existing scripts' own fallback
+(`GCLOUD="$(command -v gcloud || echo "$HOME/google-cloud-sdk/bin/gcloud")"`) keeps
+working either way and is not touched.
+
 ## The permission problem, and the shape of the fix
 
 `.claude/settings.json` denies `Bash(gcloud)`, `Bash(gcloud *)`, `Bash(bq)`, `Bash(bq *)`.
@@ -47,8 +73,9 @@ Fix: replace the blanket denies with a **PreToolUse Bash hook** that denies any
 PreToolUse Bash hook (the `pgrep -f` guard in `.claude/settings.json`), so the mechanism
 and its `permissionDecision: "deny"` JSON shape are proven here. The hook denies when:
 
-- the command invokes `gcloud` or `bq`, **and** carries no `--project=<DOGFOOD>` /
-  `--project_id=<DOGFOOD>`; or
+- the command invokes `gcloud` or `bq` **by any spelling** — bare, or via a path such as
+  `~/google-cloud-sdk/bin/gcloud`, `$HOME/…`, `./gcloud` — **and** carries no
+  `--project=<DOGFOOD>` / `--project_id=<DOGFOOD>`; or
 - it references `gcloud-smelt-bq`, or sets `CLOUDSDK_CONFIG` to the test config dir; or
 - it is destructive at project scope (`projects delete`, `billing` mutations,
   `iam ... delete`) — phase 1 is the only phase that needs those, and it is human-run.
@@ -56,10 +83,19 @@ and its `permissionDecision: "deny"` JSON shape are proven here. The hook denies
 These stay untouched: the `scripts/bigquery-*.sh` denials and
 `Read(//home/andrew/.config/gcloud-smelt-bq/**)`.
 
+**Match the binary's basename, not the command prefix.** Today's `Bash(bq *)` /
+`Bash(gcloud *)` denies match the start of the command string, so
+`~/google-cloud-sdk/bin/bq …` — the SDK's real location on this box — does not match and
+is permitted. The replacement guard must therefore key on the invoked binary's basename
+across the whole command line (including after `env VAR=… `, a pipe, or `&&`), or it
+inherits the same hole it is replacing. The full-path cases are in the test list below
+because this was a live gap, not a hypothetical one.
+
 **Honesty about what this is.** A hook matching command text is a guardrail against
-mistakes, not a security boundary — a determined agent can build the string dynamically.
-The actual boundary is IAM, which is why D1 matters more than the hook does. Say this in
-the commit rather than implying the hook is containment.
+mistakes, not a security boundary — a determined agent can build the string dynamically,
+and the basename gap above is a reminder of how thin text matching is. The actual boundary
+is IAM, which is why D1 matters more than the hook does. Say this in the commit rather
+than implying the hook is containment.
 
 ## Tasks
 
@@ -80,12 +116,17 @@ Human (you), in a shell — none of this is Claude-executable before the hook la
 
 Claude, in the repo:
 
-6. Add `.claude/scripts/gcloud-scope-guard.sh` implementing the rules above, with the
-   dogfood project id read from one place, and register it as a PreToolUse Bash hook.
-7. Narrow the four `gcloud`/`bq` deny entries in `.claude/settings.json` accordingly,
+6. Per D3: `scripts/mise-setup-gcloud.sh` + `[tasks.setup-gcloud]` and the `[env]` bin
+   resolution in `mise.toml`, mirroring the DuckDB pair; a `CLAUDE.md` line beside
+   `mise run setup-duckdb`. Verify it is a no-op on this box (SDK 580.0.0 already present)
+   before trusting it on a clean one.
+7. Add `.claude/scripts/gcloud-scope-guard.sh` implementing the rules above — basename
+   matching, not prefix — with the dogfood project id read from one place, and register it
+   as a PreToolUse Bash hook.
+8. Narrow the four `gcloud`/`bq` deny entries in `.claude/settings.json` accordingly,
    leaving the script denials and the config-dir `Read` deny intact.
-8. Record the project id, dataset, location, cap, and the D1/D2 answers in the outcome's
-   decision log.
+9. Record the project id, dataset, location, cap, and the D1/D2/D3 answers in the
+   outcome's decision log.
 
 ## Tests (red-green on the guard)
 
@@ -99,6 +140,10 @@ The guard is the only testable artifact; write `.claude/scripts/gcloud-scope-gua
   (right project, wrong credential store).
 - `bq query --project_id=<DOGFOOD> …` → allowed if D2 says `bq` is in scope, denied if not.
 - `gcloud projects delete <DOGFOOD>` → denied.
+- `~/google-cloud-sdk/bin/gcloud …` with no project flag → denied (the full-path case
+  today's deny list misses).
+- `env FOO=1 $HOME/google-cloud-sdk/bin/bq …` and `true && gcloud …` with no project flag
+  → denied (the binary is not the first token).
 - A command not touching `gcloud`/`bq` at all → untouched (the guard must not intercept
   ordinary Bash; a false deny here would break every other session in this worktree).
 
