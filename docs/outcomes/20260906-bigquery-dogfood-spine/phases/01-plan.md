@@ -13,19 +13,17 @@ from this worktree. The test project `smelt-bq-test-20260816` is left exactly as
 
 ## Two decisions to settle before executing
 
-**D1 — the identity behind ADC.** The outcome records "plain ADC". Executed literally,
-`gcloud auth application-default login` writes *your own* credentials, which reach every
-GCP project you own, not just the dogfood one. Recommended refinement, same ergonomics:
+**D1 — the identity behind ADC.** Plain `gcloud auth application-default login` is the
+recorded choice and is fine. One alternative, offered as a preference rather than a
+correction, since it costs nothing and keeps the blast radius to one project:
 
 ```
 gcloud auth application-default login --impersonate-service-account=smelt-dogfood@<PROJECT>.iam.gserviceaccount.com
 ```
 
-ADC still "just works" for every client library, no key material is minted or stored, and
-the effective identity is a service account holding only dataset-scoped roles on the
-dogfood project. This is strictly better than both options originally offered and needs
-your yes before phase 1 runs. If you decline, plain ADC stands and the IAM half of
-criterion 2 is weaker — record that in the decision log rather than leaving it implied.
+Same ergonomics, no key material either way; the difference is only whether the effective
+identity reaches your other GCP projects. Take whichever you prefer and record which in
+the decision log so a later reader knows what the credential actually was.
 
 **D2 — `bq` may be unusable anyway.** `scripts/bigquery-provision.sh` documents that `bq`
 imports pyOpenSSL and dies on some installs (`module 'lib' has no attribute 'GEN_EMAIL'`),
@@ -61,45 +59,37 @@ The existing scripts' own fallback
 (`GCLOUD="$(command -v gcloud || echo "$HOME/google-cloud-sdk/bin/gcloud")"`) keeps
 working either way and is not touched.
 
-## The permission problem, and the shape of the fix
+## The permission change
 
 `.claude/settings.json` denies `Bash(gcloud)`, `Bash(gcloud *)`, `Bash(bq)`, `Bash(bq *)`.
 **Deny beats allow**, so no `settings.local.json` entry can re-open them — the checked-in
-list must change. A blanket removal would also re-open the test project, which criterion 2
-forbids.
+list must change.
 
-Fix: replace the blanket denies with a **PreToolUse Bash hook** that denies any
-`gcloud`/`bq` invocation not scoped to the dogfood project. The repo already runs a
-PreToolUse Bash hook (the `pgrep -f` guard in `.claude/settings.json`), so the mechanism
-and its `permissionDecision: "deny"` JSON shape are proven here. The hook denies when:
+Remove those four entries. Session access to the dogfood project is deliberate (human
+decision of 2026-09-06), so there is nothing left for a command-scoping hook to add: an
+earlier draft of this plan proposed a PreToolUse guard admitting only project-scoped
+invocations, and it is dropped. Text matching over a command line was never containment —
+a dynamically built string defeats it — so it would have bought ceremony rather than
+safety.
 
-- the command invokes `gcloud` or `bq` **by any spelling** — bare, or via a path such as
-  `~/google-cloud-sdk/bin/gcloud`, `$HOME/…`, `./gcloud` — **and** carries no
-  `--project=<DOGFOOD>` / `--project_id=<DOGFOOD>`; or
-- it references `gcloud-smelt-bq`, or sets `CLOUDSDK_CONFIG` to the test config dir; or
-- it is destructive at project scope (`projects delete`, `billing` mutations,
-  `iam ... delete`) — phase 1 is the only phase that needs those, and it is human-run.
+These two stay, and they are the parts that are real boundaries rather than pattern
+matching:
 
-These stay untouched: the `scripts/bigquery-*.sh` denials and
-`Read(//home/andrew/.config/gcloud-smelt-bq/**)`.
+- `Read(//home/andrew/.config/gcloud-smelt-bq/**)` — the test project's credentials live
+  in a separate `CLOUDSDK_CONFIG`, so isolation rests on not being able to read that
+  directory, which is enforced rather than inferred from command text.
+- the `scripts/bigquery-*.sh` denials — those scripts self-target the test project.
 
-**Match the binary's basename, not the command prefix.** Today's `Bash(bq *)` /
-`Bash(gcloud *)` denies match the start of the command string, so
-`~/google-cloud-sdk/bin/bq …` — the SDK's real location on this box — does not match and
-is permitted. The replacement guard must therefore key on the invoked binary's basename
-across the whole command line (including after `env VAR=… `, a pipe, or `&&`), or it
-inherits the same hole it is replacing. The full-path cases are in the test list below
-because this was a live gap, not a hypothetical one.
-
-**Honesty about what this is.** A hook matching command text is a guardrail against
-mistakes, not a security boundary — a determined agent can build the string dynamically,
-and the basename gap above is a reminder of how thin text matching is. The actual boundary
-is IAM, which is why D1 matters more than the hook does. Say this in the commit rather
-than implying the hook is containment.
+Worth knowing while editing the list: the deny patterns match the **start** of the command
+string, so `~/google-cloud-sdk/bin/bq …` — the SDK's real location on this box — was never
+matched by `Bash(bq *)` in the first place. It is not a hole worth patching now, but it
+does mean the old denies were narrower in practice than they read, which is a good reason
+not to reintroduce the same shape elsewhere.
 
 ## Tasks
 
-Human (you), in a shell — none of this is Claude-executable before the hook lands:
+Human (you), in a shell — task 8 lands first, after which the rest is Claude-executable
+too; these are listed as yours because they spend money and create identities:
 
 1. Create the project (name it in the decision log), link billing, enable
    `bigquery.googleapis.com` and `billingbudgets.googleapis.com`.
@@ -109,10 +99,8 @@ Human (you), in a shell — none of this is Claude-executable before the hook la
 3. Budget alert plus a documented monthly cap. `bigquery-provision.sh`'s
    `gcloud billing budgets create` invocation is the template; US$5 is the test project's
    figure and is almost certainly too low here — pick a real number and write down why.
-4. Per D1: create `smelt-dogfood@…`, grant it dataset-scoped roles plus
-   `roles/bigquery.jobUser`, and run the impersonating ADC login. (Or plain ADC, if you
-   declined D1.)
-5. Confirm the reach: one REST call listing the dataset, run from this worktree.
+4. Per D1: run the ADC login, impersonating `smelt-dogfood@…` or not, as you prefer.
+5. Set the default / quota project so ordinary invocations need no flag.
 
 Claude, in the repo:
 
@@ -120,65 +108,58 @@ Claude, in the repo:
    resolution in `mise.toml`, mirroring the DuckDB pair; a `CLAUDE.md` line beside
    `mise run setup-duckdb`. Verify it is a no-op on this box (SDK 580.0.0 already present)
    before trusting it on a clean one.
-7. Add `.claude/scripts/gcloud-scope-guard.sh` implementing the rules above — basename
-   matching, not prefix — with the dogfood project id read from one place, and register it
-   as a PreToolUse Bash hook.
-8. Narrow the four `gcloud`/`bq` deny entries in `.claude/settings.json` accordingly,
-   leaving the script denials and the config-dir `Read` deny intact.
+7. Remove the four `gcloud`/`bq` deny entries from `.claude/settings.json`, leaving the
+   `scripts/bigquery-*.sh` denials and the config-dir `Read` deny intact.
+8. Confirm the reach end to end, from this worktree.
 9. Record the project id, dataset, location, cap, and the D1/D2/D3 answers in the
    outcome's decision log.
 
-## Tests (red-green on the guard)
+## Tests
 
-The guard is the only testable artifact; write `.claude/scripts/gcloud-scope-guard.test.sh`
-(or a bats file if one exists) red first, one case each:
-
-- `gcloud … --project=<DOGFOOD> …` → allowed.
-- `gcloud …` with no project flag → denied.
-- `gcloud … --project=smelt-bq-test-20260816 …` → denied.
-- `CLOUDSDK_CONFIG=~/.config/gcloud-smelt-bq gcloud … --project=<DOGFOOD>` → denied
-  (right project, wrong credential store).
-- `bq query --project_id=<DOGFOOD> …` → allowed if D2 says `bq` is in scope, denied if not.
-- `gcloud projects delete <DOGFOOD>` → denied.
-- `~/google-cloud-sdk/bin/gcloud …` with no project flag → denied (the full-path case
-  today's deny list misses).
-- `env FOO=1 $HOME/google-cloud-sdk/bin/bq …` and `true && gcloud …` with no project flag
-  → denied (the binary is not the first token).
-- A command not touching `gcloud`/`bq` at all → untouched (the guard must not intercept
-  ordinary Bash; a false deny here would break every other session in this worktree).
-
-Then verify the real thing rather than trusting the unit test: attempt one denied and one
-allowed command through the actual tool path and confirm the decisions match.
+Nothing here is a testable unit: the phase provisions cloud resources and deletes four
+lines of configuration. Verification is by observation, and the phase is done only when
+each observation is real rather than inferred from a create call having succeeded.
 
 ## Verification gate
 
-- The guard's own test file passes.
-- A live denied/allowed pair confirmed through the real hook, not simulated.
-- `bash .claude/scripts/verify-phase.sh` green (this phase touches no Rust, so this is a
-  regression check that the settings edit broke nothing).
-- `git diff .claude/settings.json` reviewed by you before commit — this is the one file
-  where a mistake widens access silently.
+- `mise run setup-gcloud` is a no-op on this box, and its script is plain enough that a
+  clean machine's behaviour is evident from reading it. A genuinely clean-machine run is
+  not reproducible here — say so rather than implying it was tested.
+- `bq version` runs. This is also D2's answer, whichever way it goes: a version string, or
+  the pyOpenSSL import failure that sends the dogfood path to REST like every other script
+  in this repo.
+- The dogfood dataset lists, under the credential D1 chose.
+- The dataset's `defaultTableExpirationMs` is confirmed **absent**, read back from the API.
+  This is the one detail whose silent failure destroys the pipeline's history a day later,
+  and a successful create call is not evidence that it is unset.
+- The budget alert exists and names the dogfood project.
+- `bash .claude/scripts/verify-phase.sh` green — no Rust changes here, so this only checks
+  that the `mise.toml` edit broke no other tooling.
 
 ## Commit message
 
 ```
-feat(dogfood): provision the BigQuery dogfood project and scope session access
+feat(dogfood): provision the BigQuery dogfood project and open session access
 
 Creates the dedicated dogfood project's dataset (no table expiry, unlike the
-test project's 24h) under a budget alert, and opens a credential path scoped
-to it.
+test project's 24h) under a budget alert, and opens a credential path to it.
 
 .claude/settings.json's blanket Bash(gcloud *) / Bash(bq *) denies are
-replaced by a PreToolUse guard that admits only invocations carrying the
-dogfood project, refuses the test project's config dir, and refuses
-destructive project-scoped verbs. smelt-bq-test-20260816's isolation is
-unchanged: its script denials and the Read deny on its gcloud config dir
-stay.
+removed — session access to the dogfood project is deliberate.
+smelt-bq-test-20260816's isolation is unchanged and rests where it actually
+holds: its credentials live in a separate CLOUDSDK_CONFIG that stays
+Read-denied, and its scripts stay denied. No command-text guard is added;
+matching command strings was never containment, and IAM is the real
+boundary.
 
-Risk accepted, stated plainly: a hook matching command text is a guardrail
-against mistakes, not containment — a dynamically built command defeats it.
-The real boundary is IAM, which is why the identity behind ADC is
-<D1 ANSWER> rather than an owner credential.
+The Cloud SDK is pinned via mise (task + env, not [tools], so the ~200MB
+download stays out of seven CI jobs that never use it), mirroring the
+existing setup-duckdb pair.
+
+Verified rather than assumed: the dataset's defaultTableExpirationMs is
+absent when read back from the API — a successful create call does not prove
+it, and a wrong value here silently destroys the pipeline's history a day
+later.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
