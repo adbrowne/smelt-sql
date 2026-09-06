@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use rowan::TextRange;
 use smelt_db::{Diagnostic as DbDiagnostic, DiagnosticCode, DiagnosticSeverity};
-use smelt_logical::analysis::diff::{DiffReport, Dimension, ModelDiff};
-use smelt_logical::analysis::diff_render::{change_line, lens_title, reason_line};
+use smelt_logical::analysis::diff::{DiffReport, ModelDiff};
+use smelt_logical::analysis::diff_render::lens_title;
+use smelt_logical::analysis::diff_stories::{Severity, StoryKind};
 use smelt_parser::ast::File as AstFile;
 use smelt_runtime::property_diff::{
     baseline_side as derive_baseline_side, report as derive_report, work_side, BaselineSide,
@@ -66,34 +67,29 @@ pub struct ProjectDiffState {
     pub cached_baseline: Option<Arc<BaselineSide>>,
 }
 
-/// Anchor a change at the narrowest range the diff's `subject` supports
-/// (`docs/specs/property_diff.md` §Surface "Editor", Δ4):
+/// Anchor a story at the narrowest range its `subject` supports
+/// (`docs/specs/property_diff.md` §Surface "Editor", "A story's anchor is
+/// only as narrow as its `subject` supports"):
 ///
-/// 1. A column-named subject (`ColumnAdded`/`ColumnRemoved`/`Determinism`/
-///    `Comparability`/`Discriminant`/`LiteralColumn`/`Grain`) anchors on the
-///    matching `SELECT`-list item's alias, or the whole item if unaliased.
-/// 2. A source-named subject (`SourceBound`) anchors on the matching
+/// 1. A column-subject kind (`column_semantics`) anchors on the matching
+///    `SELECT`-list item's alias, or the whole item if unaliased.
+/// 2. A source-subject kind (`reads`, `dependency`) anchors on the matching
 ///    `FROM`/`JOIN` item.
-/// 3. Everything else (cell subjects `<group>@<trigger>`, refusal subjects,
-///    whole-model dimensions with an empty subject) has no narrower anchor
-///    — it is not derivable, and this function does not pretend otherwise
-///    (ruling R2) — and anchors at the model's first SQL token, or an
-///    empty range at offset 0 if the file has no SQL at all.
-pub fn anchor_for(dimension: Dimension, subject: &str, ast: &AstFile) -> TextRange {
-    match dimension {
-        Dimension::ColumnAdded
-        | Dimension::ColumnRemoved
-        | Dimension::Determinism
-        | Dimension::Comparability
-        | Dimension::Discriminant
-        | Dimension::LiteralColumn
-        | Dimension::Grain => {
+/// 3. Everything else (a cell subject, a refusal, or a whole-model story
+///    with no subject at all — including `schema`, which is never surfaced
+///    as a diagnostic in the first place) has no narrower anchor — it is
+///    not derivable, and this function does not pretend otherwise (ruling
+///    R2) — and anchors at the model's first SQL token, or an empty range
+///    at offset 0 if the file has no SQL at all.
+pub fn anchor_for(kind: StoryKind, subject: &str, ast: &AstFile) -> TextRange {
+    match kind {
+        StoryKind::ColumnSemantics => {
             if let Some(range) = anchor_column(subject, ast) {
                 return range;
             }
             first_sql_token_range(ast)
         }
-        Dimension::SourceBound => {
+        StoryKind::Reads | StoryKind::Dependency => {
             if let Some(range) = anchor_source(subject, ast) {
                 return range;
             }
@@ -155,25 +151,20 @@ fn first_sql_token_range(ast: &AstFile) -> TextRange {
 }
 
 /// Build the `PropertyDowngrade` diagnostics for one model file
-/// (`docs/specs/property_diff.md` §Diagnostics): one warning per downgrade,
-/// message = the text form's change line plus its reason line when
-/// present, anchored per [`anchor_for`]. Returned as `smelt_db::Diagnostic`
-/// values carrying raw `rowan::TextRange`s — `Backend::to_lsp_diagnostic`
-/// converts them at the boundary, same as every Salsa diagnostic.
+/// (`docs/specs/property_diff.md` §Diagnostics): one warning per story of
+/// severity `risk` or `cost`, message = `"<lead>: <detail>"` — the same
+/// line the text form prints — anchored per [`anchor_for`]. Returned as
+/// `smelt_db::Diagnostic` values carrying raw `rowan::TextRange`s —
+/// `Backend::to_lsp_diagnostic` converts them at the boundary, same as
+/// every Salsa diagnostic.
 pub fn diagnostics_for_model(model: &ModelDiff, ast: &AstFile) -> Vec<DbDiagnostic> {
-    use smelt_logical::analysis::diff::Direction;
-
     model
-        .changes
+        .stories
         .iter()
-        .filter(|c| c.direction == Direction::Downgrade)
-        .map(|change| {
-            let range = anchor_for(change.dimension, &change.subject, ast);
-            let mut message = change_line(change);
-            if let Some(reason) = reason_line(change) {
-                message.push('\n');
-                message.push_str(&reason);
-            }
+        .filter(|s| matches!(s.severity, Severity::Risk | Severity::Cost))
+        .map(|story| {
+            let range = anchor_for(story.kind, &story.subject, ast);
+            let message = format!("{}: {}", story.lead, story.detail);
             DbDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message,
@@ -186,10 +177,11 @@ pub fn diagnostics_for_model(model: &ModelDiff, ast: &AstFile) -> Vec<DbDiagnost
 }
 
 /// Build the code lens title for a shifted model, per §Surface "Editor":
-/// `N downgrades, M upgrades vs <short ref>`. `None` for an unshifted model
-/// (`model` absent from `report.models`) — callers look the model up
-/// themselves; this is the pure title primitive shared with the parity
-/// gate and the CLI's `lens_title`.
+/// the story-derived `diff_stories::lens_title` (`N risks, M costlier vs
+/// <short ref>`, `changed vs <short ref>` with neither). `None` for an
+/// unshifted model (`model` absent from `report.models`) — callers look
+/// the model up themselves; this is the pure title primitive shared with
+/// the parity gate and the CLI's `lens_title`.
 pub fn lens_title_for(report: &DiffReport, model_name: &str) -> Option<String> {
     let model = report.models.iter().find(|m| m.model == model_name)?;
     Some(lens_title(model, &report.baseline))
@@ -321,6 +313,9 @@ mod tests {
         AstFile::cast(parse.syntax()).expect("valid SQL fixture must parse")
     }
 
+    use smelt_logical::analysis::diff::{Cause, CauseKind};
+    use smelt_logical::analysis::diff_stories::Story;
+
     /// D3: fails against a broken implementation that always falls back to
     /// the first SQL token — the asserted `(start, end)` offsets are the
     /// alias `renamed`'s, not the `SELECT` keyword's, so the two ranges
@@ -329,7 +324,7 @@ mod tests {
     fn anchor_column_subject_hits_the_select_item() {
         let sql = "SELECT a, b AS renamed FROM t";
         let ast = parse_ast(sql);
-        let range = anchor_for(Dimension::Determinism, "renamed", &ast);
+        let range = anchor_for(StoryKind::ColumnSemantics, "renamed", &ast);
         let expected_start = sql.find("renamed").unwrap() as u32;
         assert_eq!(u32::from(range.start()), expected_start);
         assert_eq!(
@@ -348,7 +343,7 @@ mod tests {
     fn anchor_cell_subject_falls_back_to_first_sql_token() {
         let sql = "SELECT a, b AS renamed FROM t";
         let ast = parse_ast(sql);
-        let range = anchor_for(Dimension::CellTechnique, "amount@new_data", &ast);
+        let range = anchor_for(StoryKind::Technique, "amount@new_data", &ast);
         assert_eq!(u32::from(range.start()), 0);
         assert_eq!(u32::from(range.end()), "SELECT".len() as u32);
     }
@@ -357,7 +352,17 @@ mod tests {
     fn anchor_source_subject_hits_the_from_item() {
         let sql = "SELECT a FROM raw.users u JOIN raw.orders o ON u.id = o.user_id";
         let ast = parse_ast(sql);
-        let range = anchor_for(Dimension::SourceBound, "raw.orders", &ast);
+        let range = anchor_for(StoryKind::Reads, "raw.orders", &ast);
+        let expected_start = sql.find("JOIN raw.orders").unwrap() as u32;
+        assert_eq!(u32::from(range.start()), expected_start);
+    }
+
+    /// `dependency` is the other source-subject kind (§Surface "Editor").
+    #[test]
+    fn dependency_story_anchors_at_the_from_item_too() {
+        let sql = "SELECT a FROM raw.users u JOIN raw.orders o ON u.id = o.user_id";
+        let ast = parse_ast(sql);
+        let range = anchor_for(StoryKind::Dependency, "raw.orders", &ast);
         let expected_start = sql.find("JOIN raw.orders").unwrap() as u32;
         assert_eq!(u32::from(range.start()), expected_start);
     }
@@ -365,7 +370,142 @@ mod tests {
     #[test]
     fn anchor_falls_back_to_empty_range_when_there_is_no_sql() {
         let ast = parse_ast("");
-        let range = anchor_for(Dimension::MaintenanceLost, "", &ast);
+        let range = anchor_for(StoryKind::MaintenanceLost, "", &ast);
         assert_eq!(range, TextRange::empty(0.into()));
+    }
+
+    fn story(
+        kind: StoryKind,
+        severity: Severity,
+        subject: &str,
+        lead: &str,
+        detail: &str,
+    ) -> Story {
+        Story {
+            kind,
+            severity,
+            subject: subject.to_string(),
+            lead: lead.to_string(),
+            detail: detail.to_string(),
+            changes: Vec::new(),
+        }
+    }
+
+    fn model_diff_with_stories(stories: Vec<Story>) -> ModelDiff {
+        ModelDiff {
+            model: "m".to_string(),
+            cause: Cause {
+                kind: CauseKind::Edited,
+                of: vec!["m".to_string()],
+                reason: None,
+            },
+            changes: Vec::new(),
+            stories,
+        }
+    }
+
+    /// A `risk` story folding several downgrades still yields exactly one
+    /// `PropertyDowngrade` diagnostic, whose message is `"<lead>: <detail>"`
+    /// (§Surface "Diagnostics") — not one diagnostic per folded change.
+    #[test]
+    fn one_diagnostic_per_risk_or_cost_story() {
+        let ast = parse_ast("SELECT a FROM t");
+        let model = model_diff_with_stories(vec![
+            story(
+                StoryKind::RowsMayDuplicate,
+                Severity::Risk,
+                "",
+                "Rows may be duplicated",
+                "A join can now match more than one row per (id).",
+            ),
+            story(
+                StoryKind::Reads,
+                Severity::Cost,
+                "",
+                "Reads more per run",
+                "Each run now reads all history of t.",
+            ),
+            story(StoryKind::Schema, Severity::Info, "", "Schema", "Adds b."),
+        ]);
+        let diags = diagnostics_for_model(&model, &ast);
+        assert_eq!(
+            diags.len(),
+            2,
+            "one diagnostic per risk/cost story: {diags:?}"
+        );
+        assert!(diags.iter().any(|d| d.message
+            == "Rows may be duplicated: A join can now match more than one row per (id)."));
+        assert!(diags
+            .iter()
+            .any(|d| d.message == "Reads more per run: Each run now reads all history of t."));
+    }
+
+    /// §Surface "Editor": a `schema` story is `info` severity and never a
+    /// diagnostic; `column_semantics` anchors at the SELECT item;
+    /// `reads`/`dependency` anchor at the FROM/JOIN item; a story with an
+    /// empty subject (`rows_may_duplicate`) anchors at the first SQL token.
+    #[test]
+    fn story_subject_anchors_column_source_or_first_token() {
+        let sql =
+            "SELECT id, amount AS total FROM raw.orders o JOIN raw.users u ON o.user_id = u.id";
+        let ast = parse_ast(sql);
+        let model = model_diff_with_stories(vec![
+            story(
+                StoryKind::Schema,
+                Severity::Info,
+                "",
+                "Schema",
+                "Adds total.",
+            ),
+            story(
+                StoryKind::ColumnSemantics,
+                Severity::Risk,
+                "total",
+                "Column now nondeterministic",
+                "total is now Run-nondeterministic (was Clean).",
+            ),
+            story(
+                StoryKind::Reads,
+                Severity::Cost,
+                "raw.orders",
+                "Reads more per run",
+                "Each run now reads all history of raw.orders.",
+            ),
+            story(
+                StoryKind::RowsMayDuplicate,
+                Severity::Risk,
+                "",
+                "Rows may be duplicated",
+                "A join can now match more than one row per (id).",
+            ),
+        ]);
+        let diags = diagnostics_for_model(&model, &ast);
+        // The `schema` story is info-severity: no diagnostic for it.
+        assert!(!diags.iter().any(|d| d.message.starts_with("Schema:")));
+        assert_eq!(diags.len(), 3);
+
+        let column_diag = diags
+            .iter()
+            .find(|d| d.message.starts_with("Column now nondeterministic:"))
+            .expect("column_semantics story must yield a diagnostic");
+        let expected_start = sql.find("total").unwrap() as u32;
+        assert_eq!(u32::from(column_diag.range.start()), expected_start);
+
+        let source_diag = diags
+            .iter()
+            .find(|d| d.message.starts_with("Reads more per run:"))
+            .expect("reads story must yield a diagnostic");
+        let source_text =
+            &sql[usize::from(source_diag.range.start())..usize::from(source_diag.range.end())];
+        assert!(
+            source_text.contains("raw.orders"),
+            "reads story must anchor at the raw.orders FROM item, got {source_text:?}"
+        );
+
+        let first_token_diag = diags
+            .iter()
+            .find(|d| d.message.starts_with("Rows may be duplicated:"))
+            .expect("rows_may_duplicate story must yield a diagnostic");
+        assert_eq!(u32::from(first_token_diag.range.start()), 0);
     }
 }

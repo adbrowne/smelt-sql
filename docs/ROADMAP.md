@@ -218,9 +218,16 @@ baseline and the working tree.
   (never the derived) set.
   This repository's own CI posts the Markdown form as a pull-request comment over `examples/` as
   dogfood (`.github/workflows/property-diff.yml`, `docs-site/docs/guide/ci.md`).
-- **The LSP** advertises a code lens (`N downgrades, M upgrades vs <ref>`) on every shifted model
-  and a `PropertyDowngrade` warning per downgrade, baseline-cached per resolved commit and
-  re-resolved on `.git/HEAD` changes.
+- **Stories** (September 6, 2026): every rendered form leads with severity-ranked stories —
+  🔴 risk / ⚠️ cost / 🟢 improvement / ℹ️ info — that answer the reviewer's three questions (still
+  maintained incrementally? what does a run read now? what can smelt no longer guarantee?), with
+  the raw verdict table collapsed underneath. Severity is derived from direction, so `--fail-on`,
+  `PropertyDowngrade`, and the stories cannot disagree (`story_coverage` proptest gate). Two
+  direction rulings corrected at the same time: a new cell over an unclocked source and a widened
+  grain are downgrades. `docs/plans/20260906-property-diff-stories.md`.
+- **The LSP** advertises a code lens (`N risks, M costlier vs <ref>`) on every shifted model
+  and a `PropertyDowngrade` warning per risk or cost story, baseline-cached per resolved commit
+  and re-resolved on `.git/HEAD` changes.
 - **Standing gates**: `property_profile_parity` (report/profile byte-identity), `diff_purity`
   (no I/O in `diff_profiles`), `property_diff_cli`, `property_diff_ci_docs`,
   `property_diff_parity` (LSP surface equals the CLI JSON, proven non-vacuous by a sabotage run).
@@ -231,8 +238,8 @@ baseline and the working tree.
   race-inducing test; whether `column_added` on a maintained model should inherit its
   accompanying `cell_added`'s direction is undecided.
 
-Driven end-to-end from `docs/outcomes/20260905-property-diff/outcome.md` (no separate
-implementation plan was written).
+Driven end-to-end from `docs/outcomes/20260905-property-diff/outcome.md`; the stories surface
+followed as `docs/plans/20260906-property-diff-stories.md`.
 
 ### ~~Registry-owned dialect emission and the cross-engine audit~~ ✅ (August 24, 2026)
 
