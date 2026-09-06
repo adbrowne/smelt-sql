@@ -1,7 +1,7 @@
 # Outcome: SCD2 — the keyed-succession grain, maintained
 
 **Created:** 2026-09-06
-**Status:** queued
+**Status:** active
 **Source:** spec diff `git diff 1e5e0675..HEAD -- docs/specs/` (commits `1dacc2d2`..`91cec5e2`, all `spec(scd2): ...`); `docs/research/20260723-scd2-succession-pattern.md`
 **Spec anchors:** `docs/specs/incremental_shapes.md` §"Succession-grain admission (no declaration)", §"Diagnostics" (succession-grain codes), §"The succession grain" (§"The tombstone ledger (hidden state)", §"The maintenance theorem (bounded footprint)", §"Delete events", §"Run shape and late events", §"What stays out of this grain"), §"Succession-grain design", §"Succession-grain constraints", §Known Divergences "The succession grain"; `docs/specs/model_properties.md` §"Keyed-succession classification", §"Event-time monotonicity trace", §"The composition walk"; `docs/specs/model_transforms.md` (Succession-patch keyed `MERGE` row); `docs/specs/diagnostics.md` §"Succession grain"; `docs/specs/sources.md` §Known Divergences (append-only probe fingerprint leg); `docs/specs/state.md` (Tombstone ledger row, §"The degradation contract"); `docs/specs/incremental_models.md` §Limitations "SCD2 recognition is bounded to the keyed-succession pattern"
 
@@ -137,7 +137,7 @@ out-of-order and repeated windows, and the clamp.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | pending |
+| 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | planned |
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | pending |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
@@ -196,6 +196,17 @@ out-of-order and repeated windows, and the clamp.
     done marker, and an insertion beside them conflicts on the loop's `origin/main` merge. The
     loop reads entries in file order and skips done/blocked ones, so the position is
     equivalent to "after `20260904-dialect-emission-vocabulary`". Promote by moving the line.
+
+- 2026-09-06 (plan phase 1): no reshape — phase 1 is the first row, there is no
+  prior summary, and the human resolutions of 2026-09-06 already reshaped phases 1
+  and 6. Phase 1 planned as three normative pins with no new diagnostic codes: the
+  ledger is a per-model sibling table `<presented table>__tombstones` holding exactly
+  `k ∪ {t}` in the model's own types with PK `(k, t)`; `smelt explain` gains a
+  `keyed_succession` delta-signature shape plus a `succession` JSON object and a text
+  block; and the contract lattice gains no point — `frozen_horizon`/`retain_departed`
+  fall to the existing refusals, `deferral` is admitted unchanged. A reserved-suffix
+  relation collision is recorded as a residual divergence rather than a twelfth code,
+  to hold the outcome's stated code budget.
 
 ## Blocked
 
