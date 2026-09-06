@@ -1,9 +1,38 @@
 # Plan: Consolidate integration test targets
 
+> **RETIRED 2026-09-06 — do not execute. Not superseded by another plan; the
+> problem it was written to solve does not exist.**
+>
+> Every cost figure below was measured while the dev box's SSD was writing at
+> ~15 MB/s (TRIM starvation on a drive churning ~300 GB/day). The build was
+> stalled on disk writeback — `vmstat` showed 170–450 tasks blocked, 99%
+> iowait, ~0% user — so the numbers describe how many bytes each target wrote
+> and how contended the disk was, not how much rustc worked.
+>
+> After `fstrim`, on the same checkout and toolchain:
+>
+> | Claim in this plan | Re-measured |
+> |---|---|
+> | 28,539 CPU-seconds for a clean `cargo test --no-run` | **95s wall / 16m21s CPU**, fully cold, `-j32` |
+> | 65.6% of it is the 323 integration test targets | one crate's 63 test targets rebuild in **6s** |
+> | a 4-line test target costs 70s with deps warm | **~1.3s** total rustc wall |
+> | mold is 45% slower | mold is 15% *faster*; linking is ~1.3s either way |
+>
+> Folding 313 targets into 58 would therefore buy a few seconds, against the
+> cost of 46 rewritten command strings across `CLAUDE.md`, four specs and six
+> workflows, plus a permanent ratchet gate and a new architecture invariant.
+> The premise — "the cost is per-target overhead, not test content" — was
+> true only of bytes written.
+>
+> Kept as a record of the measurement error. The general lesson now lives in
+> `CLAUDE.md` §"`cargo --timings` durations are wall time, not build cost".
+> If integration-test build time ever becomes a real problem, re-measure from
+> scratch rather than reviving this plan's numbers.
+
 **Date**: 2026-09-06
 **Spec**: [`docs/specs/architecture.md`](../specs/architecture.md) — adds one invariant under §"Constraints & Invariants"
 **Spec diff**: new invariant, authored in Phase 8 (no existing spec text changes)
-**Tracking PR / branch**: `worktree-build-speed` (PR TBD)
+**Tracking PR / branch**: `worktree-build-speed` (retired, never executed)
 **Docs**: code-only — no `docs-site/` surface changes; the one normative addition is the architecture.md invariant in Phase 8
 
 ---
@@ -61,14 +90,14 @@ Cargo only auto-discovers `.rs` files at the *top* of `tests/`; files in subdire
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
-| 2     | pending  |        |      |
-| 3     | pending  |        |      |
-| 4     | pending  |        |      |
-| 5     | pending  |        |      |
-| 6     | pending  |        |      |
-| 7     | pending  |        |      |
-| 8     | pending  |        |      |
+| 1     | retired  |        |      |
+| 2     | retired  |        |      |
+| 3     | retired  |        |      |
+| 4     | retired  |        |      |
+| 5     | retired  |        |      |
+| 6     | retired  |        |      |
+| 7     | retired  |        |      |
+| 8     | retired  |        |      |
 
 ---
 
