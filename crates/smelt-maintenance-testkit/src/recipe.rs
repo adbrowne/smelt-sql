@@ -1133,6 +1133,19 @@ pub enum KeyedCombiner {
     /// `(value, written)` state per candidate. Deliberately excluded from
     /// [`arb_keyed_combiner`], same reason as [`KeyedCombiner::OnceWrite`].
     OnceWriteMultiCandidate,
+    /// `COALESCE(MAX(<key>), 0) AS once_val` — the once-write family's
+    /// route-2 `unique_key`-member skip (human decision (c),
+    /// `docs/outcomes/20260904-decided-gap-residue` outcome.md Decision
+    /// log): the candidate is a wrapped reference to the model's own
+    /// `unique_key` column, so `classify_once_write` admits it with
+    /// `state: None` and **no** declared functional dependency —
+    /// `render::render_keyed_model_file` deliberately omits the
+    /// `functional_dependencies:` block for this variant; the absent block
+    /// is the witness that the FD-free route is what admits it. Deliberately
+    /// excluded from [`arb_keyed_combiner`] — same once-write world-fact
+    /// reason as [`KeyedCombiner::OnceWrite`], and additionally this variant
+    /// projects the KEY column, not the schedule's varying payload.
+    OnceWriteKeyFallback,
     /// `AVG(val) AS avg_val` — the decomposed-fold family
     /// (`incremental_shapes.md` §"The column-family catalogue", row 7):
     /// admits onto hidden additive `(sum, count)` state via
@@ -1156,6 +1169,7 @@ impl KeyedCombiner {
             KeyedCombiner::OnceWrite => "once_write",
             KeyedCombiner::OnceWriteFallback => "once_write_fallback",
             KeyedCombiner::OnceWriteMultiCandidate => "once_write_multi_candidate",
+            KeyedCombiner::OnceWriteKeyFallback => "once_write_key_fallback",
             KeyedCombiner::DecomposedAvg => "decomposed_avg",
             KeyedCombiner::DecomposedStddev => "decomposed_stddev",
         }
@@ -1174,7 +1188,8 @@ impl KeyedCombiner {
             KeyedCombiner::PlainOverwrite => ("ANY_VALUE", "current_val"),
             KeyedCombiner::OnceWrite
             | KeyedCombiner::OnceWriteFallback
-            | KeyedCombiner::OnceWriteMultiCandidate => ("COALESCE", "once_val"),
+            | KeyedCombiner::OnceWriteMultiCandidate
+            | KeyedCombiner::OnceWriteKeyFallback => ("COALESCE", "once_val"),
             KeyedCombiner::DecomposedAvg => ("AVG", "avg_val"),
             KeyedCombiner::DecomposedStddev => ("STDDEV_SAMP", "stddev_val"),
         }
@@ -1194,15 +1209,19 @@ impl KeyedCombiner {
             | KeyedCombiner::OnceWrite
             | KeyedCombiner::OnceWriteFallback
             | KeyedCombiner::OnceWriteMultiCandidate
+            | KeyedCombiner::OnceWriteKeyFallback
             | KeyedCombiner::DecomposedAvg
             | KeyedCombiner::DecomposedStddev => None,
         }
     }
 
     /// The full select-list fragment (beyond the key) this combiner
-    /// projects, given the source's payload column (`val`) and clock column
-    /// (`clock`, used as the order-monotone family's ordering expression).
-    pub fn projection_sql(self, val: &str, clock: &str) -> String {
+    /// projects, given the source's payload column (`val`), clock column
+    /// (`clock`, used as the order-monotone family's ordering expression),
+    /// and key column (`key`, used only by
+    /// [`KeyedCombiner::OnceWriteKeyFallback`]'s wrapped key-reference
+    /// candidate).
+    pub fn projection_sql(self, val: &str, clock: &str, key: &str) -> String {
         let (agg, alias) = self.agg_and_alias();
         match self {
             // `ordering_alias()` is `Some` for every `OrderMonotone` value —
@@ -1231,6 +1250,17 @@ impl KeyedCombiner {
                 // rather than the bare spelling's stateless merge
                 // (`decompose_once_write`, `classify_once_write`).
                 format!("COALESCE(MAX({val}), 0) AS {alias}")
+            }
+            KeyedCombiner::OnceWriteKeyFallback => {
+                // The candidate is a wrapped reference to the model's own
+                // `unique_key` column (`key`, not `val`) — `val` plays no
+                // role in this variant's projection at all.
+                // `classify_once_write`'s route-2 skip admits this with no
+                // declared FD because `key` is provably non-null within its
+                // own group; `render_keyed_model_file` correspondingly
+                // omits the `functional_dependencies:` block for this
+                // variant.
+                format!("COALESCE(MAX({key}), 0) AS {alias}")
             }
             KeyedCombiner::OnceWriteMultiCandidate => {
                 // Two candidates (a leading `MAX` and a trailing `MIN`),
@@ -1510,9 +1540,14 @@ pub enum ComposedRoute {
     /// Route 1 (key-embedded): `partition_column` is itself a `unique_key`
     /// column.
     KeyEmbedded,
-    /// Route 2 (key-determined): the partition projection is a per-key
-    /// constant under a declared `functional_dependencies:` entry.
+    /// Route 2 (key-determined), **declared** sub-route: the partition
+    /// projection is a per-key constant under a declared
+    /// `functional_dependencies:` entry (derivation is undecidable).
     KeyDetermined,
+    /// Route 2 (key-determined), **derived** sub-route: the partition
+    /// projection is a deterministic expression over `unique_key` columns
+    /// alone — no declaration needed.
+    KeyDerived,
     /// Route 3 (recurrence-bounded, declared): a declared `key_recurrence`
     /// bound `r` on the driving source, admitted checked.
     RecurrenceBounded,
@@ -1524,15 +1559,17 @@ pub fn composed_route_name(route: ComposedRoute) -> &'static str {
     match route {
         ComposedRoute::KeyEmbedded => "key_embedded",
         ComposedRoute::KeyDetermined => "key_determined",
+        ComposedRoute::KeyDerived => "key_derived",
         ComposedRoute::RecurrenceBounded => "recurrence_bounded",
     }
 }
 
-/// A `Strategy` drawing uniformly from the three [`ComposedRoute`]s.
+/// A `Strategy` drawing uniformly from the four [`ComposedRoute`]s.
 pub fn arb_composed_route() -> impl Strategy<Value = ComposedRoute> {
     prop_oneof![
         Just(ComposedRoute::KeyEmbedded),
         Just(ComposedRoute::KeyDetermined),
+        Just(ComposedRoute::KeyDerived),
         Just(ComposedRoute::RecurrenceBounded),
     ]
 }
@@ -1548,9 +1585,9 @@ pub const ROUTE3_RECURRENCE_WINDOW: &str = "3 days";
 pub const ROUTE3_STORM_KEY_ID: i64 = 900;
 
 /// A composed (`grain: key` + `timeseries:`) recipe covering one of the
-/// three key-temporal-locality routes. Every route uses the same clocked,
-/// append-only `events(d, id, val)` source; only the body shape, declared
-/// `unique_key`, and partition-column provenance differ:
+/// four key-temporal-locality routes/sub-routes. Every route uses the same
+/// clocked, append-only `events(d, id, val)` source; only the body shape,
+/// declared `unique_key`, and partition-column provenance differ:
 ///
 /// - [`ComposedRoute::KeyEmbedded`]: `SELECT id, d, SUM(val) AS total FROM
 ///   events GROUP BY id, d` — `partition_column` (`d`) is itself a
@@ -1561,16 +1598,25 @@ pub const ROUTE3_STORM_KEY_ID: i64 = 900;
 ///   pdate, SUM(val) AS total FROM events GROUP BY id`, with a declared
 ///   `functional_dependencies: [{key: [id], determines: pdate}]` — `pdate`
 ///   is a direct scalar wrapper of the driving source's own clock column,
-///   the one NOT-NULL-provable, non-extremal shape route 2 admits
+///   not itself a `unique_key` column (`unique_key` is `[id]` alone), so
+///   the derived sub-route cannot decide it and it falls to the declared
+///   fallback — the one NOT-NULL-provable, non-extremal shape route 2
+///   admits
 ///   (`smelt_logical::analysis::not_null::partition_column_provably_not_null`'s
 ///   doc comment).
+/// - [`ComposedRoute::KeyDerived`]: `SELECT id, d, CAST(d AS DATE) AS
+///   pdate, SUM(val) AS total FROM events GROUP BY id, d` — `unique_key` is
+///   `[id, d]`, so `pdate`'s only column reference (`d`) IS a `unique_key`
+///   column: the **derived** sub-route
+///   (`smelt_logical::analysis::key_derived`) admits with **no** declared
+///   `functional_dependencies:` entry at all.
 /// - [`ComposedRoute::RecurrenceBounded`]: `SELECT id, MAX(d) AS last_seen
 ///   FROM events GROUP BY id`, with the driving source declaring
 ///   `key_recurrence: {key: [id], window: '3 days'}` — the flagship
 ///   extremal-fold shape route 3 exists for.
 ///
-/// `KeyDetermined`'s and `RecurrenceBounded`'s rendered model+source files
-/// are admitted by the real key-temporal-locality gate
+/// `KeyDetermined`'s, `KeyDerived`'s, and `RecurrenceBounded`'s rendered
+/// model+source files are admitted by the real key-temporal-locality gate
 /// (`establish_locality`, exercised through `smelt-db`'s real
 /// `maintenance_plan_report` Salsa query over the real staged
 /// frontmatter/YAML) but are **not** executable through the real
@@ -1578,12 +1624,12 @@ pub const ROUTE3_STORM_KEY_ID: i64 = 900;
 /// independent of this pool (`incremental_models.md` §Known Divergences:
 /// every extremal `MIN`/`MAX`-derived `timeseries.partition_column` trips
 /// the unrelated NOT-NULL diagnostic `execute_project`'s pre-execution gate
-/// enforces, regardless of locality admission; `KeyDetermined`'s own
-/// `pdate` scalar-wrapper projection is likewise not a real GROUP BY key
-/// nor an allowlisted aggregate, so `classify_cumulative`'s runtime
-/// grammar refuses it independently of locality admission). The
-/// conformance gate therefore drives these two routes' actual merge
-/// mechanics through
+/// enforces, regardless of locality admission; `KeyDetermined`'s and
+/// `KeyDerived`'s own `pdate` scalar-wrapper projection is likewise not a
+/// literal GROUP BY key text nor an allowlisted aggregate, so
+/// `classify_cumulative`'s runtime grammar refuses it independently of
+/// locality admission). The conformance gate therefore drives these
+/// routes' actual merge mechanics through
 /// `smelt_runtime::maintenance_driver::run_windowed_keyed_maintenance`
 /// directly against a real `DuckDbBackend` — the same workaround
 /// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`
@@ -1598,9 +1644,9 @@ pub struct ComposedKeyedRecipe {
 impl ComposedKeyedRecipe {
     pub fn new(route: ComposedRoute) -> Self {
         let source = match route {
-            ComposedRoute::KeyEmbedded | ComposedRoute::KeyDetermined => {
-                SourceRecipe::events(KeyShape::Single)
-            }
+            ComposedRoute::KeyEmbedded
+            | ComposedRoute::KeyDetermined
+            | ComposedRoute::KeyDerived => SourceRecipe::events(KeyShape::Single),
             ComposedRoute::RecurrenceBounded => SourceRecipe::events_with_key_recurrence(
                 vec!["id".to_string()],
                 ROUTE3_RECURRENCE_WINDOW,
@@ -1618,7 +1664,7 @@ impl ComposedKeyedRecipe {
     /// derivation).
     pub fn unique_key(&self) -> Vec<String> {
         match self.route {
-            ComposedRoute::KeyEmbedded => vec![
+            ComposedRoute::KeyEmbedded | ComposedRoute::KeyDerived => vec![
                 self.source.key_column.clone(),
                 self.source.clock_column.clone(),
             ],
@@ -1632,13 +1678,15 @@ impl ComposedKeyedRecipe {
     pub fn partition_column(&self) -> String {
         match self.route {
             ComposedRoute::KeyEmbedded => self.source.clock_column.clone(),
-            ComposedRoute::KeyDetermined => "pdate".to_string(),
+            ComposedRoute::KeyDetermined | ComposedRoute::KeyDerived => "pdate".to_string(),
             ComposedRoute::RecurrenceBounded => "last_seen".to_string(),
         }
     }
 
     /// The declared `functional_dependencies:` entry (`key`, `determines`)
-    /// route 2 needs to admit — `None` for the other two routes.
+    /// route 2's **declared** sub-route needs to admit — `None` for the
+    /// other routes, including `KeyDerived` (admitted by the derived
+    /// sub-route with no declaration at all).
     pub fn functional_dependency(&self) -> Option<(Vec<String>, String)> {
         match self.route {
             ComposedRoute::KeyDetermined => Some((

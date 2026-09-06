@@ -765,6 +765,12 @@ pub enum DiagnosticCode {
     /// partition column by default; the rule reads it from the driving
     /// source. Anchored at offset 0. Error severity.
     KeyedForbidsTimeseries,
+    /// A `refresh: keyed` model's route-3 statically-derived recurrence
+    /// bound disagrees with a declared `key_recurrence` over the same key
+    /// (key-grain rule 16, `incremental_shapes.md` §"Key temporal
+    /// locality"). Names both values; the derived value is authoritative.
+    /// Anchored at offset 0. Error severity.
+    KeyedRecurrenceDeclarationMismatch,
     /// A key-addressed model (`grain: key`, resolved) declares
     /// `safety_overrides:` (top-level or the folded `batched.safety_overrides`
     /// sub-block). A keyed model has no partition-shaped output for a safety

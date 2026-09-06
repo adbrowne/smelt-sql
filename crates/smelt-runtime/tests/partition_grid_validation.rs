@@ -283,3 +283,79 @@ async fn test_execute_project_rejects_misaligned_run_window_through_real_path() 
         "expected the refusal to explain the weekly-alignment violation, got: {msg}"
     );
 }
+
+/// A misaligned monthly run window is refused with a message naming the
+/// exact coarsened `[--event-time-start, --event-time-end)` pair that would
+/// be accepted (`docs/specs/incremental_shapes.md` §"Run window vs partition
+/// granularity", success criterion 2) — this test parses that pair out of
+/// the real refusal, re-runs `execute_project` with exactly it, and asserts
+/// the run succeeds with correct output, through the same real path both
+/// `smelt-cli` and `smelt-ui` share.
+#[tokio::test]
+async fn test_misaligned_window_refusal_names_a_pair_that_then_succeeds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (project_dir, config) = setup_project(&tmp, "month");
+    let config = Arc::new(config);
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let db_path = project_dir.join("run.duckdb");
+
+    // 2024-12-05 is not the 1st of a month — misaligned to monthly granularity.
+    let refusal = execute_project(
+        "run-misaligned-month".to_string(),
+        make_request("2024-12-05", "2024-12-20"),
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("a non-month-aligned window must be refused");
+    let msg = refusal.to_string();
+
+    let extract = |flag: &str| -> String {
+        let idx = msg
+            .find(flag)
+            .unwrap_or_else(|| panic!("expected '{flag}' in refusal message: {msg}"));
+        msg[idx + flag.len()..]
+            .split_whitespace()
+            .next()
+            .unwrap_or_else(|| panic!("expected a date after '{flag}' in: {msg}"))
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .to_string()
+    };
+    let suggested_start = extract("--event-time-start");
+    let suggested_end = extract("--event-time-end");
+    assert_eq!(suggested_start, "2024-12-01");
+    assert_eq!(suggested_end, "2025-01-01");
+
+    let outcome = execute_project(
+        "run-coarsened".to_string(),
+        make_request(&suggested_start, &suggested_end),
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("re-running with the suggested coarsened pair must succeed");
+
+    let model_result = outcome
+        .models
+        .get("revenue")
+        .expect("revenue model must appear in RunOutcome");
+    assert_eq!(
+        model_result.row_count, 4,
+        "expected 4 grouped (revenue_date, user_id) rows, got {}",
+        model_result.row_count
+    );
+}

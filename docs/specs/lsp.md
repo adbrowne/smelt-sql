@@ -305,7 +305,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 - **Code**:
   - `crates/smelt-lsp/src/lib.rs` — main LSP server, all capability handlers
   - `crates/smelt-lsp/src/python_scan.rs` — Python decorator scanning for go-to-definition
-  - `crates/smelt-db/src/lib.rs` — Salsa queries, `file_diagnostics()`, `model_schema()`
+  - `crates/smelt-db/src/file_check.rs` — `file_diagnostics()`; `crates/smelt-db/src/queries/schema.rs` — `model_schema()`
   - `crates/smelt-db/src/type_inference.rs` — pure type inference functions
   - `crates/smelt-db/src/code_actions.rs` — code action suggestions
   - `crates/smelt-db/src/references.rs` — `find_cte_references()`

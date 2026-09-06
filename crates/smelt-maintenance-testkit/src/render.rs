@@ -310,20 +310,19 @@ fn render_bigquery_target_body(dataset: &str) -> String {
 /// `ConformanceTarget`-parametrized `render_smelt_yml`).
 pub fn render_smelt_yml_for(target: ConformanceTarget, db_path: &Path) -> String {
     let (name, block) = render_target_block(target, db_path);
-    // `probes: {cadence: off}` — this harness exists to prove maintenance-
-    // technique equivalence (`docs/specs/incremental_models.md` §"The
-    // equivalence invariant"), a property checked independently by the
-    // S-restricted oracle after every run step; it is not exercising
-    // declared-fact probe firing, which has its own dedicated coverage
+    // `probes: {cadence: per_run}` — the source append-only posture probe
+    // (`docs/specs/model_properties.md` §"Probe obligation") now classifies
+    // a row-count increase in an already-closed partition as a late append
+    // (an observation, run-manifest `observed`) rather than a violation, so
+    // it no longer spuriously fires on this pool's generated `AppendLateRow`
+    // schedules (`docs/outcomes/20260904-decision-residue/outcome.md` phase
+    // 6). Declared-fact probe firing has its own dedicated coverage
     // (`crates/smelt-runtime/tests/{model_probes,source_probes}.rs`,
-    // `crates/smelt-cli/tests/e2e/declared_fact_probe_firing.rs`). Left on,
-    // the source append-only posture probe
-    // (`docs/specs/model_properties.md` §"Probe obligation") spuriously
-    // fires on this pool's generated `AppendLateRow` schedules — a
-    // legitimate late append into an already-closed partition, which the
-    // probe cannot yet distinguish from an in-place mutation (the declared
-    // `mutation_profile.lateness` limitation recorded in that section's
-    // §Known Divergences).
+    // `crates/smelt-cli/tests/e2e/declared_fact_probe_firing.rs`) — this
+    // harness's own purpose stays proving maintenance-technique equivalence
+    // (`docs/specs/incremental_models.md` §"The equivalence invariant"), a
+    // property checked independently by the S-restricted oracle after every
+    // run step.
     // `state.mode: intervals` — this harness reads back run manifests and
     // interval history via a permissive `FileStore::new` (e.g.
     // `gate.rs`'s post-run interval assertions), which requires the run
@@ -331,7 +330,7 @@ pub fn render_smelt_yml_for(target: ConformanceTarget, db_path: &Path) -> String
     // posture (`docs/specs/state.md` §"`state.mode` and what each posture
     // provides") would leave `.smelt/` empty.
     format!(
-        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
+        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: per_run\n",
     )
 }
 
@@ -679,7 +678,7 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
     let key = &recipe.source.key_column;
     let val = &recipe.source.payload_column;
     let clock = &recipe.source.clock_column;
-    let proj = recipe.combiner.projection_sql(val, clock);
+    let proj = recipe.combiner.projection_sql(val, clock, key);
     format!("SELECT {key}, {proj} FROM {src} GROUP BY {key}")
 }
 
@@ -1036,6 +1035,12 @@ pub fn render_composed_model_body(recipe: &ComposedKeyedRecipe) -> String {
                  GROUP BY {id}"
             )
         }
+        ComposedRoute::KeyDerived => {
+            format!(
+                "SELECT {id}, {d}, CAST({d} AS DATE) AS pdate, SUM({val}) AS total FROM {src} \
+                 GROUP BY {id}, {d}"
+            )
+        }
         ComposedRoute::RecurrenceBounded => {
             format!("SELECT {id}, MAX({d}) AS last_seen FROM {src} GROUP BY {id}")
         }
@@ -1259,7 +1264,9 @@ pub fn stage_composed_for_target(
 /// fixed regardless of which run window a schedule step later drives).
 pub fn render_repair_model_body(recipe: &RepairRecipe) -> String {
     let src = format!("smelt.sources.{}", recipe.source_name);
-    let proj = recipe.combiner.projection_sql("amount", "order_date");
+    let proj = recipe
+        .combiner
+        .projection_sql("amount", "order_date", "customer_id");
     format!(
         "SELECT customer_id, {proj} FROM {src} WHERE order_date BETWEEN TIMESTAMP \
          '{REPAIR_BAND_ANCHOR}' - INTERVAL '{band} days' AND TIMESTAMP '{REPAIR_BAND_ANCHOR}' \
@@ -1378,7 +1385,7 @@ mod tests {
 
         let duckdb_yaml = render_smelt_yml_for(ConformanceTarget::DuckDb, &db_path);
         let expected_duckdb = format!(
-            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
+            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: per_run\n",
             db = db_path.display(),
         );
         assert_eq!(
@@ -1391,7 +1398,7 @@ mod tests {
         let warehouse = crate::recipe::spark_warehouse_dir(&db_path);
         let connect_url = crate::recipe::spark_connect_url();
         let expected_spark = format!(
-            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  spark:\n    type: spark\n    connect_url: {connect_url}\n    catalog: spark_catalog\n    schema: {schema}\n    warehouse: {warehouse}\n    format: delta\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
+            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  spark:\n    type: spark\n    connect_url: {connect_url}\n    catalog: spark_catalog\n    schema: {schema}\n    warehouse: {warehouse}\n    format: delta\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: per_run\n",
             schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA,
             warehouse = warehouse.display(),
         );

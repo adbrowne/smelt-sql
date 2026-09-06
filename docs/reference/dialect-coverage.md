@@ -8,13 +8,19 @@ Regenerate with:
 
 How every built-in smelt recognises is spelled on each backend. Each cell is the
 `Emission` verdict the registry carries for that `(entry, dialect)` pair
-(`crates/smelt-types/src/signatures.rs`), which is the single place the printer
-reads — there is no name-matched dialect arm in `printer.rs`.
+(`crates/smelt-types/src/signatures/`), which is the single place the printer
+reads — there is no name-matched dialect arm in the printer.
 
 Cell vocabulary:
 
 - `native` — same spelling, same semantics; smelt emits the name unchanged.
 - `rename:X` — same call shape, emitted as `X`.
+- `template:X` — the target spells this built-in as a fixed shape `X` over the
+  call's own positional arguments (`{n}` placeholders), interpreted by one generic
+  printer routine that holds no function names; a call carrying a modifier a
+  placeholder cannot express (`DISTINCT`, `FILTER`, `WITHIN GROUP`, an argument-list
+  `ORDER BY`, `IGNORE`/`RESPECT NULLS`, a named argument, or `*`) is refused at
+  compile time rather than silently dropping it.
 - `rewrite:Id` — structurally rewritten by the printer's `RewriteId::Id` arm.
 - `restructure:Id` — the enclosing query block is restructured around a
   synthesised CTE by the planner's `RestructureId::Id` shape, because the
@@ -22,6 +28,12 @@ Cell vocabulary:
   author wrote.
 - `unsupported` — the compiler refuses the model (`UnsupportedOnBackend`) rather
   than emitting SQL the engine would reject or misread.
+- `conditional(guard→verdict | ... | otherwise→verdict)` — the verdict depends on
+  the call's own arity and/or operand types; the first arm whose guard the call
+  satisfies wins, and `otherwise` always matches last. Settled once per call on
+  the compile path by `Signature::settle_at`; the printer only ever sees the
+  settled verdict. Every arm is probed by the audit — never claimed from
+  documentation.
 - `(gap #N)` — a live sweep found this pair does not work as claimed, tracked by
   issue #N. The count ratchets down only
   (`.claude/dialect-gaps-baseline.txt`).
@@ -37,159 +49,159 @@ asymmetry the position axis exists to record — GoogleSQL's `PERCENTILE_CONT` i
 refused as an aggregate but accepted with a whole-partition `OVER`, while `MAX_BY` is
 the exact reverse.
 
-| Entry | Form | DuckDB | Spark SQL | PostgreSQL | BigQuery |
-|---|---|---|---|---|---|
-| `%` | infix | native | native | native | rewrite:ModuloCall (gap #173) |
-| `**` | infix | native | rewrite:PowerCall | native | rewrite:PowerCall (gap divergent) |
-| `//` | infix | native | unsupported | unsupported | unsupported |
-| `ABS` | call | native | native | native | native |
-| `ACOS` | call | native | native | native | native |
-| `AGE` | call | native | native (gap #178) | native | native (gap #179) |
-| `ANY_VALUE` | call | native | native | native | native |
-| `APPROX_COUNT_DISTINCT` | call | native | native | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #179) |
-| `ARG_MAX` | call | native | rename:MAX_BY | native | agg:rename:MAX_BY; win:restructure:WindowToCte; run:unsupported (gap #179) |
-| `ARG_MIN` | call | native | rename:MIN_BY | native | agg:rename:MIN_BY; win:restructure:WindowToCte; run:unsupported (gap #179) |
-| `ARRAY_AGG` | call | native | native (gap divergent) | native | native (gap divergent) |
-| `ASIN` | call | native | native | native | native |
-| `ATAN` | call | native | native | native | native |
-| `ATAN2` | call | native | native | native | native |
-| `AVG` | call | native | native | native | native |
-| `BETWEEN` | special | native | native | native | native |
-| `BIT_AND` | call | native | native | native | native |
-| `BIT_OR` | call | native | native | native | native |
-| `BIT_XOR` | call | native | native | native | native |
-| `BOOL_AND` | call | native | rename:EVERY | native | rename:LOGICAL_AND |
-| `BOOL_OR` | call | native | rename:SOME | native | rename:LOGICAL_OR |
-| `CAST` | special | native | native | native | native |
-| `CEIL` | call | native | native | native | native |
-| `CEILING` | call | native | native | native | native |
-| `CHARACTER_LENGTH` | call | native | native | native | native |
-| `CHAR_LENGTH` | call | native | native | native | native |
-| `COALESCE` | call | native | native | native | native |
-| `CONCAT` | call | native | native (gap divergent) | native | native (gap divergent) |
-| `CORR` | call | native | native (gap divergent) | native | native (gap divergent) |
-| `COS` | call | native | native | native | native |
-| `COSH` | call | native | native | native | native |
-| `COUNT` | call | native | native | native | native |
-| `COVAR_POP` | call | native | native | native | native |
-| `COVAR_SAMP` | call | native | native | native | native |
-| `CUME_DIST` | call | native | native | native | native |
-| `CURRENT_DATE` | call | native | native | native | native |
-| `CURRENT_TIMESTAMP` | call | native | native | native | native |
-| `DATE` | call | native | native | native | native |
-| `DATE_ADD` | special | native (gap #176) | native (gap #176) | native | native (gap #176, divergent) |
-| `DATE_PART` | call | native | native | native | native (gap #179) |
-| `DATE_SUB` | special | native (gap #177) | native (gap #178) | native | native (gap #176) |
-| `DATE_TRUNC` | call | native | native | native | native (gap #179) |
-| `DAY` | call | native | native | native | native (gap #179) |
-| `DAYOFWEEK` | call | native | native (gap #174) | native | native (gap #179) |
-| `DENSE_RANK` | call | native | native | native | native |
-| `EVERY` | call | rename:BOOL_AND | native | native | rename:LOGICAL_AND |
-| `EXISTS` | special | native | native | native | native |
-| `EXP` | call | native | native | native | native |
-| `EXPLODE` | table-fn | rename:UNNEST (gap #176) | native (gap #176) | rename:UNNEST | rename:UNNEST (gap #179) |
-| `EXTRACT` | call | native | native | native | native |
-| `FIRST` | call | native (gap #175) | native (gap #175) | native | native (gap #179) |
-| `FIRST_VALUE` | call | native | native | native | native |
-| `FLOOR` | call | native | native | native | native |
-| `GLOB` | infix | native | native (gap #178) | native | native (gap #179) |
-| `GREATEST` | call | native | native | native | native (gap divergent) |
-| `GROUP_CONCAT` | call | native | native (gap #178) | native | rename:STRING_AGG |
-| `IFNULL` | call | native | native | native | native |
-| `ILIKE` | infix | native | native | native | native (gap #179) |
-| `IN` | special | native | native | native | native |
-| `INITCAP` | call | native (gap #177) | native | native | native |
-| `IS_NOT_NULL` | postfix | native | native | native | native |
-| `IS_NULL` | postfix | native | native | native | native |
-| `JSON_ARRAY` | call | native | native (gap #178) | native | native |
-| `JSON_ARRAY_LENGTH` | call | native | native (gap #178) | native | native (gap #179) |
-| `JSON_CONTAINS` | call | native | native (gap #178) | native | native (gap #179) |
-| `JSON_EXTRACT` | call | native | rename:GET_JSON_OBJECT | native | native |
-| `JSON_EXTRACT_TEXT` | call | rename:JSON_EXTRACT_STRING | rename:GET_JSON_OBJECT | native | rename:JSON_VALUE |
-| `JSON_OBJECT` | call | native | native (gap #178) | native | native |
-| `JSON_OBJECT_KEYS` | call | rename:JSON_KEYS | native (gap #178) | native | native (gap #179) |
-| `LAG` | call | native | native | native | native |
-| `LAST` | call | native (gap #175) | native (gap #175) | native | native (gap #179) |
-| `LAST_VALUE` | call | native | native | native | native |
-| `LEAD` | call | native | native | native | native |
-| `LEAST` | call | native | native | native | native (gap divergent) |
-| `LEFT` | call | native | native | native | native |
-| `LENGTH` | call | native | native | native | native |
-| `LIKE` | infix | native | native | native | native |
-| `LISTAGG` | call | native | native | native | rename:STRING_AGG |
-| `LN` | call | native | native | native | native |
-| `LOG` | call | native | native (gap #174) | native | native (gap #174) |
-| `LOG10` | call | native | native | native | native |
-| `LOG2` | call | native | native | native | native (gap #179) |
-| `LOWER` | call | native | native | native | native |
-| `LPAD` | call | native | native | native | native |
-| `LTRIM` | call | native | native | native | native |
-| `MAKE_DATE` | call | native | native | native | rename:DATE |
-| `MAKE_TIME` | call | native | native (gap #178) | native | rename:TIME |
-| `MAKE_TIMESTAMP` | call | native | native | native | rename:DATETIME |
-| `MAKE_TIMESTAMPTZ` | call | native | native (gap #178) | native | native (gap #179) |
-| `MAX` | call | native | native | native | native |
-| `MD5` | call | native | native | native | native (gap #179, divergent) |
-| `MEDIAN` | call | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:rewrite:BigQueryMedian; win:rewrite:BigQueryMedian; run:unsupported (gap #179) |
-| `MIN` | call | native | native | native | native |
-| `MOD` | call | native | native | native | native |
-| `MODE` | call | native | native | native | native (gap #179) |
-| `MONTH` | call | native | native | native | native (gap #179) |
-| `NOW` | call | native | native | native | rename:CURRENT_TIMESTAMP |
-| `NTH_VALUE` | call | native | native | native | native |
-| `NTILE` | call | native | native | native | native |
-| `NULLIF` | call | native | native | native | native |
-| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
-| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
-| `PERCENT_RANK` | call | native | native | native | native |
-| `PI` | call | native | native | native | native (gap #179) |
-| `POSITION` | call | native | native | native | native (gap #179) |
-| `POW` | call | native | native | native | native |
-| `POWER` | call | native | native | native | native (gap divergent) |
-| `QUARTER` | call | native | native | native | native (gap #179) |
-| `QUOTE_IDENT` | call | native (gap #177) | native (gap #178) | native | native (gap #179) |
-| `QUOTE_LITERAL` | call | native (gap #177) | native (gap #178) | native | native (gap #179) |
-| `RANDOM` | call | native | native | native | rename:RAND |
-| `RANK` | call | native | native | native | native |
-| `REGR_SLOPE` | call | native | native (gap divergent) | native | native (gap #179) |
-| `REPEAT` | call | native | native | native | native |
-| `REPLACE` | call | native | native | native | native |
-| `REVERSE` | call | native | native | native | native |
-| `RIGHT` | call | native | native | native | native |
-| `ROUND` | call | native | native | native | native |
-| `ROW_NUMBER` | call | native | native | native | native |
-| `RPAD` | call | native | native | native | native |
-| `RTRIM` | call | native | native | native | native |
-| `SIGN` | call | native | native | native | native (gap #179) |
-| `SIN` | call | native | native | native | native |
-| `SINH` | call | native | native | native | native |
-| `SPLIT_PART` | call | native | native | native | native (gap #179) |
-| `SQRT` | call | native | native | native | native |
-| `STDDEV` | call | native | native | native | native |
-| `STDDEV_POP` | call | native | native | native | native |
-| `STDDEV_SAMP` | call | native | native | native | native |
-| `STRING_AGG` | call | native | native | native | native |
-| `STRPOS` | call | native | rename:INSTR | native | native |
-| `SUBSTR` | call | native | native | native | native |
-| `SUBSTRING` | call | native | native | native | native |
-| `SUM` | call | native | native | native | native |
-| `TAN` | call | native | native | native | native |
-| `TANH` | call | native | native | native | native |
-| `TO_CHAR` | call | native (gap #177) | native | native | native (gap #179) |
-| `TO_JSON` | call | native | native (gap #178) | native | native (gap divergent) |
-| `TO_SECONDS` | call | native | native (gap #178) | native | native (gap #179) |
-| `TRANSLATE` | call | native | native | native | native |
-| `TRIM` | call | native | native | native | native |
-| `TRUNC` | call | native | native (gap #178) | native | native (gap #179) |
-| `TRUNCATE` | call | rename:TRUNC | native (gap #178) | native | rename:TRUNC (gap #179) |
-| `UNNEST` | table-fn | native (gap #176) | rename:EXPLODE (gap #176) | native | native (gap #179) |
-| `UPPER` | call | native | native | native | native |
-| `VARIANCE` | call | native | native | native | native |
-| `VAR_POP` | call | native | native | native | native |
-| `VAR_SAMP` | call | native | native | native | native |
-| `YEAR` | call | native | native | native | native (gap #179) |
-| `^` | infix | native | rewrite:PowerCall | native | rewrite:PowerCall (gap divergent) |
-| `||` | infix | native | native | native | native |
+| Entry | Form | DuckDB | Spark SQL | BigQuery |
+|---|---|---|---|---|
+| `%` | infix | native | native | template:MOD({0}, {1}) (gap #173) |
+| `**` | infix | native | template:POWER({0}, {1}) | template:POWER({0}, {1}) (gap divergent) |
+| `//` | infix | native | conditional(a0:integral,a1:integral→template:{0} DIV {1} | a0:floating,a1:floating→template:{0} / {1} | a0:decimal,a1:decimal→template:{0} / {1} | otherwise→unsupported) | unsupported |
+| `ABS` | call | native | native | native |
+| `ACOS` | call | native | native | native |
+| `AGE` | call | native | template:{0} - {1} (gap divergent) | native (gap #179) |
+| `ANY_VALUE` | call | native | native | native |
+| `APPROX_COUNT_DISTINCT` | call | native | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #179) |
+| `ARG_MAX` | call | native | rename:MAX_BY | agg:rename:MAX_BY; win:restructure:WindowToCte; run:unsupported (gap #179) |
+| `ARG_MIN` | call | native | rename:MIN_BY | agg:rename:MIN_BY; win:restructure:WindowToCte; run:unsupported (gap #179) |
+| `ARRAY_AGG` | call | native | native (gap divergent) | native (gap divergent) |
+| `ASIN` | call | native | native | native |
+| `ATAN` | call | native | native | native |
+| `ATAN2` | call | native | native | native |
+| `AVG` | call | native | native | native |
+| `BETWEEN` | special | native | native | native |
+| `BIT_AND` | call | native | native | native |
+| `BIT_OR` | call | native | native | native |
+| `BIT_XOR` | call | native | native | native |
+| `BOOL_AND` | call | native | rename:EVERY | rename:LOGICAL_AND |
+| `BOOL_OR` | call | native | rename:SOME | rename:LOGICAL_OR |
+| `CAST` | special | native | native | native |
+| `CEIL` | call | native | native | native |
+| `CEILING` | call | native | native | native |
+| `CHARACTER_LENGTH` | call | native | native | native |
+| `CHAR_LENGTH` | call | native | native | native |
+| `COALESCE` | call | native | native | native |
+| `CONCAT` | call | native | native (gap divergent) | native (gap divergent) |
+| `CORR` | call | native | native (gap divergent) | native (gap divergent) |
+| `COS` | call | native | native | native |
+| `COSH` | call | native | native | native |
+| `COUNT` | call | native | native | native |
+| `COVAR_POP` | call | native | native | native |
+| `COVAR_SAMP` | call | native | native | native |
+| `CUME_DIST` | call | native | native | native |
+| `CURRENT_DATE` | call | native | native | native |
+| `CURRENT_TIMESTAMP` | call | native | native | native |
+| `DATE` | call | native | native | native |
+| `DATE_ADD` | call | native | template:CAST({0} + {1} AS TIMESTAMP) | native (gap #176, divergent) |
+| `DATE_PART` | call | native | native | native (gap #179) |
+| `DATE_SUB` | call | template:{0} - {1} | template:CAST({0} - {1} AS TIMESTAMP) | native (gap #176) |
+| `DATE_TRUNC` | call | native | native | native (gap #179) |
+| `DAY` | call | native | native | native (gap #179) |
+| `DAYOFWEEK` | call | native | template:DAYOFWEEK({0}) - 1 | native (gap #179) |
+| `DENSE_RANK` | call | native | native | native |
+| `EVERY` | call | rename:BOOL_AND | native | rename:LOGICAL_AND |
+| `EXISTS` | special | native | native | native |
+| `EXP` | call | native | native | native |
+| `EXPLODE` | table-fn | rename:UNNEST (gap #176) | native (gap #176) | rename:UNNEST (gap #179) |
+| `EXTRACT` | call | native | native | native |
+| `FIRST` | call | native (gap #175) | native (gap #175) | native (gap #179) |
+| `FIRST_VALUE` | call | native | native | native |
+| `FLOOR` | call | native | native | native |
+| `GLOB` | infix | native | unsupported | native (gap #179) |
+| `GREATEST` | call | native | native | native (gap divergent) |
+| `GROUP_CONCAT` | call | native | unsupported | rename:STRING_AGG |
+| `IFNULL` | call | native | native | native |
+| `ILIKE` | infix | native | native | native (gap #179) |
+| `IN` | special | native | native | native |
+| `INITCAP` | call | unsupported | native | native |
+| `IS_NOT_NULL` | postfix | native | native | native |
+| `IS_NULL` | postfix | native | native | native |
+| `JSON_ARRAY` | call | native | unsupported | native |
+| `JSON_ARRAY_LENGTH` | call | native | native (gap divergent) | native (gap #179) |
+| `JSON_CONTAINS` | call | native | unsupported | native (gap #179) |
+| `JSON_EXTRACT` | call | native | rename:GET_JSON_OBJECT | native |
+| `JSON_EXTRACT_TEXT` | call | rename:JSON_EXTRACT_STRING | rename:GET_JSON_OBJECT | rename:JSON_VALUE |
+| `JSON_OBJECT` | call | native | unsupported | native |
+| `JSON_OBJECT_KEYS` | call | rename:JSON_KEYS | native (gap divergent) | native (gap #179) |
+| `LAG` | call | native | native | native |
+| `LAST` | call | native (gap #175) | native (gap #175) | native (gap #179) |
+| `LAST_VALUE` | call | native | native | native |
+| `LEAD` | call | native | native | native |
+| `LEAST` | call | native | native | native (gap divergent) |
+| `LEFT` | call | native | native | native |
+| `LENGTH` | call | native | native | native |
+| `LIKE` | infix | native | native | native |
+| `LISTAGG` | call | native | native | rename:STRING_AGG |
+| `LN` | call | native | native | native |
+| `LOG` | call | native | conditional(arity=1→rename:LOG10 | otherwise→native) | native (gap #174) |
+| `LOG10` | call | native | native | native |
+| `LOG2` | call | native | native | native (gap #179) |
+| `LOWER` | call | native | native | native |
+| `LPAD` | call | native | native | native |
+| `LTRIM` | call | native | native | native |
+| `MAKE_DATE` | call | native | native | rename:DATE |
+| `MAKE_TIME` | call | native | unsupported | rename:TIME |
+| `MAKE_TIMESTAMP` | call | native | native | rename:DATETIME |
+| `MAKE_TIMESTAMPTZ` | call | native | unsupported | native (gap #179) |
+| `MAX` | call | native | native | native |
+| `MD5` | call | native | native | native (gap #179, divergent) |
+| `MEDIAN` | call | native | agg:native; win:restructure:WindowToCte; run:unsupported | agg:rewrite:BigQueryMedian; win:rewrite:BigQueryMedian; run:unsupported (gap #179) |
+| `MIN` | call | native | native | native |
+| `MOD` | call | native | native | native |
+| `MODE` | call | native | native | native (gap #179) |
+| `MONTH` | call | native | native | native (gap #179) |
+| `NOW` | call | native | native | rename:CURRENT_TIMESTAMP |
+| `NTH_VALUE` | call | native | native | native |
+| `NTILE` | call | native | native | native |
+| `NULLIF` | call | native | native | native |
+| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
+| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported | agg:native; win:restructure:WindowToCte; run:unsupported | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
+| `PERCENT_RANK` | call | native | native | native |
+| `PI` | call | native | native | native (gap #179) |
+| `POSITION` | call | native | native | native (gap #179) |
+| `POW` | call | native | native | native |
+| `POWER` | call | native | native | native (gap divergent) |
+| `QUARTER` | call | native | native | native (gap #179) |
+| `QUOTE_IDENT` | call | unsupported | unsupported | native (gap #179) |
+| `QUOTE_LITERAL` | call | unsupported | unsupported | native (gap #179) |
+| `RANDOM` | call | native | native | rename:RAND |
+| `RANK` | call | native | native | native |
+| `REGR_SLOPE` | call | native | native (gap divergent) | native (gap #179) |
+| `REPEAT` | call | native | native | native |
+| `REPLACE` | call | native | native | native |
+| `REVERSE` | call | native | native | native |
+| `RIGHT` | call | native | native | native |
+| `ROUND` | call | native | native | native |
+| `ROW_NUMBER` | call | native | native | native |
+| `RPAD` | call | native | native | native |
+| `RTRIM` | call | native | native | native |
+| `SIGN` | call | native | native | native (gap #179) |
+| `SIN` | call | native | native | native |
+| `SINH` | call | native | native | native |
+| `SPLIT_PART` | call | native | native | native (gap #179) |
+| `SQRT` | call | native | native | native |
+| `STDDEV` | call | native | native | native |
+| `STDDEV_POP` | call | native | native | native |
+| `STDDEV_SAMP` | call | native | native | native |
+| `STRING_AGG` | call | native | native | native |
+| `STRPOS` | call | native | rename:INSTR | native |
+| `SUBSTR` | call | native | native | native |
+| `SUBSTRING` | call | native | native | native |
+| `SUM` | call | native | native | native |
+| `TAN` | call | native | native | native |
+| `TANH` | call | native | native | native |
+| `TO_CHAR` | call | unsupported | native | native (gap #179) |
+| `TO_JSON` | call | native | conditional(a0:composite→native | otherwise→unsupported) | native (gap divergent) |
+| `TO_SECONDS` | call | native | template:make_interval(0, 0, 0, 0, 0, 0, {0}) (gap divergent) | native (gap #179) |
+| `TRANSLATE` | call | native | native | native |
+| `TRIM` | call | native | native | native |
+| `TRUNC` | call | conditional(arity=2,a0:temporal,a1:string→unsupported | otherwise→native) | conditional(arity=2,a0:temporal,a1:string→native | otherwise→unsupported) | native (gap #179) |
+| `TRUNCATE` | call | rename:TRUNC | unsupported | rename:TRUNC (gap #179) |
+| `UNNEST` | table-fn | native (gap #176) | rename:EXPLODE (gap #176) | native (gap #179) |
+| `UPPER` | call | native | native | native |
+| `VARIANCE` | call | native | native | native |
+| `VAR_POP` | call | native | native | native |
+| `VAR_SAMP` | call | native | native | native |
+| `YEAR` | call | native | native | native (gap #179) |
+| `^` | infix | native | template:POWER({0}, {1}) | template:POWER({0}, {1}) (gap divergent) |
+| `||` | infix | native | native | native |
 
 ## Schema-only entries
 
@@ -214,7 +226,6 @@ confirmed differs per dialect:
 | DuckDB | schema + value | every PR (in-process, no warehouse) |
 | Spark SQL | schema + value | nightly, or a PR labelled `run-docker-tests` |
 | BigQuery | schema + value | manual sweep only — `scripts/bigquery-dialect-audit.sh`; the value leg executes rather than dry-runs, so it bills |
-| PostgreSQL | none | **unverified** — a `SqlDialect` variant with no backend crate and no oracle, so nothing exercises its verdicts |
 
 An untested `native` is reported as *unverified*, never as *passing*: the value leg
 exists to test the claim, and a default-passing assumption would recreate exactly the

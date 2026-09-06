@@ -31,8 +31,9 @@ use smelt_logical::maintenance::locality::{
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
-    identity_not_derivable_plan, locality_refused_plan, ColumnGroup, Grain as PlanGrain,
-    MaintenancePlan, MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
+    identity_not_derivable_plan, locality_refused_plan, recurrence_mismatch_plan, ColumnGroup,
+    Grain as PlanGrain, MaintenancePlan, MutationProfile as PlanMutationProfile, OutputSpec,
+    SourceFacts, Trigger,
 };
 use smelt_logical::rules::cumulative::{
     declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
@@ -554,6 +555,21 @@ pub fn derive_model_maintenance_plan(
                     sql,
                 };
                 match establish_locality(&inputs) {
+                    Err(
+                        refusal @ smelt_logical::maintenance::locality::LocalityRefusal::RecurrenceDeclarationMismatch {
+                            ..
+                        },
+                    ) => {
+                        return Some(MaintenancePlanResult {
+                            plan: recurrence_mismatch_plan(refusal.message(table)),
+                            column_groups: Vec::new(),
+                            degenerate: Vec::new(),
+                            state_columns: Vec::new(),
+                            execution_postures: None,
+                            is_snapshot_reconcile: None,
+                            comparability: Vec::new(),
+                        });
+                    }
                     Err(refusal) => {
                         return Some(MaintenancePlanResult {
                             plan: locality_refused_plan(refusal.message(table)),
@@ -906,6 +922,12 @@ pub enum MaintenanceRefusal {
     LocalityNotEstablished {
         message: String,
     },
+    /// `KeyedRecurrenceDeclarationMismatch` — a declared `key_recurrence`
+    /// disagrees with route 3's statically-derived recurrence bound over
+    /// the same key (key-grain rule 16).
+    KeyedRecurrenceDeclarationMismatch {
+        message: String,
+    },
     /// `GrainAssertionMismatch` — a `grain: key` model with no declared
     /// top-level `unique_key:` and no GROUP-BY-derivable identity either.
     IdentityNotDerivable {
@@ -1000,6 +1022,11 @@ pub fn diagnostic_for_refusal(
         MaintenanceRefusal::LocalityNotEstablished { message } => (
             DiagnosticSeverity::Error,
             DiagnosticCode::KeyedForbidsTimeseries,
+            message.clone(),
+        ),
+        MaintenanceRefusal::KeyedRecurrenceDeclarationMismatch { message } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::KeyedRecurrenceDeclarationMismatch,
             message.clone(),
         ),
         MaintenanceRefusal::IdentityNotDerivable { message } => (
@@ -1188,7 +1215,6 @@ pub fn backend_write_capabilities_for(
     let caps = match backend_name.to_ascii_lowercase().as_str() {
         "duckdb" => smelt_dialect::BackendCapabilities::duckdb(),
         "spark" | "databricks" => smelt_dialect::BackendCapabilities::spark(),
-        "postgres" | "postgresql" => smelt_dialect::BackendCapabilities::postgresql(),
         _ => {
             return smelt_logical::maintenance::BackendWriteCapabilities::default();
         }
@@ -1212,7 +1238,6 @@ pub fn backend_dialect_for(backend_name: &str) -> Option<smelt_dialect::SqlDiale
     match backend_name.to_ascii_lowercase().as_str() {
         "duckdb" => Some(smelt_dialect::SqlDialect::DuckDB),
         "spark" | "databricks" => Some(smelt_dialect::SqlDialect::SparkSQL),
-        "postgres" | "postgresql" => Some(smelt_dialect::SqlDialect::PostgreSQL),
         "bigquery" => Some(smelt_dialect::SqlDialect::BigQuery),
         _ => None,
     }
@@ -1628,6 +1653,11 @@ pub fn maintenance_plan_diagnostics(
                     message: message.clone(),
                 })
             }
+            smelt_logical::maintenance::Refusal::KeyedRecurrenceDeclarationMismatch { message } => {
+                Some(MaintenanceRefusal::KeyedRecurrenceDeclarationMismatch {
+                    message: message.clone(),
+                })
+            }
             smelt_logical::maintenance::Refusal::IdentityNotDerivable { message } => {
                 Some(MaintenanceRefusal::IdentityNotDerivable {
                     message: message.clone(),
@@ -1775,6 +1805,28 @@ mod tests {
 
     use super::*;
     use smelt_core::config::{MaintenanceCellConfig, PerSourceScanBounds};
+
+    /// The PostgreSQL emission dialect is retired (#181): `Target::backend_type`
+    /// already rejects `type: postgres` at the declaration boundary, and these
+    /// two name-keyed resolvers must not resurrect it as a second, unguarded
+    /// entry point — an unrecognised name resolves conservatively, matching the
+    /// fail-loud posture both functions already take for any other unknown name.
+    #[test]
+    fn retired_backend_names_resolve_to_nothing() {
+        for name in ["postgres", "postgresql"] {
+            assert_eq!(
+                backend_dialect_for(name),
+                None,
+                "{name} must not resolve to a SqlDialect"
+            );
+            let caps = backend_write_capabilities_for(name);
+            assert_eq!(
+                caps,
+                smelt_logical::maintenance::BackendWriteCapabilities::default(),
+                "{name} must resolve to the conservative default, not a real capability set"
+            );
+        }
+    }
 
     fn group(columns: &[&str], sensitivity: &[&str]) -> ColumnGroup {
         ColumnGroup {

@@ -20,8 +20,8 @@ use smelt_types::{DataType, SqlFunction};
 /// `cast_sql` is the **canonical** rendering — the SQL text smelt's own parser
 /// and type inference always read. Oracles whose engine does not accept the
 /// canonical spelling (BigQuery) get their rendering via
-/// [`TypedSource::cast_sql_for`]; DuckDB, Spark and PostgreSQL share the
-/// canonical text byte for byte.
+/// [`TypedSource::cast_sql_for`]; DuckDB and Spark share the canonical text
+/// byte for byte.
 #[derive(Debug, Clone)]
 pub struct TypedSource {
     pub name: String,
@@ -3053,11 +3053,7 @@ mod tests {
         ];
         for (bt, sql) in &expected {
             assert_eq!(bt.cast_sql(), *sql, "canonical cast moved for {bt:?}");
-            for dialect in [
-                SqlDialect::DuckDB,
-                SqlDialect::SparkSQL,
-                SqlDialect::PostgreSQL,
-            ] {
+            for dialect in [SqlDialect::DuckDB, SqlDialect::SparkSQL] {
                 assert_eq!(
                     bt.cast_sql_for(dialect),
                     Some(*sql),

@@ -501,7 +501,7 @@ fn median_integer_infers_double() {
 /// asserted with total confidence.
 ///
 /// This is exactly the shape BigQuery's `MEDIAN` lowering produces
-/// (`crates/smelt-dialect/src/printer.rs::print_bigquery_median`): `(CAST(x
+/// (`crates/smelt-dialect/src/printer/registry_emit.rs::print_bigquery_median`): `(CAST(x
 /// AS FLOAT64) + CAST(y AS FLOAT64)) / 2`. `smelt-types::parse_type` does not
 /// recognise `FLOAT64` (a GoogleSQL spelling), so both operands infer `None`,
 /// and the division fallback used to produce `SmallInt` (matching the

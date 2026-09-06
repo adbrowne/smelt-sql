@@ -496,6 +496,7 @@ async fn run_since_upstream(
 
         if had_runs_before_scoping && plan.runs.is_empty() {
             print!("{}", plan.dirty_set_report);
+            // stdout: --since-upstream intersected with the selector(s) leaves nothing to run
             eprintln!("smelt: no models matched the selector(s)");
             return Ok(());
         }

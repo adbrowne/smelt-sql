@@ -1,9 +1,136 @@
 /// Phase 50: registry coverage tests — verify that newly-seeded built-ins
 /// are present and carry the correct `ExprKind`.
 use smelt_types::{
-    signatures::{Emission, ExprKind, Position, RewriteId, Signature, SyntaxForm},
-    BuiltinRegistry, DataType, DialectId, TypeConstraint, TypeExpr,
+    signatures::{
+        ConditionalArm, Emission, ExprKind, Position, RewriteId, SigParam, Signature, SyntaxForm,
+        TemplateError,
+    },
+    validate_conditional, validate_template, BuiltinRegistry, CallFacts, ConditionalError,
+    DataType, DialectId, OperandClass, SettledEmission, TypeConstraint, TypeExpr,
 };
+
+/// A two-parameter integer signature — only its params/kind matter to the
+/// `validate_template` tests below.
+fn two_arg_signature() -> Signature {
+    Signature::new(
+        "TEST_TWO_ARG",
+        vec![],
+        vec![
+            SigParam::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+            SigParam::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+    )
+}
+
+fn one_arg_signature() -> Signature {
+    Signature::new(
+        "TEST_ONE_ARG",
+        vec![],
+        vec![SigParam::Concrete(TypeConstraint::Concrete(
+            DataType::Integer,
+        ))],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+    )
+}
+
+fn variadic_signature() -> Signature {
+    Signature::new(
+        "TEST_VARIADIC",
+        vec![],
+        vec![SigParam::Variadic(Box::new(SigParam::Concrete(
+            TypeConstraint::Concrete(DataType::Integer),
+        )))],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+    )
+}
+
+// ─── `Emission::Template` validation ───────────────────────────────────────
+
+#[test]
+fn template_index_beyond_arity_is_rejected() {
+    let sig = two_arg_signature();
+    let err = validate_template("MOD({0}, {2})", &sig, Position::Any).unwrap_err();
+    assert_eq!(
+        err,
+        TemplateError::IndexOutOfRange {
+            signature: sig.name.clone(),
+            index: 2,
+            arity: 2,
+        }
+    );
+}
+
+#[test]
+fn template_dropping_an_argument_is_rejected() {
+    let sig = two_arg_signature();
+    let err = validate_template("MOD({0})", &sig, Position::Any).unwrap_err();
+    assert_eq!(
+        err,
+        TemplateError::ArgumentUnreferenced {
+            signature: sig.name.clone(),
+            index: 1,
+        }
+    );
+}
+
+#[test]
+fn template_with_unbalanced_parens_is_rejected() {
+    let sig = two_arg_signature();
+    let err = validate_template("(MOD({0}, {1})", &sig, Position::Any).unwrap_err();
+    assert_eq!(
+        err,
+        TemplateError::UnbalancedParens {
+            signature: sig.name.clone()
+        }
+    );
+}
+
+#[test]
+fn non_call_template_at_a_window_position_is_rejected() {
+    let sig = one_arg_signature();
+    let err = validate_template("{0} - 1", &sig, Position::WholePartitionWindow).unwrap_err();
+    assert_eq!(
+        err,
+        TemplateError::NonCallAtWindowPosition {
+            signature: sig.name.clone()
+        }
+    );
+    // A call-shaped template at the same position is fine.
+    assert!(validate_template("SUM({0})", &sig, Position::WholePartitionWindow).is_ok());
+}
+
+#[test]
+fn template_on_a_variadic_signature_is_rejected() {
+    let sig = variadic_signature();
+    let err = validate_template("{0}", &sig, Position::Any).unwrap_err();
+    assert_eq!(
+        err,
+        TemplateError::VariadicSignature {
+            signature: sig.name.clone()
+        }
+    );
+}
+
+#[test]
+fn the_full_registry_builds() {
+    // Forces `REGISTRY`'s `LazyLock` to build — a malformed `Emission::Template`
+    // row panics at construction (the registry seed's `insert` closure), so
+    // simply resolving anything already exercises the build-time gate.
+    let names: Vec<&str> = BuiltinRegistry::names().collect();
+    assert!(!names.is_empty());
+    for sig in names.iter().filter_map(|n| BuiltinRegistry::resolve(n)) {
+        for (_, position, emission) in sig.emission.iter() {
+            if let Emission::Template(t) = emission {
+                assert!(
+                    validate_template(t, sig, *position).is_ok(),
+                    "{}: template {t:?} failed validation",
+                    sig.name
+                );
+            }
+        }
+    }
+}
 
 /// A bare test signature with no parameters — only its `emission` table
 /// matters to the tests below.
@@ -660,8 +787,6 @@ fn dedicated_syntax_entries_are_not_call_form() {
         "IN",
         "EXISTS",
         "CAST",
-        "DATE_ADD",
-        "DATE_SUB",
     ] {
         let sig = BuiltinRegistry::resolve(name).expect(name);
         assert_ne!(
@@ -669,6 +794,23 @@ fn dedicated_syntax_entries_are_not_call_form() {
             SyntaxForm::Call,
             "{name} is dedicated syntax; leaving it Call re-enters it into the \
              callable-function consistency gate"
+        );
+    }
+}
+
+#[test]
+fn date_add_and_date_sub_are_ordinary_calls() {
+    // Phase 9: both names are ordinary two-argument calls on the callable
+    // surface — nothing in production consumes their `SyntaxForm::Special`
+    // classification (`binary.rs` types the infix interval add/sub itself),
+    // so the registry-consistency gate's `SyntaxForm` exemption must no
+    // longer cover them.
+    for name in ["DATE_ADD", "DATE_SUB"] {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_eq!(
+            sig.syntax_form,
+            SyntaxForm::Call,
+            "{name} must be an ordinary callable, not dedicated syntax"
         );
     }
 }
@@ -682,7 +824,6 @@ fn the_rename_matrix_matches_the_printer_it_replaces() {
     // replacement for it rather than a re-derivation.
     let expected: &[(&str, DialectId, &str)] = &[
         ("EXPLODE", DialectId::DuckDb, "UNNEST"),
-        ("EXPLODE", DialectId::PostgreSql, "UNNEST"),
         ("EXPLODE", DialectId::BigQuery, "UNNEST"),
         ("UNNEST", DialectId::SparkSql, "EXPLODE"),
         ("EVERY", DialectId::DuckDb, "BOOL_AND"),
@@ -704,18 +845,6 @@ fn the_rename_matrix_matches_the_printer_it_replaces() {
 }
 
 #[test]
-fn every_is_native_on_postgresql() {
-    // PostgreSQL has `EVERY` natively; DuckDB does not and renames it to
-    // `BOOL_AND`. The printer's old rename chain carried the same asymmetry, and
-    // `smelt-dialect`'s `snapshots.rs` pins both halves of it.
-    let sig = BuiltinRegistry::resolve("EVERY").expect("EVERY");
-    assert_eq!(
-        sig.emission_at(DialectId::PostgreSql, Position::Any),
-        Emission::Native
-    );
-}
-
-#[test]
 fn caret_is_rewritten_wherever_infix_caret_means_xor() {
     // GoogleSQL and Spark SQL both define infix `^` as bitwise XOR while smelt's
     // grammar reads it as power. Emitting it verbatim returns a different number
@@ -725,7 +854,7 @@ fn caret_is_rewritten_wherever_infix_caret_means_xor() {
             let sig = BuiltinRegistry::resolve(op).expect(op);
             assert_eq!(
                 sig.emission_at(dialect, Position::Any),
-                Emission::Rewrite(RewriteId::PowerCall),
+                Emission::Template("POWER({0}, {1})"),
                 "{op} on {}",
                 dialect.slug()
             );
@@ -735,10 +864,6 @@ fn caret_is_rewritten_wherever_infix_caret_means_xor() {
         let sig = BuiltinRegistry::resolve(op).expect(op);
         assert_eq!(
             sig.emission_at(DialectId::DuckDb, Position::Any),
-            Emission::Native
-        );
-        assert_eq!(
-            sig.emission_at(DialectId::PostgreSql, Position::Any),
             Emission::Native
         );
     }
@@ -751,20 +876,27 @@ fn floor_divide_is_unsupported_everywhere_it_has_no_safe_lowering() {
         sig.emission_at(DialectId::DuckDb, Position::Any),
         Emission::Native
     );
-    for dialect in [
-        DialectId::SparkSql,
-        DialectId::PostgreSql,
-        DialectId::BigQuery,
-    ] {
-        assert!(
-            matches!(
-                sig.emission_at(dialect, Position::Any),
-                Emission::Unsupported { .. }
-            ),
-            "// on {} must be a declared refusal, not a pass-through",
-            dialect.slug()
-        );
-    }
+    // BigQuery has no per-class lowering at all — flatly unsupported.
+    assert!(
+        matches!(
+            sig.emission_at(DialectId::BigQuery, Position::Any),
+            Emission::Unsupported { .. }
+        ),
+        "// on bigquery must be a declared refusal, not a pass-through"
+    );
+    // Spark settles per operand class (phase 7); an operand whose class
+    // cannot be resolved must still land on a declared refusal, never a
+    // pass-through.
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(2)
+        ),
+        SettledEmission::Unsupported {
+            reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)"
+        }
+    );
 }
 
 #[test]
@@ -790,12 +922,29 @@ fn every_declared_rewrite_id_is_reachable_from_some_entry() {
     seen.dedup();
     assert_eq!(
         seen,
-        vec![
-            RewriteId::BigQueryMedian,
-            RewriteId::ModuloCall,
-            RewriteId::PowerCall,
-            RewriteId::WithinGroupToAnalytic,
-        ],
+        vec![RewriteId::BigQueryMedian, RewriteId::WithinGroupToAnalytic],
+    );
+}
+
+#[test]
+fn every_declared_template_is_reachable_from_some_entry() {
+    // The `%`/`^`/`**` templates migrated off `RewriteId` in this phase; this
+    // is their equivalent reachability check for `Emission::Template`.
+    let templates: Vec<&'static str> = BuiltinRegistry::names()
+        .filter_map(BuiltinRegistry::resolve)
+        .flat_map(|sig| sig.emission.iter())
+        .filter_map(|(_, _, e)| match e {
+            Emission::Template(t) => Some(*t),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        templates.contains(&"MOD({0}, {1})"),
+        "expected the `%` modulo template to be registered: {templates:?}"
+    );
+    assert!(
+        templates.contains(&"POWER({0}, {1})"),
+        "expected the `^`/`**` power template to be registered: {templates:?}"
     );
 }
 
@@ -958,5 +1107,487 @@ fn window_verdict_totality() {
          position must state the other, since lookup never falls between \
          them):\n{}",
         violations.join("\n")
+    );
+}
+
+// ─── Retired dialects
+
+/// The whole `signatures` module source, concatenated — read at test time
+/// rather than `include_str!`-ed one file at a time, so a new submodule
+/// dropped into `src/signatures/` (or `src/signatures/builtins/`) is scanned
+/// the moment it exists, never only once someone remembers to list it here.
+fn signatures_src() -> String {
+    fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .expect("readable signatures module directory")
+            .map(|e| e.expect("readable dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                read_dir_recursive(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let src = std::fs::read_to_string(&path).expect("readable source file");
+                out.push((path, src));
+            }
+        }
+    }
+    let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/signatures"));
+    let mut files = Vec::new();
+    read_dir_recursive(dir, &mut files);
+    assert!(
+        !files.is_empty(),
+        "no signatures sources found — the gate would pass vacuously"
+    );
+    files
+        .into_iter()
+        .map(|(_, src)| src)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn no_registry_row_names_a_retired_dialect() {
+    // The PostgreSQL emission dialect was retired (#181): no backend crate
+    // exists to verify its verdicts, so a template or conditional-verdict
+    // arm reintroducing it would carry an unverifiable claim. This scans the
+    // registry source directly rather than `DialectId::ALL` (which would
+    // trivially be silent about a variant that no longer compiles).
+    let src = signatures_src();
+    for spelling in ["PostgreSql", "PostgreSQL"] {
+        assert!(
+            !src.contains(spelling),
+            "the signatures module names the retired dialect spelling {spelling:?}"
+        );
+    }
+}
+
+// ─── Operand-conditional verdicts (phase 5) ────────────────────────────────
+
+#[test]
+fn operand_class_is_total_over_every_datatype() {
+    assert_eq!(OperandClass::of(&DataType::Boolean), OperandClass::Boolean);
+    assert_eq!(
+        OperandClass::of(&DataType::SmallInt),
+        OperandClass::Integral
+    );
+    assert_eq!(OperandClass::of(&DataType::Integer), OperandClass::Integral);
+    assert_eq!(OperandClass::of(&DataType::BigInt), OperandClass::Integral);
+    assert_eq!(OperandClass::of(&DataType::Float), OperandClass::Floating);
+    assert_eq!(OperandClass::of(&DataType::Double), OperandClass::Floating);
+    assert_eq!(
+        OperandClass::of(&DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }),
+        OperandClass::Decimal
+    );
+    assert_eq!(
+        OperandClass::of(&DataType::Varchar { max_length: None }),
+        OperandClass::String
+    );
+    assert_eq!(
+        OperandClass::of(&DataType::Char { length: 1 }),
+        OperandClass::String
+    );
+    assert_eq!(OperandClass::of(&DataType::Text), OperandClass::String);
+    assert_eq!(OperandClass::of(&DataType::Blob), OperandClass::Binary);
+    assert_eq!(OperandClass::of(&DataType::Date), OperandClass::Temporal);
+    assert_eq!(OperandClass::of(&DataType::Time), OperandClass::Temporal);
+    assert_eq!(
+        OperandClass::of(&DataType::Timestamp {
+            with_timezone: false
+        }),
+        OperandClass::Temporal
+    );
+    assert_eq!(
+        OperandClass::of(&DataType::Interval),
+        OperandClass::Interval
+    );
+    assert_eq!(
+        OperandClass::of(&DataType::Array(Box::new(DataType::Integer))),
+        OperandClass::Composite
+    );
+    assert_eq!(
+        OperandClass::of(&DataType::Struct(vec![(
+            "a".to_string(),
+            DataType::Integer
+        )])),
+        OperandClass::Composite
+    );
+    assert_eq!(
+        OperandClass::of(&DataType::Map(
+            Box::new(DataType::Text),
+            Box::new(DataType::Integer)
+        )),
+        OperandClass::Composite
+    );
+    assert_eq!(OperandClass::of(&DataType::Null), OperandClass::Unresolved);
+    assert_eq!(
+        OperandClass::of(&DataType::Unknown(smelt_types::UnknownReason::Dynamic)),
+        OperandClass::Unresolved
+    );
+}
+
+const NATIVE_IF_INTEGRAL: ConditionalArm = ConditionalArm {
+    arity: None,
+    classes: &[(0, OperandClass::Integral)],
+    verdict: SettledEmission::Native,
+};
+const RENAME_IF_STRING: ConditionalArm = ConditionalArm {
+    arity: None,
+    classes: &[(0, OperandClass::String)],
+    verdict: SettledEmission::Rename("STR_ARM"),
+};
+const OTHERWISE_UNSUPPORTED: ConditionalArm = ConditionalArm {
+    arity: None,
+    classes: &[],
+    verdict: SettledEmission::Unsupported {
+        reason: "otherwise",
+    },
+};
+
+#[test]
+fn first_matching_arm_wins() {
+    // Both arms match an Integral first argument — `NATIVE_IF_INTEGRAL` is
+    // listed first, so its verdict wins even though `RENAME_IF_STRING`'s
+    // sibling below would also match a hypothetical wider guard.
+    const ARMS: &[ConditionalArm] = &[
+        NATIVE_IF_INTEGRAL,
+        ConditionalArm {
+            arity: None,
+            classes: &[],
+            verdict: SettledEmission::Rename("SHOULD_NOT_WIN"),
+        },
+        OTHERWISE_UNSUPPORTED,
+    ];
+    let sig = one_arg_signature().with_emission(&[(
+        DialectId::DuckDb,
+        Position::Any,
+        Emission::Conditional(ARMS),
+    )]);
+    let facts = CallFacts::new(vec![OperandClass::Integral]);
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &facts),
+        SettledEmission::Native
+    );
+}
+
+#[test]
+fn an_arity_guard_selects_on_call_arity() {
+    const ARMS: &[ConditionalArm] = &[
+        ConditionalArm {
+            arity: Some(1),
+            classes: &[],
+            verdict: SettledEmission::Rename("ONE_ARG"),
+        },
+        ConditionalArm {
+            arity: Some(2),
+            classes: &[],
+            verdict: SettledEmission::Rename("TWO_ARG"),
+        },
+        OTHERWISE_UNSUPPORTED,
+    ];
+    // `//`-shaped two-arg signature so both arities are admitted.
+    let sig = two_arg_signature().with_emission(&[(
+        DialectId::DuckDb,
+        Position::Any,
+        Emission::Conditional(ARMS),
+    )]);
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &CallFacts::unresolved(1)),
+        SettledEmission::Rename("ONE_ARG")
+    );
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &CallFacts::unresolved(2)),
+        SettledEmission::Rename("TWO_ARG")
+    );
+}
+
+#[test]
+fn a_class_guard_selects_on_argument_class() {
+    const ARMS: &[ConditionalArm] = &[NATIVE_IF_INTEGRAL, RENAME_IF_STRING, OTHERWISE_UNSUPPORTED];
+    let sig = one_arg_signature().with_emission(&[(
+        DialectId::DuckDb,
+        Position::Any,
+        Emission::Conditional(ARMS),
+    )]);
+    assert_eq!(
+        sig.settle_at(
+            DialectId::DuckDb,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::String])
+        ),
+        SettledEmission::Rename("STR_ARM")
+    );
+}
+
+#[test]
+fn an_unmatched_call_takes_the_otherwise_arm() {
+    const ARMS: &[ConditionalArm] = &[NATIVE_IF_INTEGRAL, OTHERWISE_UNSUPPORTED];
+    let sig = one_arg_signature().with_emission(&[(
+        DialectId::DuckDb,
+        Position::Any,
+        Emission::Conditional(ARMS),
+    )]);
+    assert_eq!(
+        sig.settle_at(
+            DialectId::DuckDb,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Boolean])
+        ),
+        SettledEmission::Unsupported {
+            reason: "otherwise"
+        }
+    );
+    // An unresolved operand lands on `otherwise` too — the fail-safe
+    // direction (`docs/specs/multi_backend.md` §"Operand-conditional
+    // verdicts").
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &CallFacts::unresolved(1)),
+        SettledEmission::Unsupported {
+            reason: "otherwise"
+        }
+    );
+}
+
+#[test]
+fn a_conditional_without_an_otherwise_arm_fails_validation() {
+    const ARMS: &[ConditionalArm] = &[NATIVE_IF_INTEGRAL];
+    let sig = one_arg_signature();
+    assert_eq!(
+        validate_conditional(ARMS, &sig, Position::Any),
+        Err(ConditionalError::MissingOtherwise {
+            signature: sig.name.clone()
+        })
+    );
+}
+
+#[test]
+fn an_otherwise_arm_not_last_fails_validation() {
+    const ARMS: &[ConditionalArm] = &[OTHERWISE_UNSUPPORTED, NATIVE_IF_INTEGRAL];
+    let sig = one_arg_signature();
+    assert_eq!(
+        validate_conditional(ARMS, &sig, Position::Any),
+        Err(ConditionalError::MissingOtherwise {
+            signature: sig.name.clone()
+        })
+    );
+}
+
+#[test]
+fn a_conditional_naming_an_arity_the_signature_does_not_admit_fails_validation() {
+    const ARMS: &[ConditionalArm] = &[
+        ConditionalArm {
+            arity: Some(5),
+            classes: &[],
+            verdict: SettledEmission::Native,
+        },
+        OTHERWISE_UNSUPPORTED,
+    ];
+    let sig = one_arg_signature();
+    assert_eq!(
+        validate_conditional(ARMS, &sig, Position::Any),
+        Err(ConditionalError::ArityNotAdmitted {
+            signature: sig.name.clone(),
+            arity: 5
+        })
+    );
+}
+
+#[test]
+fn a_conditional_naming_an_argument_index_beyond_arity_fails_validation() {
+    const ARMS: &[ConditionalArm] = &[
+        ConditionalArm {
+            arity: None,
+            classes: &[(3, OperandClass::Integral)],
+            verdict: SettledEmission::Native,
+        },
+        OTHERWISE_UNSUPPORTED,
+    ];
+    let sig = one_arg_signature();
+    assert_eq!(
+        validate_conditional(ARMS, &sig, Position::Any),
+        Err(ConditionalError::ArgumentIndexOutOfRange {
+            signature: sig.name.clone(),
+            index: 3
+        })
+    );
+}
+
+#[test]
+fn a_conditional_arm_template_is_validated() {
+    // Phase 9: a `Conditional` arm's `Template` verdict is held to the same
+    // registry-construction discipline as a top-level `Emission::Template`
+    // row — an out-of-range placeholder must fail to build, not misbehave
+    // silently at print time.
+    const ARMS: &[ConditionalArm] = &[ConditionalArm {
+        arity: None,
+        classes: &[],
+        verdict: SettledEmission::Template("{9}"),
+    }];
+    let sig = one_arg_signature();
+    assert_eq!(
+        validate_conditional(ARMS, &sig, Position::Any),
+        Err(ConditionalError::InvalidTemplateArm {
+            signature: sig.name.clone(),
+            arm_index: 0,
+            error: TemplateError::IndexOutOfRange {
+                signature: sig.name.clone(),
+                index: 9,
+                arity: 1,
+            },
+        })
+    );
+}
+
+#[test]
+fn the_full_registry_builds_with_conditional_validation() {
+    // Mirrors `the_full_registry_builds`, extended to `Conditional` entries:
+    // forcing the registry to build already exercises `validate_conditional`
+    // via the seed's `insert` closure (a malformed entry panics at
+    // construction). Phase 7 landed the first production `Conditional`
+    // entries (`LOG`, `//`, `TRUNC`, `TO_JSON` on Spark), so this loop now
+    // exercises real registry data, not just a hypothetical future one.
+    let names: Vec<&str> = BuiltinRegistry::names().collect();
+    for sig in names.iter().filter_map(|n| BuiltinRegistry::resolve(n)) {
+        for (_, position, emission) in sig.emission.iter() {
+            if let Emission::Conditional(arms) = emission {
+                assert!(
+                    validate_conditional(arms, sig, *position).is_ok(),
+                    "{}: conditional arms failed validation",
+                    sig.name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn log_settles_by_arity_on_spark() {
+    let sig = BuiltinRegistry::resolve("LOG").expect("LOG is registered");
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(1)
+        ),
+        SettledEmission::Rename("LOG10")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(2)
+        ),
+        SettledEmission::Native
+    );
+    // DuckDB is unchanged (`Native` at both arities) — it has no emission
+    // row for `LOG` at all.
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &CallFacts::unresolved(1)),
+        SettledEmission::Native
+    );
+    assert_eq!(
+        sig.settle_at(DialectId::DuckDb, Position::Any, &CallFacts::unresolved(2)),
+        SettledEmission::Native
+    );
+}
+
+#[test]
+fn intdiv_settles_per_operand_class_on_spark() {
+    let sig = BuiltinRegistry::resolve("//").expect("// is registered");
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Integral, OperandClass::Integral])
+        ),
+        SettledEmission::Template("{0} DIV {1}")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Floating, OperandClass::Floating])
+        ),
+        SettledEmission::Template("{0} / {1}")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::new(vec![OperandClass::Decimal, OperandClass::Decimal])
+        ),
+        SettledEmission::Template("{0} / {1}")
+    );
+    assert_eq!(
+        sig.settle_at(
+            DialectId::SparkSql,
+            Position::Any,
+            &CallFacts::unresolved(2)
+        ),
+        SettledEmission::Unsupported {
+            reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)"
+        }
+    );
+}
+
+/// Phase 8 (docs/outcomes/20260904-dialect-emission-vocabulary) closed every
+/// remaining #178 Spark schema-gap ledger row with an explicit registry
+/// verdict — never falling through to the implicit `Native` default, which
+/// would say nothing was ever measured. (`DATE_ADD` is #176, untouched by
+/// this phase, and is not in this list.)
+#[test]
+fn spark_schema_gap_names_have_an_explicit_verdict() {
+    let closed_names = [
+        "AGE",
+        "DATE_SUB",
+        "GLOB",
+        "JSON_ARRAY",
+        "JSON_ARRAY_LENGTH",
+        "JSON_CONTAINS",
+        "JSON_OBJECT",
+        "JSON_OBJECT_KEYS",
+        "MAKE_TIME",
+        "MAKE_TIMESTAMPTZ",
+        "QUOTE_IDENT",
+        "QUOTE_LITERAL",
+        "TO_SECONDS",
+        "TRUNCATE",
+        "GROUP_CONCAT",
+    ];
+    for name in closed_names {
+        let sig = BuiltinRegistry::resolve(name).unwrap_or_else(|| panic!("{name} is registered"));
+        let has_explicit_spark_row = sig
+            .emission
+            .iter()
+            .any(|(d, _, _)| *d == DialectId::SparkSql);
+        assert!(
+            has_explicit_spark_row,
+            "{name} has no explicit SparkSql emission row — resolves to the implicit Native \
+             default, which is not a measured verdict"
+        );
+    }
+}
+
+/// Guards the constraint phase 8 leaned on repeatedly: a signature whose
+/// arity is still the permissive variadic `any_args()` shape cannot carry a
+/// `Template`, because a fixed `{n}` placeholder can't name a variadic tail
+/// (`validate_template`'s `TemplateOnVariadicSignature` error, already
+/// exercised directly above by `template_on_a_variadic_signature_is_rejected`).
+/// This test pins that the constraint holds for a *real* registry row this
+/// phase left `Unsupported` for exactly this reason (`GROUP_CONCAT`), not
+/// just the synthetic `variadic_signature()` fixture.
+#[test]
+fn a_variadic_signature_still_rejects_a_template() {
+    let sig = BuiltinRegistry::resolve("GROUP_CONCAT").expect("GROUP_CONCAT is registered");
+    let err = validate_template("concat_ws({1}, collect_list({0}))", sig, Position::Any)
+        .expect_err("a template over a variadic signature must be rejected");
+    assert_eq!(
+        err,
+        TemplateError::VariadicSignature {
+            signature: sig.name.clone(),
+        }
     );
 }

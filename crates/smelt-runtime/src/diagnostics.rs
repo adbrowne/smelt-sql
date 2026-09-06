@@ -140,14 +140,23 @@ pub struct InboundEdgeContract {
     pub name: String,
     pub provider: RelationContractProvider,
     pub contract: RelationContractView,
+    /// A source's declared `mutation_profile.lateness`/`source_lateness`,
+    /// rendered append-stable in both text and `--json` output as an
+    /// orchestration-only world-fact — it is read by nothing in plan
+    /// derivation (`docs/specs/model_properties.md` §Constraints "Declared
+    /// lateness is orchestration-only"). Always `None` for a `Model`
+    /// provider — lateness is a source-only declaration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lateness: Option<String>,
 }
 
 impl InboundEdgeContract {
-    pub fn source(name: String, contract: RelationContractView) -> Self {
+    pub fn source(name: String, contract: RelationContractView, lateness: Option<String>) -> Self {
         InboundEdgeContract {
             name,
             provider: RelationContractProvider::Source,
             contract,
+            lateness,
         }
     }
 
@@ -156,6 +165,7 @@ impl InboundEdgeContract {
             name,
             provider: RelationContractProvider::Model,
             contract,
+            lateness: None,
         }
     }
 }
@@ -223,9 +233,15 @@ pub fn build_relation_contract(
         if edges.iter().any(|e| e.name == name) {
             continue;
         }
+        let lateness = info
+            .mutation_profile
+            .as_ref()
+            .and_then(|mp| mp.lateness.as_ref())
+            .map(|l| l.display.clone());
         edges.push(InboundEdgeContract::source(
             name,
             RelationContractView::from_facts(info.timeseries.as_ref(), info.unique_key.as_deref()),
+            lateness,
         ));
     }
 

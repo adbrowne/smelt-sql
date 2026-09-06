@@ -5652,12 +5652,13 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
     }
 }
 
-/// `src/`-relative file paths excluded from the scan entirely: the two
-/// maintenance/backbuild single-owner emitter modules
+/// `src/`-relative file paths excluded from the scan entirely: the
+/// backbuild single-owner emitter module
 /// (`docs/specs/architecture.md` §"Constraints & Invariants" item 12 —
 /// every maintenance/backbuild statement is the output of a pure emitter in
-/// one of these two files; scanning them for the shapes they themselves
-/// author would be circular), plus `smelt-state`'s three per-dialect
+/// one of these modules; scanning them for the shapes they themselves
+/// author would be circular; the maintenance emitter module is excluded by
+/// directory, see [`EMITTER_MODULE_DIR_EXCLUSIONS`]), plus `smelt-state`'s three per-dialect
 /// schema-evolution DDL modules. Schema-evolution DDL is declared a
 /// *separate* single-owner family, outside the maintenance/backbuild
 /// emitter rule (`docs/specs/incremental_models.md` §"Statement emission
@@ -5670,18 +5671,26 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
 /// identifiers, `ADD COLUMNS (...)`, `SET DATA TYPE`) don't match this
 /// scan's DuckDB-flavored `ALTER TABLE `/`UPDATE ` shapes anyway.
 const EMITTER_MODULE_EXCLUSIONS: &[&str] = &[
-    "smelt-logical/src/maintenance/emit.rs",
     "smelt-logical/src/backbuild/emit.rs",
     "smelt-state/src/ddl_duckdb.rs",
     "smelt-state/src/ddl_spark.rs",
     "smelt-state/src/ddl_bigquery.rs",
 ];
 
+/// `src/`-relative directory paths excluded wholesale: the maintenance
+/// emitter module, whose emitters are split across per-family submodules
+/// under one directory. Excluded for the same circularity reason as the
+/// files in [`EMITTER_MODULE_EXCLUSIONS`].
+const EMITTER_MODULE_DIR_EXCLUSIONS: &[&str] = &["smelt-logical/src/maintenance/emit/"];
+
 fn is_emitter_module(path: &Path) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
     EMITTER_MODULE_EXCLUSIONS
         .iter()
         .any(|suffix| normalized.ends_with(suffix))
+        || EMITTER_MODULE_DIR_EXCLUSIONS
+            .iter()
+            .any(|dir| normalized.contains(dir))
 }
 
 fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit>) {
@@ -5717,7 +5726,7 @@ fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit
 /// statement text must not be constructed anywhere in `smelt-backend*/src`,
 /// `smelt-runtime/src`, or `smelt-logical/src` production code outside the
 /// two single-owner emitter modules
-/// (`crates/smelt-logical/src/maintenance/emit.rs`,
+/// (`crates/smelt-logical/src/maintenance/emit/`,
 /// `crates/smelt-logical/src/backbuild/emit.rs` —
 /// [`EMITTER_MODULE_EXCLUSIONS`], excluded rather than unscanned entirely so
 /// a *new* statement-shaped file dropped anywhere else in `smelt-logical`
@@ -5892,9 +5901,9 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
     )
     .sql;
     let (probe_sql, snapshot_sql) = match &probes[0].action {
-        smelt_runtime::source_probes::SourcePostureAction::Verify { sql, snapshot_sql } => {
-            (sql.clone(), snapshot_sql.clone())
-        }
+        smelt_runtime::source_probes::SourcePostureAction::Verify {
+            sql, snapshot_sql, ..
+        } => (sql.clone(), snapshot_sql.clone()),
         smelt_runtime::source_probes::SourcePostureAction::Establish { .. } => {
             panic!("a recorded baseline must build a Verify action, not Establish")
         }

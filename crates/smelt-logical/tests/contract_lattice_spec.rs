@@ -19,6 +19,23 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Every `.rs` file under `dir`, recursively — the conformance gate's own
+/// source is a module tree (`maintenance_conformance/gate/`), not a flat
+/// directory, so a single-level `read_dir` would silently stop scanning the
+/// files this gate exists to scan.
+fn rs_files_recursive(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}")) {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            out.extend(rs_files_recursive(&path));
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn read(rel: &str) -> String {
     let path = repo_root().join(rel);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
@@ -328,12 +345,7 @@ fn conformance_gate_consumes_the_oracle_transform() {
 
     for dir in dirs {
         let dir = repo_root().join(dir);
-        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}")) {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
+        for path in rs_files_recursive(&dir) {
             let contents = std::fs::read_to_string(&path).unwrap_or_default();
 
             if contents.contains("contract::oracle_obligation") {
