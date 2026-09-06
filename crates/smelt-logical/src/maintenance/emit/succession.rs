@@ -403,6 +403,15 @@ pub fn emit_succession_full_rebuild(
 /// pair across the presented rows, the tombstone ledger, and the batch; a
 /// redelivered-identical row (same content and flag) is silent, matching
 /// the run-shape's re-presentation rule.
+///
+/// A delete row's signature is its flag *alone* — "against a stored
+/// tombstone only the delete flag is comparable, since the ledger carries
+/// no row-local content" (`incremental_shapes.md` §"Run shape and late
+/// events"). [`build_domain_cte`]'s tombstone branch projects `NULL` for
+/// every payload column, so comparing content would make every replay of a
+/// tombstoned delete collide with itself (the ledger's NULL payload vs. the
+/// replayed event's real payload) and fire a spurious tie on every refold
+/// of a window containing a delete.
 pub fn emit_succession_clock_tie_probe(
     presented_table: &str,
     key_cols: &[String],
@@ -425,7 +434,7 @@ pub fn emit_succession_clock_tie_probe(
         event_delta_select,
     );
     let cast_type = super::probes::probe_dialect_string_type(dialect);
-    let sig_expr = if payload_columns.is_empty() {
+    let content_sig = if payload_columns.is_empty() {
         "''".to_string()
     } else {
         payload_columns
@@ -434,15 +443,15 @@ pub fn emit_succession_clock_tie_probe(
             .collect::<Vec<_>>()
             .join(" || '|' || ")
     };
+    let sig_expr = format!("CASE WHEN __smelt_is_delete THEN 'D' ELSE 'I|' || ({content_sig}) END");
     let key_display = payload_columns_display(key_cols, cast_type);
     let sample_expr = clock_tie_sample_agg(dialect);
     let sql = format!(
         "WITH __smelt_domain AS ({domain}), __smelt_tie_violations AS (SELECT {key_display} AS \
          violation_key FROM __smelt_domain GROUP BY {keys}, __smelt_t HAVING COUNT(DISTINCT \
-         CAST(__smelt_is_delete AS {cast_type}) || '|' || ({sig_expr})) > 1) SELECT COUNT(*) AS \
-         violation_count, (SELECT {sample_expr} FROM (SELECT violation_key FROM \
-         __smelt_tie_violations LIMIT 5) AS __smelt_sample) AS sample_keys FROM \
-         __smelt_tie_violations"
+         {sig_expr}) > 1) SELECT COUNT(*) AS violation_count, (SELECT {sample_expr} FROM \
+         (SELECT violation_key FROM __smelt_tie_violations LIMIT 5) AS __smelt_sample) AS \
+         sample_keys FROM __smelt_tie_violations"
     );
     MaintenanceStatement::new(sql)
 }
@@ -646,6 +655,109 @@ mod tests {
         assert!(stmt.sql.contains("violation_count"), "{}", stmt.sql);
         assert!(stmt.sql.contains("sample_keys"), "{}", stmt.sql);
         assert!(stmt.sql.contains("HAVING COUNT(DISTINCT"), "{}", stmt.sql);
+    }
+
+    /// Runs [`emit_succession_clock_tie_probe`] against a real in-memory
+    /// DuckDB, over a `main.customer_history` presented table and its
+    /// `__tombstones` ledger sibling, both pre-created by the caller, and
+    /// returns the probe's `violation_count`.
+    fn clock_tie_violation_count(conn: &duckdb::Connection, event_delta_select: &str) -> i64 {
+        let stmt = emit_succession_clock_tie_probe(
+            "main.customer_history",
+            &keys(),
+            "changed_at",
+            &["tier".to_string()],
+            Some("is_deleted"),
+            event_delta_select,
+            MaintenanceDialect::DuckDb,
+        );
+        conn.query_row(&stmt.sql, [], |row| row.get::<_, i64>(0))
+            .expect("clock tie probe query")
+    }
+
+    fn conn_with_empty_presented_and_ledger() -> duckdb::Connection {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        conn.execute_batch(
+            "CREATE TABLE main.customer_history (customer_id INTEGER, changed_at TIMESTAMP, \
+             tier VARCHAR); CREATE TABLE main.customer_history__tombstones (customer_id \
+             INTEGER, changed_at TIMESTAMP);",
+        )
+        .expect("create presented and ledger tables");
+        conn
+    }
+
+    /// The red test: replaying a tombstoned delete (same `(k, t)` as an
+    /// existing ledger row, delete flag set) must be silent — the spec's
+    /// rule that "against a stored tombstone only the delete flag is
+    /// comparable, since the ledger carries no row-local content"
+    /// (`docs/specs/incremental_shapes.md` §"Run shape and late events").
+    /// Before the fix, the ledger row's NULL payload and the replayed
+    /// event's real payload compared unequal, so this fired a spurious
+    /// `SuccessionClockTie` on every refold of a window containing a
+    /// delete.
+    #[test]
+    fn clock_tie_probe_is_silent_when_a_tombstoned_delete_is_replayed() {
+        let conn = conn_with_empty_presented_and_ledger();
+        conn.execute_batch(
+            "INSERT INTO main.customer_history__tombstones VALUES (1, TIMESTAMP \
+             '2024-01-01 00:00:00');",
+        )
+        .expect("seed ledger row");
+        let count = clock_tie_violation_count(
+            &conn,
+            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'bronze' \
+             AS tier, TRUE AS is_deleted",
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn clock_tie_probe_still_fires_for_a_delete_and_an_insert_at_one_clock_value() {
+        let conn = conn_with_empty_presented_and_ledger();
+        conn.execute_batch(
+            "INSERT INTO main.customer_history VALUES (1, TIMESTAMP '2024-01-01 00:00:00', \
+             'silver');",
+        )
+        .expect("seed presented row");
+        let count = clock_tie_violation_count(
+            &conn,
+            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, NULL AS \
+             tier, TRUE AS is_deleted",
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn clock_tie_probe_still_fires_for_two_non_identical_inserts() {
+        let conn = conn_with_empty_presented_and_ledger();
+        let count = clock_tie_violation_count(
+            &conn,
+            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'bronze' \
+             AS tier, FALSE AS is_deleted \
+             UNION ALL \
+             SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'gold' AS \
+             tier, FALSE AS is_deleted",
+        );
+        assert_eq!(count, 1);
+    }
+
+    /// Two deletes colliding at one `(k, t)` are indistinguishable by
+    /// construction once a delete row's signature is its flag alone, so
+    /// they must stay silent (the spec's "identical ⇒ re-presentation"
+    /// rule) — distinct from the tombstone-replay case above in that
+    /// neither delete comes from the ledger.
+    #[test]
+    fn clock_tie_probe_is_silent_for_two_identical_deletes_at_one_clock_value() {
+        let conn = conn_with_empty_presented_and_ledger();
+        let count = clock_tie_violation_count(
+            &conn,
+            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'bronze' \
+             AS tier, TRUE AS is_deleted \
+             UNION ALL \
+             SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, NULL AS \
+             tier, TRUE AS is_deleted",
+        );
+        assert_eq!(count, 0);
     }
 
     #[test]

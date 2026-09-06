@@ -10,8 +10,9 @@
 use chrono::NaiveDate;
 
 use smelt_maintenance_testkit::gate_succession::{
-    drive_succession_window_and_assert_for, drive_succession_window_expect_probe_failure,
-    insert_row_succession_for, stage_succession_recipe_for, SuccessionEventRow,
+    assert_succession_equivalence_for, drive_succession_window_and_assert_for,
+    drive_succession_window_expect_probe_failure, insert_row_succession_for,
+    stage_succession_recipe_for, SuccessionEventRow,
 };
 use smelt_maintenance_testkit::recipe::{ConformanceTarget, SourceRecipe, SuccessionRecipe};
 
@@ -387,6 +388,127 @@ async fn repeated_window_application_is_idempotent() {
         tombstones_before, tombstones_after,
         "refolding the same window must leave the tombstone ledger byte-identical"
     );
+}
+
+/// Leg 6 (delete-flagged variant, phase 7c): re-running a window whose
+/// delta already contains a tombstoned delete must be as idempotent as the
+/// plain leg-6 case above — the clock-tie probe fixed in phase 7c compares
+/// only the delete flag for a stored tombstone, so replaying the same
+/// delete event a second time is silent rather than a spurious
+/// `SuccessionClockTie` refusal. Phase 7b originally drafted this as a
+/// delete-flagged recipe and had to weaken it to the plain recipe above
+/// once it discovered the bug this leg now proves fixed.
+#[tokio::test]
+async fn repeated_window_application_with_deletes_is_idempotent() {
+    let mut recipe = SuccessionRecipe::new_lead().with_delete_filter();
+    recipe.model_name = "customer_history_repeated_window_deleted".to_string();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+        .expect("stage succession recipe");
+
+    let rows = vec![
+        SuccessionEventRow::new(1, dt(2026, 1, 1, 8), "gold"),
+        SuccessionEventRow::deleted(1, dt(2026, 1, 2, 8), "gold"),
+        SuccessionEventRow::new(2, dt(2026, 1, 2, 8), "bronze"),
+    ];
+    for row in &rows {
+        insert_row_succession_for(&project, &recipe, row).expect("insert window rows");
+    }
+
+    let mut request = smelt_maintenance_testkit::link_c_harness::base_request("dev");
+    request.start = Some("2026-01-01".to_string());
+    request.end = Some("2026-01-03".to_string());
+    project
+        .run_quiet("succession-leg6-deleted-1", request.clone())
+        .await
+        .expect("first fold (with a delete) must succeed");
+
+    let presented = format!("main.{}", recipe.model_name);
+    let tombstones = tombstone_relation(&recipe.model_name);
+    let presented_before = snapshot_rows(&project, &presented).await;
+    let tombstones_before = snapshot_rows(&project, &tombstones).await;
+
+    project
+        .run_quiet("succession-leg6-deleted-2", request)
+        .await
+        .expect(
+            "refolding a window containing a delete must succeed, not raise SuccessionClockTie",
+        );
+
+    let presented_after = snapshot_rows(&project, &presented).await;
+    let tombstones_after = snapshot_rows(&project, &tombstones).await;
+    assert_eq!(
+        presented_before, presented_after,
+        "refolding a delete-bearing window must leave the presented table byte-identical"
+    );
+    assert_eq!(
+        tombstones_before, tombstones_after,
+        "refolding a delete-bearing window must leave the tombstone ledger byte-identical"
+    );
+}
+
+/// Answers phase 7b's uninvestigated question: does the same tie-signature
+/// issue affect the `--full-refresh` ledger-rebuild path? Stage a
+/// delete-bearing recipe, drive two windows, rebuild via `--full-refresh`
+/// (which rewrites both the presented table and the tombstone ledger from
+/// `emit_succession_ledger_rebuild_select` in one transaction — phase 5c),
+/// then re-drive the last window: the clock-tie probe must not fire, and
+/// the result must still match the model's own full-refresh oracle.
+#[tokio::test]
+async fn refold_after_a_full_refresh_ledger_rebuild_is_clean() {
+    let mut recipe = SuccessionRecipe::new_lead().with_delete_filter();
+    recipe.model_name = "customer_history_rebuild_refold".to_string();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+        .expect("stage succession recipe");
+
+    let window1_rows = vec![SuccessionEventRow::new(1, dt(2026, 1, 1, 8), "gold")];
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "succession-rebuild-refold-1",
+        date(2026, 1, 1),
+        date(2026, 1, 2),
+        &window1_rows,
+    )
+    .await
+    .expect("window 1 must succeed and match the oracle");
+
+    let window2_rows = vec![SuccessionEventRow::deleted(1, dt(2026, 1, 2, 8), "gold")];
+    let last_window_start = date(2026, 1, 2);
+    let last_window_end = date(2026, 1, 3);
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "succession-rebuild-refold-2",
+        last_window_start,
+        last_window_end,
+        &window2_rows,
+    )
+    .await
+    .expect("window 2 (the delete) must succeed and match the oracle");
+
+    let mut rebuild_request = smelt_maintenance_testkit::link_c_harness::base_request("dev");
+    rebuild_request.full_refresh = true;
+    project
+        .run_quiet("succession-rebuild-refold-rebuild", rebuild_request)
+        .await
+        .expect("--full-refresh must rebuild the presented table and the tombstone ledger");
+
+    let mut refold_request = smelt_maintenance_testkit::link_c_harness::base_request("dev");
+    refold_request.start = Some(last_window_start.format("%Y-%m-%d").to_string());
+    refold_request.end = Some(last_window_end.format("%Y-%m-%d").to_string());
+    project
+        .run_quiet("succession-rebuild-refold-refold", refold_request)
+        .await
+        .expect(
+            "refolding the last window after a --full-refresh ledger rebuild must not raise \
+             SuccessionClockTie",
+        );
+
+    assert_succession_equivalence_for(&project, &recipe)
+        .await
+        .expect("state must still match the oracle after the rebuild-then-refold sequence");
 }
 
 /// Leg 7: `pre_window_clamp_excludes_clamped_rows_from_state_and_oracle` — a

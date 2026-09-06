@@ -156,7 +156,7 @@ out-of-order and repeated windows, and the clamp.
 | 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | done |
 | 7a | Testkit scaffolding: widen `SourceRecipe` to an arrival-partitioned, delete-flagged shape (`partition_column` ≠ `event_time_column`, `is_deleted NOT NULL`); add the typed `SuccessionRecipe` + its renderer (row-local projection, `LEAD`/`LAG`, optional clamp, optional `QUALIFY NOT <flag>`), the model-SQL full-refresh oracle, and the `families/gate_succession.rs` stage/insert/drive/assert quartet; one smoke conformance case (two windows, one splice) green end to end | done |
 | 7b | Conformance leg matrix (the succession family's own legs): late splice, delete-then-later-insert, late insert before a folded delete, delete-only key, `LAG` variants under delete/splice, out-of-order and repeated window application, the pre-window clamp, an event-time-partitioned source, and an equal-`(k, t)` collision expecting a `SuccessionClockTie` rollback; plus the `gate_succession` helper widening each leg needs (delete-flagged and event-time-partitioned row/recipe constructors, a probe-failure drive helper) | done |
-| 7c | Re-run tolerance under deletes: fix the spurious `SuccessionClockTie` phase 7b found — `emit_succession_clock_tie_probe`'s tie signature compares a tombstone row's NULLed payload against the same event's real payload replayed from the source, so refolding any window containing a delete fails. Make a delete row's signature its flag alone (the spec's rule: "against a stored tombstone only the delete flag is comparable"), keeping delete-vs-insert and non-identical-insert collisions firing; restore phase 7b's weakened delete-flagged refold leg and add a rebuild-then-refold leg answering 7b's uninvestigated question about the `--full-refresh`/`repair` ledger path | planned |
+| 7c | Re-run tolerance under deletes: fix the spurious `SuccessionClockTie` phase 7b found — `emit_succession_clock_tie_probe`'s tie signature compares a tombstone row's NULLed payload against the same event's real payload replayed from the source, so refolding any window containing a delete fails. Make a delete row's signature its flag alone (the spec's rule: "against a stored tombstone only the delete flag is comparable"), keeping delete-vs-insert and non-identical-insert collisions firing; restore phase 7b's weakened delete-flagged refold leg and add a rebuild-then-refold leg answering 7b's uninvestigated question about the `--full-refresh`/`repair` ledger path | done |
 | 7d | Conformance cross-suite widening: succession recipes added to `state_deletion.rs` (`.smelt/` deleted between runs), `repair.rs` (a full-refresh rebuild leg co-rebuilding ledger + presented table), and the contract-lattice `deferral` leg (a `contract:` field on `SuccessionRecipe` + its frontmatter rendering, driven against the existing `deferral` oracle transform); full seeded `maintenance_conformance` sample green | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | pending |
 | 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | pending |
@@ -656,6 +656,17 @@ out-of-order and repeated windows, and the clamp.
   confirmed the sole failure in `cargo test --workspace`. Follow-up: no diagnostic surfacing yet
   for `NotSuccession*` classifier codes beyond the `SuccessionPreFilterNegatesFlag` advisory. See
   `phases/05b-summary.md`.
+
+- 2026-09-07 (implement phase 7c): fixed the spurious `SuccessionClockTie` phase 7b found.
+  `emit_succession_clock_tie_probe`'s tie signature now treats a delete row's signature as its
+  flag alone (`CASE WHEN __smelt_is_delete THEN 'D' ELSE 'I|' || (<payload sig>) END`) rather
+  than comparing NULLed tombstone payload against the same event's real replayed payload.
+  Restored phase 7b's weakened delete-flagged leg 6 as
+  `repeated_window_application_with_deletes_is_idempotent` and added
+  `refold_after_a_full_refresh_ledger_rebuild_is_clean` answering 7b's uninvestigated
+  `--full-refresh`/`repair` ledger-path question — both green, so that path was already sound.
+  `verify-phase.sh` fully green (no large-file ratchet regression this phase). See
+  `phases/07c-summary.md`.
 
 ## Blocked
 
