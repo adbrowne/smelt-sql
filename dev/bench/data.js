@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788683737080,
+  "lastUpdate": 1788683740831,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.01345041892543,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9909db306be3967008f1905b6e644217d6f9bbfc",
+          "message": "Merge pull request #195 from adbrowne/fix-concurrency-flakes-189-194\n\nFix two concurrency flakes: Python model registry (#189) and git archive SIGPIPE (#194)",
+          "timestamp": "2026-09-06T18:32:05+10:00",
+          "tree_id": "d8edb3db0ff394e81ce9272f543ae49a44704c9a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9909db306be3967008f1905b6e644217d6f9bbfc"
+        },
+        "date": 1788683739467,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.956631440435615,
             "unit": "MB/s"
           }
         ]
