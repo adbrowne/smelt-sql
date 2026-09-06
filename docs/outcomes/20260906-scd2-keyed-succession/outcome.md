@@ -138,7 +138,8 @@ out-of-order and repeated windows, and the clamp.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | done |
-| 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | pending |
+| 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | planned |
+| 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | pending |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -214,6 +215,20 @@ out-of-order and repeated windows, and the clamp.
   listing under parallel test threads) — confirmed unrelated via a docs-only diff and an
   isolated `--test-threads=1` pass; not fixed here (out of this phase's spec-only scope, not a
   success criterion). See `phases/01-summary.md`.
+
+- 2026-09-06 (plan phase 2): one reshape — inserted row **2a**, a gate-hygiene fix for the
+  pre-existing `smelt-core` baseline flake phase 1's summary found
+  (`checkout_scratch_is_deleted_when_materialization_fails` races on a shared `/tmp`
+  scratch-dir listing under parallel test threads). Not deferred to "## Out of scope" because
+  success criterion 10 requires `verify-phase.sh` green, and every remaining phase's
+  verification is ambiguous while the workspace suite is red for an unrelated reason; placed
+  after phase 2 (which is additive and self-contained) so the fix lands before the heavy code
+  phases 3–7. Phase 2 itself planned with no spec delta — the classifier's rules are already
+  normative — and with `NotSuccessionReason` as an eleven-variant enum 1:1 with the
+  analysis-time codes, so phase 3's `DiagnosticCode` mapping is a total match rather than a
+  re-derivation, and with `SuccessionPreFilterNegatesFlag` carried as an advisory on the
+  `Recognized` verdict rather than as a refusal variant (the spec says it never changes
+  admission).
 
 ## Blocked
 
