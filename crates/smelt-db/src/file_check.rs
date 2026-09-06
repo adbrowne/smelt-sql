@@ -930,6 +930,24 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             })
             .accumulate(db);
         }
+        for advisory in &plan_diags.succession_advisories {
+            let smelt_logical::analysis::succession::SuccessionAdvisory::PreFilterNegatesFlag {
+                column,
+            } = advisory;
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "SuccessionPreFilterNegatesFlag: the pre-window WHERE filters on '{column}' \
+                     before the succession window — if this is a CDC delete flag, filtering it \
+                     out here never closes its predecessor's interval; prefer \
+                     QUALIFY NOT {column}"
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::SuccessionPreFilterNegatesFlag),
+                data: None,
+            })
+            .accumulate(db);
+        }
         for refusal in &plan_diags.contract_state_refusals {
             DiagnosticAcc(Diagnostic {
                 severity: DiagnosticSeverity::Error,

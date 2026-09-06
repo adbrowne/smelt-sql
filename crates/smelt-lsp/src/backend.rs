@@ -451,6 +451,17 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::PropertyDiffBaselineUnavailable => "property-diff-baseline-unavailable",
         DbCode::MaintenanceStateDowngraded => "maintenance-state-downgraded",
         DbCode::DeclaredContractRequiresState => "declared-contract-requires-state",
+        DbCode::SuccessionWindowFunctionNotLead => "succession-window-function-not-lead",
+        DbCode::SuccessionPartitionKeyMismatch => "succession-partition-key-mismatch",
+        DbCode::SuccessionOrderNotMonotoneClock => "succession-order-not-monotone-clock",
+        DbCode::SuccessionRowLocalColumnViolation => "succession-row-local-column-violation",
+        DbCode::SuccessionIdentityNotProjected => "succession-identity-not-projected",
+        DbCode::SuccessionSingleSourceOnly => "succession-single-source-only",
+        DbCode::SuccessionDrivingSourceNotAppendOnly => "succession-driving-source-not-append-only",
+        DbCode::SuccessionPreFilterNotRowLocal => "succession-pre-filter-not-row-local",
+        DbCode::SuccessionDeleteFilterMisplaced => "succession-delete-filter-misplaced",
+        DbCode::SuccessionPreFilterNegatesFlag => "succession-pre-filter-negates-flag",
+        DbCode::SuccessionPatternUnrecognized => "succession-pattern-unrecognized",
     }
 }
 

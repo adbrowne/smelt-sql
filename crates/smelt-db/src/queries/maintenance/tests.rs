@@ -841,6 +841,83 @@ fn undeclared_grain_unrecognised_shape_derives_the_succession_refusal() {
     ));
 }
 
+/// Every `NotSuccessionReason` survives the `Refusal` → `MaintenanceRefusal`
+/// projection (`queries::maintenance::diagnostics::maintenance_plan_diagnostics`)
+/// as a real diagnostic — none filtered to a dropped/`None` mapping, mirroring
+/// `refusal_codes::refusal_code_names_are_real_variants_and_agree_with_smelt_db`
+/// but exercised end-to-end through the Salsa-facing entry point.
+#[test]
+fn succession_refusal_projects_to_maintenance_refusal() {
+    let metadata = succession_metadata();
+    let sql = "SELECT customer_id, COUNT(*) AS n FROM smelt.sources.customer_changes GROUP BY customer_id";
+    let diags = maintenance_plan_diagnostics(
+        sql,
+        "main.customer_counts",
+        &metadata,
+        &[],
+        None,
+        &[],
+        &[],
+        smelt_core::config::WarehouseTables::default(),
+        &[],
+        None,
+        None,
+    );
+    assert_eq!(diags.refusals.len(), 1);
+    assert!(matches!(
+        diags.refusals[0],
+        MaintenanceRefusal::SuccessionNotRecognized { .. }
+    ));
+    let (severity, code, _message) = diagnostic_for_refusal(&diags.refusals[0])
+        .expect("SuccessionNotRecognized must map to a real diagnostic");
+    assert_eq!(
+        severity,
+        crate::diagnostics_types::DiagnosticSeverity::Error
+    );
+    assert_eq!(
+        code,
+        crate::diagnostics_types::DiagnosticCode::SuccessionPatternUnrecognized
+    );
+}
+
+/// The classifier's `SuccessionPreFilterNegatesFlag` advisory reaches
+/// `MaintenancePlanDiagnostics.succession_advisories` without touching
+/// `refusals` — the admission-purity fact `file_check.rs` folds into a
+/// Warning diagnostic, never an Error.
+#[test]
+fn succession_advisory_reaches_plan_diagnostics() {
+    let metadata = succession_metadata();
+    let sql = "SELECT customer_id, changed_at, \
+               LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_changed_at \
+               FROM smelt.sources.customer_changes WHERE NOT is_deleted";
+    let source_refs = vec![(
+        "customer_changes".to_string(),
+        Some(succession_source_info()),
+    )];
+    let diags = maintenance_plan_diagnostics(
+        sql,
+        "main.customer_history",
+        &metadata,
+        &source_refs,
+        None,
+        &[],
+        &[],
+        smelt_core::config::WarehouseTables::default(),
+        &[],
+        None,
+        None,
+    );
+    assert!(diags.refusals.is_empty());
+    assert_eq!(
+        diags.succession_advisories,
+        vec![
+            smelt_logical::analysis::succession::SuccessionAdvisory::PreFilterNegatesFlag {
+                column: "is_deleted".to_string()
+            }
+        ]
+    );
+}
+
 #[test]
 fn succession_context_is_built_from_the_source_declarations() {
     let source_refs = vec![(

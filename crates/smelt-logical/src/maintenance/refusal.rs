@@ -168,10 +168,26 @@ pub fn refusal_code(refusal: &Refusal) -> Option<&'static str> {
             Some("MaintenanceColumnAddNotBackfillable")
         }
         Refusal::KeyedRetractableContribution { .. } => Some("KeyedRetractableContribution"),
-        // No diagnostic yet: the eleven `Succession*` codes land in phase 3a
-        // (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md`) —
-        // this phase derives the plan shape only, no diagnostics change.
-        Refusal::SuccessionNotRecognized { .. } => None,
+        // Ten of the eleven `Succession*` codes, 1:1 with `NotSuccessionReason`
+        // (the eleventh, `SuccessionPreFilterNegatesFlag`, is a
+        // `SuccessionAdvisory` carried on the `Recognized` verdict, never a
+        // `Refusal`). Exhaustive with no wildcard arm — a new
+        // `NotSuccessionReason` variant is a compile error here until named.
+        Refusal::SuccessionNotRecognized { reason } => {
+            use crate::analysis::succession::NotSuccessionReason::*;
+            Some(match reason {
+                WindowFunctionNotLead(_) => "SuccessionWindowFunctionNotLead",
+                PartitionKeyMismatch(_) => "SuccessionPartitionKeyMismatch",
+                OrderNotMonotoneClock(_) => "SuccessionOrderNotMonotoneClock",
+                IdentityNotProjected(_) => "SuccessionIdentityNotProjected",
+                RowLocalColumnViolation(_) => "SuccessionRowLocalColumnViolation",
+                SingleSourceOnly(_) => "SuccessionSingleSourceOnly",
+                DrivingSourceNotAppendOnly(_) => "SuccessionDrivingSourceNotAppendOnly",
+                PreFilterNotRowLocal(_) => "SuccessionPreFilterNotRowLocal",
+                DeleteFilterMisplaced(_) => "SuccessionDeleteFilterMisplaced",
+                PatternUnrecognized(_) => "SuccessionPatternUnrecognized",
+            })
+        }
     }
 }
 
@@ -189,7 +205,6 @@ mod refusal_code_tests {
             "ReachNotDerivable",
             "RepairKeysNotDiscoverable",
             "RepairSliceUnbounded",
-            "SuccessionNotRecognized",
         ];
         let sample: Vec<Refusal> = vec![
             Refusal::SkeletonChanged {
@@ -261,5 +276,37 @@ mod refusal_code_tests {
                 ),
             }
         }
+    }
+
+    /// The ten `NotSuccessionReason` variants each map to their own distinct
+    /// `Succession*` name, and none is `None` — the exhaustive inner match's
+    /// full coverage, driven data-first rather than sampling one reason.
+    #[test]
+    fn succession_reasons_each_name_their_own_code() {
+        use crate::analysis::succession::NotSuccessionReason::*;
+        let reasons = [
+            WindowFunctionNotLead("r".to_string()),
+            PartitionKeyMismatch("r".to_string()),
+            OrderNotMonotoneClock("r".to_string()),
+            IdentityNotProjected("r".to_string()),
+            RowLocalColumnViolation("r".to_string()),
+            SingleSourceOnly("r".to_string()),
+            DrivingSourceNotAppendOnly("r".to_string()),
+            PreFilterNotRowLocal("r".to_string()),
+            DeleteFilterMisplaced("r".to_string()),
+            PatternUnrecognized("r".to_string()),
+        ];
+        let mut names = std::collections::HashSet::new();
+        for reason in reasons {
+            let refusal = Refusal::SuccessionNotRecognized { reason };
+            let name = refusal_code(&refusal).unwrap_or_else(|| {
+                panic!("refusal_code returned None for {refusal:?}, expected Some")
+            });
+            assert!(
+                names.insert(name),
+                "duplicate code name '{name}' for {refusal:?} — every reason must name its own code"
+            );
+        }
+        assert_eq!(names.len(), 10);
     }
 }

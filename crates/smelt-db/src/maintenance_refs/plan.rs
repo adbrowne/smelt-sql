@@ -16,7 +16,12 @@ use super::refs::{ref_model_source_facts, ref_source_info, ref_timeseries_config
 /// [`crate::queries::maintenance::maintenance_plan_diagnostics`] (pure) to
 /// derive the plan and map its admission refusals onto a Salsa-safe
 /// return shape. Returns the default (empty) result for a model with no
-/// maintenance plan (not `refresh: incremental`, or no frontmatter at all).
+/// maintenance plan at all (not `refresh: incremental`, or no frontmatter).
+/// A `refresh: incremental` model with `resolved_grain() == None` still has
+/// a plan — the keyed-succession grain's own undeclared-admission shape
+/// (`docs/specs/incremental_shapes.md` §"Succession-grain admission (no
+/// declaration)") — so it is not filtered out here; `derive_model_maintenance_plan`
+/// itself is what decides admission for that case.
 #[salsa::tracked]
 pub fn maintenance_plan(
     db: &dyn salsa::Database,
@@ -32,9 +37,7 @@ pub fn maintenance_plan(
         return Arc::new(Default::default());
     };
     let resolved_grain = metadata.resolved_grain();
-    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
-        || resolved_grain.is_none()
-    {
+    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental) {
         return Arc::new(Default::default());
     }
     let path = file.path(db);

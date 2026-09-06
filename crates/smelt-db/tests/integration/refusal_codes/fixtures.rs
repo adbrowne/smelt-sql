@@ -1,4 +1,5 @@
 use smelt_db::queries::maintenance::MaintenanceRefusal;
+use smelt_logical::analysis::succession::NotSuccessionReason;
 use smelt_logical::maintenance::Refusal;
 
 /// Every `Refusal` variant that has a real `MaintenanceRefusal` counterpart,
@@ -103,6 +104,39 @@ pub(super) fn refusal_with_db_counterpart() -> Vec<(Refusal, MaintenanceRefusal)
             },
         ),
     ]
+    .into_iter()
+    .chain(succession_pairs())
+    .collect()
+}
+
+/// The ten `NotSuccessionReason` variants, each paired with the equivalent
+/// `MaintenanceRefusal::SuccessionNotRecognized` — one `(Refusal,
+/// MaintenanceRefusal)` pair per reason
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/03a-plan.md` test 4).
+fn succession_pairs() -> Vec<(Refusal, MaintenanceRefusal)> {
+    use NotSuccessionReason::*;
+    [
+        WindowFunctionNotLead("r".to_string()),
+        PartitionKeyMismatch("r".to_string()),
+        OrderNotMonotoneClock("r".to_string()),
+        IdentityNotProjected("r".to_string()),
+        RowLocalColumnViolation("r".to_string()),
+        SingleSourceOnly("r".to_string()),
+        DrivingSourceNotAppendOnly("r".to_string()),
+        PreFilterNotRowLocal("r".to_string()),
+        DeleteFilterMisplaced("r".to_string()),
+        PatternUnrecognized("r".to_string()),
+    ]
+    .into_iter()
+    .map(|reason| {
+        (
+            Refusal::SuccessionNotRecognized {
+                reason: reason.clone(),
+            },
+            MaintenanceRefusal::SuccessionNotRecognized { reason },
+        )
+    })
+    .collect()
 }
 
 /// The three `Refusal` variants with no `MaintenanceRefusal` counterpart at
@@ -123,11 +157,6 @@ pub(super) fn refusals_with_no_db_counterpart() -> Vec<Refusal> {
         Refusal::RepairSliceUnbounded {
             source: "s".to_string(),
             why: "w".to_string(),
-        },
-        Refusal::SuccessionNotRecognized {
-            reason: smelt_logical::analysis::succession::NotSuccessionReason::PatternUnrecognized(
-                "r".to_string(),
-            ),
         },
     ]
 }

@@ -1094,6 +1094,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         execution_postures: None,
         is_snapshot_reconcile: None,
         comparability: vec![],
+        succession_advisories: vec![],
     };
     let properties = smelt_logical::analysis::profile::PropertySet::derive(
         "non_repair_fixture",
@@ -1834,6 +1835,7 @@ fn text_report_technique_matches_the_profile_technique() {
         execution_postures: None,
         is_snapshot_reconcile: None,
         comparability: vec![],
+        succession_advisories: vec![],
     };
 
     // Build the profile from a cell whose technique deliberately differs

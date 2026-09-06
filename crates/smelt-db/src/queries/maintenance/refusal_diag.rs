@@ -75,6 +75,13 @@ pub enum MaintenanceRefusal {
         columns: Vec<String>,
         why: String,
     },
+    /// One of ten `Succession*` codes, 1:1 with the classifier's
+    /// `NotSuccessionReason` (`docs/specs/diagnostics.md` §"Succession
+    /// grain") — an undeclared-grain `refresh: incremental` model's SQL did
+    /// not prove the keyed-succession shape.
+    SuccessionNotRecognized {
+        reason: smelt_logical::analysis::succession::NotSuccessionReason,
+    },
 }
 
 /// The `(severity, code, message)` a `MaintenanceRefusal` of this shape
@@ -203,6 +210,44 @@ pub fn diagnostic_for_refusal(
                 columns.join(", "),
             ),
         ),
+        MaintenanceRefusal::SuccessionNotRecognized { reason } => {
+            use smelt_logical::analysis::succession::NotSuccessionReason::*;
+            let (code, detail) = match reason {
+                WindowFunctionNotLead(detail) => {
+                    (DiagnosticCode::SuccessionWindowFunctionNotLead, detail)
+                }
+                PartitionKeyMismatch(detail) => {
+                    (DiagnosticCode::SuccessionPartitionKeyMismatch, detail)
+                }
+                OrderNotMonotoneClock(detail) => {
+                    (DiagnosticCode::SuccessionOrderNotMonotoneClock, detail)
+                }
+                IdentityNotProjected(detail) => {
+                    (DiagnosticCode::SuccessionIdentityNotProjected, detail)
+                }
+                RowLocalColumnViolation(detail) => {
+                    (DiagnosticCode::SuccessionRowLocalColumnViolation, detail)
+                }
+                SingleSourceOnly(detail) => (DiagnosticCode::SuccessionSingleSourceOnly, detail),
+                DrivingSourceNotAppendOnly(detail) => {
+                    (DiagnosticCode::SuccessionDrivingSourceNotAppendOnly, detail)
+                }
+                PreFilterNotRowLocal(detail) => {
+                    (DiagnosticCode::SuccessionPreFilterNotRowLocal, detail)
+                }
+                DeleteFilterMisplaced(detail) => {
+                    (DiagnosticCode::SuccessionDeleteFilterMisplaced, detail)
+                }
+                PatternUnrecognized(detail) => {
+                    (DiagnosticCode::SuccessionPatternUnrecognized, detail)
+                }
+            };
+            (
+                DiagnosticSeverity::Error,
+                code,
+                format!("{code:?}: {detail}"),
+            )
+        }
     })
 }
 
@@ -297,4 +342,11 @@ pub struct MaintenancePlanDiagnostics {
     /// into a `DeclaredContractRequiresState` Error diagnostic
     /// (`state.md` §Diagnostics).
     pub contract_state_refusals: Vec<ContractStateRefusalDiagnostic>,
+    /// The keyed-succession classifier's `Recognized`-verdict advisories
+    /// (`SuccessionPreFilterNegatesFlag`), mirrored from
+    /// [`super::MaintenancePlanResult::succession_advisories`] — folded into
+    /// a `Warning` `SuccessionPreFilterNegatesFlag` diagnostic by
+    /// `file_diagnostics`, alongside the `state_downgrades` loop. Never
+    /// changes admission.
+    pub succession_advisories: Vec<smelt_logical::analysis::succession::SuccessionAdvisory>,
 }

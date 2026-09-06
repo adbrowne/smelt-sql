@@ -1005,6 +1005,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         execution_postures: None,
         is_snapshot_reconcile: None,
         comparability: vec![],
+        succession_advisories: vec![],
     };
     let __profile = synthetic_profile(&result, "daily_events_enriched");
     let report = build_maintenance_plan_report(
@@ -1137,6 +1138,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         execution_postures: None,
         is_snapshot_reconcile: None,
         comparability: vec![],
+        succession_advisories: vec![],
     };
     let __profile = synthetic_profile(&result, "events_enriched");
     let report = build_maintenance_plan_report(
@@ -1352,6 +1354,7 @@ mod write_variant_explain_surface {
             execution_postures: None,
             is_snapshot_reconcile: None,
             comparability,
+            succession_advisories: vec![],
         };
         let profile = synthetic_profile(&result, "write_variant_fixture");
         build_maintenance_plan_report(

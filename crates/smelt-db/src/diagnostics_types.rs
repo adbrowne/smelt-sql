@@ -1060,6 +1060,67 @@ pub enum DiagnosticCode {
     /// (`docs/specs/state.md` §Diagnostics). Names the declaration and the
     /// missing structure. Anchored at the model SQL body start.
     DeclaredContractRequiresState,
+
+    // ── Succession grain ──────────────────────────────────────────────
+    // `docs/specs/diagnostics.md` §"Succession grain": the ten refusal
+    // reasons the keyed-succession leaf classifier
+    // (`smelt_logical::analysis::succession::classify_keyed_succession`)
+    // can return, plus the one advisory. Raised (Error, except the
+    // advisory) from `smelt_logical::maintenance::Refusal::
+    // SuccessionNotRecognized`'s classifier reason via `smelt-db`'s
+    // `MaintenanceRefusal::SuccessionNotRecognized` mapping in
+    // `queries/maintenance/refusal_diag.rs::diagnostic_for_refusal`, folded
+    // into `check_file_diagnostics` exactly like every other
+    // `Maintenance*` refusal — LSP and CLI see the same set. Anchored at
+    // the model SQL body start. `SuccessionClockTie` (runtime) has no
+    // variant here yet — it lands with phase 5's runtime dispatch.
+    /// A window function in the projection is not `LEAD(t)`/`LAG(t)` over
+    /// the clock column with the default offset of 1, or not a scalar
+    /// expression over one.
+    SuccessionWindowFunctionNotLead,
+    /// Two or more window functions in the projection partition by
+    /// different column sets, by a column set the classifier cannot
+    /// resolve to a stable per-row key, or by a column not proven `NOT
+    /// NULL`.
+    SuccessionPartitionKeyMismatch,
+    /// A window's `ORDER BY` column does not trace as a strictly monotone
+    /// clock to the driving source's declared `event_time_column`, is not
+    /// proven `NOT NULL`, or the `ORDER BY` is descending or carries a
+    /// second sort key.
+    SuccessionOrderNotMonotoneClock,
+    /// A projected column that is not a window function (or an expression
+    /// over one) is itself an aggregate, a further window function, or
+    /// otherwise not row-local.
+    SuccessionRowLocalColumnViolation,
+    /// A key column or the clock column is not projected row-locally, so
+    /// the derived `(k, t)` identity cannot be recovered from the
+    /// presented table.
+    SuccessionIdentityNotProjected,
+    /// The `FROM` clause is not exactly one source reference — a join,
+    /// CTE, subquery, or set operation is present.
+    SuccessionSingleSourceOnly,
+    /// The driving source does not declare `mutation_profile.kind:
+    /// append_only`, or declares no `timeseries:` block.
+    SuccessionDrivingSourceNotAppendOnly,
+    /// A filter precedes the window projection but is not a deterministic
+    /// row-local predicate over the driving source's own columns, or more
+    /// than one such filter is present.
+    SuccessionPreFilterNotRowLocal,
+    /// A `QUALIFY` clause exists but is not exactly `QUALIFY NOT
+    /// <row-local boolean column>`, the flag column is not proven `NOT
+    /// NULL`, or a same-scope `WHERE` tests a window-derived column.
+    SuccessionDeleteFilterMisplaced,
+    /// Warning. The pre-window `WHERE` is a bare negated boolean column.
+    /// Admitted unchanged; suggests `QUALIFY NOT <col>` if it is a CDC
+    /// delete flag, since a flag filtered before the window never closes
+    /// its predecessor's interval. Advisory only — never changes
+    /// admission.
+    SuccessionPreFilterNegatesFlag,
+    /// `refresh: incremental` with no `unique_key`, no `timeseries:`, and a
+    /// SQL shape none of the succession rules above individually names — a
+    /// `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the
+    /// scope, or a model resembling no admitted grain.
+    SuccessionPatternUnrecognized,
 }
 
 /// Structured metadata attached to diagnostics for code actions

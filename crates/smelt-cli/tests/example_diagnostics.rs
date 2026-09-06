@@ -1546,6 +1546,180 @@ fn broken_workspace_maintenance_granularity_mismatch() {
     );
 }
 
+/// `docs/outcomes/20260906-scd2-keyed-succession/phases/03a-plan.md` test 7:
+/// eleven `examples/broken/models/succession_*.sql` fixtures, one per
+/// `Succession*` diagnostic code — for each, exactly its own code fires at
+/// that file and at no other file in the shared `examples/broken/`
+/// workspace. The advisory fixture
+/// (`succession_pre_filter_negates_flag.sql`) is `Warning` severity and
+/// reports no `Succession*` Error at its own file.
+#[test]
+fn broken_workspace_succession_codes() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticCode, DiagnosticSeverity, Workspace};
+
+    const SUCCESSION_CODES: &[DiagnosticCode] = &[
+        DiagnosticCode::SuccessionWindowFunctionNotLead,
+        DiagnosticCode::SuccessionPartitionKeyMismatch,
+        DiagnosticCode::SuccessionOrderNotMonotoneClock,
+        DiagnosticCode::SuccessionRowLocalColumnViolation,
+        DiagnosticCode::SuccessionIdentityNotProjected,
+        DiagnosticCode::SuccessionSingleSourceOnly,
+        DiagnosticCode::SuccessionDrivingSourceNotAppendOnly,
+        DiagnosticCode::SuccessionPreFilterNotRowLocal,
+        DiagnosticCode::SuccessionDeleteFilterMisplaced,
+        DiagnosticCode::SuccessionPreFilterNegatesFlag,
+        DiagnosticCode::SuccessionPatternUnrecognized,
+    ];
+
+    // (file, expected code, expected severity)
+    let expectations: &[(&str, DiagnosticCode, DiagnosticSeverity)] = &[
+        (
+            "models/succession_window_function_not_lead.sql",
+            DiagnosticCode::SuccessionWindowFunctionNotLead,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_partition_key_mismatch.sql",
+            DiagnosticCode::SuccessionPartitionKeyMismatch,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_order_not_monotone_clock.sql",
+            DiagnosticCode::SuccessionOrderNotMonotoneClock,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_row_local_column_violation.sql",
+            DiagnosticCode::SuccessionRowLocalColumnViolation,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_identity_not_projected.sql",
+            DiagnosticCode::SuccessionIdentityNotProjected,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_single_source_only.sql",
+            DiagnosticCode::SuccessionSingleSourceOnly,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_driving_source_not_append_only.sql",
+            DiagnosticCode::SuccessionDrivingSourceNotAppendOnly,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_pre_filter_not_row_local.sql",
+            DiagnosticCode::SuccessionPreFilterNotRowLocal,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_delete_filter_misplaced.sql",
+            DiagnosticCode::SuccessionDeleteFilterMisplaced,
+            DiagnosticSeverity::Error,
+        ),
+        (
+            "models/succession_pre_filter_negates_flag.sql",
+            DiagnosticCode::SuccessionPreFilterNegatesFlag,
+            DiagnosticSeverity::Warning,
+        ),
+        (
+            "models/succession_pattern_unrecognized.sql",
+            DiagnosticCode::SuccessionPatternUnrecognized,
+            DiagnosticSeverity::Error,
+        ),
+    ];
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/broken");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    // file -> every succession diagnostic that fired there
+    let mut by_file: std::collections::HashMap<String, Vec<smelt_db::Diagnostic>> =
+        std::collections::HashMap::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !d
+                .code
+                .as_ref()
+                .is_some_and(|c| SUCCESSION_CODES.contains(c))
+            {
+                continue;
+            }
+            by_file.entry(rel.clone()).or_default().push(d.clone());
+        }
+    }
+
+    for (expected_file, expected_code, expected_severity) in expectations {
+        let diags = by_file.get(*expected_file).cloned().unwrap_or_default();
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly 1 succession diagnostic from '{expected_file}', got {}:\n  {}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("[{:?}]: {}", d.code, d.message))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(*expected_code),
+            "wrong code for '{expected_file}'"
+        );
+        assert_eq!(
+            diags[0].severity, *expected_severity,
+            "wrong severity for '{expected_file}'"
+        );
+    }
+
+    let expected_files: std::collections::HashSet<&str> =
+        expectations.iter().map(|(f, ..)| *f).collect();
+    let stray: Vec<(String, smelt_db::Diagnostic)> = by_file
+        .into_iter()
+        .filter(|(f, _)| !expected_files.contains(f.as_str()))
+        .flat_map(|(f, ds)| ds.into_iter().map(move |d| (f.clone(), d)))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "expected zero succession diagnostics from files other than the eleven fixtures, got {}:\n  {}",
+        stray.len(),
+        stray
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
 // ===== Phase D (meta-language) TDD tests =====
 //
 // Layout mirrors Phase C: one clean workspace + one broken workspace per diagnostic code.

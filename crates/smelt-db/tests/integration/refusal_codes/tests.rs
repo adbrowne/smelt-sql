@@ -37,6 +37,16 @@ fn refusal_code_names_are_real_variants_and_agree_with_smelt_db() {
             DiagnosticCode::GrainAssertionMismatch,
             DiagnosticCode::MaintenanceColumnAddNotBackfillable,
             DiagnosticCode::KeyedRetractableContribution,
+            DiagnosticCode::SuccessionWindowFunctionNotLead,
+            DiagnosticCode::SuccessionPartitionKeyMismatch,
+            DiagnosticCode::SuccessionOrderNotMonotoneClock,
+            DiagnosticCode::SuccessionIdentityNotProjected,
+            DiagnosticCode::SuccessionRowLocalColumnViolation,
+            DiagnosticCode::SuccessionSingleSourceOnly,
+            DiagnosticCode::SuccessionDrivingSourceNotAppendOnly,
+            DiagnosticCode::SuccessionPreFilterNotRowLocal,
+            DiagnosticCode::SuccessionDeleteFilterMisplaced,
+            DiagnosticCode::SuccessionPatternUnrecognized,
         ];
         assert!(
             all_variants.iter().any(|v| format!("{v:?}") == name),

@@ -109,6 +109,7 @@ pub fn derive_model_maintenance_plan(
             execution_postures: None,
             is_snapshot_reconcile: None,
             comparability: Vec::new(),
+            succession_advisories: derivation.advisories,
         });
     };
     if grain == ConfigGrain::KeyPerPartition {
@@ -128,6 +129,7 @@ pub fn derive_model_maintenance_plan(
             execution_postures: None,
             is_snapshot_reconcile: None,
             comparability: Vec::new(),
+            succession_advisories: Vec::new(),
         });
     }
     let partition_col = metadata
@@ -180,6 +182,7 @@ pub fn derive_model_maintenance_plan(
                         execution_postures: None,
                         is_snapshot_reconcile: None,
                         comparability: Vec::new(),
+                        succession_advisories: Vec::new(),
                     });
                 }
             } else if unique_key.is_empty() {
@@ -204,6 +207,7 @@ pub fn derive_model_maintenance_plan(
                     execution_postures: None,
                     is_snapshot_reconcile: None,
                     comparability: Vec::new(),
+                    succession_advisories: Vec::new(),
                 });
             }
             // A `grain: key` model that also declares a `timeseries:`
@@ -275,6 +279,7 @@ pub fn derive_model_maintenance_plan(
                             execution_postures: None,
                             is_snapshot_reconcile: None,
                             comparability: Vec::new(),
+                            succession_advisories: Vec::new(),
                         });
                     }
                     Err(refusal) => {
@@ -286,6 +291,7 @@ pub fn derive_model_maintenance_plan(
                             execution_postures: None,
                             is_snapshot_reconcile: None,
                             comparability: Vec::new(),
+                            succession_advisories: Vec::new(),
                         });
                     }
                     // Admitted: the derived `LocalitySlice` is folded onto
@@ -402,6 +408,7 @@ pub fn derive_model_maintenance_plan(
         state_columns: Vec::new(),
         execution_postures: None,
         is_snapshot_reconcile: None,
+        succession_advisories: Vec::new(),
     })
 }
 

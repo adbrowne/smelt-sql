@@ -142,7 +142,7 @@ out-of-order and repeated windows, and the clamp.
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
 | 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | done |
 | 3 | Plan model and derivation: `Grain::Succession { key_cols, clock_col }`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + the full-refresh availability downgrade; the pure succession-plan/refusal deriver in `smelt-logical`; the `resolved_grain()`-is-`None` branch in `smelt-db`'s `derive_model_maintenance_plan` that classifies and derives the one succession cell; `frozen_horizon`/`retain_departed` refusals naming the succession grain, `deferral` admitted | done |
-| 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | planned |
+| 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | done |
 | 3b | Gate hygiene: `join_context_reach::every_production_join_context_new_is_tagged` is red on `crates/smelt-logical/src/analysis/walk/tests.rs:472` — the walk-module split turned a `#[cfg(test)] mod tests;` body into a whole file the gate's `#[cfg(test)]`-span exclusion cannot see, so a test-only `JoinContext::new()` is scanned as production. Fix the gate's file-level exclusion (not the call site) and prove it still catches a real untagged production site | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg; the `maintenance_plan_conformance` SCD2 matrix cell updated with the emitter-backed CLAIMED entry | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -387,6 +387,27 @@ out-of-order and repeated windows, and the clamp.
   resolution) and `join_context_reach`'s `every_production_join_context_new_is_tagged`
   (pre-existing, confirmed via `git log` to predate this phase, in a file
   this phase never touched). See `phases/03-summary.md`.
+
+- 2026-09-07 (phase 3a done): landed as planned, no reshape. Also fixed a real bug the
+  plan didn't anticipate: `smelt-db`'s `#[salsa::tracked] maintenance_plan`
+  (`src/maintenance_refs/plan.rs`) early-returned the empty default whenever
+  `resolved_grain().is_none()` — a guard predating the succession grain that silently
+  discarded every succession diagnostic before `check_file_diagnostics` ever saw it. Fixed
+  by dropping that half of the guard (`refresh != Incremental` alone now gates the early
+  return). The sibling `maintenance_plan_report` (used by `smelt explain`) carries the same
+  stale guard, left unfixed — out of scope (explain is phase 8), flagged for that phase.
+  Four gates were found already red before this phase started (confirmed via a stash-and-
+  rerun-on-committed-tree check, none touched by this diff): `state_docs_freshness::
+  spec_references_are_live` (stale `availability.rs` path reference after a split),
+  `hardening_budget::gate_detects_regression` (`smelt-logical` `.expect(` reads 14 vs
+  baseline 1), `contract_lattice_spec` (two failures, one citing a missing
+  `contract/frozen_horizon.rs`), and `walk_coverage::admission_paths_have_no_raw_text_scans`
+  (ten test-file `.contains(...)` calls misclassified as raw admission-path scans) — all look
+  like fallout from this branch's earlier large-file-splitting work, same class of bug as
+  `join_context_reach`'s (phase 3b's target). Recorded in `phases/03a-summary.md` rather than
+  fixed — none are this phase's own target. This phase's own diff also grew nine files past
+  the large-file ratchet baseline (same shape as phases 2b/3); left to the loop's dedicated
+  shrink step per `docs/outcome_loop.md`. See `phases/03a-summary.md`.
 
 ## Blocked
 

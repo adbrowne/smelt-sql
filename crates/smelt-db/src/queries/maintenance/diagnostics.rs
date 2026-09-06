@@ -225,11 +225,11 @@ pub fn maintenance_plan_diagnostics(
                 columns: columns.clone(),
                 why: why.clone(),
             }),
-            // The eleven `Succession*` diagnostic codes land in phase 3a
-            // (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md`) —
-            // left unmapped exactly as `ReachNotDerivable` above, for the
-            // same reason: a future phase's own diagnostic lands it.
-            smelt_logical::maintenance::Refusal::SuccessionNotRecognized { .. } => None,
+            smelt_logical::maintenance::Refusal::SuccessionNotRecognized { reason } => {
+                Some(MaintenanceRefusal::SuccessionNotRecognized {
+                    reason: reason.clone(),
+                })
+            }
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -337,5 +337,6 @@ pub fn maintenance_plan_diagnostics(
         scan_bounds_warnings,
         state_downgrades,
         contract_state_refusals,
+        succession_advisories: result.succession_advisories,
     }
 }

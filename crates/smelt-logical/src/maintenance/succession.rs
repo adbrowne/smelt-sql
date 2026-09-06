@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::analysis::succession::SuccessionVerdict;
+use crate::analysis::succession::{SuccessionAdvisory, SuccessionVerdict};
 
 use super::{
     succession_refused_plan, Corner, Grain, MaintenancePlan, OutputSpec, PartitionLocal, PlanCell,
@@ -24,9 +24,15 @@ use super::{
 /// placeholder (empty key, no meaningful grain) since the caller only ever
 /// reads `plan` in that case — `derive_model_maintenance_plan` returns the
 /// refusal plan and never constructs an [`super::OutputSpec`] from it.
+/// `advisories` carries the classifier's `Recognized`-verdict advisories
+/// (`SuccessionPreFilterNegatesFlag`) verbatim, empty on `NotSuccession` —
+/// kept off [`MaintenancePlan`] itself so "the advisory never changes
+/// admission" is a structural fact this type cannot express otherwise
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/03a-plan.md`).
 pub struct SuccessionDerivation {
     pub output: OutputSpec,
     pub plan: MaintenancePlan,
+    pub advisories: Vec<SuccessionAdvisory>,
 }
 
 /// Derive the one-cell succession plan (or the refusal plan) from the
@@ -37,6 +43,7 @@ pub fn derive_succession_plan(verdict: &SuccessionVerdict, table: &str) -> Succe
             source,
             key_cols,
             clock_col,
+            advisories,
             ..
         } => {
             let skeleton_columns: BTreeSet<String> = key_cols
@@ -95,6 +102,7 @@ pub fn derive_succession_plan(verdict: &SuccessionVerdict, table: &str) -> Succe
                     refusals: Vec::new(),
                     key_locality: None,
                 },
+                advisories: advisories.clone(),
             }
         }
         SuccessionVerdict::NotSuccession { reason } => SuccessionDerivation {
@@ -106,6 +114,7 @@ pub fn derive_succession_plan(verdict: &SuccessionVerdict, table: &str) -> Succe
                 skeleton_columns: BTreeSet::new(),
             },
             plan: succession_refused_plan(reason.clone()),
+            advisories: Vec::new(),
         },
     }
 }
@@ -191,5 +200,50 @@ mod tests {
         assert_eq!(derivation.plan.cells.len(), 1);
         let cell = &derivation.plan.cells[0];
         assert_eq!(cell.technique, Technique::SuccessionPatch);
+        assert_eq!(
+            derivation.advisories,
+            vec![SuccessionAdvisory::PreFilterNegatesFlag {
+                column: "is_deleted".to_string()
+            }]
+        );
+    }
+
+    /// The advisory is carried on `SuccessionDerivation`, never on
+    /// `MaintenancePlan` — deriving over the same `Recognized` verdict with
+    /// and without the advisory must yield byte-identical `plan` and
+    /// `output`, proving admission cannot depend on it.
+    #[test]
+    fn advisory_does_not_change_the_derived_plan() {
+        let with_advisory = recognized(vec![SuccessionAdvisory::PreFilterNegatesFlag {
+            column: "is_deleted".to_string(),
+        }]);
+        let without_advisory = recognized(vec![]);
+        let with_derivation = derive_succession_plan(&with_advisory, "customer_history");
+        let without_derivation = derive_succession_plan(&without_advisory, "customer_history");
+        assert_eq!(
+            with_derivation.plan.cells.len(),
+            without_derivation.plan.cells.len()
+        );
+        assert_eq!(
+            with_derivation.plan.refusals.len(),
+            without_derivation.plan.refusals.len()
+        );
+        let (with_cell, without_cell) = (
+            &with_derivation.plan.cells[0],
+            &without_derivation.plan.cells[0],
+        );
+        assert_eq!(with_cell.trigger, without_cell.trigger);
+        assert_eq!(with_cell.technique, without_cell.technique);
+        assert_eq!(with_cell.corner, without_cell.corner);
+        assert_eq!(with_cell.row_identity, without_cell.row_identity);
+        assert_eq!(
+            with_derivation.output.grain,
+            without_derivation.output.grain
+        );
+        assert_eq!(
+            with_derivation.output.skeleton_columns,
+            without_derivation.output.skeleton_columns
+        );
+        assert_ne!(with_derivation.advisories, without_derivation.advisories);
     }
 }

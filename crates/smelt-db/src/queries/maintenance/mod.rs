@@ -97,6 +97,14 @@ pub struct MaintenancePlanResult {
     /// `unique_key` mismatch, a locality refusal) — those never reach the
     /// walk at all.
     pub comparability: Vec<smelt_logical::analysis::walk::ColumnComparability>,
+    /// The keyed-succession classifier's `Recognized`-verdict advisories
+    /// (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md` criterion
+    /// 2) — populated only on the succession branch of
+    /// `derive_model_maintenance_plan` (`metadata.resolved_grain()` is
+    /// `None`), empty everywhere else. Never changes `plan` (structurally
+    /// carried off it, see `smelt_logical::maintenance::succession::
+    /// SuccessionDerivation`'s own doc comment).
+    pub succession_advisories: Vec<smelt_logical::analysis::succession::SuccessionAdvisory>,
 }
 
 mod diagnostics;
