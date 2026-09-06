@@ -6,12 +6,14 @@
 //! hand-written match. The assertion is on the resulting [`TypedColumn`] —
 //! property that must hold under either path.
 
+mod date_functions;
+
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 
 /// Parse a SELECT statement and infer column types using the given context.
-fn infer(sql: &str, ctx: &TypeContext) -> Vec<TypedColumn> {
+pub(crate) fn infer(sql: &str, ctx: &TypeContext) -> Vec<TypedColumn> {
     let parse = smelt_parser::parse(sql);
     let file = File::cast(parse.syntax()).expect("parse File");
     let select = file.select_stmt().expect("parse SELECT");
@@ -19,7 +21,7 @@ fn infer(sql: &str, ctx: &TypeContext) -> Vec<TypedColumn> {
 }
 
 /// Build a TypeContext with one upstream model that has the given columns.
-fn ctx_with_model(model: &str, cols: &[(&str, DataType)]) -> TypeContext {
+pub(crate) fn ctx_with_model(model: &str, cols: &[(&str, DataType)]) -> TypeContext {
     let mut ctx = TypeContext::new();
     for (name, dt) in cols {
         ctx.add_model_column(
@@ -109,39 +111,4 @@ fn min_of_timestamp_returns_timestamp() {
         types[0].data_type,
     );
     assert!(types[0].nullable, "MIN(...) result is always nullable");
-}
-
-#[test]
-fn date_add_infers_timestamp() {
-    // Phase 9: `DATE_ADD` is an ordinary callable (not `SyntaxForm::Special`)
-    // typed `(Date, Interval) -> Timestamp` by the registry.
-    let ctx = ctx_with_model("upstream", &[("d", DataType::Date)]);
-    let sql = "SELECT DATE_ADD(d, INTERVAL 1 DAY) AS r FROM upstream";
-    let types = infer(sql, &ctx);
-    assert_eq!(types.len(), 1);
-    assert_eq!(
-        types[0].data_type,
-        DataType::Timestamp {
-            with_timezone: false,
-        },
-        "DATE_ADD(DATE, INTERVAL) must infer TIMESTAMP, got {:?}",
-        types[0].data_type,
-    );
-}
-
-#[test]
-fn date_sub_infers_timestamp() {
-    // Phase 9: same contract as `date_add_infers_timestamp` for `DATE_SUB`.
-    let ctx = ctx_with_model("upstream", &[("d", DataType::Date)]);
-    let sql = "SELECT DATE_SUB(d, INTERVAL 1 DAY) AS r FROM upstream";
-    let types = infer(sql, &ctx);
-    assert_eq!(types.len(), 1);
-    assert_eq!(
-        types[0].data_type,
-        DataType::Timestamp {
-            with_timezone: false,
-        },
-        "DATE_SUB(DATE, INTERVAL) must infer TIMESTAMP, got {:?}",
-        types[0].data_type,
-    );
 }
