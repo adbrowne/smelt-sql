@@ -624,7 +624,10 @@ crates/smelt-logical/src/analysis/profile.rs 498
 crates/smelt-logical/src/analysis/select_analysis.rs 457
 crates/smelt-logical/src/analysis/skeleton_closure.rs 414
 crates/smelt-logical/src/analysis/source_bounds.rs 3367
-crates/smelt-logical/src/analysis/succession.rs 1229
+crates/smelt-logical/src/analysis/succession/mod.rs 445
+crates/smelt-logical/src/analysis/succession/predicates.rs 76
+crates/smelt-logical/src/analysis/succession/tests.rs 518
+crates/smelt-logical/src/analysis/succession/window.rs 262
 crates/smelt-logical/src/analysis/temporal.rs 986
 crates/smelt-logical/src/analysis/walk/mod.rs 44
 crates/smelt-logical/src/analysis/walk/properties.rs 873
