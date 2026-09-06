@@ -3063,18 +3063,19 @@ happens to see. There's nothing left to order.</p>
 <a id="__codelineno-3-62" name="__codelineno-3-62" href="#__codelineno-3-62"></a>      clock:    event_time_column=event_date partition_column=event_date granularity=Day
 <a id="__codelineno-3-63" name="__codelineno-3-63" href="#__codelineno-3-63"></a>      identity: (none)
 <a id="__codelineno-3-64" name="__codelineno-3-64" href="#__codelineno-3-64"></a>      derived grain: partition
-<a id="__codelineno-3-65" name="__codelineno-3-65" href="#__codelineno-3-65"></a>      delta type: append-only within window
-<a id="__codelineno-3-66" name="__codelineno-3-66" href="#__codelineno-3-66"></a>
-<a id="__codelineno-3-67" name="__codelineno-3-67" href="#__codelineno-3-67"></a>Probes (2):
-<a id="__codelineno-3-68" name="__codelineno-3-68" href="#__codelineno-3-68"></a>  cadence: per_run
-<a id="__codelineno-3-69" name="__codelineno-3-69" href="#__codelineno-3-69"></a>  - fact: mutation_profile.kind: append_only
-<a id="__codelineno-3-70" name="__codelineno-3-70" href="#__codelineno-3-70"></a>      probe: SourceMutationProfileViolated
-<a id="__codelineno-3-71" name="__codelineno-3-71" href="#__codelineno-3-71"></a>      licensed cell: main.silver_events_deduped (declared)
-<a id="__codelineno-3-72" name="__codelineno-3-72" href="#__codelineno-3-72"></a>      cost: +1 query per consuming run
-<a id="__codelineno-3-73" name="__codelineno-3-73" href="#__codelineno-3-73"></a>  - fact: key_recurrence
-<a id="__codelineno-3-74" name="__codelineno-3-74" href="#__codelineno-3-74"></a>      probe: KeyedRecurrenceBoundViolated
-<a id="__codelineno-3-75" name="__codelineno-3-75" href="#__codelineno-3-75"></a>      licensed cell: main.silver_events_deduped keyed merge
-<a id="__codelineno-3-76" name="__codelineno-3-76" href="#__codelineno-3-76"></a>      cost: +1 query per consuming run
+<a id="__codelineno-3-65" name="__codelineno-3-65" href="#__codelineno-3-65"></a>      orchestration-only fact: lateness = 3 days (never a plan input)
+<a id="__codelineno-3-66" name="__codelineno-3-66" href="#__codelineno-3-66"></a>      delta type: append-only within window
+<a id="__codelineno-3-67" name="__codelineno-3-67" href="#__codelineno-3-67"></a>
+<a id="__codelineno-3-68" name="__codelineno-3-68" href="#__codelineno-3-68"></a>Probes (2):
+<a id="__codelineno-3-69" name="__codelineno-3-69" href="#__codelineno-3-69"></a>  cadence: per_run
+<a id="__codelineno-3-70" name="__codelineno-3-70" href="#__codelineno-3-70"></a>  - fact: mutation_profile.kind: append_only
+<a id="__codelineno-3-71" name="__codelineno-3-71" href="#__codelineno-3-71"></a>      probe: SourceMutationProfileViolated
+<a id="__codelineno-3-72" name="__codelineno-3-72" href="#__codelineno-3-72"></a>      licensed cell: main.silver_events_deduped (declared)
+<a id="__codelineno-3-73" name="__codelineno-3-73" href="#__codelineno-3-73"></a>      cost: +1 query per consuming run
+<a id="__codelineno-3-74" name="__codelineno-3-74" href="#__codelineno-3-74"></a>  - fact: key_recurrence
+<a id="__codelineno-3-75" name="__codelineno-3-75" href="#__codelineno-3-75"></a>      probe: KeyedRecurrenceBoundViolated
+<a id="__codelineno-3-76" name="__codelineno-3-76" href="#__codelineno-3-76"></a>      licensed cell: main.silver_events_deduped keyed merge
+<a id="__codelineno-3-77" name="__codelineno-3-77" href="#__codelineno-3-77"></a>      cost: +1 query per consuming run
 </code></pre></div>
 <p>Two things the previous page's refusal didn't have:</p>
 <ul>
