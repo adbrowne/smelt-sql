@@ -15,6 +15,15 @@ Integration tests in `tests/compile_parity.rs` (SQL compilation equivalence acro
 - **`execute_project(request, reporter)` is the single entry point.** Both `smelt-cli` and `smelt-ui` call it and contribute only surface adapters (`RunReporter` impls, argument parsing). Do not add a parallel compile or execute helper in either consumer. See root `CLAUDE.md` §Architectural invariants — **Run Pipeline Parity** is load-bearing for any work here.
 - **`SqlCompiler` and its helpers (`EphemeralResolver`, `PrintContext` constructors) are `pub(crate)`** by design — consumers cannot construct a half-compiled model. If you need a new shape from the compiler, extend `smelt-runtime`, not the consumer crate.
 - **`smelt-lsp` depends on this crate for exactly one thing: `property_diff`.** The property-diff editor integration (`docs/specs/property_diff.md` §Surface "Editor") needs `profile::profiles_for_workspace` and the `work_side`/`baseline_side`/`report` pipeline in `src/property_diff.rs`, so `smelt-lsp` added `smelt-runtime` + `smelt-logical` as normal dependencies (`docs/outcomes/20260905-property-diff/phases/07-plan.md` R1) — verified acyclic and DuckDB-free (`duckdb`/`smelt-backend-duckdb`/`smelt-backends` are this crate's `[dev-dependencies]` only). Do not add any OTHER LSP-serving logic here; LSP needs otherwise stop at the analysis layer (`smelt-db`, `smelt-core`).
+- **The Python model path you test depends on the feature set.** `smelt-lsp` has
+  `default = ["python"]`, which unifies `smelt-runtime/python` ON in any
+  workspace-wide build. So `cargo test -p smelt-runtime --lib` exercises the
+  subprocess path in `src/python.rs`, while `cargo test` / `mise run verify`
+  exercises the embedded-PyO3 path in the same file — a bug in one is invisible
+  to the other (issue #189). Reproduce the full-suite path with
+  `cargo test -p smelt-runtime --lib --features python`. The embedded path shares
+  one process-global interpreter across concurrent tests; its global state is
+  serialised in `smelt-core`'s `python_models.rs`, not here.
 - **`reporter.rs` defines the `RunReporter` trait** — implement it in consumer crates (`smelt-cli`'s terminal reporter, `smelt-ui`'s WebSocket reporter).
 - **`transformer.rs`** owns `inject_time_filter` and `inject_source_filters`. Time-filter logic lives here, not in the CLI or UI.
 

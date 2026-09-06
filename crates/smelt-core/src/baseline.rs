@@ -367,7 +367,7 @@ pub fn materialize(resolved: &ResolvedBaseline) -> Result<BaselineCheckout, Base
         .spawn()
         .map_err(BaselineError::GitUnavailable)?;
 
-    let stdout = match child.stdout.take() {
+    let mut stdout = match child.stdout.take() {
         Some(s) => s,
         None => {
             return Err(BaselineError::Archive {
@@ -375,7 +375,16 @@ pub fn materialize(resolved: &ResolvedBaseline) -> Result<BaselineCheckout, Base
             });
         }
     };
-    let unpack_result = tar::Archive::new(stdout).unpack(scratch.path());
+    let unpack_result = tar::Archive::new(&mut stdout).unpack(scratch.path());
+
+    // Drain whatever `git` has left to write before dropping the read end.
+    // `tar` stops at the end-of-archive marker, but `git archive` still emits
+    // the trailing block padding after it; closing the pipe first kills git
+    // with `SIGPIPE`, which surfaced as an intermittent "`git archive` failed"
+    // with an EMPTY stderr whenever the machine was loaded enough for git to
+    // still be writing (issue #194).
+    let _ = std::io::copy(&mut stdout, &mut std::io::sink());
+    drop(stdout);
 
     let status = child.wait().map_err(BaselineError::GitUnavailable)?;
     if !status.success() {
