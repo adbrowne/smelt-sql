@@ -79,8 +79,9 @@ audit before it is claimed — never from documentation.
 | 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
 | 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
 | 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
-| 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` to the four surviving `type_gap` rows with a sign-off line | pending |
-| 9 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
+| 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | planned |
+| 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap` | pending |
+| 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
 
 ## Decision log
 
@@ -288,6 +289,29 @@ audit before it is claimed — never from documentation.
   python-discovery test flake (temp-file race, 216/216 green single-threaded, confirmed across
   three runs hitting a different subset of tests each time — flagged for a future outcome, not
   this one's to fix). Live Spark dialect_audit: 61/61 green. See `phases/07-summary.md`.
+
+- 2026-09-06 (plan 08) — **Reshape: a new phase 9 closes the `DATE_ADD`/`DATE_SUB` type-leg
+  family; the docs phase becomes phase 10.** Criterion 5 is currently unmet on DuckDB —
+  `dialect_gaps_duckdb` is 6, not `≤ 5` — because phase 4's bail-out clause landed two new
+  `type_gap` rows, and phase 8 templating `DATE_SUB` on Spark would land the same two there,
+  putting Spark at 6 rather than the criterion's 4. This is work the Success criteria require, so
+  it gets a row rather than a note. Root cause measured while planning: both names are
+  `SyntaxForm::Special` registry rows (they exist to type the *infix* interval add/sub, and are
+  deliberately exempt from `SqlFunction` by `registry_consistency`'s `syntax_form != Call`
+  exemption), yet the audit derives an ordinary *call* probe for them, and
+  `infer_function_type` bails at `SqlFunction::from_name(...)?` before `try_registry_inference`
+  runs. Phase 9 decides between making the pair genuinely callable and excluding non-`Call`
+  syntax forms from the probe axis; phase 8 does not pre-empt that choice — it records whatever
+  the Spark type legs report as `type_gap` rows under the same bail-out clause phase 4 used.
+
+- 2026-09-06 (plan 08, design) — Two points fixed inside phase 8's own scope. The three
+  `gap_at(..., Position::Window)` Spark rows (`MEDIAN`, `PERCENTILE_CONT`, `PERCENTILE_DISC`) are
+  **already** `Emission::Unsupported` in the registry — exactly the redundancy phase 4 found and
+  deleted on the DuckDB side — so they close by deleting the ledger rows, with the audit's
+  declared-unsupported exemption doing the verification. And most of the sixteen surviving
+  schema rows have `any_args()` signatures, on which `validate_template` rejects a template
+  outright: for those the vocabulary offers only `Rename` or `Unsupported { reason }`, so the
+  phase is predominantly a measured-`Unsupported` paydown rather than a lowering-authoring one.
 
 ## Blocked
 
