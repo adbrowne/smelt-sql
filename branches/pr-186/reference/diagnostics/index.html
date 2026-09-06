@@ -2512,6 +2512,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Example: UnsupportedOnBackend">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-templates-spelling-cannot-carry-a-modifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A template's spelling cannot carry a modifier
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-verdict-that-depends-on-operand-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A verdict that depends on operand type
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
       </ul>
@@ -2777,6 +2805,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Example: UnsupportedOnBackend">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-templates-spelling-cannot-carry-a-modifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A template's spelling cannot carry a modifier
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-verdict-that-depends-on-operand-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A verdict that depends on operand type
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
       </ul>
@@ -2875,6 +2931,40 @@ For the query above, targeting DuckDB, the message reads:</p>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>  `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>  `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
 </code></pre></div>
+<h4 id="a-templates-spelling-cannot-carry-a-modifier">A template's spelling cannot carry a modifier<a class="headerlink" href="#a-templates-spelling-cannot-carry-a-modifier" title="Permanent link">&para;</a></h4>
+<p>A built-in whose target spelling is a fixed template over its own positional arguments — DuckDB's
+<code>DATE_SUB(d, i)</code>, spelled <code>d - i</code> — has no place in that spelling for a call modifier: <code>DISTINCT</code>,
+<code>FILTER (WHERE …)</code>, <code>WITHIN GROUP (ORDER BY …)</code>, an <code>ORDER BY</code> inside the argument list, <code>IGNORE
+NULLS</code>/<code>RESPECT NULLS</code>, a named (<code>=&gt;</code>) argument, or a <code>*</code> argument. Dropping the modifier would
+change the answer — a dropped <code>DISTINCT</code> counts duplicates the author excluded — so the call is
+refused at compile time rather than silently stripped.</p>
+<p><strong>Example</strong> — targeting DuckDB, <code>DATE_SUB</code> carrying <code>DISTINCT</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">DATE_SUB</span><span class="p">(</span><span class="k">DISTINCT</span><span class="w"> </span><span class="n">d</span><span class="p">,</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">DAY</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events</span>
+</code></pre></div>
+<!-- unsupported-on-backend-template-modifier-refusal-text -->
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>UnsupportedOnBackend: this model uses 1 construct the DuckDB backend cannot express:
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>  `DATE_SUB` — this built-in&#39;s target spelling is a fixed template over positional arguments; DISTINCT cannot be expressed by a template (a dropped DISTINCT would count duplicates the author excluded) and is refused rather than silently dropped
+</code></pre></div>
+<p><strong>Fix</strong>: Rewrite the query without the modifier — for example, deduplicate the input rows in a CTE
+before calling the function — or pick a target backend whose registry entry for that built-in is
+not a template.</p>
+<h4 id="a-verdict-that-depends-on-operand-type">A verdict that depends on operand type<a class="headerlink" href="#a-verdict-that-depends-on-operand-type" title="Permanent link">&para;</a></h4>
+<p>Some built-ins lower differently depending on the type of the values passed to them, not only on
+where they're called. <code>//</code> is DuckDB's native floor/true division operator, but Spark and BigQuery
+have no infix <code>//</code>: on Spark, <code>a // b</code> lowers to <code>a DIV b</code> when both operands are integral and to
+plain <code>a / b</code> when both are floating-point or decimal. When an operand's type cannot be resolved at
+compile time, smelt refuses rather than guess — guessing wrong here would silently compute a
+<em>different number</em>, not fail loudly.</p>
+<p><strong>Example</strong> — targeting Spark, <code>//</code> over a column whose type cannot be resolved:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">//</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">t</span>
+</code></pre></div>
+<!-- unsupported-on-backend-operand-class-refusal-text -->
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>UnsupportedOnBackend: this model uses 1 construct the Spark SQL backend cannot express:
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>  `//` — Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)
+</code></pre></div>
+<p><strong>Fix</strong>: Give the operands a resolvable type — for example, by declaring the upstream column's type
+or wrapping the operand in an explicit <code>CAST</code> — or rewrite the expression as a typed <code>FLOOR(a / b)</code>
+or <code>DIV(a, b)</code> call.</p>
 
 
 

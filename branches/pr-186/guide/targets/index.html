@@ -1870,6 +1870,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#per-operand-type-lowering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-operand-type lowering
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3158,6 +3169,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#per-operand-type-lowering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-operand-type lowering
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3737,6 +3759,14 @@ around the affected call isn't a shape the restructure can rewrite in place: <co
 <code>PARTITION BY</code> expression, or a correlated subquery. Each of these needs the same kind of manual
 rewrite: pull the affected aggregate into its own <code>GROUP BY</code>/join or correlated-subquery form
 before joining it back into the original query shape.</p>
+<h3 id="per-operand-type-lowering">Per-operand-type lowering<a class="headerlink" href="#per-operand-type-lowering" title="Permanent link">&para;</a></h3>
+<p>Some built-ins lower differently depending on the type of the values passed to them, not just on
+where they're called. <code>a // b</code> is DuckDB's native floor/true division operator; on Spark it lowers
+to <code>a DIV b</code> when both operands are integral and to plain <code>a / b</code> when both are floating-point or
+decimal. When an operand's type cannot be resolved at compile time, smelt refuses with
+<code>UnsupportedOnBackend</code> rather than guess — a wrong guess here would silently compute a different
+number, not fail loudly. See <a href="../../reference/diagnostics/#a-verdict-that-depends-on-operand-type">Diagnostics reference: a verdict that depends on operand
+type</a>.</p>
 <h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
 <ul>
 <li><a href="../materializations/">Materializations</a> for how tables and views are created in each target</li>
