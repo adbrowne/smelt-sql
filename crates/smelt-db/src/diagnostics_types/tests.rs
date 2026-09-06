@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// Every multi-model diagnostic code exists in `DiagnosticCode` and its
