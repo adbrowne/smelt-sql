@@ -140,7 +140,7 @@ out-of-order and repeated windows, and the clamp.
 | 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | done |
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | done |
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
-| 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | planned |
+| 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | done |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -299,6 +299,25 @@ out-of-order and repeated windows, and the clamp.
   (non-bare-column `ORDER BY`, two window calls in one projection), which today have none.
   The existing 39 succession tests are the behaviour-preservation oracle and must pass
   unedited.
+
+- 2026-09-06 (phase 2b done): landed as planned. All four `unwrap`/`expect` sites in
+  `analysis/succession.rs` eliminated by restructuring: a `WindowShape`/`window_shape` helper
+  extracts one window call's own per-item checks with no `Option` accumulation, and the shared
+  fold over `window_items` now uses `split_first()` (`None` → the existing "no LEAD/LAG"
+  refusal, `Some` → seed shared state from the first item as plain values, fold the rest) instead
+  of `Option`-typed shared state forced open with `expect()`. A `record_window` helper shares the
+  "reaches over the clock column, then record lead/lag" check between the first item and the
+  fold. `hardening-budget.sh` confirms `smelt-logical` back to baseline `unwrap 1` / `expect 1`
+  with the baseline file untouched. Two new unit tests
+  (`refuses_order_by_expression_not_bare_column`, `refuses_two_window_calls_in_one_projection`)
+  pin refusal paths the rewrite touches; all 39 pre-existing succession tests pass unedited.
+  New residual finding, caused by this phase's own diff: `succession.rs` grew from the
+  1229-line baseline to 1282, tripping `large_file_ratchet::gate_passes_on_committed_tree` in
+  `verify-phase.sh`'s workspace `cargo test` leg — every other leg (fmt, clippy both feature
+  sets, the rest of `cargo test`, `example_diagnostics`) is green. Not fixed here: splitting the
+  file is out of scope for a hardening-ratchet phase, and `docs/outcome_loop.md` §"The large-file
+  shrink step" describes a dedicated non-blocking automated step for exactly this ratchet. See
+  `phases/02b-summary.md`.
 
 ## Blocked
 

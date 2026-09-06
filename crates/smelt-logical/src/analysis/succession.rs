@@ -251,9 +251,15 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
         let Some(expr) = item.expression() else {
             continue;
         };
-        let windows = find_window_calls(&expr);
-        match windows.len() {
-            0 => {
+        let mut windows = find_window_calls(&expr);
+        if windows.len() > 1 {
+            return refuse(WindowFunctionNotLead(format!(
+                "projected column '{alias}' contains more than one window function call"
+            )));
+        }
+        match windows.pop() {
+            Some(window_call) => window_items.push((alias, expr, window_call)),
+            None => {
                 if !is_row_local(&expr) {
                     return refuse(RowLocalColumnViolation(format!(
                         "projected column '{alias}' is not row-local"
@@ -263,152 +269,65 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
                     plain_bare_names.insert(col.name().to_string());
                 }
             }
-            1 => window_items.push((alias, expr, windows.into_iter().next().unwrap())),
-            _ => {
-                return refuse(WindowFunctionNotLead(format!(
-                    "projected column '{alias}' contains more than one window function call"
-                )));
-            }
         }
-    }
-
-    if window_items.is_empty() {
-        return refuse(PatternUnrecognized(
-            "no LEAD/LAG window projection found — not a succession shape".into(),
-        ));
     }
 
     // Rule 2/3: every window is LEAD/LAG(clock) at the default offset,
     // sharing one PARTITION BY key set and one ascending ORDER BY column.
     let mut lead_cols = Vec::new();
     let mut lag_cols = Vec::new();
-    let mut shared_partition: Option<BTreeSet<String>> = None;
-    let mut shared_order_text: Option<String> = None;
-    let mut shared_order_expr: Option<Expr> = None;
-    let mut clock_col_name: Option<String> = None;
 
-    for (alias, _item_expr, window_call) in &window_items {
-        let func = &window_call.func;
-        let window = &window_call.window;
-        let name = func.name().unwrap_or_default().to_uppercase();
-        let is_lead = match name.as_str() {
-            "LEAD" => true,
-            "LAG" => false,
-            other => {
-                return refuse(WindowFunctionNotLead(format!(
-                    "'{other}' (column '{alias}') is not LEAD/LAG"
-                )));
-            }
-        };
-        let args = func.arguments();
-        if args.len() != 1 {
-            return refuse(WindowFunctionNotLead(format!(
-                "{name}(...) for column '{alias}' carries an explicit offset/default argument \
-                 — only the default single-argument form is admitted"
-            )));
-        }
-        let Some(arg_col) = args[0].as_column_ref() else {
-            return refuse(WindowFunctionNotLead(format!(
-                "{name} argument for column '{alias}' is not a bare column reference"
-            )));
-        };
+    let Some(((first_alias, _, first_call), rest)) = window_items.split_first() else {
+        return refuse(PatternUnrecognized(
+            "no LEAD/LAG window projection found — not a succession shape".into(),
+        ));
+    };
 
-        let partition_cols: BTreeSet<String> = match window.partition_by() {
-            Some(pb) => {
-                let mut set = BTreeSet::new();
-                for e in pb.expressions() {
-                    match e.as_column_ref() {
-                        Some(c) => {
-                            set.insert(c.name().to_string());
-                        }
-                        None => {
-                            return refuse(PartitionKeyMismatch(format!(
-                                "PARTITION BY for column '{alias}' contains a non-column expression"
-                            )));
-                        }
-                    }
-                }
-                set
-            }
-            None => {
-                return refuse(PartitionKeyMismatch(format!(
-                    "column '{alias}' window has no PARTITION BY"
-                )));
-            }
-        };
-        match &shared_partition {
-            None => shared_partition = Some(partition_cols),
-            Some(existing) if existing == &partition_cols => {}
-            Some(_) => {
-                return refuse(PartitionKeyMismatch(format!(
-                    "column '{alias}' partitions by a different key set than the other \
-                     succession windows"
-                )));
-            }
-        }
-
-        let Some(order_by) = window.order_by() else {
-            return refuse(OrderNotMonotoneClock(format!(
-                "column '{alias}' window has no ORDER BY"
-            )));
-        };
-        let order_items: Vec<_> = order_by.items().collect();
-        if order_items.len() != 1 {
-            return refuse(OrderNotMonotoneClock(format!(
-                "column '{alias}' window ORDER BY carries more than one sort key"
-            )));
-        }
-        if order_items[0].direction() == Some(SortDirection::Desc) {
-            return refuse(OrderNotMonotoneClock(format!(
-                "column '{alias}' window orders descending"
-            )));
-        }
-        let Some(order_expr) = order_items[0].expression() else {
-            return refuse(OrderNotMonotoneClock(format!(
-                "column '{alias}' window ORDER BY has no expression"
-            )));
-        };
-        let order_text = order_expr.text().trim().to_string();
-        match &shared_order_text {
-            None => {
-                shared_order_text = Some(order_text);
-                shared_order_expr = Some(order_expr.clone());
-            }
-            Some(existing) if existing == &order_text => {}
-            Some(_) => {
-                return refuse(OrderNotMonotoneClock(format!(
-                    "column '{alias}' orders by a different column than the other succession \
-                     windows"
-                )));
-            }
-        }
-
-        if clock_col_name.is_none() {
-            let Some(clock_ref) = order_expr.as_column_ref() else {
-                return refuse(OrderNotMonotoneClock(
-                    "ORDER BY expression is not a bare column reference".into(),
-                ));
-            };
-            clock_col_name = Some(clock_ref.name().to_string());
-        }
-
-        if arg_col.name() != clock_col_name.as_deref().unwrap_or_default() {
-            return refuse(WindowFunctionNotLead(format!(
-                "{name}(...) for column '{alias}' does not reach over the clock column"
-            )));
-        }
-
-        if is_lead {
-            lead_cols.push(alias.clone());
-        } else {
-            lag_cols.push(alias.clone());
-        }
+    let first_shape = match window_shape(first_alias, first_call) {
+        Ok(shape) => shape,
+        Err(reason) => return refuse(reason),
+    };
+    let Some(clock_ref) = first_shape.order_expr.as_column_ref() else {
+        return refuse(OrderNotMonotoneClock(
+            "ORDER BY expression is not a bare column reference".into(),
+        ));
+    };
+    let clock_col = clock_ref.name().to_string();
+    let partition_cols = first_shape.partition_cols.clone();
+    let shared_order_text = first_shape.order_text.clone();
+    let shared_order_expr = first_shape.order_expr.clone();
+    if let Err(reason) = record_window(
+        first_alias,
+        &first_shape,
+        &clock_col,
+        &mut lead_cols,
+        &mut lag_cols,
+    ) {
+        return refuse(reason);
     }
 
-    let clock_col =
-        clock_col_name.expect("a non-empty window_items set always sets a clock column");
-    let shared_order_expr =
-        shared_order_expr.expect("a non-empty window_items set always sets an ORDER BY expression");
+    for (alias, _item_expr, window_call) in rest {
+        let shape = match window_shape(alias, window_call) {
+            Ok(shape) => shape,
+            Err(reason) => return refuse(reason),
+        };
+        if shape.partition_cols != partition_cols {
+            return refuse(PartitionKeyMismatch(format!(
+                "column '{alias}' partitions by a different key set than the other \
+                 succession windows"
+            )));
+        }
+        if shape.order_text != shared_order_text {
+            return refuse(OrderNotMonotoneClock(format!(
+                "column '{alias}' orders by a different column than the other succession \
+                 windows"
+            )));
+        }
+        if let Err(reason) = record_window(alias, &shape, &clock_col, &mut lead_cols, &mut lag_cols)
+        {
+            return refuse(reason);
+        }
+    }
 
     // Rule 3 (continued): the clock traces Traceable-with-is_strict to the
     // source's declared event_time_column, and both key and clock are
@@ -441,10 +360,7 @@ pub fn classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> 
             "clock column '{clock_col}' is nullable"
         )));
     }
-    let key_cols: Vec<String> = shared_partition
-        .expect("a non-empty window_items set always sets a partition key")
-        .into_iter()
-        .collect();
+    let key_cols: Vec<String> = partition_cols.into_iter().collect();
     for k in &key_cols {
         if !ctx.not_null_columns.contains(k) {
             return refuse(OrderNotMonotoneClock(format!(
@@ -648,6 +564,122 @@ fn find_window_calls_rec(node: &SyntaxNode, out: &mut Vec<WindowCall>) {
     for child in node.children() {
         find_window_calls_rec(&child, out);
     }
+}
+
+/// One window call's own shape (rule 2/3's per-item checks), before any
+/// comparison against sibling window items.
+struct WindowShape {
+    is_lead: bool,
+    partition_cols: BTreeSet<String>,
+    order_text: String,
+    order_expr: Expr,
+    arg_col_name: String,
+}
+
+fn window_shape(alias: &str, window_call: &WindowCall) -> Result<WindowShape, NotSuccessionReason> {
+    use NotSuccessionReason::*;
+    let func = &window_call.func;
+    let window = &window_call.window;
+    let name = func.name().unwrap_or_default().to_uppercase();
+    let is_lead = match name.as_str() {
+        "LEAD" => true,
+        "LAG" => false,
+        other => {
+            return Err(WindowFunctionNotLead(format!(
+                "'{other}' (column '{alias}') is not LEAD/LAG"
+            )));
+        }
+    };
+    let args = func.arguments();
+    if args.len() != 1 {
+        return Err(WindowFunctionNotLead(format!(
+            "{name}(...) for column '{alias}' carries an explicit offset/default argument \
+             — only the default single-argument form is admitted"
+        )));
+    }
+    let Some(arg_col) = args[0].as_column_ref() else {
+        return Err(WindowFunctionNotLead(format!(
+            "{name} argument for column '{alias}' is not a bare column reference"
+        )));
+    };
+
+    let partition_cols: BTreeSet<String> = match window.partition_by() {
+        Some(pb) => {
+            let mut set = BTreeSet::new();
+            for e in pb.expressions() {
+                match e.as_column_ref() {
+                    Some(c) => {
+                        set.insert(c.name().to_string());
+                    }
+                    None => {
+                        return Err(PartitionKeyMismatch(format!(
+                            "PARTITION BY for column '{alias}' contains a non-column expression"
+                        )));
+                    }
+                }
+            }
+            set
+        }
+        None => {
+            return Err(PartitionKeyMismatch(format!(
+                "column '{alias}' window has no PARTITION BY"
+            )));
+        }
+    };
+
+    let Some(order_by) = window.order_by() else {
+        return Err(OrderNotMonotoneClock(format!(
+            "column '{alias}' window has no ORDER BY"
+        )));
+    };
+    let order_items: Vec<_> = order_by.items().collect();
+    if order_items.len() != 1 {
+        return Err(OrderNotMonotoneClock(format!(
+            "column '{alias}' window ORDER BY carries more than one sort key"
+        )));
+    }
+    if order_items[0].direction() == Some(SortDirection::Desc) {
+        return Err(OrderNotMonotoneClock(format!(
+            "column '{alias}' window orders descending"
+        )));
+    }
+    let Some(order_expr) = order_items[0].expression() else {
+        return Err(OrderNotMonotoneClock(format!(
+            "column '{alias}' window ORDER BY has no expression"
+        )));
+    };
+    let order_text = order_expr.text().trim().to_string();
+
+    Ok(WindowShape {
+        is_lead,
+        partition_cols,
+        order_text,
+        order_expr,
+        arg_col_name: arg_col.name().to_string(),
+    })
+}
+
+/// Check `shape` reaches over `clock_col` and, if so, record its alias as a
+/// lead or lag column.
+fn record_window(
+    alias: &str,
+    shape: &WindowShape,
+    clock_col: &str,
+    lead_cols: &mut Vec<String>,
+    lag_cols: &mut Vec<String>,
+) -> Result<(), NotSuccessionReason> {
+    if shape.arg_col_name != clock_col {
+        let name = if shape.is_lead { "LEAD" } else { "LAG" };
+        return Err(NotSuccessionReason::WindowFunctionNotLead(format!(
+            "{name}(...) for column '{alias}' does not reach over the clock column"
+        )));
+    }
+    if shape.is_lead {
+        lead_cols.push(alias.to_string());
+    } else {
+        lag_cols.push(alias.to_string());
+    }
+    Ok(())
 }
 
 /// Validate a scalar expression wrapping exactly one succession window
@@ -1012,6 +1044,27 @@ mod tests {
                     FROM smelt.raw.customer_changes";
         assert_refused_as(&classify(sql, &fixture_ctx()), |r| {
             matches!(r, NotSuccessionReason::OrderNotMonotoneClock(_))
+        });
+    }
+
+    #[test]
+    fn refuses_order_by_expression_not_bare_column() {
+        let sql = "SELECT customer_id, changed_at, \
+                    LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at + 1) AS next_ts \
+                    FROM smelt.raw.customer_changes";
+        assert_refused_as(&classify(sql, &fixture_ctx()), |r| {
+            matches!(r, NotSuccessionReason::OrderNotMonotoneClock(_))
+        });
+    }
+
+    #[test]
+    fn refuses_two_window_calls_in_one_projection() {
+        let sql = "SELECT customer_id, changed_at, \
+                    COALESCE(LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at), \
+                    LAG(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at)) AS both \
+                    FROM smelt.raw.customer_changes";
+        assert_refused_as(&classify(sql, &fixture_ctx()), |r| {
+            matches!(r, NotSuccessionReason::WindowFunctionNotLead(_))
         });
     }
 
