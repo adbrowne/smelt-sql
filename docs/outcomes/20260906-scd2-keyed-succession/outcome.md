@@ -140,7 +140,7 @@ out-of-order and repeated windows, and the clamp.
 | 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | done |
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | done |
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
-| 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | planned |
+| 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | pending |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -275,6 +275,15 @@ out-of-order and repeated windows, and the clamp.
   rather than force a fix. Inserted row **2b** ahead of phase 3 to resolve it, since criterion 10
   needs every standing gate green and every later phase's `verify-phase.sh` run is otherwise still
   ambiguous for the same reason 2a itself was inserted. See `phases/02a-summary.md`.
+
+- 2026-09-06 (implement dispatch on row 2b): row 2b was marked `planned` in the phase table
+  (inserted that way by the phase-2a plan step's write, rather than via a normal PLAN-step
+  pass that writes `phases/02b-plan.md` and then flips the row) but no `phases/02b-plan.md`
+  exists. The IMPLEMENT step contract requires reading that file and must not author its own
+  plan — that authority belongs to the PLAN step (opus judgment, reads the prior summary,
+  reshapes remaining rows). Reset the row to `pending` so the next loop iteration runs a PLAN
+  step and produces the missing plan artifact before implementation proceeds. No code touched
+  this iteration.
 
 ## Blocked
 
