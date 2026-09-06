@@ -158,7 +158,7 @@ out-of-order and repeated windows, and the clamp.
 | 7b | Conformance leg matrix (the succession family's own legs): late splice, delete-then-later-insert, late insert before a folded delete, delete-only key, `LAG` variants under delete/splice, out-of-order and repeated window application, the pre-window clamp, an event-time-partitioned source, and an equal-`(k, t)` collision expecting a `SuccessionClockTie` rollback; plus the `gate_succession` helper widening each leg needs (delete-flagged and event-time-partitioned row/recipe constructors, a probe-failure drive helper) | done |
 | 7c | Re-run tolerance under deletes: fix the spurious `SuccessionClockTie` phase 7b found — `emit_succession_clock_tie_probe`'s tie signature compares a tombstone row's NULLed payload against the same event's real payload replayed from the source, so refolding any window containing a delete fails. Make a delete row's signature its flag alone (the spec's rule: "against a stored tombstone only the delete flag is comparable"), keeping delete-vs-insert and non-identical-insert collisions firing; restore phase 7b's weakened delete-flagged refold leg and add a rebuild-then-refold leg answering 7b's uninvestigated question about the `--full-refresh`/`repair` ledger path | done |
 | 7d | Conformance cross-suite widening: succession recipes added to `state_deletion.rs` (`.smelt/` deleted between runs), `repair.rs` (a full-refresh rebuild leg co-rebuilding ledger + presented table), and the contract-lattice `deferral` leg (a `contract:` field on `SuccessionRecipe` + its frontmatter rendering, driven against the existing `deferral` oracle transform); full seeded `maintenance_conformance` sample green | done |
-| 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | planned |
+| 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | blocked |
 | 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | pending |
 | 6b | Deferral frontier for succession (criterion 6 residue from phase 7d): the succession window-forward driver never writes `IntervalStore`, so `contract_probes::resolve_deferral_frontiers` always reads a `None` maintained frontier and `deferral::run_license` can never license a skip for a succession model. Record the driver's maintained arrival frontier after each successful fold (or teach the resolver a succession-aware frontier source), then re-add phase 7d's tests 6–7 as written in `phases/07d-plan.md` (the executed-skip `contract_points.rs` deferral leg) | pending |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
@@ -707,4 +707,53 @@ out-of-order and repeated windows, and the clamp.
 
 ## Blocked
 
-(none)
+- 2026-09-07 (implement phase 6): **blocked, no code changes kept.** Phase 6's
+  plan treats the append-only posture probe's live dispatch as already wired
+  for the succession grain ("Pre-verified (no implementation work)" — only the
+  count-gated fingerprint predicate and the harness's `probes: {cadence:
+  per_run}` rendering were checked). It is not: `crate::source_probes::
+  append_only_posture_probes`/`dispatch_and_record_append_only_postures` are
+  called from exactly two sites in `crates/smelt-runtime/src/execute/
+  project/mod.rs` (~3242/3260 and ~4124/4136), both inside the ordinary
+  `match plan.incremental` block for the ordinary keyed/partition grains. The
+  succession dispatch block (`resolved_grain().is_none()`, ~2280–2467) never
+  calls either function and hardcodes `probes: Vec::new()` on its
+  `ModelRunRecord` — so a succession model's declared `mutation_profile:
+  append_only` source posture is never verified at runtime today, in any
+  shape (late append OR genuine mutation).
+  Confirmed empirically before reverting: a test driving
+  `SuccessionRecipe::new_lead().with_delete_filter().with_source(
+  SourceRecipe::succession_events_event_time_partitioned())` through two
+  clean windows, then an in-place `UPDATE` of a closed partition's row, then
+  a re-drive of that same window, does NOT fail with
+  `SourceMutationProfileViolated` — it fails with `SuccessionClockTie`
+  instead (a coincidental side effect of the model's own event-delta
+  re-reading the mutated row at the same `(key, clock)` already present in
+  the presented table — a mutation NOT re-driving the same window, or a
+  mutation that doesn't also collide on `(key, clock)`, would pass silently
+  with no probe firing at all). So the late-append leg the plan asked for
+  would have been vacuously green (trivially true with the probe entirely
+  absent, not because the count-gate correctly classifies it), and the
+  paired mutation control could not be made to fail with the plan's own
+  named diagnostic without first wiring the dispatch in — real production
+  work the phase's own task list explicitly excluded ("do not re-implement
+  or re-test it at the unit level"). Forcing either test to pass by
+  asserting on the wrong error, or by adding the runtime wiring unplanned
+  and untested at the unit level, would both violate the plan's own
+  constraints. Reverted the test additions (`git checkout --` on
+  `crates/smelt-cli/tests/maintenance_conformance/probes.rs`); working tree
+  is clean at the pre-phase commit.
+  **Candidate options for the next planner:**
+  1. Insert a phase before 6 that wires `dispatch_and_record_append_only_postures`
+     into `execute_succession_maintenance`'s window-forward loop (persisting
+     the refreshed `SourcePostureStore` baseline the same way the ordinary
+     path does), with its own unit tests, THEN re-plan phase 6 as originally
+     written on top of it.
+  2. Re-scope phase 6 down to documenting the divergence in
+     `docs/specs/sources.md` §Known Divergences (append-only posture probe
+     is not yet dispatched for the succession grain) instead of claiming
+     conformance evidence that cannot exist yet, and push the wiring to a
+     later criterion-7 phase.
+  Either way this is criterion-7 work the outcome cannot claim done; leaving
+  it out is not an option per the outcome loop's own rule that success-
+  criterion work is never deferred out silently.
