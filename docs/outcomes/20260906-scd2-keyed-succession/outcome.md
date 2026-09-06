@@ -140,7 +140,7 @@ out-of-order and repeated windows, and the clamp.
 | 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | done |
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | done |
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
-| 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | pending |
+| 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | planned |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -284,6 +284,21 @@ out-of-order and repeated windows, and the clamp.
   reshapes remaining rows). Reset the row to `pending` so the next loop iteration runs a PLAN
   step and produces the missing plan artifact before implementation proceeds. No code touched
   this iteration.
+
+- 2026-09-06 (plan phase 2b): no reshape — the row was inserted by the phase-2a plan step and
+  the 2a summary raises nothing else that changes the remaining rows. Pinned before planning
+  that `.claude/scripts/hardening-budget.sh` is a **pure per-crate count ratchet** with no
+  "classified as infallible" allowlist, so "classify or convert" collapses to a single
+  admissible move here: eliminate all four sites so `smelt-logical` returns to exactly
+  `unwrap 1` / `expect 1` with the baseline file untouched (a `--update` would be the silent
+  lowering the fail-loud rule forbids). Planned as two structural rewrites in
+  `analysis/succession.rs` — destructure the single-window select-list arm instead of
+  asserting it, and replace the `Option`-accumulating shared-window loop with a
+  `split_first()` seed so the "loop ran at least once" invariant becomes a type-level fact —
+  plus two new unit tests covering the two refusal paths the rewrite touches
+  (non-bare-column `ORDER BY`, two window calls in one projection), which today have none.
+  The existing 39 succession tests are the behaviour-preservation oracle and must pass
+  unedited.
 
 ## Blocked
 
