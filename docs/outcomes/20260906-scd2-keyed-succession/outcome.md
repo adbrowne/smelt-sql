@@ -142,7 +142,8 @@ out-of-order and repeated windows, and the clamp.
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
 | 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | done |
 | 3 | Plan model and derivation: `Grain::Succession { key_cols, clock_col }`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + the full-refresh availability downgrade; the pure succession-plan/refusal deriver in `smelt-logical`; the `resolved_grain()`-is-`None` branch in `smelt-db`'s `derive_model_maintenance_plan` that classifies and derives the one succession cell; `frozen_horizon`/`retain_departed` refusals naming the succession grain, `deferral` admitted | done |
-| 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | pending |
+| 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | planned |
+| 3b | Gate hygiene: `join_context_reach::every_production_join_context_new_is_tagged` is red on `crates/smelt-logical/src/analysis/walk/tests.rs:472` — the walk-module split turned a `#[cfg(test)] mod tests;` body into a whole file the gate's `#[cfg(test)]`-span exclusion cannot see, so a test-only `JoinContext::new()` is scanned as production. Fix the gate's file-level exclusion (not the call site) and prove it still catches a real untagged production site | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg; the `maintenance_plan_conformance` SCD2 matrix cell updated with the emitter-backed CLAIMED entry | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
@@ -152,6 +153,26 @@ out-of-order and repeated windows, and the clamp.
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (plan phase 3a): one reshape — inserted row **3b**. The phase-3 summary
+  reported `join_context_reach::every_production_join_context_new_is_tagged` as
+  "pre-existing and unrelated"; re-running it confirms it is red, and reading the gate
+  shows *why*: it excludes `#[cfg(test)]`-annotated item **spans**, which the
+  `walk.rs` → `walk/{mod,tests}.rs` split (this outcome's own lineage, `5107c66b`)
+  turned into a whole file with no such attribute inside it. So it is this outcome's
+  residue, not unrelated drift, and criterion 10 requires every standing gate green —
+  not deferrable to "## Out of scope". Placed after 3a rather than before because the
+  failure is precisely named and cannot be confused with a succession-diagnostics
+  regression, so 3a's own `verify-phase.sh` reading stays unambiguous. The correct fix is
+  in the gate's file selection, not a `// join-context:` tag on a test helper — tagging
+  the call site would leave the blind spot open for the next module split.
+  Not reshaped: the large-file ratchet the phase-3 summary also flags stays with the
+  loop's dedicated shrink step (`docs/outcome_loop.md`), as for phases 2b and 3.
+  Phase 3a itself planned with no spec delta — `diagnostics.md` §"Succession grain"
+  already specifies all twelve codes — and with the classifier advisory carried on
+  `SuccessionDerivation` rather than on `MaintenancePlan`, so "the advisory never changes
+  admission" is a structural fact the plan type cannot express otherwise, backed by an
+  identical-plan test.
 
 - 2026-09-06 (scaffold): the branch already carries the full spec delta (six `spec(scd2)`
   commits), so phase 1 is a closure pass over what those commits left unspecified, not a
