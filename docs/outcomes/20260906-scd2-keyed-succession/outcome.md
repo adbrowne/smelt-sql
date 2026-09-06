@@ -154,13 +154,28 @@ out-of-order and repeated windows, and the clamp.
 | 5a | Emitter inputs, derived purely: widen `SuccessionVerdict::Recognized` to carry the classifier's own expression material (row-local `(alias, source expr)` projection, `{lead}`/`{lag}` templates per derived column, the delete-flag expression) and add the pure `SuccessionRecipe` assembler in `smelt-logical`'s maintenance layer that turns a verdict + presented column set into every argument the phase-4 emitters take; carry it out of `derive_model_maintenance_plan` on `MaintenancePlanResult` so no consumer re-parses model SQL | done |
 | 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | done |
 | 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | done |
-| 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
-| 7 | Testkit and conformance: arrival-partitioned `SourceRecipe`, `SuccessionRecipe` family with the model-SQL oracle and every listed leg; state-deletion and repair legs widened; seeded sample green | pending |
+| 7a | Testkit scaffolding: widen `SourceRecipe` to an arrival-partitioned, delete-flagged shape (`partition_column` ≠ `event_time_column`, `is_deleted NOT NULL`); add the typed `SuccessionRecipe` + its renderer (row-local projection, `LEAD`/`LAG`, optional clamp, optional `QUALIFY NOT <flag>`), the model-SQL full-refresh oracle, and the `families/gate_succession.rs` stage/insert/drive/assert quartet; one smoke conformance case (two windows, one splice) green end to end | planned |
+| 7b | Conformance legs: the full listed leg matrix (late splice, delete-then-insert, late insert before a folded delete, delete-only key, `LAG` variants, out-of-order and repeated windows, the pre-window clamp, an event-time-partitioned source, equal-`(k, t)` collision expecting `SuccessionClockTie`); succession recipes added to `state_deletion.rs`, `repair.rs`, and the contract-lattice `deferral` leg; seeded sample green | pending |
+| 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | pending |
+| 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | pending |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
 | 9 | Fixture and docs: example workspace `customer_changes`/`customer_history` with zero diagnostics; docs-site guide page and diagnostics reference | pending |
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (plan phase 7a): **reshape.** Two changes. (1) **Swapped 6 and 7, and split 7.**
+  Row 6's deliverable is a *succession-recipe* late-append leg in `probes.rs`, but no
+  `SuccessionRecipe` exists in `crates/smelt-maintenance-testkit` yet — that is row 7's work,
+  so 6 was unplannable as written. 7 is also far too large for one phase (a new source shape,
+  a new recipe + renderer + oracle, a family quartet, ~10 legs, and three widened suites), so
+  it splits into **7a** (scaffolding + one smoke case) and **7b** (the leg matrix and the
+  widened suites). New order: 7a, 7b, 6, 6a, 8–10. (2) **Added 6a** from phase 5c's summary:
+  `smelt rebuild <model> --event-time-start/-end` does not reach the succession full-ledger
+  rebuild because `ExecuteRequest` carries no rebuild signal (both `smelt run` and
+  `smelt rebuild` pass `full_refresh: false`). Criterion 5 names `smelt repair`/rebuild
+  explicitly, so this is not deferrable out of the outcome — it gets a row rather than a
+  divergence bullet.
 
 - 2026-09-07 (implement phase 5c): shipped `emit_succession_full_rebuild` +
   `rebuild_succession_state`, wired `project.rs`'s succession dispatch to branch on
