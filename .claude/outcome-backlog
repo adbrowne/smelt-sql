@@ -29,3 +29,17 @@ docs/outcomes/20260809-incremental-spec-redraft
 # hygiene loop branch's own edits to the section above. Depends only on
 # state-residency (done); promote by moving the line up once that branch lands.
 docs/outcomes/20260906-scd2-keyed-succession
+# --- BigQuery dogfood, loop-grindable half (docs/research/20260906-bigquery-dogfood.md) ---
+# The human-gated half (20260906-bigquery-dogfood-spine, 20260906-bigquery-unattended)
+# is deliberately NOT listed here: it provisions cloud infrastructure and runs live
+# BigQuery, neither of which a headless loop can do. The three below can be ground
+# unattended, but each depends on evidence the spine produces:
+#   bigquery-correctness      phase 1 is unconditional and runnable today; phase 2
+#                             onwards is rewritten from the spine's findings handoff.
+#   external-dag-steps        phase 1 is a spec decision; the rest waits on the spine's
+#   trimmed-history-sources   real loader and its retention bound.
+# A phase needing live BigQuery or the spine's handoff must emit <<PHASE_BLOCKED>>
+# rather than skip green.
+docs/outcomes/20260906-bigquery-correctness
+docs/outcomes/20260906-external-dag-steps
+docs/outcomes/20260906-trimmed-history-sources
