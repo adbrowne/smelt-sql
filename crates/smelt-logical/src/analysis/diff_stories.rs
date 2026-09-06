@@ -686,8 +686,8 @@ fn rule_reads(changes: &[Change], claimed: &mut [bool]) -> Vec<Story> {
             "Reads more per run"
         };
         let detail = format!(
-            "Each run now reads {new_w} of {} (was {old_w}).",
-            sources.join(", ")
+            "Each run now reads {new_w} from {} (was {old_w}).",
+            join_and(&sources)
         );
         stories.push(Story {
             kind: StoryKind::Reads,
@@ -1252,6 +1252,16 @@ pub fn severity_glyph(s: Severity) -> &'static str {
     }
 }
 
+/// Join names for prose: `a`, `a and b`, `a, b and c`
+/// (`docs/specs/property_diff.md` §"Stories", the `reads` row's `<sources>`).
+fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1371,7 +1381,7 @@ mod tests {
         assert_eq!(stories[1].severity, Severity::Cost);
         assert_eq!(
             stories[1].detail,
-            "Each run now reads 7 days either side of the run window of gold.identity_forward_only, silver.sessions (was 1 day either side of the run window)."
+            "Each run now reads 7 days either side of the run window from gold.identity_forward_only and silver.sessions (was 1 day either side of the run window)."
         );
         assert!(!stories[1].detail.contains("P7D"));
         assert_eq!(stories[2].severity, Severity::Info);
