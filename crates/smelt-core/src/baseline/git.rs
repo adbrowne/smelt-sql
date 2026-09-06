@@ -305,14 +305,32 @@ pub fn git_watch_paths(resolved: &ResolvedBaseline) -> Vec<PathBuf> {
 /// read even if it is committed" — `ingest_loaded_workspace` reads
 /// `.smelt/` from disk, so the baseline copy must not have one).
 ///
+/// Delegates to [`materialize_in`] with `std::env::temp_dir()` as the
+/// scratch parent.
+pub fn materialize(resolved: &ResolvedBaseline) -> Result<BaselineCheckout, BaselineError> {
+    materialize_in(resolved, &std::env::temp_dir())
+}
+
+/// [`materialize`] with an explicit scratch parent, rather than
+/// `std::env::temp_dir()`. Exists because a shared temp dir is not
+/// observable in isolation: any concurrent `materialize` call anywhere on
+/// the box — same process or another — creates and drops its own
+/// `smelt-baseline-*` entries there, so a test asserting scratch hygiene
+/// against the system temp dir races every other `materialize` caller in
+/// the workspace. Callers that need to *observe* scratch creation/cleanup
+/// (rather than just get a checkout) should pass a private directory.
+///
 /// The scratch [`tempfile::TempDir`] is created **first**, before any
 /// fallible step, so every error path below unwinds through its `Drop` and
 /// leaves no directory behind (module doc comment; tested by
 /// `checkout_scratch_is_deleted_when_materialization_fails`).
-pub fn materialize(resolved: &ResolvedBaseline) -> Result<BaselineCheckout, BaselineError> {
+pub fn materialize_in(
+    resolved: &ResolvedBaseline,
+    scratch_parent: &Path,
+) -> Result<BaselineCheckout, BaselineError> {
     let scratch = tempfile::Builder::new()
         .prefix("smelt-baseline-")
-        .tempdir()
+        .tempdir_in(scratch_parent)
         .map_err(BaselineError::Scratch)?;
 
     let mut args: Vec<String> = vec![

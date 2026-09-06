@@ -139,7 +139,8 @@ out-of-order and repeated windows, and the clamp.
 |---|-------|--------|
 | 1 | Spec closure delta: pin the residual unspecified surface only — the tombstone ledger as a per-model sibling table (name derived from the model, columns exactly `k ∪ {t}` in the model's own types, PK `(k, t)`, lifecycle tied to the presented table), the `smelt explain` succession rendering fields (text + `--json` keys), and the contract-lattice posture for a succession model (`frozen_horizon`/`retain_departed` refused by the existing rules naming the grain, `deferral` admitted with unchanged semantics) | done |
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | done |
-| 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | planned |
+| 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
+| 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | planned |
 | 3 | Plan and diagnostics: `Grain::Succession`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + availability downgrade; plan derivation in `smelt-db`; the eleven `DiagnosticCode` variants from the pure owner into `check_file_diagnostics`; `examples/broken` fixtures; `maintenance_plan_conformance` rows | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -255,6 +256,25 @@ out-of-order and repeated windows, and the clamp.
   delegating to it with `std::env::temp_dir()`) with the test asserting over a private
   directory. No spec delta: `property_diff.md` §"Baseline materialisation" describes the
   unwind-on-error behaviour, which is unchanged.
+
+- 2026-09-06 (phase 2a done): landed as planned, no reshape to phase 2a itself, but one row
+  inserted. `materialize_in(resolved, scratch_parent)` (`crates/smelt-core/src/baseline/git.rs`)
+  is the extracted seam; `materialize` delegates to it with `std::env::temp_dir()`; the flaky
+  test now asserts against a private `TempDir` and two new tests pin the seam's contract
+  (private-parent placement + the default-parent delegation). 20/20 green under the
+  concurrency-reproduction loop; full `smelt-core` suite green.
+  `bash .claude/scripts/verify-phase.sh` is still **not** green: the workspace `cargo test` leg
+  fails on `smelt-core`'s `hardening_budget::gate_detects_regression`, but not for the flake —
+  isolating each `analysis/` file's production `unwrap`/`expect` count shows all four new sites
+  (`unwrap` baseline 1→2, `expect` baseline 1→4) are in `crates/smelt-logical/src/analysis/
+  succession.rs`, landed by phase 2's classifier, not by anything in this phase's diff or by the
+  `analysis/mod.rs`/`walk.rs` split refactors (`a411f3f6`, `5107c66b`) that looked like the likelier
+  suspect. Confirmed by reverting this phase's diff via a temporary stash and re-running the gate
+  in isolation — still red on the unchanged tree. Out of phase 2a's scope (a different gate, a
+  different file, not the flake this phase targeted) per the plan's own instruction to record
+  rather than force a fix. Inserted row **2b** ahead of phase 3 to resolve it, since criterion 10
+  needs every standing gate green and every later phase's `verify-phase.sh` run is otherwise still
+  ambiguous for the same reason 2a itself was inserted. See `phases/02a-summary.md`.
 
 ## Blocked
 

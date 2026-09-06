@@ -39,6 +39,6 @@ mod git;
 
 pub use edited_set::{edited_set, EditedSet};
 pub use git::{
-    discover_repo_root, git_watch_paths, materialize, resolve_baseline, BaselineCheckout,
-    BaselineError, ResolvedAs, ResolvedBaseline,
+    discover_repo_root, git_watch_paths, materialize, materialize_in, resolve_baseline,
+    BaselineCheckout, BaselineError, ResolvedAs, ResolvedBaseline,
 };
