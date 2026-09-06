@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788675846032,
+  "lastUpdate": 1788675848884,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 10.452837,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "d263980ac54d9f0c240370241105e84bbdb95e2b",
+          "message": "property-diff: reads story names the window before its sources\n\n\"Each run now reads 7 days either side of the run window from a and b\"\ninstead of \"… of a, b\"; sources joined with \"and\".\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
+          "timestamp": "2026-09-06T16:18:14+10:00",
+          "tree_id": "2b57ff646d5b6a51a89d8930f6c63e2cd7a339d2",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/d263980ac54d9f0c240370241105e84bbdb95e2b"
+        },
+        "date": 1788675847824,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.97918067602126,
+            "unit": "MB/s"
           }
         ]
       }
