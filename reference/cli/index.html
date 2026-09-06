@@ -5534,27 +5534,36 @@ downgrade (a <code>SUM</code> folding through <code>KeyedFold</code> suddenly re
 upstream edit broke its row identity, say) gets caught before it ships, including on a model
 nobody touched directly — a shifted model whose own file was not edited is reported
 <code>(downstream of &lt;model&gt;)</code>, naming the nearest edited ancestor.</p>
+<p>A reviewer reads the <strong>stories</strong> first: a handful of severity-ranked sentences answering "is it
+still maintained incrementally?", "what does a run read now?", and "what can smelt no longer
+guarantee?" The raw per-dimension verdicts sit underneath, for cross-reference, and the report
+ends with a one-line <strong>headline</strong>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-53-1" name="__codelineno-53-1" href="#__codelineno-53-1"></a>$ smelt explain --diff
 <a id="__codelineno-53-2" name="__codelineno-53-2" href="#__codelineno-53-2"></a>
 <a id="__codelineno-53-3" name="__codelineno-53-3" href="#__codelineno-53-3"></a>property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
 <a id="__codelineno-53-4" name="__codelineno-53-4" href="#__codelineno-53-4"></a>
 <a id="__codelineno-53-5" name="__codelineno-53-5" href="#__codelineno-53-5"></a>  user_daily_spend  (edited)
-<a id="__codelineno-53-6" name="__codelineno-53-6" href="#__codelineno-53-6"></a>    ▼ cell_technique {total_amount}@NewData { source: &quot;raw.transactions&quot; }: KeyedFold → DeleteInsert
-<a id="__codelineno-53-7" name="__codelineno-53-7" href="#__codelineno-53-7"></a>
-<a id="__codelineno-53-8" name="__codelineno-53-8" href="#__codelineno-53-8"></a>  user_spend_running_total  (downstream of user_daily_spend)
-<a id="__codelineno-53-9" name="__codelineno-53-9" href="#__codelineno-53-9"></a>    ▼ cell_removed {running_total}@NewData { source: &quot;user_daily_spend&quot; }: {...} → null
-<a id="__codelineno-53-10" name="__codelineno-53-10" href="#__codelineno-53-10"></a>
-<a id="__codelineno-53-11" name="__codelineno-53-11" href="#__codelineno-53-11"></a>1 downgrades, 0 upgrades, 0 neutral.
+<a id="__codelineno-53-6" name="__codelineno-53-6" href="#__codelineno-53-6"></a>    [cost] Costlier maintenance: Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.
+<a id="__codelineno-53-7" name="__codelineno-53-7" href="#__codelineno-53-7"></a>    verdicts:
+<a id="__codelineno-53-8" name="__codelineno-53-8" href="#__codelineno-53-8"></a>      ▼ cell_technique {total_amount}@NewData { source: &quot;raw.transactions&quot; }: KeyedFold → DeleteInsert
+<a id="__codelineno-53-9" name="__codelineno-53-9" href="#__codelineno-53-9"></a>
+<a id="__codelineno-53-10" name="__codelineno-53-10" href="#__codelineno-53-10"></a>  user_spend_running_total  (downstream of user_daily_spend)
+<a id="__codelineno-53-11" name="__codelineno-53-11" href="#__codelineno-53-11"></a>    [cost] Maintenance route lost: {running_total} no longer has a maintenance route for changes from user_daily_spend.
+<a id="__codelineno-53-12" name="__codelineno-53-12" href="#__codelineno-53-12"></a>    verdicts:
+<a id="__codelineno-53-13" name="__codelineno-53-13" href="#__codelineno-53-13"></a>      ▼ cell_removed {running_total}@NewData { source: &quot;user_daily_spend&quot; }: {...} → null
+<a id="__codelineno-53-14" name="__codelineno-53-14" href="#__codelineno-53-14"></a>
+<a id="__codelineno-53-15" name="__codelineno-53-15" href="#__codelineno-53-15"></a>2 model(s) shifted · 2 read more per run
 </code></pre></div>
 <p><code>--json</code> emits the same diff as a JSON object with <code>baseline</code> (the resolved ref, its commit, and
 whether it was explicit or defaulted), <code>edited_files</code>, <code>summary</code> (downgrade/upgrade/neutral
-counts and the shifted-model count), and <code>models</code> (one entry per shifted model, each with a
-<code>cause</code> and its <code>changes</code>). See <code>docs/specs/property_diff.md</code> §Surface "JSON" for the full
-schema. <code>--markdown</code> emits a single GitHub-flavoured Markdown comment body instead, with a
-trailing <code>&lt;!-- smelt-property-diff --&gt;</code> marker — see <a href="../smelt-explain/#property-diff"><code>smelt explain</code> §Property
-diff</a> and <a href="../../guide/ci/">Continuous integration</a> for the
-documented job that posts it. <code>--select</code> narrows the <em>reported</em> set only — every model is still
-compared at both versions so attribution stays correct — and the summary counts follow the
+counts and the shifted-model count), <code>headline</code>, and <code>models</code> (one entry per shifted model, each
+with a <code>cause</code>, its <code>stories</code>, and its raw <code>changes</code>). See <code>docs/specs/property_diff.md</code> §Surface
+"JSON" for the full schema. <code>--markdown</code> emits a single GitHub-flavoured Markdown comment body
+instead — the headline in bold, one bullet per story, each model's verdicts collapsed under a
+<code>Verdict table</code> — with a trailing <code>&lt;!-- smelt-property-diff --&gt;</code> marker — see <a href="../smelt-explain/#property-diff"><code>smelt explain</code>
+§Property diff</a> and <a href="../../guide/ci/">Continuous integration</a> for
+the documented job that posts it. <code>--select</code> narrows the <em>reported</em> set only — every model is
+still compared at both versions so attribution stays correct — and the summary counts follow the
 reported set.</p>
 <p>Exit codes: <code>0</code> whenever the diff was computed (whether or not anything shifted); <code>1</code> only under
 <code>--fail-on</code>; <code>2</code> for an unresolvable baseline (not a git work tree, an unknown ref, or a ref with
