@@ -803,4 +803,69 @@ def unstable(project):
             "expected non-convergence error, got: {err_msg}"
         );
     }
+
+    /// Regression (#189): concurrent discovery must not leak one model file's
+    /// registrations into another's results.
+    ///
+    /// The embedded-PyO3 path mutates process-global interpreter state
+    /// (`smelt.core._registered_models`). Python releases the GIL during I/O,
+    /// so without a lock two concurrent `run_python_model_file` calls interleave
+    /// their clear/exec/collect sections and each can observe the other's models.
+    #[test]
+    fn concurrent_discovery_does_not_leak_models_across_files() {
+        const THREADS: usize = 8;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let tmp = tempfile::TempDir::new().unwrap();
+                    let project_dir = tmp.path();
+                    setup_sdk(project_dir);
+
+                    let models_dir = project_dir.join("models");
+                    std::fs::create_dir_all(&models_dir).unwrap();
+
+                    // A file the model reads, to force a GIL release inside the
+                    // critical section and widen the interleaving window.
+                    let marker = project_dir.join("marker.txt");
+                    std::fs::write(&marker, "ok").unwrap();
+
+                    let py_content = format!(
+                        r#"from smelt import model
+
+@model
+def model_{i}(project):
+    open(r"{marker}").read()
+    return "SELECT {i} AS v"
+"#,
+                        i = i,
+                        marker = marker.display()
+                    );
+                    let file = models_dir.join(format!("m{i}.py"));
+                    std::fs::write(&file, &py_content).unwrap();
+
+                    let python_files = vec![(file, vec![2u32], py_content)];
+                    let config = minimal_config();
+
+                    for _ in 0..5 {
+                        let models =
+                            discover_python_models(&python_files, &[], &config, project_dir, None)
+                                .unwrap_or_else(|e| panic!("thread {i} discovery failed: {e}"));
+
+                        assert_eq!(
+                            models.len(),
+                            1,
+                            "thread {i} must see only its own model, got {:?}",
+                            models.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
+                        );
+                        assert_eq!(models[0].name, format!("model_{i}"));
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("no thread may observe another's models");
+        }
+    }
 }

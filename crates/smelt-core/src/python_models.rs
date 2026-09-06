@@ -7,6 +7,51 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::path::Path;
+use std::sync::{Condvar, Mutex};
+
+/// Serialises the clear/exec/collect critical section of [`run_python_model_file`].
+///
+/// The embedded interpreter is process-global, and so is the registry the
+/// `@model` decorator writes to (`smelt.core._registered_models`). The GIL alone
+/// does **not** protect that section: CPython drops the GIL on every I/O call a
+/// model makes, so two concurrent `run_python_model_file` calls interleave —
+/// A clears, A execs, B clears (dropping A's registration and adding its own),
+/// then A iterates the registry and runs *B's* model. The observable symptoms
+/// are a model file returning another file's models, and an error attributed to
+/// one file carrying another file's traceback (issue #189).
+///
+/// Acquire this **with the GIL released** (see [`lock_registry`]): a thread that
+/// held the GIL while blocking here would deadlock against the lock holder
+/// waiting to re-acquire the GIL.
+static REGISTRY_HELD: Mutex<bool> = Mutex::new(false);
+static REGISTRY_CV: Condvar = Condvar::new();
+
+/// RAII release for the registry lock acquired by [`lock_registry`].
+struct RegistryGuard;
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        let mut held = REGISTRY_HELD.lock().unwrap_or_else(|e| e.into_inner());
+        *held = false;
+        REGISTRY_CV.notify_one();
+    }
+}
+
+/// Acquire [`REGISTRY_HELD`] with the GIL released.
+///
+/// A plain `MutexGuard` cannot cross `Python::detach` (it is not `Send`), so the
+/// wait is expressed as a condvar gate whose guard stays inside the closure and
+/// the ownership flag is handed back through the `RegistryGuard`.
+fn lock_registry(py: Python<'_>) -> RegistryGuard {
+    py.detach(|| {
+        let mut held = REGISTRY_HELD.lock().unwrap_or_else(|e| e.into_inner());
+        while *held {
+            held = REGISTRY_CV.wait(held).unwrap_or_else(|e| e.into_inner());
+        }
+        *held = true;
+    });
+    RegistryGuard
+}
 
 /// Output from a single Python model function executed via PyO3.
 #[derive(Debug, Clone)]
@@ -34,6 +79,10 @@ pub fn run_python_model_file(
     file_path: &Path,
     project_context_json: &str,
 ) -> PyResult<Vec<PythonModelOutput>> {
+    // Hold the registry lock for the whole clear/exec/collect section. Released
+    // GIL while blocking — see `REGISTRY_HELD`.
+    let _registry_guard = lock_registry(py);
+
     let sys = py.import("sys")?;
     let sys_path = sys.getattr("path")?;
 
