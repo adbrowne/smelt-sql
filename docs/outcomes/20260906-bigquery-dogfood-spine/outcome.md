@@ -25,12 +25,14 @@ live run surfaces are written down as a punch-list rather than fixed here.
    carrying **no** default table expiration, a budget alert, and a documented monthly cap.
    `docs/research/20260816-bigquery-backend.md`'s provisioning decisions are followed
    except where this outcome's decision log records a departure.
-2. **Reachable, deliberately.** `bq`/`gcloud` are usable from a session against the
-   dogfood project via ADC. This requires narrowing the checked-in `deny` list in
-   `.claude/settings.json` (deny beats allow, so `settings.local.json` cannot do it).
-   The narrowing keeps `smelt-bq-test-20260816`'s isolation intact: the
-   `scripts/bigquery-*.sh` denials and `Read(//home/andrew/.config/gcloud-smelt-bq/**)`
-   stay, and the commit carries a rationale note naming the risk accepted.
+2. **Reachable, and only here.** `bq`/`gcloud` are usable from a session against the
+   dogfood project via ADC impersonating a dogfood-scoped service account, so the
+   credential reaches this project and no other — demonstrated, not assumed: a call
+   against a different project of the human's is refused. This requires removing the
+   `gcloud`/`bq` entries from the checked-in `deny` list in `.claude/settings.json` (deny
+   beats allow, so `settings.local.json` cannot do it). `smelt-bq-test-20260816`'s
+   isolation is untouched: the `scripts/bigquery-*.sh` denials and
+   `Read(//home/andrew/.config/gcloud-smelt-bq/**)` stay.
 3. **Loader.** One scheduled query (or `bq query` step) populates `raw.github_events` from
    `githubarchive.day.*`: day-partitioned on `created_at`, projecting only the columns the
    spine consumes (`payload` pruned or narrowed), filtered to `MOD(repo.id, 1000) = 0`,
@@ -120,12 +122,29 @@ live run surfaces are written down as a punch-list rather than fixed here.
   (criterion 6) the least expensive way to find the class of defect the research doc says
   only live runs catch. It also gives `examples/github_activity/` real CI coverage, which
   the research doc anticipated.
-- 2026-09-06 (scaffold): **ADC, not the encrypted-key pattern.** The human chose plain ADC
-  scoped to the dogfood project over extending the existing non-ambient design. Consequence
-  discovered while scaffolding: `.claude/settings.json` hard-denies `Bash(bq *)` and
-  `Bash(gcloud *)`, and deny beats allow, so this cannot be done in `settings.local.json` —
-  phase 1 must narrow the checked-in list, which is why it is called out as its own task
-  with a rationale requirement rather than treated as configuration.
+- 2026-09-06 (human): **ADC by impersonation, one project.** The credential is ADC — not
+  the existing encrypted-key design — but obtained with
+  `--impersonate-service-account=smelt-dogfood@…` rather than as the human's own identity,
+  so it reaches the dogfood project and nothing else. No key material is minted or stored.
+  The service account holds `roles/bigquery.jobUser` plus `WRITER` on the one dataset,
+  deliberately not `roles/bigquery.user`: the test suites need dataset-creation because
+  they isolate each run in a fresh dataset, while this pipeline writes to one long-lived
+  dataset and never creates its own.
+- 2026-09-06 (human): **session access is deliberate; no command-scoping guard.** The four
+  blanket `Bash(gcloud *)` / `Bash(bq *)` denies in `.claude/settings.json` are removed
+  rather than replaced by a hook admitting only project-scoped invocations. Deny beats
+  allow, so the checked-in list had to change either way; the guard was dropped because
+  matching command text is not containment (a dynamically built string defeats it) and,
+  with the identity above, there is nothing left for it to protect. Isolation of
+  `smelt-bq-test-20260816` is unchanged and rests where it actually holds: its credentials
+  live in a separate `CLOUDSDK_CONFIG` that stays `Read`-denied, and its self-targeting
+  scripts stay denied.
+- 2026-09-06 (human): **the Cloud SDK is pinned in `mise.toml`**, as a task plus a computed
+  env var rather than a `[tools]` entry — every workflow runs `jdx/mise-action@v2` with no
+  arguments, so a `[tools]` pin would pull the ~200MB SDK into all seven CI jobs, none of
+  which use it. Mirrors the existing `setup-duckdb` precedent. (SDK 580.0.0 is already
+  present on the current box at `~/google-cloud-sdk/bin`, so this is a no-op here and
+  earns its keep on the next machine.)
 - 2026-09-06 (scaffold): unverified assumption for phase 2 — `githubarchive.day.*` is
   assumed to expose `repo.id` (INT64), `repo.name`, `actor.id`, `created_at` (TIMESTAMP),
   `id`, `type` and a large `payload` STRING. Phase 2 confirms against the live schema

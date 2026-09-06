@@ -13,17 +13,28 @@ from this worktree. The test project `smelt-bq-test-20260816` is left exactly as
 
 ## Two decisions to settle before executing
 
-**D1 — the identity behind ADC.** Plain `gcloud auth application-default login` is the
-recorded choice and is fine. One alternative, offered as a preference rather than a
-correction, since it costs nothing and keeps the blast radius to one project:
+**D1 — resolved 2026-09-06: impersonation, scoped to one project.**
 
 ```
 gcloud auth application-default login --impersonate-service-account=smelt-dogfood@<PROJECT>.iam.gserviceaccount.com
 ```
 
-Same ergonomics, no key material either way; the difference is only whether the effective
-identity reaches your other GCP projects. Take whichever you prefer and record which in
-the decision log so a later reader knows what the credential actually was.
+The effective identity is a service account holding roles only on the dogfood project, so
+nothing this pipeline (or a session driving it) does can reach your other GCP projects.
+ADC still works for every client library and no key material is minted or stored.
+
+Two consequences for the tasks below. The service account must exist and be granted
+**before** the ADC login, so task 4 splits in two. And impersonation needs
+`roles/iam.serviceAccountTokenCreator` for your human account on that service account —
+easy to miss, and its absence shows up as a confusing `PERMISSION_DENIED` at login rather
+than a message about impersonation.
+
+Grants, following `bigquery-provision.sh`'s reasoning: `roles/bigquery.jobUser` at project
+scope (run jobs), plus `WRITER` on the dogfood dataset specifically. Deliberately **not**
+`roles/bigquery.user` — the test project needs it because its suites create a dataset per
+run, whereas the dogfood pipeline writes to one long-lived dataset and never creates its
+own. Withholding `bigquery.datasets.create` costs nothing here and means an accident
+cannot scatter datasets across the project.
 
 **D2 — `bq` may be unusable anyway.** `scripts/bigquery-provision.sh` documents that `bq`
 imports pyOpenSSL and dies on some installs (`module 'lib' has no attribute 'GEN_EMAIL'`),
@@ -99,8 +110,13 @@ too; these are listed as yours because they spend money and create identities:
 3. Budget alert plus a documented monthly cap. `bigquery-provision.sh`'s
    `gcloud billing budgets create` invocation is the template; US$5 is the test project's
    figure and is almost certainly too low here — pick a real number and write down why.
-4. Per D1: run the ADC login, impersonating `smelt-dogfood@…` or not, as you prefer.
-5. Set the default / quota project so ordinary invocations need no flag.
+4. Create `smelt-dogfood@<PROJECT>.iam.gserviceaccount.com`; grant it
+   `roles/bigquery.jobUser` at project scope and `WRITER` on the dogfood dataset (the ACL
+   read-modify-write in `bigquery-provision.sh` is the template — `PATCH` replaces the
+   `access` array wholesale, so existing entries must be carried forward). Grant your own
+   account `roles/iam.serviceAccountTokenCreator` on it.
+5. Run the impersonating ADC login from D1, then set the default / quota project so
+   ordinary invocations need no flag.
 
 Claude, in the repo:
 
@@ -128,7 +144,11 @@ each observation is real rather than inferred from a create call having succeede
 - `bq version` runs. This is also D2's answer, whichever way it goes: a version string, or
   the pyOpenSSL import failure that sends the dogfood path to REST like every other script
   in this repo.
-- The dogfood dataset lists, under the credential D1 chose.
+- The dogfood dataset lists, under the impersonated credential.
+- The impersonation is real, not nominal: `gcloud auth application-default print-access-token`
+  resolves to the service account, and a call touching a **different** project of yours is
+  refused. An impersonated login that silently fell back to your own identity would pass
+  every other check on this list, so this is the one that proves D1 actually took effect.
 - The dataset's `defaultTableExpirationMs` is confirmed **absent**, read back from the API.
   This is the one detail whose silent failure destroys the pipeline's history a day later,
   and a successful create call is not evidence that it is unset.
@@ -151,6 +171,13 @@ holds: its credentials live in a separate CLOUDSDK_CONFIG that stays
 Read-denied, and its scripts stay denied. No command-text guard is added;
 matching command strings was never containment, and IAM is the real
 boundary.
+
+The credential is a dogfood-scoped service account reached by ADC
+impersonation, not an owner identity: the pipeline and any session driving
+it reach this project and nothing else. No key material is minted. The
+service account gets bigquery.jobUser plus WRITER on the one dataset —
+not bigquery.user, since unlike the test suites this pipeline never creates
+datasets of its own.
 
 The Cloud SDK is pinned via mise (task + env, not [tools], so the ~200MB
 download stays out of seven CI jobs that never use it), mirroring the
