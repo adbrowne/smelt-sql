@@ -94,7 +94,7 @@ crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-parser/src/printer.rs 1156
 crates/smelt-runtime/src/compile.rs 4015
 crates/smelt-runtime/src/cumulative.rs 2179
-crates/smelt-runtime/src/execute/project.rs 4944
+crates/smelt-runtime/src/execute/project/mod.rs 4691
 crates/smelt-runtime/src/maintenance_driver/tests.rs 1079
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
