@@ -320,6 +320,80 @@ pub fn emit_succession_patch(
     }
 }
 
+/// The full-rebuild statement group (`incremental_shapes.md` §"The
+/// tombstone ledger (hidden state)" — "Lifecycle"): `--full-refresh` and a
+/// `smelt rebuild` range alike re-derive the presented table AND the
+/// tombstone ledger from the whole source, in one transaction — the ledger
+/// is a pure function of the whole retained source, so there is no
+/// range-restricted form of it (see the spec paragraph this emitter
+/// implements). `model_select_sql` is the model's own compiled SELECT (the
+/// full-refresh oracle every other technique in this crate also uses for
+/// its bootstrap arm); the presented arm reuses [`emit_create_table_as`]'s
+/// spelling verbatim, so the caller is responsible for dropping any
+/// pre-existing presented table before running this group (idempotent DDL,
+/// not part of the transactional rebuild itself — mirroring
+/// `execute_succession_maintenance`'s own precedent of running idempotent
+/// DDL before its transactional write).
+///
+/// `delete_flag_expr` is `"FALSE"` when the model's grammar admits no
+/// delete filter, matching [`emit_succession_patch`]'s own default —
+/// callers resolve `recipe.delete_flag_expr.as_deref().unwrap_or("FALSE")`
+/// before calling, since this emitter (like
+/// [`emit_succession_ledger_rebuild_select`]) takes the resolved
+/// expression, not the `Option`.
+///
+/// # Panics
+/// Same DuckDb-only restriction as [`emit_succession_patch`].
+#[allow(clippy::too_many_arguments)]
+pub fn emit_succession_full_rebuild(
+    presented_table: &str,
+    model_select_sql: &str,
+    source_table: &str,
+    key_cols: &[String],
+    clock_col: &str,
+    pre_filter: Option<&str>,
+    delete_flag_expr: &str,
+    dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        matches!(dialect, MaintenanceDialect::DuckDb),
+        "emit_succession_full_rebuild: only MaintenanceDialect::DuckDb is supported today for \
+         {presented_table} — Spark/BigQuery take the recorded state downgrade rather than a \
+         half-right emitted rebuild"
+    );
+    let tombstone_table = tombstone_table_name(presented_table);
+    let keys = key_col_list(key_cols);
+
+    let presented_create = super::emit_create_table_as(presented_table, model_select_sql, dialect);
+    let ledger_delete = MaintenanceStatement::new(format!("DELETE FROM {tombstone_table}"));
+    let ledger_rebuild_select = emit_succession_ledger_rebuild_select(
+        source_table,
+        key_cols,
+        clock_col,
+        pre_filter,
+        delete_flag_expr,
+        None,
+    );
+    let ledger_insert = MaintenanceStatement::new(format!(
+        "INSERT INTO {tombstone_table} ({keys}, {clock_col}) {}",
+        ledger_rebuild_select.sql
+    ));
+
+    // `emit_create_table_as` always returns exactly one statement (its own
+    // doc comment); matching rather than `.expect`-ing keeps this crate's
+    // hardening-budget ratchet (`CLAUDE.md` §"Fail-loud discipline") from
+    // counting a site that can never actually fail.
+    let presented_stmt = match presented_create.statements.into_iter().next() {
+        Some(stmt) => stmt,
+        None => unreachable!("emit_create_table_as always returns exactly one statement"),
+    };
+
+    StatementGroup {
+        statements: vec![presented_stmt, ledger_delete, ledger_insert],
+        transactional: true,
+    }
+}
+
 /// The clock-tie probe (`incremental_shapes.md` §"Run shape and late
 /// events" — "Clock ties"): a read-only query the caller executes and
 /// inspects *before* running [`emit_succession_patch`], so a violation is
@@ -572,6 +646,63 @@ mod tests {
         assert!(stmt.sql.contains("violation_count"), "{}", stmt.sql);
         assert!(stmt.sql.contains("sample_keys"), "{}", stmt.sql);
         assert!(stmt.sql.contains("HAVING COUNT(DISTINCT"), "{}", stmt.sql);
+    }
+
+    #[test]
+    fn full_rebuild_group_is_transactional_and_replaces_the_ledger() {
+        let model_select_sql = "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER \
+                                 (PARTITION BY customer_id ORDER BY changed_at) AS valid_to FROM \
+                                 raw.customer_changes";
+        let group = emit_succession_full_rebuild(
+            "main.customer_history",
+            model_select_sql,
+            "raw.customer_changes",
+            &keys(),
+            "changed_at",
+            None,
+            "FALSE",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 3);
+        assert_eq!(
+            group.statements[0].sql,
+            format!("CREATE TABLE main.customer_history AS {model_select_sql}")
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            "DELETE FROM main.customer_history__tombstones"
+        );
+        let expected_select = emit_succession_ledger_rebuild_select(
+            "raw.customer_changes",
+            &keys(),
+            "changed_at",
+            None,
+            "FALSE",
+            None,
+        );
+        assert_eq!(
+            group.statements[2].sql,
+            format!(
+                "INSERT INTO main.customer_history__tombstones (customer_id, changed_at) {}",
+                expected_select.sql
+            )
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "only MaintenanceDialect::DuckDb is supported today")]
+    fn emit_succession_full_rebuild_refuses_non_duckdb_dialects() {
+        emit_succession_full_rebuild(
+            "main.customer_history",
+            "SELECT 1",
+            "raw.customer_changes",
+            &keys(),
+            "changed_at",
+            None,
+            "FALSE",
+            MaintenanceDialect::Spark,
+        );
     }
 
     #[test]

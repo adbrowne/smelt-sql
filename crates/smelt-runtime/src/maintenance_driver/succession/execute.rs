@@ -16,6 +16,46 @@ use crate::reporter::RunReporter;
 /// since that constant is private to the sibling `driver` module).
 const SUCCESSION_LEDGER_GROUP: &str = "{*}";
 
+/// Resolve the tombstone ledger's `key_cols ++ [clock_col]` typed columns
+/// from the presented table's own resolved output schema — shared by
+/// [`execute_succession_maintenance`] and [`rebuild_succession_state`],
+/// both of which need it to author the ledger's `CREATE TABLE IF NOT
+/// EXISTS`.
+fn resolve_ledger_column_types(
+    model_name: &str,
+    recipe: &smelt_logical::maintenance::succession::SuccessionRecipe,
+    columns: &[(String, DataType)],
+) -> Result<(Vec<(String, DataType)>, DataType)> {
+    let key_cols_typed: Vec<(String, DataType)> = recipe
+        .key_cols
+        .iter()
+        .map(|k| {
+            columns
+                .iter()
+                .find(|(name, _)| name == k)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "succession-patch: model '{model_name}' key column '{k}' has no \
+                         resolved output type — cannot build the tombstone ledger table"
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (_, clock_type) = columns
+        .iter()
+        .find(|(name, _)| name == &recipe.clock_col)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "succession-patch: model '{model_name}' clock column '{}' has no resolved \
+                 output type — cannot build the tombstone ledger table",
+                recipe.clock_col
+            )
+        })?;
+    Ok((key_cols_typed, clock_type))
+}
+
 /// Execute the window-forward succession-patch loop over `steps`: for each
 /// step, build the event-delta `SELECT` over the driving source's own
 /// arrival-partition window, run the clock-tie probe read-only (refusing
@@ -66,33 +106,7 @@ pub async fn execute_succession_maintenance(
     let dialect = smelt_backend::maintenance_dialect(backend.dialect());
     let recipe = &cell.recipe;
 
-    let key_cols_typed: Vec<(String, DataType)> = recipe
-        .key_cols
-        .iter()
-        .map(|k| {
-            columns
-                .iter()
-                .find(|(name, _)| name == k)
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "succession-patch: model '{model_name}' key column '{k}' has no \
-                         resolved output type — cannot build the tombstone ledger table"
-                    )
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let (_, clock_type) = columns
-        .iter()
-        .find(|(name, _)| name == &recipe.clock_col)
-        .cloned()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "succession-patch: model '{model_name}' clock column '{}' has no resolved \
-                 output type — cannot build the tombstone ledger table",
-                recipe.clock_col
-            )
-        })?;
+    let (key_cols_typed, clock_type) = resolve_ledger_column_types(model_name, recipe, columns)?;
     let tombstone_table =
         smelt_logical::maintenance::emit::tombstone_table_name(&cell.presented_table);
     let ledger_input = recipe
@@ -249,6 +263,103 @@ pub async fn execute_succession_maintenance(
 
         total_rows = backend.get_row_count(schema, table).await.unwrap_or(0);
     }
+
+    Ok(ExecutionResult {
+        model_name: model_name.to_string(),
+        duration: start.elapsed(),
+        row_count: total_rows,
+        preview: None,
+    })
+}
+
+/// `--full-refresh` and a `smelt rebuild` range alike (phase 5c,
+/// `docs/outcomes/20260906-scd2-keyed-succession/phases/05c-plan.md`):
+/// re-derive the presented table AND the tombstone ledger from the whole
+/// source, in one transaction (`docs/specs/incremental_shapes.md` §"The
+/// tombstone ledger (hidden state)" — "Lifecycle"). `compiled_sql` is the
+/// model's own compiled SELECT (the full-refresh oracle), already resolved
+/// against the physical source table the same way `plan.sql` is for every
+/// other full-refresh path in this crate.
+///
+/// The presented table is dropped first (idempotent, non-transactional —
+/// mirroring `execute_succession_maintenance`'s own precedent of running
+/// idempotent DDL ahead of its transactional write), so
+/// `emit_succession_full_rebuild`'s `CREATE TABLE … AS` arm never races a
+/// pre-existing table. Every emitted statement is reported via
+/// `reporter.maintenance_statements` before it runs, same as the patch
+/// loop, so the statement-parity leg (phase 5c test 8) has a record to
+/// check against.
+#[allow(clippy::too_many_arguments)]
+pub async fn rebuild_succession_state(
+    backend: &dyn Backend,
+    model_name: &str,
+    schema: &str,
+    table: &str,
+    cell: &SuccessionCell,
+    columns: &[(String, DataType)],
+    compiled_sql: &str,
+    retry: &crate::execute::RetryPolicy<'_>,
+    reporter: &dyn RunReporter,
+    run_id: &str,
+) -> Result<ExecutionResult> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        bail!(
+            "{}",
+            BackendError::unsupported(
+                backend.dialect().name(),
+                "succession-patch technique (window-forward driver)",
+            )
+        );
+    }
+    let dialect = smelt_backend::maintenance_dialect(backend.dialect());
+    let recipe = &cell.recipe;
+
+    let (key_cols_typed, clock_type) = resolve_ledger_column_types(model_name, recipe, columns)?;
+    let tombstone_table =
+        smelt_logical::maintenance::emit::tombstone_table_name(&cell.presented_table);
+
+    let start = Instant::now();
+
+    // Idempotent DDL, non-transactional: drop any pre-existing presented
+    // table (a fresh model has none yet) and ensure the tombstone table
+    // exists, before the transactional rebuild group below.
+    backend
+        .drop_table_if_exists(schema, table)
+        .await
+        .map_err(|e| anyhow::anyhow!("succession full-rebuild: failed to drop '{table}': {e}"))?;
+    let ensure_sqls = vec![ddl_duckdb::generate_tombstone_table_ddl(
+        &tombstone_table,
+        &key_cols_typed,
+        &recipe.clock_col,
+        &clock_type,
+    )];
+
+    let delete_expr = recipe.delete_flag_expr.as_deref().unwrap_or("FALSE");
+    let group = smelt_logical::maintenance::emit::emit_succession_full_rebuild(
+        &cell.presented_table,
+        compiled_sql,
+        &cell.source_table,
+        &recipe.key_cols,
+        &recipe.clock_col,
+        recipe.pre_filter.as_deref(),
+        delete_expr,
+        dialect,
+    );
+    reporter.maintenance_statements(run_id, model_name, None, &group);
+
+    crate::execute::retry_backend_call(retry, || {
+        backend.execute_write_with_bookkeeping(&ensure_sqls, &[], &group)
+    })
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to execute succession full-rebuild for model '{}': {}",
+            model_name,
+            e
+        )
+    })?;
+
+    let total_rows = backend.get_row_count(schema, table).await.unwrap_or(0);
 
     Ok(ExecutionResult {
         model_name: model_name.to_string(),

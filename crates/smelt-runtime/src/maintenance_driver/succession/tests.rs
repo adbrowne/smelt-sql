@@ -18,7 +18,10 @@ use smelt_logical::maintenance::availability::StateAvailability;
 use smelt_logical::maintenance::succession::SuccessionRecipe;
 use smelt_types::DataType;
 
-use super::{execute_succession_maintenance, resolve_live_succession_cell, SuccessionCell};
+use super::{
+    execute_succession_maintenance, rebuild_succession_state, resolve_live_succession_cell,
+    SuccessionCell,
+};
 use crate::maintenance_driver::driving_steps;
 
 const NO_OP_REPORTER: crate::reporter::NoOpReporter = crate::reporter::NoOpReporter;
@@ -178,6 +181,46 @@ async fn run_steps(
 
 fn day(s: &str, e: &str) -> Vec<crate::maintenance_driver::MaintenanceStep> {
     driving_steps(s, e, &Granularity::Day).expect("driving_steps")
+}
+
+/// The model's own compiled full-refresh oracle for [`recipe(true)`] —
+/// `QUALIFY NOT is_deleted` excludes delete-flagged rows from the presented
+/// arm, matching `crates/smelt-logical/tests/succession_emit.rs`'s
+/// `oracle_sql(true)`.
+const REBUILD_MODEL_SQL: &str = "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER \
+     (PARTITION BY customer_id ORDER BY changed_at) AS valid_to FROM main.raw_customer_changes \
+     QUALIFY NOT is_deleted";
+
+async fn run_rebuild(
+    db_path: &Path,
+    model_select_sql: &str,
+    cell: &SuccessionCell,
+) -> anyhow::Result<()> {
+    let backend = open_backend(db_path).await;
+    rebuild_succession_state(
+        &backend,
+        "customer_history",
+        "main",
+        "customer_history",
+        cell,
+        &presented_columns(),
+        model_select_sql,
+        &no_retry_policy(),
+        &NO_OP_REPORTER,
+        "run-rebuild",
+    )
+    .await?;
+    Ok(())
+}
+
+fn table_exists(conn: &duckdb::Connection, schema: &str, table: &str) -> bool {
+    row_count(
+        conn,
+        &format!(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = '{schema}' AND \
+             table_name = '{table}'"
+        ),
+    ) > 0
 }
 
 /// Test 1: `first_window_bootstraps_shell_then_patches` — an empty presented
@@ -568,6 +611,209 @@ async fn frontier_record_is_written_per_window() {
         "SELECT * FROM main._smelt_ledger WHERE model_name = 'customer_history'",
     );
     assert_eq!(ledger_rows, 2, "one ledger row per applied window");
+}
+
+/// Test (phase 5c, `docs/outcomes/20260906-scd2-keyed-succession/phases/
+/// 05c-plan.md`) 3: `full_refresh_rebuilds_presented_and_ledger_from_source`
+/// — after two patched windows, a full-rebuild call
+/// ([`rebuild_succession_state`]) leaves both the presented table and the
+/// tombstone ledger equal to their whole-source definitions.
+#[tokio::test]
+async fn full_refresh_rebuilds_presented_and_ledger_from_source() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open");
+        stage_source(&conn);
+        insert_event(&conn, 1, "2026-01-01 08:00:00", "2026-01-01", "gold", false);
+        insert_event(
+            &conn,
+            1,
+            "2026-01-02 08:00:00",
+            "2026-01-02",
+            "silver",
+            true,
+        );
+    }
+    run_steps(
+        &db_path,
+        &day("2026-01-01", "2026-01-03"),
+        &cell(recipe(true)),
+    )
+    .await
+    .expect("bootstrap run succeeds");
+
+    run_rebuild(&db_path, REBUILD_MODEL_SQL, &cell(recipe(true)))
+        .await
+        .expect("full rebuild succeeds");
+
+    let conn = duckdb::Connection::open(&db_path).expect("reopen");
+    assert_eq!(
+        row_count(
+            &conn,
+            "(SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history) EXCEPT \
+             ALL (SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER (PARTITION BY \
+             customer_id ORDER BY changed_at) AS valid_to FROM main.raw_customer_changes \
+             QUALIFY NOT is_deleted)"
+        ),
+        0,
+        "the rebuilt presented table must match the model SQL's own full-refresh oracle"
+    );
+    assert_eq!(
+        row_count(
+            &conn,
+            "(SELECT customer_id, changed_at FROM main.customer_history__tombstones) EXCEPT ALL \
+             (SELECT customer_id, changed_at FROM main.raw_customer_changes WHERE is_deleted)"
+        ),
+        0,
+        "the rebuilt ledger must match the delete-flagged rows of the whole source"
+    );
+    assert_eq!(
+        row_count(
+            &conn,
+            "(SELECT customer_id, changed_at FROM main.raw_customer_changes WHERE is_deleted) \
+             EXCEPT ALL (SELECT customer_id, changed_at FROM \
+             main.customer_history__tombstones)"
+        ),
+        0
+    );
+}
+
+/// Test 4: `full_refresh_drops_a_tombstone_whose_source_row_vanished` — a
+/// stale ledger row with no matching delete-flagged source row (seeded by
+/// hand, simulating ledger drift a patch loop would never itself produce)
+/// does not survive a full rebuild: the ledger arm is `DELETE` then
+/// `INSERT ... SELECT`, never an append onto whatever the ledger already
+/// held.
+#[tokio::test]
+async fn full_refresh_drops_a_tombstone_whose_source_row_vanished() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open");
+        stage_source(&conn);
+        insert_event(&conn, 1, "2026-01-01 08:00:00", "2026-01-01", "gold", false);
+    }
+    run_steps(
+        &db_path,
+        &day("2026-01-01", "2026-01-02"),
+        &cell(recipe(true)),
+    )
+    .await
+    .expect("bootstrap run succeeds");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("reopen");
+        conn.execute_batch(
+            "INSERT INTO main.customer_history__tombstones (customer_id, changed_at) VALUES \
+             (999, TIMESTAMP '2020-01-01 00:00:00')",
+        )
+        .expect("seed a stale tombstone with no matching source row");
+    }
+
+    run_rebuild(&db_path, REBUILD_MODEL_SQL, &cell(recipe(true)))
+        .await
+        .expect("full rebuild succeeds");
+
+    let conn = duckdb::Connection::open(&db_path).expect("reopen");
+    assert_eq!(
+        row_count(
+            &conn,
+            "SELECT * FROM main.customer_history__tombstones WHERE customer_id = 999"
+        ),
+        0,
+        "a stale tombstone with no matching delete-flagged source row must not survive a full \
+         rebuild"
+    );
+}
+
+/// Test 5: `failed_ledger_insert_rolls_back_the_presented_rebuild` — a
+/// tombstone table pre-created with a `CHECK` constraint the ledger
+/// rebuild's own `INSERT` violates fails the whole group; the presented
+/// table's `CREATE TABLE ... AS`, sharing the same transaction, rolls back
+/// too and never exists.
+#[tokio::test]
+async fn failed_ledger_insert_rolls_back_the_presented_rebuild() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open");
+        stage_source(&conn);
+        insert_event(&conn, 1, "2026-01-01 08:00:00", "2026-01-01", "gold", true);
+        // `generate_tombstone_table_ddl` is `CREATE TABLE IF NOT EXISTS`, so
+        // pre-creating the table here with a constraint the rebuild's own
+        // INSERT violates survives the driver's own idempotent ensure-DDL
+        // step untouched.
+        conn.execute_batch(
+            "CREATE TABLE main.customer_history__tombstones (customer_id INTEGER CHECK \
+             (customer_id < 0), changed_at TIMESTAMP)",
+        )
+        .expect("seed a constrained tombstone table");
+    }
+
+    let err = run_rebuild(&db_path, REBUILD_MODEL_SQL, &cell(recipe(true)))
+        .await
+        .expect_err("a ledger INSERT violating its own CHECK constraint must fail");
+    assert!(
+        err.to_string()
+            .contains("Failed to execute succession full-rebuild"),
+        "{err}"
+    );
+
+    let conn = duckdb::Connection::open(&db_path).expect("reopen");
+    assert!(
+        !table_exists(&conn, "main", "customer_history"),
+        "the presented table's CREATE TABLE AS shares a transaction with the failing ledger \
+         INSERT and must roll back with it"
+    );
+}
+
+/// Test 6: `range_rebuild_re_derives_the_whole_ledger` — a `smelt
+/// rebuild`-shaped call (the compiled model SQL passed unscoped, as
+/// `project.rs` would for a range rebuild once wired — see that file's own
+/// doc comment on the current gap) ends with the ledger equal to the
+/// whole-source rebuild `SELECT`, proving [`rebuild_succession_state`]
+/// itself has no notion of a "range" — it is always a whole-source
+/// re-derivation regardless of what window a caller happens to pass.
+#[tokio::test]
+async fn range_rebuild_re_derives_the_whole_ledger() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open");
+        stage_source(&conn);
+        insert_event(&conn, 1, "2026-01-01 08:00:00", "2026-01-01", "gold", false);
+        insert_event(
+            &conn,
+            1,
+            "2026-01-02 08:00:00",
+            "2026-01-02",
+            "silver",
+            true,
+        );
+    }
+    run_steps(
+        &db_path,
+        &day("2026-01-01", "2026-01-03"),
+        &cell(recipe(true)),
+    )
+    .await
+    .expect("bootstrap run succeeds");
+
+    run_rebuild(&db_path, REBUILD_MODEL_SQL, &cell(recipe(true)))
+        .await
+        .expect("range rebuild succeeds");
+
+    let conn = duckdb::Connection::open(&db_path).expect("reopen");
+    assert_eq!(
+        row_count(
+            &conn,
+            "(SELECT customer_id, changed_at FROM main.customer_history__tombstones) EXCEPT ALL \
+             (SELECT customer_id, changed_at FROM main.raw_customer_changes WHERE is_deleted)"
+        ),
+        0,
+        "the ledger must equal the whole source's delete-flagged rows, not a range-restricted \
+         subset"
+    );
 }
 
 fn succession_source_info() -> SourceInfo {

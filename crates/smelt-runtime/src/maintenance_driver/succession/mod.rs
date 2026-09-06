@@ -19,7 +19,7 @@ use smelt_logical::maintenance::succession::SuccessionRecipe;
 use smelt_logical::maintenance::{SourceFacts, Technique};
 
 mod execute;
-pub use execute::execute_succession_maintenance;
+pub use execute::{execute_succession_maintenance, rebuild_succession_state};
 
 #[cfg(test)]
 mod tests;

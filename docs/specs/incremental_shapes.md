@@ -1124,17 +1124,20 @@ table is therefore exactly the oracle's output for every reader, inside or outsi
 **Lifecycle.** The ledger is always a pure function of the processed input: its contents are
 exactly `SELECT k, t FROM <source> WHERE <pre-filter> AND <delete flag>` over every window
 ever folded. Every path that rebuilds presented state rebuilds the ledger from that
-definition, in the same transaction: a `--full-refresh` rebuilds both from the whole source;
-`smelt repair` over a range re-derives the ledger rows whose run-axis partition lies in that
-range alongside the presented rows; a definition delta that touches the key, the clock, the
-delete flag, or the pre-window filter changes what the ledger *is* and is a skeleton change —
-a new relation, ledger included (`definition_deltas.md` §"Skeleton changes are a new
-relation"). A definition delta that touches only row-local payload columns leaves the ledger
-untouched. The ledger-rebuild `SELECT` is the third emitter output of the succession-patch
-technique (`model_transforms.md`), never authored by a backend. Ledger size is proportional
-to the number of delete events ever folded and is never compacted: a tombstone stays
-load-bearing for as long as a later-arriving event could splice next to it, which under the
-default contract point is forever.
+definition, in the same transaction: a `--full-refresh` rebuilds both from the whole source,
+and a range rebuild (`smelt rebuild`) re-derives the ledger **in full** from the whole
+source too, in the same transaction as that range's presented rebuild — the ledger is a pure
+function of the whole (`append_only`, retained) source, so a whole-source re-derive is the
+same relation a range-restricted one would be, and is the only form the ledger's `(k, t)`
+physical shape admits (it carries no run-axis column to restrict by). A definition delta that
+touches the key, the clock, the delete flag, or the pre-window filter changes what the ledger
+*is* and is a skeleton change — a new relation, ledger included (`definition_deltas.md`
+§"Skeleton changes are a new relation"). A definition delta that touches only row-local
+payload columns leaves the ledger untouched. The ledger-rebuild `SELECT` is the third emitter
+output of the succession-patch technique (`model_transforms.md`), never authored by a
+backend. Ledger size is proportional to the number of delete events ever folded and is never
+compacted: a tombstone stays load-bearing for as long as a later-arriving event could splice
+next to it, which under the default contract point is forever.
 
 **Physical shape.** The ledger is a **per-model sibling table**, never the shared
 `_smelt_ledger`: the neighbour lookup runs `LEAD`/`LAG` over the union of presented rows and
@@ -1147,7 +1150,7 @@ columns. Its columns are **exactly** `k ∪ {t}` — the classifier verdict's `k
 `clock_col`, in that order, each in the model's own inferred type, each `NOT NULL` — with primary
 key `(k, t)`; no payload, no delete flag (every row is a delete by construction), and no
 run-metadata column. Its lifecycle is tied to the presented table: created with it, dropped with
-it, rebuilt in the same transaction on `--full-refresh` and `smelt repair`, and replaced wholesale
+it, rebuilt in the same transaction on `--full-refresh` and `smelt rebuild`, and replaced wholesale
 by a skeleton change, per the Lifecycle paragraph above.
 
 #### The maintenance theorem (bounded footprint)
@@ -1301,7 +1304,7 @@ events the delta presents. Under arrival partitioning that is every event, howev
 clock value, in the open partition; under event-time partitioning a late event arrives as an
 observed delta on a closed partition and that window is re-presented. Either way, presenting
 an event is always safe and always cheap, and a window may be re-presented — by the probe's
-late-arrival classification, a re-run, an explicit `--landed` range, or `smelt repair` —
+late-arrival classification, a re-run, an explicit `--landed` range, or `smelt rebuild` —
 without refusal.
 
 **Clock ties.** The derived identity `(k, t)` requires that no two distinct events share a key

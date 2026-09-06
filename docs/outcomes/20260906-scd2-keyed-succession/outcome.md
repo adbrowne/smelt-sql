@@ -153,7 +153,7 @@ out-of-order and repeated windows, and the clamp.
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; the `statement_parity` structural no-authoring leg widened to the succession shapes; the `maintenance_plan_conformance` SCD2 **append-only** matrix cell inhabited with the emitter-backed CLAIMED entry (columns 2/3 stay known gaps — both are out of this grain) | done |
 | 5a | Emitter inputs, derived purely: widen `SuccessionVerdict::Recognized` to carry the classifier's own expression material (row-local `(alias, source expr)` projection, `{lead}`/`{lag}` templates per derived column, the delete-flag expression) and add the pure `SuccessionRecipe` assembler in `smelt-logical`'s maintenance layer that turns a verdict + presented column set into every argument the phase-4 emitters take; carry it out of `derive_model_maintenance_plan` on `MaintenancePlanResult` so no consumer re-parses model SQL | done |
 | 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | done |
-| 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | planned |
+| 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | done |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
 | 7 | Testkit and conformance: arrival-partitioned `SourceRecipe`, `SuccessionRecipe` family with the model-SQL oracle and every listed leg; state-deletion and repair legs widened; seeded sample green | pending |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
@@ -161,6 +161,15 @@ out-of-order and repeated windows, and the clamp.
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (implement phase 5c): shipped `emit_succession_full_rebuild` +
+  `rebuild_succession_state`, wired `project.rs`'s succession dispatch to branch on
+  `request.full_refresh || force_full_refresh`, and added the `statement_parity` succession
+  family (3 tests). Did NOT wire `smelt rebuild` itself to the full-ledger rebuild —
+  `ExecuteRequest` has no field distinguishing a rebuild call from an ordinary run over the
+  same window (`smelt rebuild` always passes `full_refresh: false`), and the plan's own task 5
+  sanctioned this fallback. Left as a named follow-up in the phase summary rather than adding
+  a new `ExecuteRequest` field speculatively.
 
 - 2026-09-07 (plan phase 5c): **no phase-table reshape** — 5b's summary named 5c as next with
   no blocking surprises, and the pre-scan matched the table. One **spec delta** the phase

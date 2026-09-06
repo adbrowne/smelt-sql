@@ -18,8 +18,8 @@ use smelt_logical::analysis::input_delta::MutationProfile;
 use smelt_logical::analysis::succession::{classify_keyed_succession, SuccessionContext};
 use smelt_logical::analysis::walk::{QueryNode, QueryTree};
 use smelt_logical::maintenance::emit::{
-    emit_succession_clock_tie_probe, emit_succession_event_delta, emit_succession_patch,
-    DerivedColumn, MaintenanceDialect, StatementGroup,
+    emit_succession_clock_tie_probe, emit_succession_event_delta, emit_succession_full_rebuild,
+    emit_succession_patch, DerivedColumn, MaintenanceDialect, StatementGroup,
 };
 use smelt_logical::maintenance::succession::SuccessionRecipe;
 
@@ -573,5 +573,78 @@ fn recipe_feeds_emitters_end_to_end() {
             model_sql,
         ),
         "the recipe-driven patch must match the model's own LEAD SQL at full refresh"
+    );
+}
+
+/// Test 2 (`docs/outcomes/20260906-scd2-keyed-succession/phases/
+/// 05c-plan.md`): `emit_succession_full_rebuild` executed against a real
+/// DuckDB after two ordinary patched windows (one of which tombstones a
+/// row) reproduces both relations from scratch — the presented table
+/// matches the model SQL's own full-refresh oracle, and the tombstone
+/// ledger equals the delete-flagged rows of the whole source, proving the
+/// rebuild is a genuine re-derivation and not an incremental continuation
+/// of whatever the patch loop left behind.
+#[test]
+fn full_rebuild_executes_against_duckdb_and_matches_the_oracle() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, true);
+    insert_events_with_delete(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold", false),
+            (1, "2026-01-02 00:00:00", "silver", true),
+        ],
+    );
+    let (lead, lag) = lead_only();
+    apply_window(
+        &conn,
+        "changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-02 00:00:00')",
+        &lead,
+        &lag,
+        Some("is_deleted"),
+    );
+    insert_events_with_delete(&conn, &[(1, "2026-01-03 00:00:00", "platinum", false)]);
+    apply_window(
+        &conn,
+        "changed_at = TIMESTAMP '2026-01-03 00:00:00'",
+        &lead,
+        &lag,
+        Some("is_deleted"),
+    );
+
+    // The runtime driver drops the presented table as idempotent DDL before
+    // the transactional rebuild group (`execute_succession_maintenance`'s
+    // own precedent of idempotent DDL preceding a transactional write) —
+    // mirrored by hand here since this file drives the emitter directly.
+    conn.execute_batch(&format!("DROP TABLE {PRESENTED}"))
+        .expect("drop presented table");
+
+    let group = emit_succession_full_rebuild(
+        PRESENTED,
+        &oracle_sql(true),
+        SOURCE,
+        &["customer_id".to_string()],
+        "changed_at",
+        None,
+        "is_deleted",
+        MaintenanceDialect::DuckDb,
+    );
+    batch_group(&conn, &group);
+
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            &oracle_sql(true),
+        ),
+        "the full rebuild must match the model SQL's own full-refresh oracle"
+    );
+    assert!(
+        multiset_equal(
+            &conn,
+            &format!("SELECT customer_id, changed_at FROM {TOMBSTONES}"),
+            &format!("SELECT customer_id, changed_at FROM {SOURCE} WHERE is_deleted"),
+        ),
+        "the rebuilt ledger must equal the delete-flagged rows of the whole source"
     );
 }

@@ -9,9 +9,12 @@
 //! Covers the region `DELETE`+`INSERT` family (`IncrementalStrategy::
 //! DeleteInsert`), the keyed-fold family (`refresh: keyed`), the
 //! column-scoped `MERGE` family (`Technique::ColumnScopedMerge`) —
-//! `docs/plans/20260710-emit-unification.md` Phases 1–3 — and the repair
+//! `docs/plans/20260710-emit-unification.md` Phases 1–3 — the repair
 //! family's per-group recompute (`Technique::PerGroupRecompute`,
-//! `docs/specs/incremental_models.md` §"The repair family").
+//! `docs/specs/incremental_models.md` §"The repair family"), and the
+//! succession-patch family (`Technique::SuccessionPatch`) — both the
+//! window-forward patch loop and its `--full-refresh` rebuild counterpart
+//! (`docs/outcomes/20260906-scd2-keyed-succession/phases/05c-plan.md`).
 //!
 //! Each family's leg additionally proves **result**-equivalence to a full
 //! refresh (`multiset_equal`, the Link-C oracle also used by
@@ -490,3 +493,4 @@ mod region_and_keyed_fold;
 mod repair_and_key_addressed;
 mod staged_candidate_conditional;
 mod structural_and_ledger;
+mod succession;

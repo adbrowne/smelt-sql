@@ -2600,6 +2600,21 @@ pub async fn execute_project(
         // non-incremental model, a `NotSuccession` classifier verdict, or a
         // state-downgraded cell (technique no longer `SuccessionPatch`), so
         // this guard only needs the grain check.
+        //
+        // Below, `request.full_refresh || force_full_refresh` takes the
+        // full-ledger `rebuild_succession_state` path (phase 5c); every
+        // other run (including `smelt rebuild`'s windowed re-run, which
+        // always passes `full_refresh: false` —
+        // `crates/smelt-cli/src/commands/rebuild.rs`) takes the ordinary
+        // window-forward patch loop. `ExecuteRequest` carries no signal
+        // that distinguishes a `smelt rebuild` invocation from an ordinary
+        // `smelt run` over the same window, so a `smelt rebuild` of a
+        // succession model does not yet re-derive the tombstone ledger in
+        // full the way `docs/specs/incremental_shapes.md` §"The tombstone
+        // ledger (hidden state)" — "Lifecycle" describes; only
+        // `--full-refresh` does today. Threading a `rebuild_range` signal
+        // through `ExecuteRequest` to close this gap is left to the next
+        // planner (phase 5c plan's own task 5 notes the same fallback).
         if let Some(metadata) = plan
             .model_file
             .metadata
@@ -2627,20 +2642,6 @@ pub async fn execute_project(
                 model_target,
                 source_infos,
             )? {
-                let (Some(s), Some(e)) = (start_date, end_date) else {
-                    anyhow::bail!(
-                        "Model '{}' derives the succession grain (`docs/specs/\
-                         incremental_shapes.md` §\"The succession grain\") and was run with no \
-                         event-time window — both --event-time-start/--event-time-end are \
-                         required.",
-                        plan.name
-                    );
-                };
-                let steps = crate::maintenance_driver::driving_steps(
-                    &s.format("%Y-%m-%d").to_string(),
-                    &e.format("%Y-%m-%d").to_string(),
-                    &cell.granularity,
-                )?;
                 let columns: Vec<(String, smelt_types::DataType)> = upstream_schemas_for_bootstrap
                     .models
                     .get(&plan.model_file.name)
@@ -2652,31 +2653,85 @@ pub async fn execute_project(
                     .unwrap_or_default();
                 let succession_retry_policy =
                     RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                let succession_probe_policy =
-                    probe_policy_for_model(config, prior_runs, &plan.name);
-                let succession_result =
-                    crate::maintenance_driver::succession::execute_succession_maintenance(
-                        backend,
-                        &plan.name,
-                        schema,
-                        &db_table_name,
-                        &steps,
-                        &cell,
-                        &columns,
-                        &succession_retry_policy,
-                        &succession_probe_policy,
-                        reporter,
-                        run_id,
-                    )
-                    .await?;
+
+                // `--full-refresh`/a schema-evolution-forced full refresh
+                // (phase 5c, `docs/outcomes/20260906-scd2-keyed-succession/
+                // phases/05c-plan.md`): re-derive the presented table AND
+                // the tombstone ledger from the whole source, in one
+                // transaction — never the window-forward patch loop, which
+                // would leave a full refresh touching neither relation.
+                let (succession_result, strategy, time_range) =
+                    if request.full_refresh || force_full_refresh {
+                        let compiler = compilers.get(model_target);
+                        let resolver = &ephemeral_resolvers[model_target];
+                        let compiled = compiler.compile_with_sql_and_ephemerals(
+                            &plan.model_file,
+                            schema,
+                            &clean_sql,
+                            resolver,
+                        )?;
+                        reporter.model_compiled(run_id, &plan.name, &compiled.sql);
+                        let result =
+                            crate::maintenance_driver::succession::rebuild_succession_state(
+                                backend,
+                                &plan.name,
+                                schema,
+                                &db_table_name,
+                                &cell,
+                                &columns,
+                                &compiled.sql,
+                                &succession_retry_policy,
+                                reporter,
+                                run_id,
+                            )
+                            .await?;
+                        (result, "succession_full_rebuild", None)
+                    } else {
+                        let (Some(s), Some(e)) = (start_date, end_date) else {
+                            anyhow::bail!(
+                                "Model '{}' derives the succession grain (`docs/specs/\
+                                 incremental_shapes.md` §\"The succession grain\") and was run \
+                                 with no event-time window — both \
+                                 --event-time-start/--event-time-end are required.",
+                                plan.name
+                            );
+                        };
+                        let steps = crate::maintenance_driver::driving_steps(
+                            &s.format("%Y-%m-%d").to_string(),
+                            &e.format("%Y-%m-%d").to_string(),
+                            &cell.granularity,
+                        )?;
+                        let succession_probe_policy =
+                            probe_policy_for_model(config, prior_runs, &plan.name);
+                        let result =
+                            crate::maintenance_driver::succession::execute_succession_maintenance(
+                                backend,
+                                &plan.name,
+                                schema,
+                                &db_table_name,
+                                &steps,
+                                &cell,
+                                &columns,
+                                &succession_retry_policy,
+                                &succession_probe_policy,
+                                reporter,
+                                run_id,
+                            )
+                            .await?;
+                        (
+                            result,
+                            "succession_patch",
+                            Some(TimeRangeRecord {
+                                start: s.format("%Y-%m-%d").to_string(),
+                                end: e.format("%Y-%m-%d").to_string(),
+                            }),
+                        )
+                    };
                 manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
-                        strategy: "succession_patch".to_string(),
-                        time_range: Some(TimeRangeRecord {
-                            start: s.format("%Y-%m-%d").to_string(),
-                            end: e.format("%Y-%m-%d").to_string(),
-                        }),
+                        strategy: strategy.to_string(),
+                        time_range,
                         partitions_updated: vec![],
                         row_count: succession_result.row_count,
                         duration_ms: model_start.elapsed().as_millis() as u64,
