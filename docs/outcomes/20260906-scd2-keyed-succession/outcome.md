@@ -150,8 +150,8 @@ out-of-order and repeated windows, and the clamp.
 | 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | done |
 | 3b | Gate hygiene (test-file blind spot): this branch's large-file splits turned `#[cfg(test)] mod tests { … }` blocks into whole files that no gate's `#[cfg(test)]`-span scan can see, so test-only code is scanned as production — red in `join_context_reach::every_production_join_context_new_is_tagged`, `walk_coverage::admission_paths_have_no_raw_text_scans`, and `hardening_budget::gate_detects_regression` (`smelt-logical` `expect` 14 vs baseline 1). Fix the file *selection* in all three via one shared "declared under `#[cfg(test)] mod <stem>;`" rule (not a tag on any call site), and prove each still catches a real untagged production site | done |
 | 3c | Gate hygiene (path drift): gates and specs that cite single file paths the same splits moved — `contract_lattice_spec::frozen_horizon_triple_is_complete` (reads the vanished `src/contract/frozen_horizon.rs`) and `::explain_contract_rendering_is_single_owned` (`effective_contract` moved to `contract/effective.rs`), and `state_docs_freshness::spec_references_are_live` (`docs/specs/state.md` §References cites the vanished `maintenance/availability.rs`). Fix each to scan the module directory / cite the live path, then sweep the workspace suite and record any remaining red gate for phase 10 | done |
-| 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg; the `maintenance_plan_conformance` SCD2 matrix cell updated with the emitter-backed CLAIMED entry | pending |
-| 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
+| 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; the `statement_parity` structural no-authoring leg widened to the succession shapes; the `maintenance_plan_conformance` SCD2 **append-only** matrix cell inhabited with the emitter-backed CLAIMED entry (columns 2/3 stay known gaps — both are out of this grain) | planned |
+| 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; the `statement_parity` succession family leg (executed == emitted, which needs this phase's driver); `execute_parity` | pending |
 | 6 | Append-only probe: confirm the count-gated fingerprint leg is on `main` (landed via the decision-residue branch); add the succession-recipe late-append `probes.rs` leg | pending |
 | 7 | Testkit and conformance: arrival-partitioned `SourceRecipe`, `SuccessionRecipe` family with the model-SQL oracle and every listed leg; state-deletion and repair legs widened; seeded sample green | pending |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
@@ -159,6 +159,28 @@ out-of-order and repeated windows, and the clamp.
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (plan phase 4): one reshape, one clarification. **Reshape:** the
+  `statement_parity` *executed == emitted* succession family leg moved from phase 4 to phase 5.
+  That gate records the `StatementGroup`s a real `execute_project`/maintenance-driver run sends
+  to a live DuckDB connection; until phase 5 dispatches succession cells there is nothing to
+  record, so the leg is unwritable in phase 4. Not deferred out of the outcome — it stays a
+  criterion-4 obligation, one row later. Phase 4 keeps the leg that *is* writable now: the
+  structural no-authoring scan over `smelt-runtime/src` and `smelt-backend*/src`. In its place
+  phase 4 gets a stronger equivalence proof it can make on its own — a DuckDB-executed
+  `maintenance_plan_conformance` cell comparing the emitted patch against the model SQL at full
+  refresh (`smelt-logical` already dev-depends on `duckdb` and that file already opens
+  in-memory connections). **Clarification:** the SCD2 matrix row's inhabited cells today are
+  column 2 (EX-29, snapshot-derived, REFUSED) and column 3 (EX-28, change feed,
+  UNSUPPORTED-TODAY). The succession grain drives off an `append_only` source — column 0, which
+  is *not currently inhabited* and is not a cell of the research catalogue's own table. So
+  criterion 3's "rows updated from REFUSED/UNSUPPORTED to the succession verdict" reads, on the
+  actual matrix, as: inhabit column 0 with a new id and a CLAIMED entry, and leave 2 and 3 as
+  known gaps — a `mutable_snapshot` and a `change_feed` driving source are both refused by the
+  classifier and both listed under §Out of scope, so neither can become a succession verdict.
+  This follows the `INTERSECT / EXCEPT` precedent already in `MATRIX` for a cell the catalogue
+  does not name. No spec delta: the ledger's physical shape, the neighbour domain and the three
+  emitter outputs are all already normative (phase 1 pinned the last of them).
 
 - 2026-09-07 (implement phase 3c): fixed the three named gates via a shared
   `read_module` test helper (resolves `<stem>.rs` or concatenates the
