@@ -155,7 +155,7 @@ out-of-order and repeated windows, and the clamp.
 | 5b | Runtime dispatch: window-forward driver dispatch of the succession cell consuming the phase-5a recipe, transactional ledger write + presented `MERGE`, clock-tie probe → `SuccessionClockTie` rollback leaving both tables untouched, re-run-tolerant frontier grade with no `KeyedReprocessedWindow`; refold/either-order convergence through the real driver; `execute_parity` | done |
 | 5c | Rebuild and parity gates: `--full-refresh` and `smelt repair` rebuild the tombstone ledger from `emit_succession_ledger_rebuild_select` in the same transaction as the presented rebuild; the `statement_parity` succession family *executed == emitted* leg over a real `execute_project` run | done |
 | 7a | Testkit scaffolding: widen `SourceRecipe` to an arrival-partitioned, delete-flagged shape (`partition_column` ≠ `event_time_column`, `is_deleted NOT NULL`); add the typed `SuccessionRecipe` + its renderer (row-local projection, `LEAD`/`LAG`, optional clamp, optional `QUALIFY NOT <flag>`), the model-SQL full-refresh oracle, and the `families/gate_succession.rs` stage/insert/drive/assert quartet; one smoke conformance case (two windows, one splice) green end to end | done |
-| 7b | Conformance leg matrix (the succession family's own legs): late splice, delete-then-later-insert, late insert before a folded delete, delete-only key, `LAG` variants under delete/splice, out-of-order and repeated window application, the pre-window clamp, an event-time-partitioned source, and an equal-`(k, t)` collision expecting a `SuccessionClockTie` rollback; plus the `gate_succession` helper widening each leg needs (delete-flagged and event-time-partitioned row/recipe constructors, a probe-failure drive helper) | planned |
+| 7b | Conformance leg matrix (the succession family's own legs): late splice, delete-then-later-insert, late insert before a folded delete, delete-only key, `LAG` variants under delete/splice, out-of-order and repeated window application, the pre-window clamp, an event-time-partitioned source, and an equal-`(k, t)` collision expecting a `SuccessionClockTie` rollback; plus the `gate_succession` helper widening each leg needs (delete-flagged and event-time-partitioned row/recipe constructors, a probe-failure drive helper) | done |
 | 7c | Conformance cross-suite widening: succession recipes added to `state_deletion.rs` (`.smelt/` deleted between runs), `repair.rs` (a full-refresh rebuild leg co-rebuilding ledger + presented table), and the contract-lattice `deferral` leg (a `contract:` field on `SuccessionRecipe` + its frontmatter rendering, driven against the existing `deferral` oracle transform); full seeded `maintenance_conformance` sample green | pending || 6 | Append-only probe: confirm the count-gated fingerprint leg is in the tree (landed 2026-09-06 via the decision-residue branch, `ea3b84ea`); add the succession-recipe late-append `probes.rs` leg — a late append into a closed event-time partition re-presents its covering window rather than raising `SourceMutationProfileViolated` | pending |
 | 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | pending |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
@@ -164,6 +164,18 @@ out-of-order and repeated windows, and the clamp.
 
 ## Decision log
 
+- 2026-09-07 (implement phase 7b): the succession conformance leg matrix (10 legs + the
+  phase-7a smoke pair, 12 tests) is green through the real `execute_project` pipeline. Along the
+  way, fixed a real production bug found by the first end-to-end exercise of `delete_filter:
+  true`: `SuccessionRecipe::from_verdict` never appended the `QUALIFY NOT <flag>` column into
+  `row_local_projection`, so `emit_succession_event_delta`'s SELECT lacked the column
+  `build_domain_cte` unconditionally references — every real delete-flagged succession model
+  failed every run with a DuckDB binder error. Also found (not fixed — out of this phase's
+  scope, see `phases/07b-summary.md` "For the next planner"): refolding an already-processed
+  window containing a delete event spuriously fails `SuccessionClockTie`, because the tombstone
+  branch of the tie-signature domain NULLs payload columns that the replayed event's fresh
+  batch row still carries. This is a genuine re-run-tolerance gap for delete-using succession
+  models and should be scheduled against criteria 5/6.
 - 2026-09-07 (plan phase 7b): **reshape — row 7b split into 7b / 7c.** As written the row
   carried two unrelated bodies of work: ten deterministic legs over the succession family's own
   quartet (which build directly on what 7a shipped and need only small helper widenings), and

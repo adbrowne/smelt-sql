@@ -78,6 +78,7 @@ impl SuccessionRecipe {
             pre_filter,
             key_cols,
             clock_col,
+            delete_flag,
             delete_flag_expr,
             row_local,
             lead_derived,
@@ -93,19 +94,35 @@ impl SuccessionRecipe {
             .chain(std::iter::once(clock_col.as_str()))
             .chain(lead_derived.iter().map(|(alias, _)| alias.as_str()))
             .chain(lag_derived.iter().map(|(alias, _)| alias.as_str()))
+            .chain(delete_flag.iter().map(String::as_str))
             .collect();
         let payload_columns = row_local
             .iter()
             .filter(|(alias, _)| !excluded.contains(alias.as_str()))
             .map(|(alias, _)| alias.clone())
             .collect();
+        // The `QUALIFY NOT <flag>` operand is a filter, not a projected
+        // output column, so `row_local` (derived from the model's SELECT
+        // list) never carries it — but the event-delta `SELECT`
+        // (`emit_succession_event_delta`) is the domain CTE's only source of
+        // the flag's value (`build_domain_cte`'s `{delete_flag_expr} AS
+        // __smelt_is_delete` references it by name against the event-delta
+        // batch). Append it here, once, so every consumer of
+        // `row_local_projection` (the event-delta SELECT) has it without
+        // re-deriving anything from the model's SQL.
+        let mut row_local_projection = (**row_local).clone();
+        if let Some(flag) = delete_flag {
+            if !row_local_projection.iter().any(|(alias, _)| alias == flag) {
+                row_local_projection.push((flag.clone(), flag.clone()));
+            }
+        }
         Some(SuccessionRecipe {
             source_table: source.clone(),
             pre_filter: pre_filter.clone(),
             key_cols: key_cols.clone(),
             clock_col: clock_col.clone(),
             payload_columns,
-            row_local_projection: (**row_local).clone(),
+            row_local_projection,
             lead_derived: (**lead_derived).clone(),
             lag_derived: (**lag_derived).clone(),
             delete_flag_expr: (**delete_flag_expr).clone(),

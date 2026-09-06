@@ -75,6 +75,35 @@ impl SuccessionEventRow {
             is_deleted: false,
         }
     }
+
+    /// [`Self::new`]'s tombstoning counterpart: a DELETE event landing on its
+    /// own event day (`is_deleted: true`).
+    pub fn deleted(key: i64, event_time: NaiveDateTime, payload: &str) -> Self {
+        Self {
+            key,
+            event_time,
+            arrival: event_time.date(),
+            payload: payload.to_string(),
+            is_deleted: true,
+        }
+    }
+
+    /// [`Self::late`]'s tombstoning counterpart: a DELETE event whose
+    /// `arrival` is distinct from (and later than) its `event_time`'s date.
+    pub fn deleted_late(
+        key: i64,
+        event_time: NaiveDateTime,
+        payload: &str,
+        arrival: NaiveDate,
+    ) -> Self {
+        Self {
+            key,
+            event_time,
+            arrival,
+            payload: payload.to_string(),
+            is_deleted: true,
+        }
+    }
 }
 
 /// Stage a [`SuccessionRecipe`] into a fresh temp project dir targeting
@@ -92,23 +121,39 @@ pub fn stage_succession_recipe_for(
 }
 
 /// Insert one row into a [`SuccessionRecipe`]'s staged driving-source table.
+///
+/// The column list is derived from `recipe.source`'s own `partition_column`/
+/// `delete_flag_column` `Option`s (rather than assuming both are physically
+/// present), matching the DDL `render::stage_succession_for_target` staged:
+/// key, clock, an arrival column ONLY when `partition_column` is distinct
+/// from `clock_column`, payload, then the delete flag ONLY when
+/// `delete_flag_column` is declared. An event-time-partitioned source
+/// (`SourceRecipe::succession_events_event_time_partitioned`) has no arrival
+/// column to insert into.
 pub fn insert_row_succession_for(
     project: &LinkCProject,
     recipe: &SuccessionRecipe,
     row: &SuccessionEventRow,
 ) -> Result<()> {
-    let is_deleted = if row.is_deleted { "TRUE" } else { "FALSE" };
+    let src = &recipe.source;
+    let partition_col = src.partition_column.as_deref().unwrap_or(&src.clock_column);
+
+    let mut values = format!(
+        "{key}, TIMESTAMP '{event_time}'",
+        key = row.key,
+        event_time = row.event_time.format("%Y-%m-%d %H:%M:%S"),
+    );
+    if partition_col != src.clock_column {
+        values.push_str(&format!(", DATE '{}'", row.arrival.format("%Y-%m-%d")));
+    }
+    values.push_str(&format!(", '{}'", row.payload));
+    if src.delete_flag_column.is_some() {
+        values.push_str(if row.is_deleted { ", TRUE" } else { ", FALSE" });
+    }
+
     let conn = project.connect()?;
     conn.execute(
-        &format!(
-            "INSERT INTO main.sources_{name} VALUES ({key}, TIMESTAMP '{event_time}', DATE \
-             '{arrival}', '{payload}', {is_deleted})",
-            name = recipe.source.name,
-            key = row.key,
-            event_time = row.event_time.format("%Y-%m-%d %H:%M:%S"),
-            arrival = row.arrival.format("%Y-%m-%d"),
-            payload = row.payload,
-        ),
+        &format!("INSERT INTO main.sources_{} VALUES ({values})", src.name),
         [],
     )?;
     Ok(())
@@ -171,4 +216,138 @@ pub async fn drive_succession_window_and_assert_for(
         .map_err(|e| anyhow::anyhow!("succession run {run_id:?} failed: {e}"))?;
 
     assert_succession_equivalence_for(project, recipe).await
+}
+
+/// Snapshot a relation's full contents as a comparable, order-independent
+/// value (`ORDER BY ALL` + `smelt_runtime::check_runner::batches_to_rows`) —
+/// this crate's counterpart of `crates/smelt-cli/tests/
+/// maintenance_conformance/gate/support.rs::snapshot_table_rows`'s idiom
+/// (that helper lives in the `smelt-cli` test binary and isn't reachable
+/// from here).
+async fn snapshot_relation_rows(
+    backend: &dyn smelt_backend::Backend,
+    relation: &str,
+) -> Result<Vec<std::collections::BTreeMap<String, String>>> {
+    let batches = backend
+        .execute_sql(&format!("SELECT * FROM {relation} ORDER BY ALL"))
+        .await
+        .map_err(|e| anyhow::anyhow!("snapshot {relation:?}: {e}"))?;
+    Ok(smelt_runtime::check_runner::batches_to_rows(&batches))
+}
+
+/// Drive one window expecting `run_quiet` to FAIL with a probe refusal (e.g.
+/// `SuccessionClockTie`) — snapshots the presented table and the tombstone
+/// ledger before driving, asserts BOTH are byte-identical after the refused
+/// run (the probe must run before any write), and returns the run's error
+/// message for the caller to assert the refusal reason against. The
+/// tombstone table name follows the phase-1 `<presented table>__tombstones`
+/// pin (`smelt_logical::maintenance::emit::tombstone_table_name`).
+pub async fn drive_succession_window_expect_probe_failure(
+    project: &LinkCProject,
+    recipe: &SuccessionRecipe,
+    run_id: &str,
+    window_start: NaiveDate,
+    window_end: NaiveDate,
+    rows: &[SuccessionEventRow],
+) -> Result<String> {
+    for row in rows {
+        insert_row_succession_for(project, recipe, row)?;
+    }
+
+    let backend = project.backend().await?;
+    let presented = format!("main.{}", recipe.model_name);
+    let tombstones = format!(
+        "main.{}",
+        smelt_logical::maintenance::emit::tombstone_table_name(&recipe.model_name)
+    );
+    let before_presented = snapshot_relation_rows(backend.as_ref(), &presented).await?;
+    let before_tombstones = snapshot_relation_rows(backend.as_ref(), &tombstones).await?;
+
+    let mut request = base_request("dev");
+    request.start = Some(window_start.format("%Y-%m-%d").to_string());
+    request.end = Some(window_end.format("%Y-%m-%d").to_string());
+    let message = match project.run_quiet(run_id, request).await {
+        Ok(_) => anyhow::bail!(
+            "expected succession run {run_id:?} to fail with a probe refusal, but it succeeded"
+        ),
+        Err(e) => format!("{e:#}"),
+    };
+
+    let after_presented = snapshot_relation_rows(backend.as_ref(), &presented).await?;
+    let after_tombstones = snapshot_relation_rows(backend.as_ref(), &tombstones).await?;
+    if before_presented != after_presented {
+        anyhow::bail!(
+            "presented table {presented:?} changed despite the probe refusal for run {run_id:?}"
+        );
+    }
+    if before_tombstones != after_tombstones {
+        anyhow::bail!(
+            "tombstone ledger {tombstones:?} changed despite the probe refusal for run \
+             {run_id:?}"
+        );
+    }
+
+    Ok(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::recipe::{ConformanceTarget, SourceRecipe, SuccessionRecipe};
+
+    use super::*;
+
+    /// `succession_event_row_deleted_carries_the_flag` (phase 7b test 11):
+    /// [`SuccessionEventRow::deleted`]/[`SuccessionEventRow::deleted_late`]
+    /// set `is_deleted`, and [`insert_row_succession_for`] omits the arrival
+    /// column for an event-time-partitioned source (proved by the insert
+    /// succeeding at all against a table with no arrival column, then
+    /// reading the flag back).
+    #[test]
+    fn succession_event_row_deleted_carries_the_flag() {
+        let deleted = SuccessionEventRow::deleted(
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "gold",
+        );
+        assert!(deleted.is_deleted);
+        let deleted_late = SuccessionEventRow::deleted_late(
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "gold",
+            NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        );
+        assert!(deleted_late.is_deleted);
+        assert_eq!(
+            deleted_late.arrival,
+            NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()
+        );
+
+        let recipe = SuccessionRecipe::new_lead()
+            .with_delete_filter()
+            .with_source(SourceRecipe::succession_events_event_time_partitioned());
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+            .expect("stage event-time-partitioned recipe");
+        insert_row_succession_for(&project, &recipe, &deleted)
+            .expect("insert must omit the arrival column and succeed");
+
+        let conn = project.connect().expect("connect");
+        let is_deleted: bool = conn
+            .query_row(
+                &format!(
+                    "SELECT is_deleted FROM main.sources_{} WHERE customer_id = 1",
+                    recipe.source.name
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .expect("read back is_deleted");
+        assert!(is_deleted, "the deleted row's is_deleted flag must persist");
+    }
 }

@@ -33,6 +33,20 @@ impl SourceRecipe {
             delete_flag_column: Some("is_deleted".to_string()),
         }
     }
+
+    /// [`Self::succession_events`]'s event-time-partitioned variant
+    /// (`incremental_shapes.md` §"An event-time-partitioned source"):
+    /// `partition_column: None` — a run's window scans `changed_at` itself
+    /// rather than a separately declared arrival column, so there is no
+    /// arrival column to insert into
+    /// ([`crate::gate_succession::insert_row_succession_for`] derives its
+    /// column list from this `Option`).
+    pub fn succession_events_event_time_partitioned() -> Self {
+        Self {
+            partition_column: None,
+            ..Self::succession_events()
+        }
+    }
 }
 
 /// A fully-typed keyed-succession (SCD2) model recipe (`docs/outcomes/
@@ -105,6 +119,29 @@ impl SuccessionRecipe {
             delete_filter: false,
             source,
         }
+    }
+
+    /// Turn on `QUALIFY NOT <source.delete_flag_column>` — a builder
+    /// combinator (phase 7b) rather than a new named constructor per leg;
+    /// callers must still give the recipe a unique `model_name` so staged
+    /// projects don't collide.
+    pub fn with_delete_filter(mut self) -> Self {
+        self.delete_filter = true;
+        self
+    }
+
+    /// Attach a pre-window lateness clamp predicate (a row-local `WHERE`
+    /// text, e.g. `"changed_at >= DATE '2026-01-01'"`).
+    pub fn with_clamp(mut self, predicate: impl Into<String>) -> Self {
+        self.clamp = Some(predicate.into());
+        self
+    }
+
+    /// Swap the driving [`SourceRecipe`] (e.g. for
+    /// [`SourceRecipe::succession_events_event_time_partitioned`]).
+    pub fn with_source(mut self, source: SourceRecipe) -> Self {
+        self.source = source;
+        self
     }
 }
 
