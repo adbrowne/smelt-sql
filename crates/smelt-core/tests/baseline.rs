@@ -84,6 +84,80 @@ fn fixture_repo() -> TempDir {
     dir
 }
 
+/// A repo with enough committed files that `git archive`'s output is a
+/// long stream — the shape that makes the pipe-drain bug below observable.
+fn fixture_repo_wide() -> TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(dir.path().join("smelt.yml"), "name: fixture\n").expect("write smelt.yml");
+    std::fs::create_dir_all(dir.path().join("models")).expect("mkdir models");
+    for i in 0..200 {
+        std::fs::write(
+            dir.path().join(format!("models/m{i}.sql")),
+            format!("-- {}\nSELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id\n", "x".repeat(400)),
+        )
+        .expect("write model");
+    }
+    git(dir.path(), &["add", "-A"]);
+    git_commit(dir.path(), "initial");
+    dir
+}
+
+/// Regression (#194): `materialize` must not race `git archive` to a
+/// broken pipe.
+///
+/// `tar::Archive::unpack` stops reading at the end-of-archive marker, but
+/// `git archive` still has trailing block padding to write. If the read end
+/// is dropped first, git dies of `SIGPIPE` and `materialize` reports
+/// "`git archive` failed" with an EMPTY stderr — intermittently, and only
+/// when the machine is loaded enough for git to still be writing.
+#[test]
+fn materialize_is_not_racing_git_archive_to_a_broken_pipe() {
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 25;
+
+    let repo = fixture_repo_wide();
+    let resolved = resolve_baseline(repo.path(), Some("HEAD")).expect("HEAD resolves");
+
+    // The race only opens when `git` is slow enough to still be writing its
+    // trailing padding after `tar` has stopped reading, so the test has to
+    // supply the CPU contention itself rather than wait for a loaded CI box.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        for _ in 0..(std::thread::available_parallelism().map_or(8, |n| n.get())) {
+            let stop = &stop;
+            scope.spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            });
+        }
+
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let resolved = &resolved;
+                scope.spawn(move || {
+                    for _ in 0..ROUNDS {
+                        let checkout = materialize(resolved).unwrap_or_else(|e| {
+                            panic!("materialize must not fail under concurrency: {e}")
+                        });
+                        assert!(checkout.project_root().join("models/m0.sql").is_file());
+                    }
+                })
+            })
+            .collect();
+
+        let outcome: Result<(), _> = workers
+            .into_iter()
+            .map(|w| w.join())
+            .collect::<Result<Vec<_>, _>>()
+            .map(|_| ());
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        outcome.expect("no materialize may lose the race to git archive");
+    });
+}
+
 // --- resolve_baseline ---
 
 #[test]

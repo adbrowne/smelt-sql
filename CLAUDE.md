@@ -106,29 +106,69 @@ done
 export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR:$LD_LIBRARY_PATH"
 ```
 
-**Linker: do not add a mold `.cargo/config.toml`.** It has been tried twice and
-does not help this workspace. `[profile.dev]` already sets
-`debug = "line-tables-only"` with `debug = false` for all dependencies, which
-removes the DWARF section merging that makes GNU ld slow on Rust debug builds —
-so ld is already fast here and mold has nothing to win. Measured on one 110 MB
-test binary, best of three: GNU ld 2.14s vs mold 3.13s, i.e. mold is ~45%
-*slower*, and it emits a larger binary. Linking is also not the bottleneck at
-all: ~313 test binaries at ~2s each is ~660 CPU-seconds, which over 32 cores is
-~20s of a ~918s cold `cargo test --no-run`. That build is dominated by
-**compilation**, in particular each test crate re-monomorphizing generics from
-DuckDB/Arrow/salsa. (#149 committed a mold config and #150 reverted it for a
-different reason — CI had no mold.)
+**Build cost is CPU, not I/O — check the disk before believing otherwise.**
+Measured 2026-09-06 on the 32-core dev box, a *completely cold*
+`cargo test --workspace --no-run` is **95s wall / 16m21s CPU** at `-j32`, and
+rebuilding one crate's 63 test targets with dependencies warm is **6s**. If you
+ever measure numbers an order of magnitude above these, the machine is stalled,
+not the workspace — see "When the build looks slow" below before drawing any
+conclusion about a crate, a feature flag, or the linker.
+
+**`cargo --timings` durations are wall time, not build cost.** A unit's
+`duration` includes every second it spent blocked while ~26 other units competed
+for the machine. Ranking crates by that number attributes contention to whichever
+crate happened to be running. To cost a unit, rebuild it alone with
+`CARGO_INCREMENTAL=0` and read `user`+`sys` from `time`. (Doing this once turned a
+"158s `smelt-db` lib test" into 27s of CPU, and a "74.6s per `smelt-lsp` test
+target" into 2.5s.)
+
+**When the build looks slow, check `vmstat 5` first.** The failure mode this box
+has actually hit is disk writeback, not compilation: `b` in the hundreds, `wa` at
+99%, `us` near 0. `target/debug/deps` holds ~26 GB of test executables, so the
+build writes tens of GB and a degraded write path stops it dead. The cause here
+was TRIM starvation. `/` is ext4, which has no asynchronous discard — the only
+mount options are `discard` (synchronous, and a write-path cost this drive can
+ill afford) and `nodiscard`; `discard=async` is a btrfs option and ext4 rejects
+it. So periodic trim is the mechanism, and `fstrim.timer`'s stock **weekly**
+schedule is too slow here: at ~300 GB/day of cargo churn through a 1 TB drive
+the free-block pool empties within days, every write becomes read-modify-erase
+garbage collection, and sustained writes collapse from ~3.6 GB/s to ~15 MB/s —
+inflating every build number by ~17x. Run the timer **daily**
+(`sudo systemctl edit fstrim.timer` → `[Timer]` / `OnCalendar=` / `OnCalendar=daily`).
+Confirm the drive is healthy with
+`dd if=/dev/zero of=target/ddtest bs=1M count=1024 conv=fsync` (expect GB/s);
+recover with `sudo fstrim -v /`.
+
+**Linker: do not add a mold `.cargo/config.toml`.** Not because mold is slower —
+on a healthy disk it is marginally *faster* (best of three on a 98 MB test
+binary: GNU ld 1.31s vs mold 1.11s total rustc wall) — but because linking is
+~1.3s of a target that takes ~6s of CPU, so the whole win is ~2s of wall across
+the entire suite. `[profile.dev]` already sets `debug = "line-tables-only"` with
+`debug = false` for all dependencies, which removes the DWARF section merging
+that makes GNU ld slow on Rust debug builds. It is not worth a config file and a
+CI dependency for that. (#149 committed a mold config and #150 reverted it
+because CI had no mold. An earlier note in this file claimed mold was 45%
+*slower*; that was measured while the disk was stalled, and mold's slightly
+larger output made it look worse.)
 
 **Parallelism.** `mise.toml` sets `CARGO_BUILD_JOBS=12`. Cargo otherwise defaults
 `-j` to the core count, so several agent sessions in several worktrees fan out to
-N x nproc rustc processes on one machine. Measured on the 32-core dev box: a
-clean `cargo test --no-run` is **197s idle and 987s with three sessions building
-concurrently** — a 5x penalty from oversubscription, not from the test suite. If
-a slow build surprises you, check `uptime` before concluding anything about the
-suite. Working alone, override with `CARGO_BUILD_JOBS=32 cargo test` or a
-`.mise.local.toml`. `.claude/scripts/cargo-queue-shim.sh` is an *inactive*
-prototype that additionally serialises builds machine-wide via `flock`; read its
-header before putting it on `PATH`.
+N x nproc rustc processes on one machine. The cap is close to free for a single
+session: a cold `cargo test --workspace --no-run` is 95s at `-j32`, 103s at
+`-j12`, 102s at `-j8` — about 8% of wall time for a third less CPU, because a
+cold build is bounded by the dependency chain rather than by width. On the warm
+path (rebuilding one crate's test targets) `-j8` already saturates: 35.7s at
+`-j1`, 7.1s at `-j8`, 6.3s at `-j32`. Working alone, override with
+`CARGO_BUILD_JOBS=32 cargo test` or a `.mise.local.toml`.
+`.claude/scripts/cargo-queue-shim.sh` is an *inactive* prototype that
+additionally serialises builds machine-wide via `flock`; read its header before
+putting it on `PATH`.
+
+**Disk hygiene.** Stale artifacts accumulate fast across worktrees — 255 GB of
+`target/` at last check, of which 70 GB was one worktree's
+`target/debug/incremental`. Deleting `debug/incremental` in idle worktrees is
+free, and keeping `/` under ~70% full widens the SSD's write cache. `cargo-sweep`
+on a timer handles the rest.
 
 **Toolchain.** `rust-toolchain.toml` pins `1.95.0`, matching `[tools] rust` in
 `mise.toml`. mise exports `RUSTUP_TOOLCHAIN`, which takes precedence; the file
@@ -172,6 +212,40 @@ cargo run -p smelt-lsp
 # Test with sample workspace
 # (Configure your editor to use the LSP server, then open examples/test_workspace/)
 ```
+
+### Feature unification changes which code path you test
+
+`cargo test -p <crate>` and a workspace-wide `cargo test` do not necessarily
+build the same code. Cargo unifies features across all workspace members being
+built together, so a feature some *other* crate turns on by default is ON in the
+full-suite build and OFF when you test that crate alone.
+
+The live instance: **`smelt-lsp` declares `default = ["python"]`**, which pulls in
+`smelt-runtime/python` and `smelt-core/python`. So:
+
+- `cargo test -p smelt-runtime --lib` → the **subprocess** Python path
+  (`#[cfg(not(feature = "python"))]`), one interpreter per model file.
+- `cargo test` / `mise run verify` → the **embedded PyO3** path
+  (`#[cfg(feature = "python")]`), one process-global interpreter shared by every
+  concurrently running test.
+
+Consequences to keep in mind:
+
+- A bug that only exists in one path passes under `-p <crate>` and fails only in
+  the full suite. Issue #189 hid behind exactly this: a race on the embedded
+  interpreter's global model registry was unreproducible under
+  `cargo test -p smelt-runtime --lib` because that command does not build the
+  racy code at all.
+- Anything the embedded path touches is **process-global** — `sys.path`,
+  `sys.modules`, and `smelt.core._registered_models`. Treat it as shared mutable
+  state and serialise it (see `REGISTRY_HELD` in
+  `crates/smelt-core/src/python_models.rs`), rather than assuming the GIL is a
+  lock: CPython drops the GIL on every I/O call a model makes.
+
+When a test reproduces only under the full suite, check which feature set it is
+actually being built with before hunting for shared fixtures or temp-path
+collisions. Reproduce the full-suite path directly with
+`cargo test -p smelt-runtime --lib --features python`.
 
 ### Build and Test (Bundled DuckDB - No System Dependencies)
 
