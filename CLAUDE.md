@@ -281,7 +281,11 @@ in `.claude/outcome-backlog` (priority order; the loop advances through it).
 Scaffold with `/smelt:outcome`; driver `.claude/scripts/outcome-loop.sh`;
 operator guide in
 [`docs/outcome_loop.md`](docs/outcome_loop.md). Never run both loops in the
-same checkout simultaneously.
+same checkout simultaneously. Between every iteration's step, the loop also
+runs a large-file line-count ratchet (`.claude/scripts/large-file-check.sh`,
+baseline `.claude/large-file-baseline.txt`) and dispatches a bounded shrink
+step to split any offending file the moment it regresses — see
+[`docs/outcome_loop.md` §"The large-file shrink step"](docs/outcome_loop.md#the-large-file-shrink-step).
 
 ## Architecture
 

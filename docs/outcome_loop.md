@@ -64,6 +64,31 @@ test list, tasks, verification gate, commit message. They are NOT the full
 `/smelt:plan` template — the outcome carries the durable context; the plan
 carries one phase's worth.
 
+## The large-file shrink step
+
+After every iteration's plan/implement step finishes successfully, the loop
+runs `.claude/scripts/large-file-check.sh` — a ratchet on per-file `.rs` line
+counts (docs/research/20260906-outcome-hygiene-token-usage.md: large files
+repeatedly `Edit`-ed by an autonomous loop were found to dominate its token
+spend). If it fails, the loop immediately dispatches ONE bounded
+`claude --print` step (model: `MODEL_IMPL`) with
+`.claude/outcome-shrink-prompt.txt`, naming the specific violation(s), before
+continuing to the next regular step — this is what "inserted between phases"
+means: it is not itself a phase and does not touch the active outcome's
+phase row, so plan/implement bookkeeping is unaffected either way. It gets
+its own log file (`iter-<ts>-<NN>-shrink.log`) and usage-log event
+(`outcome-shrink`).
+
+A shrink step splits the offending file(s) into cohesive submodules (pure
+code motion, zero behavior change) and updates
+`.claude/large-file-baseline.txt`. It is never stop-the-line: if it fails or
+doesn't fully resolve the violation, the loop logs a warning and moves on —
+the ratchet gets another chance next iteration rather than blocking outcome
+progress. The one case it's expected to punt on outright is a file that's
+already a single function/closure too large for pure code motion to split
+further (`smelt-runtime/src/execute/project.rs` is the known example); that
+needs a human to explicitly raise its baseline entry, not another retry.
+
 ## How to run it
 
 Same rules as the autonomy loop: **from a real terminal or detached tmux —
