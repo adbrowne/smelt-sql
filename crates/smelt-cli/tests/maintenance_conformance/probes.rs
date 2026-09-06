@@ -22,7 +22,7 @@ use smelt_maintenance_testkit::recipe::{
     arb_recipe, ConstructKind, KeyedCombiner, KeyedRecipe, MutableEnrichedRecipe, RecipePool,
 };
 use smelt_maintenance_testkit::schedule_gen::{
-    arb_schedule_for, is_permutable, reorder_windows, GenRow,
+    arb_schedule_for, is_permutable, reorder_windows, ConformanceStep, GenRow,
 };
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
 use smelt_state::reconciliation::Region;
@@ -659,4 +659,79 @@ fn probe_skips_are_counted_never_silent() {
             "probe {probe:?} never recorded a Checked outcome across the sample: {report:#?}"
         );
     }
+}
+
+/// `late_append_schedule_holds_with_probes_on` (phase 6 TDD list;
+/// `docs/specs/model_properties.md` §Constraints "Declared lateness is
+/// orchestration-only"): a schedule containing a genuine `AppendLateRow`
+/// step plus its catch-up rerun — now driven with the harness's declared-
+/// fact probe cadence ON (`render::render_smelt_yml_for` flipped from
+/// `cadence: off` in this same phase) — converges to the full-refresh
+/// oracle with no probe failure. Before this phase, the append-only
+/// posture probe could not distinguish a late append into a closed
+/// partition from an in-place mutation and would have failed this exact
+/// schedule; `drive_and_assert`'s S-restricted equivalence check would
+/// surface that failure as an `Err`, so a passing case here is direct
+/// evidence the two-verdict split holds under a real run.
+#[test]
+fn late_append_schedule_holds_with_probes_on() {
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let mut checked = 0;
+    for i in 0..10 {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+
+        // Draw schedules until one carrying a genuine AppendLateRow step
+        // turns up — a bounded retry loop, never unbounded (design §7:
+        // "skipped explicitly, never silently vacuous").
+        let mut schedule = None;
+        for _ in 0..20 {
+            let candidate = arb_schedule_for(&recipe)
+                .new_tree(&mut runner)
+                .unwrap()
+                .current();
+            if candidate
+                .0
+                .iter()
+                .any(|s| matches!(s, ConformanceStep::AppendLateRow(_)))
+            {
+                schedule = Some(candidate);
+                break;
+            }
+        }
+        let Some(schedule) = schedule else {
+            eprintln!(
+                "SKIP case {i}: no AppendLateRow-bearing schedule drawn in 20 attempts for \
+                 recipe {recipe:?} — probe structurally does not apply this case"
+            );
+            continue;
+        };
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+        let verdict = classify(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+        if !matches!(verdict, Verdict::Admitted(_)) {
+            continue;
+        }
+
+        rt.block_on(drive_and_assert(&project, &recipe, &schedule))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "case {i}: recipe {recipe:?} schedule {schedule:?} — a late append into a \
+                     closed partition must never fail the run under probes-on equivalence: {e}"
+                )
+            });
+        checked += 1;
+    }
+
+    assert!(
+        checked > 0,
+        "no AppendLateRow-bearing admitted case reached across the deterministic sample — \
+         generator/derivation regression"
+    );
 }

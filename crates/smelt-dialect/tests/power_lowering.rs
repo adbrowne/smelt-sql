@@ -38,6 +38,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> St
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -91,13 +92,9 @@ fn the_lowered_power_parses_back_cleanly() {
 
 #[test]
 fn other_dialects_keep_infix_caret_and_double_star_verbatim() {
-    // DuckDB and PostgreSQL have no XOR hazard for `^` — both treat it as
-    // power (DuckDB) or raise a syntax error at parse time (PostgreSQL has no `**`).
-    // Neither needs a rewrite; verbatim emission is correct.
-    for (dialect, caps) in [
-        (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
-    ] {
+    // DuckDB has no XOR hazard for `^` — it treats it as power. No rewrite
+    // needed; verbatim emission is correct.
+    for (dialect, caps) in [(SqlDialect::DuckDB, BackendCapabilities::duckdb())] {
         for sql in ["SELECT val ^ 2 FROM t", "SELECT val ** 2 FROM t"] {
             let out = print_with(sql, &dialect, &caps);
             assert_eq!(
@@ -111,8 +108,8 @@ fn other_dialects_keep_infix_caret_and_double_star_verbatim() {
 }
 
 /// Spark's `^` is bitwise XOR, not exponentiation — the same silent-wrong-answer
-/// hazard as BigQuery. The registry maps `^` and `**` to `RewriteId::PowerCall`
-/// for Spark, so the printer must lower them to `POWER(...)`.
+/// hazard as BigQuery. The registry maps `^` and `**` to the `POWER({0}, {1})`
+/// template for Spark, so the printer must lower them to `POWER(...)`.
 #[test]
 fn spark_lowers_infix_caret_to_power_call() {
     let (dialect, caps) = (SqlDialect::SparkSQL, BackendCapabilities::spark());
@@ -123,8 +120,8 @@ fn spark_lowers_infix_caret_to_power_call() {
     );
 }
 
-/// `//` (floor divide) is declared `Unsupported` in the registry for Spark,
-/// PostgreSQL, and BigQuery. The printer still emits `//` verbatim; the compile
+/// `//` (floor divide) is declared `Unsupported` in the registry for Spark and
+/// BigQuery. The printer still emits `//` verbatim; the compile
 /// path owns the refusal (`UnsupportedOnBackend`). The unsupported verdict is
 /// asserted here as a registry fact so it is not silently dropped.
 ///
@@ -144,19 +141,27 @@ fn floor_divide_is_declared_unsupported_rather_than_lowered() {
          silently approximates: {out}"
     );
 
-    // Registry verdict: Unsupported on Spark, PostgreSQL, and BigQuery.
+    // Registry verdict: BigQuery still refuses `//` wholesale; Spark settles
+    // it per operand class (phase 7), whose `otherwise` arm is the same
+    // declared refusal an unresolvable operand takes.
     let sig = BuiltinRegistry::resolve("//").expect("floor-divide `//` must have a registry entry");
-    for dialect in [
-        SqlDialect::SparkSQL,
-        SqlDialect::PostgreSQL,
-        SqlDialect::BigQuery,
-    ] {
-        let emission = sig.emission_at(dialect.id(), smelt_types::signatures::Position::Any);
-        assert!(
-            matches!(emission, Emission::Unsupported { .. }),
-            "floor-divide `//` must be Unsupported on {}, got {:?}",
-            dialect.name(),
-            emission
-        );
-    }
+    let bigquery_emission = sig.emission_at(
+        smelt_types::DialectId::BigQuery,
+        smelt_types::signatures::Position::Any,
+    );
+    assert!(
+        matches!(bigquery_emission, Emission::Unsupported { .. }),
+        "floor-divide `//` must be Unsupported on BigQuery, got {bigquery_emission:?}"
+    );
+    assert_eq!(
+        sig.settle_at(
+            smelt_types::DialectId::SparkSql,
+            smelt_types::signatures::Position::Any,
+            &smelt_types::CallFacts::unresolved(2)
+        ),
+        smelt_types::SettledEmission::Unsupported {
+            reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)"
+        },
+        "an unresolved operand on Spark must still be a declared refusal"
+    );
 }

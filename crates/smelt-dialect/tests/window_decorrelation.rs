@@ -32,6 +32,7 @@ fn print_restructured(sql: &str, dialect: SqlDialect, caps: &BackendCapabilities
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &plans,
+        settled_emissions: &[],
     };
     print(&root, &ctx)
 }

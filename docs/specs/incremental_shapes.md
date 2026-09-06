@@ -329,13 +329,20 @@ The once-write family admits four spellings, and no others:
   group (a `unique_key` column of the model), the fallback is dead — it can never actually
   stand in for a value a later window would supply — so the spelling keeps the bare
   `COALESCE(target, delta)` fold with no decomposed state instead; the functional dependency is
-  still required.
+  still required unless `<col>` is itself a `unique_key` column (see below).
 - `COALESCE(MAX(<a>), MAX(<b>))` (and the `MIN` variants, and longer candidate lists) — a
   multi-candidate reduction, admitted under a declared functional dependency naming *every*
   candidate column, backed by one decomposed `(value, written)` state pair per candidate: `π`
   applies the arguments' declared preference order over the candidates whose state is `written`,
   so the order candidates happened to arrive in across windows never overrides the declared
   preference.
+
+In any of the reduction spellings, a candidate column that is itself a member of the model's
+`unique_key` needs no declared functional dependency — key membership already establishes the
+per-key constancy the declaration would otherwise assert, the same argument the key-derived
+spelling makes, extended to a `MAX`/`MIN`-wrapped reference to that column. For the
+single-candidate fallback spelling, such a candidate also proves the fallback dead, so that
+spelling admits with `state: None` exactly as the bare key-derived spelling does.
 
 The functional dependency is declared in the model's frontmatter under
 `functional_dependencies:` (a declared world-fact owned by `model_properties.md`), naming the
@@ -551,10 +558,19 @@ implied by `partition_column`'s own truncation/grid transform (`g_part`), derive
 rather than trusted: a daily truncation implies `g_part = day`, rejecting an hourly
 `granularity` as a DELETE+INSERT misalignment. `g_run >= g_part` is checked under the closed
 coarseness ordering (hour < day < week < month < quarter < year); an opaque `g_part` skips the
-comparison (undecided, not disproved). A sub-`g_part` run window is rejected with a diagnostic
-naming the model's partition granularity and spelling out the coarsened run window that would
-be accepted — never silently widened (auto-coarsening was rejected: it recomputes more than
-the operator asked for; `docs/research/20260816-open-questions-triage.md`).
+comparison (undecided, not disproved). Auto-coarsening is rejected outright: it recomputes more
+than the operator asked for (`docs/research/20260816-open-questions-triage.md`).
+
+Two distinct refusals follow, and only one has an actionable window fix. A **window-level**
+refusal fires when `g_run >= g_part` holds but the window's own bounds are not on `g_part`
+boundaries — either a misalignment to `g_run` itself, or the window-vs-`g_part`-grid residue a
+bare `g_run >= g_part` comparison alone lets through (e.g. a monthly `g_run` window over a
+weekly `g_part` grid: a month start is not always a Monday). Its message names the partition
+granularity and spells out the coarsened `[--event-time-start, --event-time-end)` pair that
+would be accepted; re-running with exactly that pair succeeds. A **config-level** refusal fires
+when `g_run < g_part` — no run window fixes this, only a `timeseries.granularity` edit does. Its
+message names the required `granularity` value and, as context only, the window covering the
+declined run at that granularity — phrased so it is not read as "re-run with this and it works".
 
 #### Batch safety classification
 
@@ -950,7 +966,15 @@ One of three **routes** establishes it: **(1) key-embedded** — `partition_colu
 `unique_key` column; slice = scan window widened by the SQL-derived skew margin (never by
 declared source lateness). **(2)
 key-determined** — the partition projection is a per-key constant under once-write provenance;
-slice = the delta's own partition values, exact regardless of key age. **(3)
+slice = the delta's own partition values, exact regardless of key age. Two sub-routes are tried
+in order: **derived** — the partition projection is a deterministic expression over
+`unique_key` columns only (key membership establishes per-key constancy directly — the same
+argument §"The column-family catalogue"'s once-write key-derived spelling makes, extended to a
+`MIN`/`MAX` wrapper over a key column); consulted first, and it outranks the extremal-fold
+refusal below *only* when every column reference in the projection is a key column (a `MAX`
+over the key is the key) — an extremal fold over a non-key column stays refused for route 2 and
+remains route 3's shape. **Declared** — a `functional_dependencies:` entry, consulted only
+where the derived sub-route cannot decide. **(3)
 recurrence-bounded** — a **key-recurrence bound** `r` (same-keyed rows lie within `r` on event
 time), derived from the SQL where decidable, else declared (`sources.md`, `key_recurrence`);
 slice = scan window widened backward by `r` plus margins, admitted only **checked** — the run
@@ -1763,10 +1787,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
   Divergences).
-- **The sub-`g_part` rejection does not yet name the coarsened window** — §"Run window vs
-  partition granularity" requires the refusal to spell out the run window that would be
-  accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over
-  auto-coarsening was decided 2026-08-16; `docs/research/20260816-open-questions-triage.md`.)
 - **`NOW()`/`CURRENT_*` are still compile-time-pinned** — §"Safety checks" admits them running
   as-is with no equivalence promise on the columns they feed; the implementation still freezes
   them to one per-run timestamp. Decision record:
@@ -1775,23 +1795,20 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 ### The key grain
 
 - **The once-write classifier's nullability route proves non-nullness only from the model's own
-  `unique_key`** — a single `MAX`/`MIN` reduction of a `unique_key` column is admitted without
-  decomposed state (the fallback is dead), but a driving-clock-derived payload still takes the
-  decomposed-state route: the classifier resolves no driving source, so widening this route to a
-  clock-derived proof would need a new plan-layer input and risks CLI↔runtime admission
-  divergence. Separately, the multi-column-`unique_key` shape this route needs to be reachable
-  through declared YAML (`key` and `determines` must name different columns — a single-column
-  `unique_key` can only self-determine, which `validate_functional_dependencies` rejects; and a
-  `grain: key` model's `GROUP BY` may not touch the driving source's `partition_column`, so the
-  partition column cannot supply the second key member either) has no generative-pool recipe
-  covering it today — the classifier route and its plan-layer/unit-test coverage exist
-  (`crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`,
-  `crates/smelt-db/tests/maintenance_fold_spec_companion.rs`), but no end-to-end DuckDB witness
-  does. The key-derived route (no `MAX`/`MIN` wrapper) still requires a bare `unique_key` column
-  reference, not an arbitrary key-derived *expression*; admission reads whole-scope
-  fan-out/set-operation facts, so any fan-out or undiscriminated set operation anywhere in scope
-  refuses every candidate. Decision record: `docs/research/20260705-keyed-collapse-application.md`;
-  tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
+  `unique_key`** — a `unique_key`-member candidate (bare, or `MAX`/`MIN`-wrapped, with or without
+  a fallback) is admitted with no decomposed state and no declared functional dependency (the
+  route-2 skip, `crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`, with
+  plan-layer parity in `crates/smelt-db/tests/maintenance_fold_spec_companion.rs` and an
+  end-to-end DuckDB witness in `crates/smelt-cli/tests/maintenance_conformance/gate.rs::
+  once_write_key_fallback_pool_upholds_end_state_equivalence`), but a driving-clock-derived
+  payload still takes the decomposed-state route: the classifier resolves no driving source, so
+  widening this route to a clock-derived proof would need a new plan-layer input and risks
+  CLI↔runtime admission divergence. The key-derived route (no `MAX`/`MIN` wrapper) still requires
+  a bare `unique_key` column reference, not an arbitrary key-derived *expression*; admission reads
+  whole-scope fan-out/set-operation facts, so any fan-out or undiscriminated set operation
+  anywhere in scope refuses every candidate. Decision record:
+  `docs/research/20260705-keyed-collapse-application.md`; tracking:
+  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/outcomes/20260904-decided-gap-residue/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The reconciliation ledger's fold — additive-graded and re-run-tolerant alike — is
@@ -1811,21 +1828,11 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
   reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
   of the rendered plan today.
-- **Key temporal locality route 2 admits only a declared functional dependency** — the
-  key-derived-expression sub-route is never consulted, so a provably key-derived partition
-  projection still refuses without the declaration. Decided 2026-09-04: implement the derived
-  sub-route, declared FD as fallback (`docs/research/20260904-decision-track.md`). Scheduled:
-  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **Locality machinery gaps**: the per-input scope-map explain surface is specified but
-  unbuilt; Route 2's declared-FD sub-route is unreachable for an arbitrary
-  non-clock-derived dimension column, so no runnable end-to-end route-2 fixture exists yet
-  (`docs/plans/20260705-keyed-collapse.md`); Route 2's `IN (SELECT DISTINCT …)` slice
+  unbuilt; Route 2's `IN (SELECT DISTINCT …)` slice
   predicate is unexercised against a real backend due to a DuckDB MERGE binder limitation
   (confirmed v1.4.4/v1.5.4); plan derivation admits routes only where it can determine the
-  driving source's granularity. Key-grain rule 16 (derived recurrence authoritative, declared
-  is a check, order-independent key sets) is decided but unimplemented: no
-  `KeyedRecurrenceDeclarationMismatch` is emitted today. Scheduled:
-  `docs/outcomes/20260904-decision-residue/outcome.md`.
+  driving source's granularity.
 - **Order-independence is not yet acted on** — every window-forward run applies its windows
   sequentially regardless of family, forgoing the parallel/out-of-order application
   §"Derived execution postures" admits when order-independence holds. The verdict itself, and
@@ -1957,7 +1964,7 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-runtime/src/windowing.rs` — `PartitionPoint`, `IncrementalBatch` axis dispatch (calendar / unit-step integer)
   - `crates/smelt-logical/src/maintenance/derive.rs` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
   - `crates/smelt-state/src/schema_tracking.rs` — `DeployedSchema::partition_column`
-  - `crates/smelt-db/src/lib.rs` — `model_source_clamps`
+  - `crates/smelt-db/src/maintenance_refs.rs` — `model_source_clamps`
 - **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI
   integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition
   full-refresh-equivalence harness; `crates/smelt-cli/tests/partition_residue_probes.rs`;

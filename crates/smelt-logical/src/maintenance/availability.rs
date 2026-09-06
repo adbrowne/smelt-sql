@@ -43,7 +43,7 @@ pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
             StateStructure::ObservedOutputDeltas,
             StateStructure::FingerprintSidecar,
         ],
-        SqlDialect::SparkSQL | SqlDialect::PostgreSQL | SqlDialect::BigQuery => vec![
+        SqlDialect::SparkSQL | SqlDialect::BigQuery => vec![
             StateStructure::ObservedOutputDeltas,
             StateStructure::FingerprintSidecar,
         ],

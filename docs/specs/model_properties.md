@@ -1,7 +1,7 @@
 ---
 feature: model_properties
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -92,7 +92,7 @@ The **probe registry** below lists one row per declaration named in §"Model-sco
 | `timeseries.assert_monotonic` | Monotonicity probe (`emit_monotonicity_probe`) | re-derives the traced event-time ordering over the run's processed rows, per partition | a processed row's event-time value is out of non-decreasing order relative to its partition predecessor | `DeclaredMonotonicityViolated` | disable `assert_monotonic`, fix the upstream ordering, or `smelt repair` the affected partition | per_run | built |
 | `functional_dependencies:` | Functional-dependency probe (`emit_functional_dependency_probe`) | re-aggregates the declared `key` over the run's processed rows and counts distinct `determines` values per key | more than one distinct `determines` value is found for the same key | `DeclaredFunctionalDependencyViolated` | drop the declaration, correct the source data, or `smelt repair` the affected keys | per_run | built |
 | `bounded_domain:` | Bounded-domain probe (`emit_bounded_domain_probe`) | counts the distinct values of the declared column within the run's processed region | the count exceeds the declared `max_cardinality` | `DeclaredBoundedDomainExceeded` | raise `max_cardinality`, narrow the domain upstream, or `smelt repair` the affected keys | per_run | built |
-| Source `mutation_profile.kind: append_only` posture | Append-only posture probe (`emit_append_only_posture_probe`, watermark-monotonicity + frontier-checksum, `sources.md` §Semantics 4) | the source's recorded per-partition baseline (`source_postures.json`, one row per partition: row count and skeleton-column fingerprint from the last held probe) against the source's current per-partition state; the fingerprint leg is gated to partitions strictly below the recorded maximum partition value — the still-open partition legitimately gains appends, so only its count is checked | a partition's row count decreases, or a closed partition's fingerprint changes under a re-check | `SourceMutationProfileViolated` | correct the source (undo the delete/reload), or `smelt repair` the affected partitions | per_run | built |
+| Source `mutation_profile.kind: append_only` posture | Append-only posture probe (`emit_append_only_posture_probe`, watermark-monotonicity + frontier-checksum, `sources.md` §Semantics 4) | the source's recorded per-partition baseline (`source_postures.json`, one row per partition: row count and skeleton-column fingerprint from the last held probe) against the source's current per-partition state; the fingerprint leg is gated to partitions strictly below the recorded maximum partition value — the still-open partition legitimately gains appends, so only its count is checked | a partition's row count decreases, or a closed partition's fingerprint changes at an unchanged row count; a count *increase* in a closed partition is recorded as a late append (run-manifest `observed`), not a violation — a delete-plus-insert that nets to a count increase is therefore read as a late append, since one aggregate fingerprint per partition cannot prove subset-ness | `SourceMutationProfileViolated` | correct the source (undo the delete/reload), or `smelt repair` the affected partitions | per_run | built |
 | Source `referential_integrity` | Count-preservation probe (`emit_count_preservation_probe`/`emit_count_preservation_probe_from_body`) | the touched region's enrichment-join row count against the driving side's row count | the enrichment join returns fewer rows than the driving side over the touched region | `SourceCountPreservationViolated` | correct or backfill the dimension's missing key, or drop the declaration | per_run | built |
 | Source `key_recurrence` | Recurrence-bound probe (`emit_recurrence_bound_probe`) | a merged delta row's key against the run's derived out-of-slice window | a key recurs outside the declared recurrence window | `KeyedRecurrenceBoundViolated` | widen `key_recurrence.window`, or `--full-refresh` the affected model | per_run | built |
 | Source `unique_key` / `delta_identity` | Uniqueness probe | duplicate values of the declared key within the consuming run's scan window (full-table via `smelt verify`) | a duplicate key value is found | `SourceUniqueKeyViolated` | correct the source's key generation, or narrow the declared key | per_run default; full-table on demand via `smelt verify` | not-yet |
@@ -501,11 +501,6 @@ recorded here — history lives in git and §References → Plans.
   by contrast, are enumerated as walk nodes and bound/reach, grain (key set, determinism,
   comparability), partition skew, and footprint-trajectory all consume their verdicts
   (§"The composition walk"). Tracked: `docs/plans/20260707-property-composition-walk.md`.
-- **`compute_effective_window` still sums declared lateness into the lookback** — §Constraints
-  "Declared lateness is orchestration-only" forbids any proof from reading it; the summation
-  survives (its output feeds batch fields no execute path consumes, so it is inert today) and
-  must be removed rather than wired further. Scheduled:
-  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **`INTERSECT`/`EXCEPT` are unclassified for filter distribution** — their arm scopes are judged
   by the admission walk only; this is independent of the per-arm mutation-sensitivity combination
   rule (§"Per-column mutation-sensitivity / column provenance" "Across set-operation arms"), which
@@ -515,6 +510,15 @@ recorded here — history lives in git and §References → Plans.
   — whether an existing column's meaning changed is not derivable from the column/dependency-set
   diff alone; falls to a declared migration intent whose exact surface is open. Cross-ref
   `models.md` §Known Divergences.
+- **§"Unified bound / reach derivation" and the declarations table (row "Unified bound / reach
+  derivation") describe `derive_model_bounds` as splitting a *source-lateness* margin out of the
+  computed reach and folding it into the licensed `Bounded{before, after}` scan widening; the
+  implementation (`crates/smelt-logical/src/analysis/source_bounds.rs`) reads no lateness value
+  at all — reach comes from the SQL's frames/offsets/interval shifts alone, matching §Constraints
+  "Declared lateness is orchestration-only" rather than the older prose above it. The prose predates
+  that constraint (`docs/research/20260904-decision-track.md`) and was never updated to match it.
+  Needs a wording pass removing the source-lateness component from both mentions; not fixed here
+  since it is a stale description, not a behavior gap this outcome's phases touched.
 - **Two FD-backed readers build their `JoinContext` empty because their callers hold no declared
   source facts to populate it with.** `rules/cumulative.rs`'s once-write route and
   `maintenance/locality.rs`'s key-temporal-locality route 2 each call
@@ -525,12 +529,6 @@ recorded here — history lives in git and §References → Plans.
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Fingerprint projection (P4) has no consumer yet** — the sidecar build and digest compare are a
   later phase's scope. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **The append-only posture probe does not yet distinguish a late append from a violation** — a
-  row-count increase in an already-closed partition can fire the frontier gate as if it were a
-  reload. §Constraints "Declared lateness is orchestration-only" requires an increase to be
-  classified as a late arrival to re-process (an observed delta), with only decreases and
-  fingerprint changes counting as violations; lateness is not consulted either way. Scheduled:
-  `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **`SourceUniqueKeyViolated` remains the one probe-registry row with no emitter at all (Open Question)**
   — whether it needs its own emitter or should fold into a general uniqueness probe family is
   undecided.

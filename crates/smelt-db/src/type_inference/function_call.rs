@@ -413,6 +413,8 @@ const REGISTRY_MIGRATED: &[&str] = &[
     "DAYOFWEEK",
     "QUARTER",
     "DATE_PART",
+    "DATE_ADD", // (Date, Interval) → Timestamp (fixed return)
+    "DATE_SUB", // (Date, Interval) → Timestamp (fixed return)
     // ── JSON (fixed return) ─────────────────────────────────────────────────
     "JSON_OBJECT",
     "JSON_ARRAY",
@@ -1042,6 +1044,13 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
 
         SqlFunction::Age | SqlFunction::ToSeconds => Some(TypedColumn {
             data_type: DataType::Interval,
+            nullable: true,
+        }),
+
+        SqlFunction::DateAdd | SqlFunction::DateSub => Some(TypedColumn {
+            data_type: DataType::Timestamp {
+                with_timezone: false,
+            },
             nullable: true,
         }),
 

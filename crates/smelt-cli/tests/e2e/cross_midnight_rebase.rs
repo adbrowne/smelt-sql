@@ -899,7 +899,6 @@ fn identity_model_windows_unchanged() {
         &inc,
         sql,
         &Default::default(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,

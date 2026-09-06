@@ -316,7 +316,7 @@ this spec describes normatively above.
   `reconciliation.rs`, `landed_deltas.rs`, `schema_tracking.rs`, `snapshot_store.rs`,
   `source_postures.rs`, `frozen_band_baselines.rs`; backend ledger DDL: `ddl_duckdb.rs`,
   `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`, `parse_warehouse_tables`);
-  `crates/smelt-runtime/src/execute.rs` (state-write sites); `crates/smelt-logical/src/maintenance/availability.rs`
+  `crates/smelt-runtime/src/execute/` (state-write sites); `crates/smelt-logical/src/maintenance/availability.rs`
   (the pure availability-resolution step)
 - **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance/`
   (the standing equivalence-oracle gate; `state_deletion.rs` is the leg that interleaves

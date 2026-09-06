@@ -286,6 +286,46 @@ fn append_only_posture_probe_returns_nonzero_with_samples_on_violating_data() {
     );
 }
 
+/// The two-verdict split (`docs/specs/model_properties.md` §Constraints
+/// "Declared lateness is orchestration-only"): a late-arriving row into an
+/// already-closed partition increases its row count AND necessarily changes
+/// its fingerprint, yet the narrowed predicate must not fire — a count
+/// increase is a late append, classified separately by
+/// `smelt_logical::maintenance::emit::late_appends`, never this violation
+/// probe.
+#[test]
+fn append_only_posture_probe_ignores_a_pure_late_append() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE raw_events (event_date DATE, payload TEXT);
+         INSERT INTO raw_events VALUES
+           (DATE '2026-01-01', 'a'), (DATE '2026-01-01', 'b'), (DATE '2026-01-02', 'c');",
+    )
+    .expect("stage");
+
+    let baseline = current_partition_state(&conn, "raw_events", "event_date", "payload");
+
+    // A late-arriving row lands in the already-closed 2026-01-01 partition:
+    // the row count increases and the partition's fingerprint necessarily
+    // changes too, but this is an observation, never a violation.
+    conn.execute_batch("INSERT INTO raw_events VALUES (DATE '2026-01-01', 'late');")
+        .expect("late append");
+
+    let stmt = emit_append_only_posture_probe(
+        "raw_events",
+        "event_date",
+        &["payload".to_string()],
+        &baseline,
+        MaintenanceDialect::DuckDb,
+    );
+    let (violation_count, sample_keys) = probe_result(&conn, &stmt.sql);
+    assert_eq!(
+        violation_count, 0,
+        "a pure late append must not fire the posture violation"
+    );
+    assert_eq!(sample_keys, None);
+}
+
 /// The frontier gate (`AppendOnlyBaselinePartition::check_fingerprint`): a
 /// legitimate append into the still-open (max) partition changes that
 /// partition's whole-partition fingerprint, but must not fire — only its

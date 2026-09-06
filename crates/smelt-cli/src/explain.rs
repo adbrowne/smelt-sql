@@ -1085,6 +1085,12 @@ pub fn build_maintenance_plan_report(
             };
             let _ = writeln!(out, "  - {} ({})", edge.name, provider);
             write_relation_contract(&mut out, "      ", &edge.contract);
+            if let Some(lateness) = &edge.lateness {
+                let _ = writeln!(
+                    out,
+                    "      orchestration-only fact: lateness = {lateness} (never a plan input)"
+                );
+            }
             if let Some((_, shape)) = edge_delta_types.iter().find(|(name, _)| name == &edge.name) {
                 let _ = writeln!(out, "      delta type: {}", format_output_delta(shape));
             }
