@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788683588413,
+  "lastUpdate": 1788683737080,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -93,6 +93,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 14.355538,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9909db306be3967008f1905b6e644217d6f9bbfc",
+          "message": "Merge pull request #195 from adbrowne/fix-concurrency-flakes-189-194\n\nFix two concurrency flakes: Python model registry (#189) and git archive SIGPIPE (#194)",
+          "timestamp": "2026-09-06T18:32:05+10:00",
+          "tree_id": "d8edb3db0ff394e81ce9272f543ae49a44704c9a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9909db306be3967008f1905b6e644217d6f9bbfc"
+        },
+        "date": 1788683734540,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 60.260904999999994,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 58.157477,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.862218,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.615315,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.30843899999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1193.9430200000002,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.4197580000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.2541100000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.180832,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.693041,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 996.839184,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.38227,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.59464,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.813002,
             "unit": "ms"
           }
         ]
