@@ -37,6 +37,23 @@
 
 set -uo pipefail
 
+# Ensure DUCKDB_LIB_DIR/LD_LIBRARY_PATH are set once here rather than letting
+# every spawned `claude --print` step rediscover them via the CLAUDE.md
+# fallback snippet in its own Bash tool calls (docs/research/20260906-outcome-
+# hygiene-token-usage.md finding 3: that snippet was observed ~95 times in a
+# single 24h window).
+if [ -z "${DUCKDB_LIB_DIR:-}" ]; then
+  eval "$(mise env 2>/dev/null)" || true
+fi
+if [ -z "${DUCKDB_LIB_DIR:-}" ]; then
+  for d in /usr/local/lib "${HOME}/.local/lib/duckdb"; do
+    [ -e "${d}/libduckdb.so" ] && export DUCKDB_LIB_DIR="${d}" && break
+  done
+fi
+if [ -n "${DUCKDB_LIB_DIR:-}" ]; then
+  export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
