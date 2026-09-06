@@ -132,6 +132,19 @@ feature's sensitivity, not a workaround; a future fixture wanting to demonstrate
 combiner-driven downgrade needs a model whose driving source is declared mutable (not
 append-only).
 
+**2026-09-06 — a non-partition-local `cell_added` and a widened grain are downgrades; a new
+cell never grades `upgrade`.** Dogfooding the PR comment on #191/#192 showed the first direction
+table graded every new cell an upgrade and a widened row key an upgrade. Both are wrong for the
+reviewer: a new `JOIN` to an unclocked source reads it in full every run and rebuilds the model
+whenever it changes, and a wider key is a weaker uniqueness claim. The direction table now grades
+those downgrades, reserves the upgrade for `maintenance_gained`, and grades a cell removed because
+its source was dropped `neutral`. Rationale lives in `docs/specs/property_diff.md` §Design "A new
+dependency is a cost, not an upgrade" and the grain paragraph under §"Direction"; landed via
+`docs/plans/20260906-property-diff-stories.md`, which also replaced the verdict-table-first
+rendering with severity-ranked stories (§"Stories"). Reversal: edit the two rows in
+`ChangeKind::direction` and the spec table together; the `story_coverage` gate and the
+`property_diff_cli` real-fixture tests pin the current grading.
+
 ## Blocked
 
 <!-- Dated entries; each names the phase, what blocked it, and what a human must decide. -->

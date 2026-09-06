@@ -243,6 +243,17 @@ ancestors — this is how a downgrade that silently propagates into a downstream
 The baseline never touches a warehouse, a deployed snapshot, or the maintenance ledger — it is a
 pure comparison of two source trees.
 
+A new maintenance cell is graded on how it reads its data, not on the fact that it exists: a
+cell whose maintenance is not partition-local — it has no time column to scan, so every run reads
+it in full and any change to it rebuilds the whole model — is a `downgrade` when it's added to a
+model that was already maintained, because the model just gained a dependency that can silently
+force a full rebuild. A partition-local new cell is `neutral` instead; `cell_added` never grades
+`upgrade` on its own — a model going from unmaintained to maintained is reported once, as
+`maintenance_gained`. Symmetrically, a grain that **widens** (its keys now cover a strict
+superset of the old column set, a weaker uniqueness claim — proving one row per `(date, user)`
+implies one row per `(date, user, name)`, never the reverse) is a `downgrade`; a grain that
+**narrows** (a strict subset — a stronger claim) is an `upgrade`.
+
 **Text** (default):
 
 ```
@@ -251,12 +262,16 @@ $ smelt explain --diff
 property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
 
   user_daily_spend  (edited)
-    ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
+    [cost] Costlier maintenance: Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.
+    verdicts:
+      ▼ cell_technique {total_amount}@NewData { source: "raw.transactions" }: KeyedFold → DeleteInsert
 
   user_spend_running_total  (downstream of user_daily_spend)
-    ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
+    [cost] Maintenance route lost: {running_total} no longer has a maintenance route for changes from user_daily_spend.
+    verdicts:
+      ▼ cell_removed {running_total}@NewData { source: "user_daily_spend" }: {...} → null
 
-1 downgrades, 0 upgrades, 0 neutral.
+2 model(s) shifted · 2 read more per run
 ```
 
 When nothing shifted, the whole output is one line: `property diff vs <ref>: no models shifted`.
@@ -268,10 +283,21 @@ When nothing shifted, the whole output is one line: `property diff vs <ref>: no 
   "baseline": { "ref": "<as given>", "commit": "<sha>", "resolved_as": "merge_base" | "explicit" },
   "edited_files": ["<project-relative path>", ...],
   "summary": { "downgrades": 1, "upgrades": 0, "neutral": 0, "shifted_models": 2 },
+  "headline": "2 model(s) shifted · 2 read more per run",
   "models": [
     {
       "model": "<name>",
       "cause": { "kind": "edited" | "added" | "removed" | "downstream", "of": ["<model>", ...] },
+      "stories": [
+        {
+          "kind": "technique",
+          "severity": "cost",
+          "subject": "{total_amount}@NewData { source: \"raw.transactions\" }",
+          "lead": "Costlier maintenance",
+          "detail": "Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.",
+          "changes": [0]
+        }
+      ],
       "changes": [
         { "dimension": "cell_technique", "subject": "...", "direction": "downgrade", "old": "KeyedFold", "new": "DeleteInsert" }
       ]
@@ -280,25 +306,71 @@ When nothing shifted, the whole output is one line: `property diff vs <ref>: no 
 }
 ```
 
-The full schema — every `dimension` value, the per-dimension direction rules, and the
-attribution algorithm — is normative in `docs/specs/property_diff.md`.
+The full schema — every `dimension` value, the per-dimension direction rules, the story-folding
+rules, and the attribution algorithm — is normative in `docs/specs/property_diff.md`.
+
+### Stories
+
+Above the raw per-dimension `changes`, each shifted model carries **stories**: the short list of
+sentences a reviewer reads first. A story folds one or more `changes` into a `lead` and a `detail`
+sentence, and every change belongs to exactly one story — nothing is ever dropped, even a change
+no dedicated rule recognizes (it lands in a catch-all `other` story).
+
+Each story carries a **severity**, derived from the directions of the changes it folds rather than
+assigned by hand:
+
+- **`risk`** — the story folds a downgrade to one of the model's correctness guarantees (its
+  grain, row identity, a maintained cell disappearing entirely, a relaxed contract, a column
+  losing determinism or comparability, and similar). This is what a careful reviewer needs to see
+  before approving.
+- **`cost`** — the story folds a downgrade that makes the model more expensive to maintain (a
+  wider read window, a costlier maintenance technique, a new dependency read in full on every
+  run) without weakening a correctness guarantee.
+- **`improvement`** — the story folds an upgrade and no downgrade at all.
+- **`info`** — everything else: a schema change, a cleared refusal, or any other change with no
+  downgrade or upgrade behind it.
+
+Because severity is derived this way, `--fail-on downgrade`, the editor's `PropertyDowngrade`
+warnings, and the `risk`/`cost` stories can never disagree with one another.
+
+The story `kind`s are: `maintenance_lost`/`maintenance_gained` (a model lost or gained
+incremental maintenance entirely), `refusal` (a maintenance admission refusal appeared or
+cleared), `rows_may_duplicate` (a join or row-identity change means rows are no longer
+identifiable by their old key), `row_key` (the proven row key was lost, gained, widened, or
+narrowed), `reads` (a source's read window widened or narrowed), `dependency` (a new or dropped
+upstream dependency, or a maintenance route lost for one that survives), `technique` (a cell's
+maintenance technique got cheaper or costlier), `contract` (a contract-lattice relaxation
+tightened or loosened), `probe` (a runtime check on a declared fact appeared or disappeared),
+`column_semantics` (a column's determinism or comparability changed), `schema` (columns were
+added or removed), and `other` (anything the rules above don't recognize).
+
+The **headline** is the report's one-line summary, joining the number of shifted models with a
+clause for each thing worth calling out — models that lost incremental maintenance, models with
+correctness risks, models that read more per run, and models that only improved — ending in
+"no downgrades" when the diff is entirely clean. The editor's code lens shows the same idea per
+model, as `<n> risk(s), <n> costlier vs <ref>` (or `changed vs <ref>` when the model has neither).
 
 **Markdown** (`--diff --markdown`): a single comment body suitable for `gh pr comment
---body-file`, with one collapsible block per shifted model (open by default when it holds a
-downgrade) and a trailing `<!-- smelt-property-diff -->` marker a CI job uses to update its
-previous comment instead of stacking a new one on every push. The marker is emitted even when
-nothing shifted, so a stale downgrade comment can be cleared once the regression is fixed. See
+--body-file`, leading with the headline and one bullet per story, each model's raw verdicts
+collapsed under a `Verdict table` — never open by default — and a trailing
+`<!-- smelt-property-diff -->` marker a CI job uses to update its previous comment instead of
+stacking a new one on every push. The marker is emitted even when nothing shifted, so a stale
+downgrade comment can be cleared once the regression is fixed. See
 [Continuous integration](../guide/ci.md) for the documented GitHub Actions job.
 
 ```
 $ smelt explain --diff --markdown
 
-### property diff vs merge-base(main) = 3e9c1a4a (1 file(s) changed, 2 model(s) shifted)
+### property diff vs merge-base(main) @ 3e9c1a4a
 
-1 downgrades, 0 upgrades, 0 neutral.
+**2 model(s) shifted · 2 read more per run**
 
-<details open>
-<summary>user_daily_spend — edited — 1 downgrades, 0 upgrades, 0 neutral</summary>
+**user_daily_spend** (edited)
+
+- ⚠️ **Costlier maintenance.** Changes from raw.transactions are applied to {total_amount} by DeleteInsert instead of KeyedFold.
+
+<details>
+<summary>Verdict table</summary>
 
 | dimension | subject | direction | old | new | reason |
 |---|---|---|---|---|---|
@@ -306,8 +378,12 @@ $ smelt explain --diff --markdown
 
 </details>
 
-<details open>
-<summary>user_spend_running_total — downstream of user_daily_spend — 1 downgrades, 0 upgrades, 0 neutral</summary>
+**user_spend_running_total** (downstream of user_daily_spend)
+
+- ⚠️ **Maintenance route lost.** {running_total} no longer has a maintenance route for changes from user_daily_spend.
+
+<details>
+<summary>Verdict table</summary>
 
 | dimension | subject | direction | old | new | reason |
 |---|---|---|---|---|---|

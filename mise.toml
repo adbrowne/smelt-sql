@@ -11,6 +11,18 @@ node = "24"
 DUCKDB_LIB_DIR = "{{ exec(command='bash scripts/mise-duckdb-lib-dir.sh') }}"
 LD_LIBRARY_PATH = "{{ env.DUCKDB_LIB_DIR }}:{{ env.LD_LIBRARY_PATH | default(value='') }}"
 
+# Cap cargo's parallelism. Cargo defaults `-j` to the core count, so N agent
+# sessions working in N worktrees fan out to N x nproc rustc processes on one
+# machine. Measured on this 32-core box: a clean `cargo test --no-run` takes
+# 197s idle and 987s when three sessions build concurrently — a 5x penalty from
+# oversubscription and the memory pressure that comes with it, not from the
+# suite being slow.
+#
+# 12 is chosen for ~3 concurrent sessions (36 jobs on 32 cores is mild and
+# harmless). Working solo costs some idle cores; override per-machine in
+# .mise.local.toml, or per-command with `CARGO_BUILD_JOBS=32 cargo test`.
+CARGO_BUILD_JOBS = "12"
+
 [tasks.setup-duckdb]
 description = "Install the DuckDB shared library (v1.5.4) into ~/.local/lib/duckdb if not already present"
 run = "bash scripts/mise-setup-duckdb.sh"

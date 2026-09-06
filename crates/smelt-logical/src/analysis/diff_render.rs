@@ -24,6 +24,7 @@ use serde_json::Value;
 use super::diff::{
     BaselineInfo, Cause, CauseKind, Change, DiffReport, Dimension, Direction, ModelDiff,
 };
+use super::diff_stories;
 
 /// The HTML comment marker every rendered form's Markdown body ends with,
 /// so a CI workflow can find and update its previous comment instead of
@@ -139,6 +140,19 @@ pub fn cause_str(cause: &Cause) -> String {
     }
 }
 
+/// Abbreviate a string to its 7-character prefix when it is a full 40-hex
+/// commit sha, else leave it alone. The one place the "is this a full sha"
+/// rule is spelled — [`short_ref`] and [`short_commit`] both call it rather
+/// than re-deriving their own truncation rule.
+fn abbreviate_if_full_sha(s: &str) -> String {
+    let is_full_sha = s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if is_full_sha {
+        s.chars().take(7).collect()
+    } else {
+        s.to_string()
+    }
+}
+
 /// The editor lens's `<short ref>` (`docs/specs/property_diff.md` §Surface
 /// "Editor", Δ1): the baseline's `ref` string, except when that string is a
 /// full 40-hex commit sha, in which case its 7-character abbreviation.
@@ -146,47 +160,49 @@ pub fn cause_str(cause: &Cause) -> String {
 /// any other consumer call this rather than re-deriving their own
 /// truncation rule (§Constraints item 5, "Surface parity").
 pub fn short_ref(baseline: &BaselineInfo) -> String {
-    let r = &baseline.r#ref;
-    let is_full_sha = r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit());
-    if is_full_sha {
-        r.chars().take(7).collect()
-    } else {
-        r.clone()
-    }
+    abbreviate_if_full_sha(&baseline.r#ref)
 }
 
-/// The editor code lens's title
-/// (`docs/specs/property_diff.md` §Surface "Editor"): `N downgrades,
-/// M upgrades vs <short ref>`, counted from `model`'s own changes. Public:
-/// the one primitive that spells the lens title, so the LSP renders it and
-/// the parity gate asserts on the same string rather than a re-derived one.
+/// The Markdown heading's `<short commit>` (`docs/specs/property_diff.md`
+/// §Surface "Markdown"): the baseline's resolved `commit` sha, abbreviated
+/// the same way [`short_ref`] abbreviates `ref`. A sibling of `short_ref`
+/// rather than a duplicate of its rule (both call [`abbreviate_if_full_sha`]).
+pub fn short_commit(baseline: &BaselineInfo) -> String {
+    abbreviate_if_full_sha(&baseline.commit)
+}
+
+/// The editor code lens's title (`docs/specs/property_diff.md` §Surface
+/// "Editor", §"Stories" "Lens title"): `<r> risk(s), <c> costlier vs
+/// <short ref>`, counted from `model`'s own stories. A thin re-export of
+/// [`crate::analysis::diff_stories::lens_title`] — kept here under its
+/// original name so the LSP and the parity gate call one stable path
+/// (§Constraints item 5, "Surface parity") while the actual primitive is
+/// single-owned alongside the rest of the narration in `diff_stories`.
 pub fn lens_title(model: &ModelDiff, baseline: &BaselineInfo) -> String {
-    let downgrades = model
-        .changes
-        .iter()
-        .filter(|c| c.direction == Direction::Downgrade)
-        .count();
-    let upgrades = model
-        .changes
-        .iter()
-        .filter(|c| c.direction == Direction::Upgrade)
-        .count();
-    format!(
-        "{downgrades} downgrades, {upgrades} upgrades vs {}",
-        short_ref(baseline)
-    )
+    super::diff_stories::lens_title(model, baseline)
 }
 
-/// One shifted model's block: header line with its cause, then one line
-/// per change (plus its reason line, when present)
-/// (`docs/specs/property_diff.md` §Surface "Text").
+/// One shifted model's block: header line with its cause, then one story
+/// line per story (severity label, lead, detail), then an indented
+/// `verdicts:` sub-block listing every raw change (plus its reason line,
+/// when present) (`docs/specs/property_diff.md` §Surface "Text").
 pub fn model_block(model: &ModelDiff) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "  {}  ({})", model.model, cause_str(&model.cause));
+    for story in &model.stories {
+        let _ = writeln!(
+            out,
+            "    [{}] {}: {}",
+            diff_stories::severity_label(story.severity),
+            story.lead,
+            story.detail
+        );
+    }
+    let _ = writeln!(out, "    verdicts:");
     for change in &model.changes {
-        let _ = writeln!(out, "    {}", change_line(change));
+        let _ = writeln!(out, "      {}", change_line(change));
         if let Some(reason) = reason_line(change) {
-            let _ = writeln!(out, "        {reason}");
+            let _ = writeln!(out, "          {reason}");
         }
     }
     out
@@ -195,7 +211,8 @@ pub fn model_block(model: &ModelDiff) -> String {
 /// The whole text report (`docs/specs/property_diff.md` §Surface "Text").
 /// Blocks render in `report.models`'s own order — already
 /// dependency-then-name sorted by `diff_profiles`, never re-sorted here.
-/// When nothing shifted, the whole output is the single line
+/// The final line is the report's headline (§"Stories"). When nothing
+/// shifted, the whole output is the single line
 /// `property diff vs <ref>: no models shifted`.
 pub fn text_report(report: &DiffReport) -> String {
     if report.models.is_empty() {
@@ -218,56 +235,32 @@ pub fn text_report(report: &DiffReport) -> String {
         out.push_str(&model_block(model));
         let _ = writeln!(out);
     }
-    let _ = writeln!(
-        out,
-        "{} downgrades, {} upgrades, {} neutral.",
-        report.summary.downgrades, report.summary.upgrades, report.summary.neutral
-    );
+    let _ = writeln!(out, "{}", report.headline);
     out
 }
 
-/// One shifted model's `<details>` block for the Markdown form: a
-/// `<summary>` naming the model, its cause, and its per-model change
-/// counts, open by default (`<details open>`) when the model holds at
-/// least one downgrade (`docs/specs/property_diff.md` §Surface "Markdown",
-/// D6.3 — decided from the model's OWN changes, never from
-/// `report.summary`, which is a whole-report count and would open every
-/// block whenever any model in the report downgraded). The table columns
-/// are the JSON `changes` entry fields, and every cell value is produced
-/// by the same primitives `text_report` uses (`dimension_str`,
-/// `json_display`, `cause_str`) — never re-derived here.
+/// One shifted model's Markdown block: the model name in bold with its
+/// cause in parentheses, one bullet per story in severity order (glyph,
+/// bold lead with a trailing full stop, detail), then one collapsed
+/// `<details><summary>Verdict table</summary>` block around the raw
+/// changes — never `<details open>` (`docs/specs/property_diff.md` §Surface
+/// "Markdown"). The table columns are the JSON `changes` entry fields, and
+/// every cell value is produced by the same primitives `text_report` uses
+/// (`dimension_str`, `json_display`, `cause_str`) — never re-derived here.
 fn markdown_model_block(model: &ModelDiff) -> String {
-    let open = model
-        .changes
-        .iter()
-        .any(|c| c.direction == Direction::Downgrade);
-    let downgrades = model
-        .changes
-        .iter()
-        .filter(|c| c.direction == Direction::Downgrade)
-        .count();
-    let upgrades = model
-        .changes
-        .iter()
-        .filter(|c| c.direction == Direction::Upgrade)
-        .count();
-    let neutral = model
-        .changes
-        .iter()
-        .filter(|c| c.direction == Direction::Neutral)
-        .count();
-
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "<details{}>\n<summary>{} — {} — {} downgrades, {} upgrades, {} neutral</summary>\n",
-        if open { " open" } else { "" },
-        model.model,
-        cause_str(&model.cause),
-        downgrades,
-        upgrades,
-        neutral,
-    );
+    let _ = writeln!(out, "**{}** ({})\n", model.model, cause_str(&model.cause));
+    for story in &model.stories {
+        let _ = writeln!(
+            out,
+            "- {} **{}.** {}",
+            diff_stories::severity_glyph(story.severity),
+            story.lead,
+            story.detail
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "<details>\n<summary>Verdict table</summary>\n");
     let _ = writeln!(
         out,
         "| dimension | subject | direction | old | new | reason |"
@@ -295,8 +288,9 @@ fn markdown_model_block(model: &ModelDiff) -> String {
 }
 
 /// The Markdown comment body (`docs/specs/property_diff.md` §Surface
-/// "Markdown"): a one-line heading with the baseline and summary counts,
-/// one `<details>` block per shifted model, and a trailing [`MARKER`] a CI
+/// "Markdown"): a one-line heading naming the baseline and short commit,
+/// the report's headline in bold, one Markdown block per shifted model
+/// (stories as bullets, verdicts collapsed), and a trailing [`MARKER`] a CI
 /// workflow uses to find and update its previous comment. Reuses
 /// `report.models`'s own order — already dependency-then-name sorted by
 /// `diff_profiles` — exactly as `text_report` does; never re-sorted here.
@@ -323,17 +317,11 @@ pub fn markdown_report(report: &DiffReport) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "### property diff vs {} = {} ({} file(s) changed, {} model(s) shifted)\n",
+        "### property diff vs {} @ {}\n",
         report.baseline.r#ref,
-        report.baseline.commit,
-        report.edited_files.len(),
-        report.summary.shifted_models,
+        short_commit(&report.baseline),
     );
-    let _ = writeln!(
-        out,
-        "{} downgrades, {} upgrades, {} neutral.\n",
-        report.summary.downgrades, report.summary.upgrades, report.summary.neutral
-    );
+    let _ = writeln!(out, "**{}**\n", report.headline);
 
     let total = report.models.len();
     let full_count = total.min(MARKDOWN_MAX_FULL_MODELS);
@@ -360,6 +348,7 @@ pub fn markdown_report(report: &DiffReport) -> String {
 mod tests {
     use super::*;
     use crate::analysis::diff::{BaselineInfo, DiffSummary};
+    use crate::analysis::diff_stories::Story;
 
     fn baseline() -> BaselineInfo {
         BaselineInfo {
@@ -374,6 +363,7 @@ mod tests {
             baseline: baseline(),
             edited_files: vec![],
             summary: DiffSummary::default(),
+            headline: String::new(),
             models: vec![],
         }
     }
@@ -447,8 +437,23 @@ mod tests {
         assert_eq!(short_ref(&named_baseline), "merge-base(main)");
     }
 
+    fn story(
+        kind: super::super::diff_stories::StoryKind,
+        severity: super::super::diff_stories::Severity,
+    ) -> super::super::diff_stories::Story {
+        super::super::diff_stories::Story {
+            kind,
+            severity,
+            subject: String::new(),
+            lead: "x".to_string(),
+            detail: "y".to_string(),
+            changes: vec![],
+        }
+    }
+
     #[test]
     fn lens_title_matches_the_summary_counts() {
+        use super::super::diff_stories::{Severity, StoryKind};
         let model = ModelDiff {
             model: "staging.orders".to_string(),
             cause: Cause {
@@ -461,11 +466,35 @@ mod tests {
                 change(Direction::Downgrade),
                 change(Direction::Upgrade),
             ],
+            stories: vec![
+                story(StoryKind::RowKey, Severity::Risk),
+                story(StoryKind::RowKey, Severity::Risk),
+                story(StoryKind::Reads, Severity::Cost),
+            ],
         };
+        // `docs/specs/property_diff.md` §"Stories" "Lens title": `<r>
+        // risk(s), <c> costlier vs <short ref>` — counted from the model's
+        // own risk/cost STORIES, not its raw downgrade/upgrade CHANGES.
         assert_eq!(
             lens_title(&model, &baseline()),
-            "2 downgrades, 1 upgrades vs main"
+            "2 risks, 1 costlier vs main"
         );
+    }
+
+    #[test]
+    fn lens_title_falls_back_to_changed_with_no_risk_or_cost_stories() {
+        use super::super::diff_stories::{Severity, StoryKind};
+        let model = ModelDiff {
+            model: "staging.orders".to_string(),
+            cause: Cause {
+                kind: CauseKind::Edited,
+                of: vec![],
+                reason: None,
+            },
+            changes: vec![change(Direction::Upgrade)],
+            stories: vec![story(StoryKind::Other, Severity::Improvement)],
+        };
+        assert_eq!(lens_title(&model, &baseline()), "changed vs main");
     }
 
     fn model_diff(cause: Cause) -> ModelDiff {
@@ -473,6 +502,7 @@ mod tests {
             model: "staging.orders".to_string(),
             cause,
             changes: vec![change(Direction::Downgrade)],
+            stories: vec![],
         }
     }
 
@@ -521,6 +551,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 2,
             },
+            headline: String::new(),
             models: vec![
                 model_diff(Cause {
                     kind: CauseKind::Edited,
@@ -535,6 +566,7 @@ mod tests {
                         reason: None,
                     },
                     changes: vec![change(Direction::Downgrade)],
+                    stories: vec![],
                 },
             ],
         };
@@ -558,17 +590,29 @@ mod tests {
                 neutral: 0,
                 shifted_models: 1,
             },
-            models: vec![model_diff(Cause {
-                kind: CauseKind::Edited,
-                of: vec![],
-                reason: None,
-            })],
+            headline: "1 model(s) shifted · no downgrades".to_string(),
+            models: vec![ModelDiff {
+                model: "staging.orders".to_string(),
+                cause: Cause {
+                    kind: CauseKind::Edited,
+                    of: vec![],
+                    reason: None,
+                },
+                changes: vec![change(Direction::Downgrade)],
+                stories: vec![story(
+                    super::super::diff_stories::StoryKind::Other,
+                    super::super::diff_stories::Severity::Cost,
+                )],
+            }],
         };
         let v = serde_json::to_value(&report).unwrap();
         let obj = v.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, vec!["baseline", "edited_files", "models", "summary"]);
+        assert_eq!(
+            keys,
+            vec!["baseline", "edited_files", "headline", "models", "summary"]
+        );
         let baseline_obj = v["baseline"].as_object().unwrap();
         let mut bkeys: Vec<&str> = baseline_obj.keys().map(|s| s.as_str()).collect();
         bkeys.sort();
@@ -577,6 +621,21 @@ mod tests {
         // A cause with no reason omits the key (Δ1).
         let cause_json = &v["models"][0]["cause"];
         assert!(cause_json.as_object().unwrap().get("reason").is_none());
+
+        // `docs/specs/property_diff.md` §Surface "JSON": every model carries
+        // `stories`, each with exactly the schema's story keys.
+        let story_json = &v["models"][0]["stories"][0];
+        let mut story_keys: Vec<&str> = story_json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        story_keys.sort();
+        assert_eq!(
+            story_keys,
+            vec!["changes", "detail", "kind", "lead", "severity", "subject"]
+        );
     }
 
     // --- Markdown form (`docs/outcomes/20260905-property-diff/phases/06-plan.md`) ---
@@ -599,45 +658,155 @@ mod tests {
     }
 
     #[test]
-    fn a_model_with_a_downgrade_renders_details_open() {
-        let downgraded = model_diff(Cause {
+    fn text_block_lists_stories_then_verdicts() {
+        use super::super::diff_stories::{Severity, StoryKind};
+        let mut model = model_diff(Cause {
             kind: CauseKind::Edited,
             of: vec![],
             reason: None,
         });
-        let mut neutral_model = model_diff(Cause {
-            kind: CauseKind::Edited,
-            of: vec![],
-            reason: None,
-        });
-        neutral_model.model = "bbb.untouched".to_string();
-        neutral_model.changes = vec![change(Direction::Neutral)];
-
+        model.stories = vec![
+            Story {
+                kind: StoryKind::RowKey,
+                severity: Severity::Risk,
+                subject: String::new(),
+                lead: "Rows may be duplicated".to_string(),
+                detail: "detail one.".to_string(),
+                changes: vec![0],
+            },
+            Story {
+                kind: StoryKind::Schema,
+                severity: Severity::Info,
+                subject: String::new(),
+                lead: "Schema".to_string(),
+                detail: "Adds x.".to_string(),
+                changes: vec![],
+            },
+        ];
         let report = DiffReport {
             baseline: baseline(),
             edited_files: vec![],
             summary: DiffSummary {
                 downgrades: 1,
                 upgrades: 0,
-                neutral: 1,
-                shifted_models: 2,
+                neutral: 0,
+                shifted_models: 1,
             },
-            models: vec![downgraded, neutral_model],
+            headline: "1 model(s) shifted".to_string(),
+            models: vec![model],
+        };
+        let block = model_block(&report.models[0]);
+        let risk_pos = block
+            .find("[risk] Rows may be duplicated: detail one.")
+            .unwrap();
+        let info_pos = block.find("[info] Schema: Adds x.").unwrap();
+        let verdicts_pos = block.find("verdicts:").unwrap();
+        let change_pos = block.find("▼ cell_technique").unwrap();
+        assert!(
+            risk_pos < info_pos && info_pos < verdicts_pos && verdicts_pos < change_pos,
+            "expected story lines, then verdicts:, then change lines: {block}"
+        );
+
+        let text = text_report(&report);
+        assert!(
+            text.trim_end().ends_with(&report.headline),
+            "expected the report to end with the headline, not a counts line: {text:?}"
+        );
+        assert!(
+            !text.contains("downgrades,"),
+            "the old counts line must be gone: {text:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_never_renders_details_open() {
+        let downgraded = model_diff(Cause {
+            kind: CauseKind::Edited,
+            of: vec![],
+            reason: None,
+        });
+        let report = DiffReport {
+            baseline: baseline(),
+            edited_files: vec![],
+            summary: DiffSummary {
+                downgrades: 1,
+                upgrades: 0,
+                neutral: 0,
+                shifted_models: 1,
+            },
+            headline: "1 model(s) shifted".to_string(),
+            models: vec![downgraded],
         };
         let body = markdown_report(&report);
-        // D6.3: open-state is decided per-model from its own changes, not
-        // from `report.summary.downgrades > 0` — that wrong implementation
-        // would also open bbb.untouched's block. Exactly one <details open>.
-        assert_eq!(
-            body.matches("<details open>").count(),
-            1,
-            "expected exactly one open block: {body}"
+        assert!(
+            !body.contains("<details open>"),
+            "no model block may ever render <details open>: {body}"
         );
-        assert!(body.contains("<details>\n<summary>bbb.untouched"));
+        assert!(body.contains("<details>\n<summary>Verdict table</summary>"));
+    }
+
+    #[test]
+    fn markdown_leads_with_headline_and_story_bullets() {
+        use super::super::diff_stories::{Severity, StoryKind};
+        let mut model = model_diff(Cause {
+            kind: CauseKind::Edited,
+            of: vec![],
+            reason: None,
+        });
+        model.model = "staging.orders".to_string();
+        model.stories = vec![Story {
+            kind: StoryKind::RowKey,
+            severity: Severity::Risk,
+            subject: String::new(),
+            lead: "Rows may be duplicated".to_string(),
+            detail: "detail one.".to_string(),
+            changes: vec![0],
+        }];
+        let report = DiffReport {
+            baseline: baseline(),
+            edited_files: vec![],
+            summary: DiffSummary {
+                downgrades: 1,
+                upgrades: 0,
+                neutral: 0,
+                shifted_models: 1,
+            },
+            headline: "1 model(s) shifted".to_string(),
+            models: vec![model],
+        };
+        let body = markdown_report(&report);
+        assert!(
+            body.starts_with("### property diff vs main @ abc1234\n"),
+            "expected the heading first: {body}"
+        );
+        assert!(
+            body.contains("**1 model(s) shifted**"),
+            "expected the bold headline: {body}"
+        );
+        assert!(body.contains("**staging.orders** (edited)"));
+        assert!(
+            body.contains("- 🔴 **Rows may be duplicated.** detail one."),
+            "expected the story bullet: {body}"
+        );
+        assert!(body.contains("<details>\n<summary>Verdict table</summary>"));
+        assert!(!body.contains("<details open>"));
+        assert!(
+            body.trim_end().ends_with(MARKER),
+            "marker must be the last line: {body}"
+        );
     }
 
     #[test]
     fn markdown_values_match_the_text_form() {
+        use super::super::diff_stories::{Severity, StoryKind};
+        let stories = vec![Story {
+            kind: StoryKind::RowKey,
+            severity: Severity::Risk,
+            subject: String::new(),
+            lead: "Rows may be duplicated".to_string(),
+            detail: "detail one.".to_string(),
+            changes: vec![0],
+        }];
         let report = DiffReport {
             baseline: baseline(),
             edited_files: vec![],
@@ -647,6 +816,7 @@ mod tests {
                 neutral: 1,
                 shifted_models: 1,
             },
+            headline: "1 model(s) shifted".to_string(),
             models: vec![ModelDiff {
                 model: "staging.orders".to_string(),
                 cause: Cause {
@@ -659,6 +829,7 @@ mod tests {
                     change(Direction::Upgrade),
                     change(Direction::Neutral),
                 ],
+                stories,
             }],
         };
         let text = text_report(&report);
@@ -680,6 +851,30 @@ mod tests {
         let cause = cause_str(&report.models[0].cause);
         assert!(markdown.contains(&cause));
         assert!(text.contains(&cause));
+
+        // Story lead/detail must be byte-identical between the two forms.
+        for story in &report.models[0].stories {
+            assert!(
+                text.contains(&story.lead),
+                "text form missing story lead {:?}: {text}",
+                story.lead
+            );
+            assert!(
+                markdown.contains(&story.lead),
+                "markdown form missing story lead {:?}: {markdown}",
+                story.lead
+            );
+            assert!(
+                text.contains(&story.detail),
+                "text form missing story detail {:?}: {text}",
+                story.detail
+            );
+            assert!(
+                markdown.contains(&story.detail),
+                "markdown form missing story detail {:?}: {markdown}",
+                story.detail
+            );
+        }
     }
 
     #[test]
@@ -693,6 +888,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 2,
             },
+            headline: String::new(),
             models: vec![
                 model_diff(Cause {
                     kind: CauseKind::Edited,
@@ -707,6 +903,7 @@ mod tests {
                         reason: None,
                     },
                     changes: vec![change(Direction::Downgrade)],
+                    stories: vec![],
                 },
             ],
         };
@@ -730,6 +927,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 1,
             },
+            headline: String::new(),
             models: vec![model_diff(Cause {
                 kind: CauseKind::Edited,
                 of: vec![],
@@ -754,6 +952,7 @@ mod tests {
                     reason: None,
                 },
                 changes: vec![change(Direction::Downgrade)],
+                stories: vec![],
             })
             .collect();
         let report = DiffReport {
@@ -765,6 +964,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 500,
             },
+            headline: String::new(),
             models,
         };
         let body = markdown_report(&report);

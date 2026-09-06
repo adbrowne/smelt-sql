@@ -79,6 +79,22 @@ fn stage_timeseries_repo(tmp: &Path) {
     git_commit(tmp, "initial import of examples/timeseries");
 }
 
+/// Stage a git repo at `examples/web_analytics`, committed on `main` — the
+/// counterpart to [`stage_timeseries_repo`] for fixtures that need a source
+/// with no declared timeseries clock (`raw.devices`).
+fn stage_web_analytics_repo(tmp: &Path) {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/web_analytics");
+    copy_dir(&repo_root, tmp);
+    git(tmp, &["init", "-q", "-b", "main"]);
+    git(tmp, &["add", "-A"]);
+    git_commit(tmp, "initial import of examples/web_analytics");
+}
+
 fn smelt() -> Command {
     Command::new(env!("CARGO_BIN_EXE_smelt"))
 }
@@ -425,7 +441,10 @@ fn diff_json_top_level_matches_the_schema() {
     let obj = json.as_object().expect("top-level object");
     let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
     keys.sort();
-    assert_eq!(keys, vec!["baseline", "edited_files", "models", "summary"]);
+    assert_eq!(
+        keys,
+        vec!["baseline", "edited_files", "headline", "models", "summary"]
+    );
 
     let baseline = json["baseline"].as_object().expect("baseline object");
     let mut bkeys: Vec<&str> = baseline.keys().map(|s| s.as_str()).collect();
@@ -666,14 +685,15 @@ fn apply_join_downgrade_edit(tmp: &Path) {
     std::fs::write(&model_path, edited).expect("write edited user_daily_spend.sql");
 }
 
-/// `--markdown` reports the join downgrade in an open `<details>` block for
-/// both the directly-edited model and its downstream dependent. Fails
-/// against a renderer whose open-state or cause string is wrong, and
+/// `--markdown` reports the join downgrade as a story bullet for both the
+/// directly-edited model and its downstream dependent, with the raw
+/// verdicts collapsed under `Verdict table` — never `<details open>`.
+/// Fails against a renderer whose story text or cause string is wrong, and
 /// against a `print!` branch wired after the `--fail-on` early return
 /// (there's no `--fail-on` here, so this alone only covers the render
 /// path — test 10 covers the ordering hazard).
 #[test]
-fn markdown_reports_the_join_downgrade_in_an_open_details() {
+fn markdown_reports_the_join_downgrade_as_stories() {
     let tmp = tempfile::tempdir().expect("tempdir");
     stage_timeseries_repo(tmp.path());
     apply_join_downgrade_edit(tmp.path());
@@ -696,12 +716,21 @@ fn markdown_reports_the_join_downgrade_in_an_open_details() {
         "expected the marker: {stdout}"
     );
     assert!(
-        stdout.contains("<details open>\n<summary>user_daily_spend"),
-        "expected an open details block naming user_daily_spend: {stdout}"
+        !stdout.contains("<details open>"),
+        "no model block may ever render <details open>: {stdout}"
     );
     assert!(
-        stdout.contains("<details open>\n<summary>user_spend_running_total"),
-        "expected an open details block naming user_spend_running_total: {stdout}"
+        stdout.contains("**user_daily_spend** (edited)"),
+        "expected a bold model header naming user_daily_spend: {stdout}"
+    );
+    assert!(
+        stdout.contains("**user_spend_running_total** (downstream of user_daily_spend)"),
+        "expected a bold model header naming user_spend_running_total: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("<summary>Verdict table</summary>").count(),
+        2,
+        "expected one collapsed verdict table per shifted model: {stdout}"
     );
 }
 
@@ -776,5 +805,195 @@ fn a_formatting_only_edit_renders_the_cleared_markdown_body() {
     assert!(
         stdout.trim_end().ends_with("<!-- smelt-property-diff -->"),
         "expected the marker as the last line: {stdout}"
+    );
+}
+
+/// `docs/specs/property_diff.md` §Design "A new dependency is a cost, not an
+/// upgrade": joining an unclocked dimension (`raw.devices` declares no
+/// `timeseries:`, so a maintenance cell reading it has no partition to scan)
+/// into an already-maintained model must grade `cell_added` a `downgrade`,
+/// never an `upgrade` (`docs/specs/property_diff.md` §"Direction", `cell_added` row).
+#[test]
+fn new_unclocked_join_is_a_cell_added_downgrade() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_web_analytics_repo(tmp.path());
+
+    let model_path = tmp.path().join("models/gold/eventstream_with_identity.sql");
+    let original =
+        std::fs::read_to_string(&model_path).expect("read eventstream_with_identity.sql");
+    let edited = original
+        .replace(
+            "FROM smelt.silver.events_deduped e\nJOIN smelt.silver.sessions s",
+            "FROM smelt.silver.events_deduped e\nJOIN smelt.sources.raw.devices d ON e.device_id = d.device_id\nJOIN smelt.silver.sessions s",
+        )
+        .replace(
+            "    s.session_id,\n    COALESCE(f.forward_only_amplitude_id,",
+            "    s.session_id,\n    d.device_type,\n    COALESCE(f.forward_only_amplitude_id,",
+        );
+    assert_ne!(
+        original, edited,
+        "the fixture's SELECT/FROM text must match what this test replaces"
+    );
+    std::fs::write(&model_path, edited).expect("write edited eventstream_with_identity.sql");
+
+    let output = smelt()
+        .args(["explain", "--diff", "--json", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --json");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("--json did not print JSON: {e}\n{output:?}"));
+
+    let models = json["models"].as_array().expect("models must be an array");
+    let edited_model = models
+        .iter()
+        .find(|m| m["model"] == "gold.eventstream_with_identity")
+        .unwrap_or_else(|| {
+            panic!("gold.eventstream_with_identity must be reported shifted: {json}")
+        });
+    let changes = edited_model["changes"].as_array().expect("changes array");
+
+    let cell_added = changes
+        .iter()
+        .find(|c| c["dimension"] == "cell_added")
+        .unwrap_or_else(|| panic!("expected a cell_added change: {changes:?}"));
+    assert_eq!(
+        cell_added["direction"], "downgrade",
+        "a non-partition-local new dependency must downgrade: {cell_added}"
+    );
+    assert_eq!(
+        cell_added["new"]["partition_local"], false,
+        "the new cell must not be partition-local: {cell_added}"
+    );
+
+    assert!(
+        !changes.iter().any(|c| c["direction"] == "upgrade"),
+        "a new dependency must never report an upgrade: {changes:?}"
+    );
+}
+
+/// `docs/specs/property_diff.md` §Surface "Markdown": the web-analytics
+/// devices-join edit (same fixture as
+/// [`new_unclocked_join_is_a_cell_added_downgrade`]) renders as stories: a
+/// `dependency` cost story naming `raw.devices`, and an `info` schema
+/// story — one collapsed `Verdict table` per model, no `P7D` window-code
+/// leakage.
+#[test]
+fn markdown_comment_for_the_web_analytics_edit_reads_as_stories() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_web_analytics_repo(tmp.path());
+
+    let model_path = tmp.path().join("models/gold/eventstream_with_identity.sql");
+    let original =
+        std::fs::read_to_string(&model_path).expect("read eventstream_with_identity.sql");
+    let edited = original
+        .replace(
+            "FROM smelt.silver.events_deduped e\nJOIN smelt.silver.sessions s",
+            "FROM smelt.silver.events_deduped e\nJOIN smelt.sources.raw.devices d ON e.device_id = d.device_id\nJOIN smelt.silver.sessions s",
+        )
+        .replace(
+            "    s.session_id,\n    COALESCE(f.forward_only_amplitude_id,",
+            "    s.session_id,\n    d.device_type,\n    COALESCE(f.forward_only_amplitude_id,",
+        );
+    assert_ne!(
+        original, edited,
+        "the fixture's SELECT/FROM text must match what this test replaces"
+    );
+    std::fs::write(&model_path, edited).expect("write edited eventstream_with_identity.sql");
+
+    let output = smelt()
+        .args(["explain", "--diff", "--markdown", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --markdown");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("⚠️ **New dependency read in full.** raw.devices"),
+        "expected the dependency story bullet: {stdout}"
+    );
+    assert!(
+        stdout.contains("ℹ️ **Schema.** Adds device_type."),
+        "expected the schema story bullet: {stdout}"
+    );
+    assert_eq!(
+        stdout
+            .matches("<details>\n<summary>Verdict table</summary>")
+            .count(),
+        1,
+        "expected exactly one collapsed verdict table for the one shifted model: {stdout}"
+    );
+    assert!(
+        !stdout.contains("P7D"),
+        "the reads story must humanise the window, never leak the raw ISO-8601 code: {stdout}"
+    );
+    assert!(stdout.trim_end().ends_with("<!-- smelt-property-diff -->"));
+}
+
+/// `docs/specs/property_diff.md` §"Direction" grain row: widening the grain
+/// (adding `user_name` to `daily_revenue`'s key via a dimension join) must
+/// grade `grain` a `downgrade` (§"Direction": a widened grain is a weaker uniqueness claim).
+#[test]
+fn key_widening_join_is_a_grain_downgrade() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_timeseries_repo(tmp.path());
+
+    let model_path = tmp.path().join("models/daily_revenue.sql");
+    let original = std::fs::read_to_string(&model_path).expect("read daily_revenue.sql");
+    let edited = original
+        .replace(
+            "SELECT\n    CAST(transaction_timestamp AS DATE) as revenue_date,\n    user_id,\n    COUNT(*) as transaction_count,\n    SUM(amount) as total_revenue,\n    AVG(amount) as avg_transaction_amount,\n    MIN(transaction_timestamp) as first_transaction,\n    MAX(transaction_timestamp) as last_transaction,\nFROM smelt.sources.raw.transactions\nWHERE transaction_timestamp IS NOT NULL\nGROUP BY 1, 2\nORDER BY 1, 2",
+            "SELECT\n    CAST(t.transaction_timestamp AS DATE) as revenue_date,\n    t.user_id,\n    u.user_name,\n    COUNT(*) as transaction_count,\n    SUM(t.amount) as total_revenue,\n    AVG(t.amount) as avg_transaction_amount,\n    MIN(t.transaction_timestamp) as first_transaction,\n    MAX(t.transaction_timestamp) as last_transaction,\nFROM smelt.sources.raw.transactions t\nJOIN smelt.sources.raw.users u ON t.user_id = u.user_id\nWHERE t.transaction_timestamp IS NOT NULL\nGROUP BY 1, 2, 3\nORDER BY 1, 2, 3",
+        );
+    assert_ne!(
+        original, edited,
+        "the fixture's SELECT text must match what this test replaces"
+    );
+    std::fs::write(&model_path, edited).expect("write edited daily_revenue.sql");
+
+    let output = smelt()
+        .args(["explain", "--diff", "--json", "--project-dir"])
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain --diff --json");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("--json did not print JSON: {e}\n{output:?}"));
+
+    let models = json["models"].as_array().expect("models must be an array");
+    let edited_model = models
+        .iter()
+        .find(|m| m["model"] == "daily_revenue")
+        .unwrap_or_else(|| panic!("daily_revenue must be reported shifted: {json}"));
+    let changes = edited_model["changes"].as_array().expect("changes array");
+
+    let grain_change = changes
+        .iter()
+        .find(|c| c["dimension"] == "grain")
+        .unwrap_or_else(|| panic!("expected a grain change: {changes:?}"));
+    assert_eq!(
+        grain_change["direction"], "downgrade",
+        "a widened grain must downgrade: {grain_change}"
     );
 }

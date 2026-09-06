@@ -135,11 +135,20 @@ pub enum ChangeKind {
     },
     CellTechnique {
         cell: String,
+        /// The cell's column-group display name, read structurally off the
+        /// matched [`CellVerdict`] rather than split back out of `cell`'s
+        /// own `{group}@{trigger:?}` join text.
+        group: String,
+        /// The source a `NewData`/`UpstreamMutation` trigger names, `None`
+        /// for `Backfill`/`ColumnAdded` — mirrors [`CellVerdict::trigger_source`].
+        trigger_source: Option<String>,
         old: Technique,
         new: Technique,
     },
     CellCorner {
         cell: String,
+        group: String,
+        trigger_source: Option<String>,
         old: String,
         new: String,
     },
@@ -156,7 +165,13 @@ pub enum ChangeKind {
     CellRemoved {
         cell: String,
         old: Box<CellVerdict>,
-        still_maintained: bool,
+        /// Whether the removed cell's trigger source is still read by
+        /// another surviving cell — the case `docs/specs/property_diff.md`
+        /// §"Direction" grades a downgrade ("a column group lost its
+        /// maintenance route for a source the model still depends on").
+        /// `false` both when the source was dropped altogether and when the
+        /// whole model lost maintenance (no surviving cell reads anything).
+        source_survives: bool,
     },
     RefusalAdded(ProfileRefusal),
     RefusalRemoved(ProfileRefusal),
@@ -222,6 +237,8 @@ pub enum ChangeKind {
     /// §"Direction" "state_downgrade" row).
     StateDowngrade {
         cell: String,
+        group: String,
+        trigger_source: Option<String>,
         old: Option<crate::maintenance::availability::StateDowngrade>,
         new: Option<crate::maintenance::availability::StateDowngrade>,
     },
@@ -299,25 +316,36 @@ impl ChangeKind {
                 } else if !old_has && new_has {
                     Direction::Upgrade
                 } else {
-                    // G5 (`docs/outcomes/20260905-property-diff` fix round
-                    // 1): compare the UNION of columns each side's keys
-                    // cover, not key-set membership — `Key(["id","region"])
-                    // -> Key(["id"])` is a composite key column dropped
-                    // ("lost a key column", spec §"Direction"), but the two
-                    // `KeySet`s are unequal as *values* so the prior
-                    // membership check saw both "lost" (old's composite
-                    // isn't in new) and "gained" (new's shorter key isn't in
-                    // old) and graded it `Neutral`. A dropped column from
-                    // the grain's footprint is always worse regardless of
-                    // what else changed, so `lost` wins ties.
+                    // A grain that widens is a downgrade because a proof
+                    // only ever gets weaker by needing more columns: proving
+                    // one row per `(date, user)` implies one row per
+                    // `(date, user, name)`, never the reverse, and every
+                    // downstream join written against the old key may now
+                    // fan out (`docs/specs/property_diff.md` §"Direction" —
+                    // the paragraph following the table). The narrowing case
+                    // (the new key's column set is a strict subset of the
+                    // old one — a *stronger* uniqueness claim) is the mirror
+                    // image and is an upgrade. Compare the UNION of columns
+                    // each side's keys cover, not key-set membership, so a
+                    // composite key losing/gaining one column is seen as a
+                    // subset/superset relationship rather than two disjoint
+                    // `KeySet` values.
                     let old_cols: BTreeSet<&String> = old.keys.iter().flatten().collect();
                     let new_cols: BTreeSet<&String> = new.keys.iter().flatten().collect();
-                    let lost = !old_cols.is_subset(&new_cols);
-                    let gained = !new_cols.is_subset(&old_cols);
-                    match (lost, gained) {
-                        (false, true) => Direction::Upgrade,
-                        (false, false) => Direction::Neutral,
-                        _ => Direction::Downgrade,
+                    if new_cols == old_cols {
+                        Direction::Neutral
+                    } else if old_cols.is_subset(&new_cols) {
+                        // new_cols is a strict superset of old_cols: widened.
+                        Direction::Downgrade
+                    } else if new_cols.is_subset(&old_cols) {
+                        // new_cols is a strict subset of old_cols: narrowed.
+                        Direction::Upgrade
+                    } else {
+                        // Neither a subset nor a superset of the other — a
+                        // different key, not a weaker/stronger one
+                        // (surfaced by the `row_key` story, not this
+                        // dimension's direction).
+                        Direction::Neutral
                     }
                 }
             }
@@ -350,21 +378,40 @@ impl ChangeKind {
                 }
             }
             ChangeKind::CellCorner { .. } => Direction::Neutral,
-            ChangeKind::CellAdded { .. } => Direction::Upgrade,
-            ChangeKind::CellRemoved {
-                still_maintained, ..
+            ChangeKind::CellAdded {
+                new,
+                still_maintained,
+                ..
             } => {
-                // A cell removed while the model is still maintained lost a
-                // maintenance route (`docs/specs/property_diff.md`
-                // §"Direction"): a downgrade. The spec's row does not name
-                // the case where the *whole model* stopped being
-                // maintained (`still_maintained == false`) — deviation
-                // (Phase 3): treated as `neutral` here rather than
-                // downgrade, since the model-wide loss of maintenance is
-                // itself visible via every other cell's removal and via
-                // the refusal set, so this dimension would otherwise
-                // double-count it.
-                if *still_maintained {
+                // A new dependency is a cost, not an upgrade
+                // (`docs/specs/property_diff.md` §Design). A model
+                // *becoming* maintained (`still_maintained == false` — this
+                // is the first cell it ever admitted) is `maintenance_
+                // gained`'s upgrade to report, not this dimension's; on an
+                // already-maintained model, a non-partition-local cell reads
+                // its trigger source in full on every run and rebuilds the
+                // whole model on any change to it — a downgrade. A new
+                // partition-local cell is `neutral`: a dependency gained,
+                // reported by the `dependency` story, not a proof that got
+                // better.
+                if *still_maintained && !new.partition_local {
+                    Direction::Downgrade
+                } else {
+                    Direction::Neutral
+                }
+            }
+            ChangeKind::CellRemoved {
+                source_survives, ..
+            } => {
+                // A cell removed while another surviving cell still reads
+                // the same trigger source lost a maintenance route
+                // (`docs/specs/property_diff.md` §"Direction"): a downgrade.
+                // `false` both when the source was dropped altogether (the
+                // model shed a dependency — `neutral`, reported by the
+                // `dependency` story) and when the whole model stopped being
+                // maintained (visible via `maintenance_lost` instead, so
+                // this dimension would otherwise double-count it).
+                if *source_survives {
                     Direction::Downgrade
                 } else {
                     Direction::Neutral
@@ -593,7 +640,14 @@ pub struct Change {
 }
 
 impl Change {
-    fn from_kind(kind: ChangeKind) -> Self {
+    /// Build a [`Change`] from a typed [`ChangeKind`], deriving `dimension`,
+    /// `subject`, `direction`, `old`/`new`, and `reason` from it — the one
+    /// constructor every [`Change`] goes through, so a caller (including
+    /// `story_coverage`'s generative gate,
+    /// `docs/specs/property_diff.md` §Constraints item 11) can build a
+    /// [`Change`] from a [`ChangeKind`] and get the *real* derived fields
+    /// rather than hand-rolling them.
+    pub fn from_kind(kind: ChangeKind) -> Self {
         Change {
             dimension: kind.dimension(),
             subject: kind.subject(),
@@ -634,6 +688,12 @@ pub struct ModelDiff {
     pub model: String,
     pub cause: Cause,
     pub changes: Vec<Change>,
+    /// The severity-ranked narration of `changes`
+    /// (`docs/specs/property_diff.md` §"Stories"), produced once by
+    /// [`crate::analysis::diff_stories::narrate`] and carried here so every
+    /// renderer reads the same value rather than re-folding the changes
+    /// itself (§Constraints item 10, "Narration single ownership").
+    pub stories: Vec<crate::analysis::diff_stories::Story>,
 }
 
 /// The diff's summary counts (`docs/specs/property_diff.md` §Surface
@@ -687,6 +747,12 @@ pub struct DiffReport {
     pub baseline: BaselineInfo,
     pub edited_files: Vec<String>,
     pub summary: DiffSummary,
+    /// The report's one-line summary (`docs/specs/property_diff.md`
+    /// §"Stories" "Headline"), derived from `models`' own stories by
+    /// [`crate::analysis::diff_stories::headline`] — recomputed by
+    /// [`DiffReport::narrow_to`] whenever `models` is narrowed, so it always
+    /// counts the reported set.
+    pub headline: String,
     pub models: Vec<ModelDiff>,
 }
 
@@ -697,12 +763,15 @@ impl DiffReport {
     /// carried unchanged; this is presentation-envelope assembly, not a
     /// second diff.
     pub fn new(baseline: BaselineInfo, edited_files: Vec<String>, diff: PropertyDiff) -> Self {
-        DiffReport {
+        let mut report = DiffReport {
             baseline,
             edited_files,
             summary: diff.summary,
+            headline: String::new(),
             models: diff.models,
-        }
+        };
+        report.headline = crate::analysis::diff_stories::headline(&report);
+        report
     }
 
     /// Narrow the REPORTED set to `selected` model names
@@ -732,6 +801,7 @@ impl DiffReport {
             }
         }
         self.summary = summary;
+        self.headline = crate::analysis::diff_stories::headline(self);
     }
 }
 
@@ -1112,12 +1182,34 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
 
     for (key, old_v) in &old_by_key {
         match new_by_key.get(key) {
-            None => changes.push(ChangeKind::CellRemoved {
-                cell: key.clone(),
-                old: Box::new((*old_v).clone()),
-                still_maintained: !new.is_empty(),
-            }),
+            None => {
+                // A removed cell is a downgrade only when its trigger source
+                // is still read by another surviving cell
+                // (`docs/specs/property_diff.md` §"Direction"
+                // "cell_added"/"cell_removed" row) — a cell removed because
+                // its source was dropped altogether, or the whole model lost
+                // maintenance, is `neutral` (see `ChangeKind::direction`).
+                let source_survives = old_v.trigger_source.as_ref().is_some_and(|src| {
+                    new.iter()
+                        .any(|c| c.trigger_source.as_deref() == Some(src.as_str()))
+                });
+                changes.push(ChangeKind::CellRemoved {
+                    cell: key.clone(),
+                    old: Box::new((*old_v).clone()),
+                    source_survives,
+                })
+            }
             Some(new_v) => {
+                // `group` and `trigger_source` are identical on both sides —
+                // the match key (`group`, `trigger`) already guarantees it —
+                // so either side's `CellVerdict` supplies them once here.
+                // Carried on the matched-cell `ChangeKind` variants below so
+                // a story can name the group/source structurally rather than
+                // recovering them by string-searching the cell key's own
+                // `{group}@{trigger:?}` join text (the re-parse-our-own-
+                // output bug class, `CLAUDE.md` §"Source-derived projection").
+                let group = old_v.group.clone();
+                let trigger_source = old_v.trigger_source.clone();
                 let CellVerdict {
                     group: _,
                     trigger: _,
@@ -1126,6 +1218,9 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                     row_identity: old_ri,
                     contract_point: old_cp,
                     state_downgrade: old_sd,
+                    trigger_source: _,
+                    partition_local: _,
+                    locality_reason: _,
                 } = *old_v;
                 let CellVerdict {
                     group: _,
@@ -1135,10 +1230,15 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                     row_identity: new_ri,
                     contract_point: new_cp,
                     state_downgrade: new_sd,
+                    trigger_source: _,
+                    partition_local: _,
+                    locality_reason: _,
                 } = *new_v;
                 if old_technique != new_technique {
                     changes.push(ChangeKind::CellTechnique {
                         cell: key.clone(),
+                        group: group.clone(),
+                        trigger_source: trigger_source.clone(),
                         old: *old_technique,
                         new: *new_technique,
                     });
@@ -1146,6 +1246,8 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                 if old_corner != new_corner {
                     changes.push(ChangeKind::CellCorner {
                         cell: key.clone(),
+                        group: group.clone(),
+                        trigger_source: trigger_source.clone(),
                         old: old_corner.clone(),
                         new: new_corner.clone(),
                     });
@@ -1167,6 +1269,8 @@ fn diff_cell_verdicts(old: &[CellVerdict], new: &[CellVerdict]) -> Vec<ChangeKin
                 if old_sd != new_sd {
                     changes.push(ChangeKind::StateDowngrade {
                         cell: key.clone(),
+                        group: group.clone(),
+                        trigger_source: trigger_source.clone(),
                         old: old_sd.clone(),
                         new: new_sd.clone(),
                     });
@@ -1359,16 +1463,19 @@ pub fn diff_profiles(
                     continue;
                 }
                 let attributed = graph.attribute(name);
-                model_diffs.push(ModelDiff {
+                let mut model_diff = ModelDiff {
                     model: (*name).clone(),
                     cause: attributed,
                     changes: diff_profile(old_profile, new_profile),
-                });
+                    stories: Vec::new(),
+                };
+                model_diff.stories = crate::analysis::diff_stories::narrate(&model_diff);
+                model_diffs.push(model_diff);
                 continue;
             }
             (None, None) => continue,
         };
-        model_diffs.push(ModelDiff {
+        let mut model_diff = ModelDiff {
             model: (*name).clone(),
             cause: Cause {
                 kind: cause_kind,
@@ -1376,7 +1483,10 @@ pub fn diff_profiles(
                 reason: None,
             },
             changes,
-        });
+            stories: Vec::new(),
+        };
+        model_diff.stories = crate::analysis::diff_stories::narrate(&model_diff);
+        model_diffs.push(model_diff);
     }
 
     // Order: the graph's topological order (upstream first), then name for
@@ -1538,6 +1648,23 @@ mod tests {
             },
             contract_point: ContractPointView::default(),
             state_downgrade: None,
+            trigger_source: Some(trigger_source.to_string()),
+            partition_local: true,
+            locality_reason: None,
+        }
+    }
+
+    /// A `cell()` whose maintenance is NOT partition-local — the case
+    /// `docs/specs/property_diff.md` §"Direction" grades `cell_added` a
+    /// downgrade on an already-maintained model.
+    fn non_local_cell(technique: Technique, group: &str, trigger_source: &str) -> CellVerdict {
+        CellVerdict {
+            partition_local: false,
+            locality_reason: Some((
+                trigger_source.to_string(),
+                "no partition_column declared".to_string(),
+            )),
+            ..cell(technique, group, trigger_source)
         }
     }
 
@@ -1601,8 +1728,28 @@ mod tests {
         assert_eq!(removed.direction(), Direction::Downgrade);
     }
 
+    /// A new dependency is a cost, not an upgrade
+    /// (`docs/specs/property_diff.md` §Design "A new dependency is a cost,
+    /// not an upgrade"): a non-partition-local cell added to an
+    /// already-maintained model reads its trigger source in full on every
+    /// run.
     #[test]
-    fn cell_added_is_an_upgrade() {
+    fn cell_added_not_partition_local_is_a_downgrade() {
+        let old = vec![cell(Technique::KeyedFold, "{a}", "orders")];
+        let new = vec![
+            cell(Technique::KeyedFold, "{a}", "orders"),
+            non_local_cell(Technique::KeyedFold, "{b}", "devices"),
+        ];
+        let changes = diff_cell_verdicts(&old, &new);
+        let added = changes
+            .iter()
+            .find(|c| matches!(c, ChangeKind::CellAdded { .. }))
+            .unwrap();
+        assert_eq!(added.direction(), Direction::Downgrade);
+    }
+
+    #[test]
+    fn cell_added_partition_local_is_neutral() {
         let old = vec![cell(Technique::KeyedFold, "{a}", "orders")];
         let new = vec![
             cell(Technique::KeyedFold, "{a}", "orders"),
@@ -1613,7 +1760,63 @@ mod tests {
             .iter()
             .find(|c| matches!(c, ChangeKind::CellAdded { .. }))
             .unwrap();
-        assert_eq!(added.direction(), Direction::Upgrade);
+        assert_eq!(added.direction(), Direction::Neutral);
+
+        // Zero cells -> one cell: `maintenance_gained` is the only upgrade
+        // reported, never a per-cell `cell_added` upgrade.
+        let mut old_p = profile_from(base_set());
+        old_p.cell_verdicts = vec![];
+        let mut new_p = profile_from(base_set());
+        new_p.cell_verdicts = vec![cell(Technique::KeyedFold, "{a}", "orders")];
+        let profile_changes = diff_profile(&old_p, &new_p);
+        let upgrades: Vec<&Change> = profile_changes
+            .iter()
+            .filter(|c| c.direction == Direction::Upgrade)
+            .collect();
+        assert_eq!(
+            upgrades.len(),
+            1,
+            "expected exactly one upgrade (maintenance_gained): {profile_changes:?}"
+        );
+        assert_eq!(upgrades[0].dimension, Dimension::MaintenanceGained);
+    }
+
+    /// `docs/specs/property_diff.md` §"Direction" "cell_added"/"cell_removed"
+    /// row: a removed cell is a downgrade only when another surviving cell
+    /// still reads the same trigger source.
+    #[test]
+    fn cell_removed_is_a_downgrade_only_when_its_source_survives() {
+        let old = vec![
+            cell(Technique::KeyedFold, "{a}", "orders"),
+            cell(Technique::KeyedFold, "{b}", "orders"),
+        ];
+        let new = vec![cell(Technique::KeyedFold, "{a}", "orders")];
+        let changes = diff_cell_verdicts(&old, &new);
+        let removed = changes
+            .iter()
+            .find(|c| matches!(c, ChangeKind::CellRemoved { .. }))
+            .unwrap();
+        assert_eq!(
+            removed.direction(),
+            Direction::Downgrade,
+            "source 'orders' still survives via {{a}}"
+        );
+
+        let old2 = vec![
+            cell(Technique::KeyedFold, "{a}", "orders"),
+            cell(Technique::KeyedFold, "{b}", "devices"),
+        ];
+        let new2 = vec![cell(Technique::KeyedFold, "{a}", "orders")];
+        let changes2 = diff_cell_verdicts(&old2, &new2);
+        let removed2 = changes2
+            .iter()
+            .find(|c| matches!(c, ChangeKind::CellRemoved { .. }))
+            .unwrap();
+        assert_eq!(
+            removed2.direction(),
+            Direction::Neutral,
+            "source 'devices' no longer appears in any surviving cell"
+        );
     }
 
     fn bounded(secs: u64) -> BoundResult {
@@ -1671,33 +1874,64 @@ mod tests {
         assert_eq!(reverse.direction(), Direction::Neutral);
     }
 
+    /// `docs/specs/property_diff.md` §"Direction": a grain that widens (its
+    /// keys now cover a strict superset of the old column set — a weaker
+    /// uniqueness claim) is a downgrade; a grain that narrows (strict
+    /// subset — a stronger claim) is an upgrade; a keyed grain becoming
+    /// unkeyed stays a downgrade regardless; a different key of unrelated
+    /// columns is `neutral`, surfaced instead by the `row_key` story.
     #[test]
-    fn grain_lost_is_a_downgrade() {
+    fn grain_widening_is_a_downgrade_and_narrowing_an_upgrade() {
+        let two = Grain {
+            keys: vec![vec!["date".to_string(), "user".to_string()]],
+        };
+        let three = Grain {
+            keys: vec![vec![
+                "date".to_string(),
+                "user".to_string(),
+                "name".to_string(),
+            ]],
+        };
+        let widened = ChangeKind::Grain {
+            subject: String::new(),
+            old: two.clone(),
+            new: three.clone(),
+        };
+        assert_eq!(widened.direction(), Direction::Downgrade);
+
+        let narrowed = ChangeKind::Grain {
+            subject: String::new(),
+            old: three,
+            new: two,
+        };
+        assert_eq!(narrowed.direction(), Direction::Upgrade);
+
+        // A different key of the same arity — neither a subset nor a
+        // superset of the other.
+        let ab = Grain {
+            keys: vec![vec!["a".to_string(), "b".to_string()]],
+        };
+        let ac = Grain {
+            keys: vec![vec!["a".to_string(), "c".to_string()]],
+        };
+        let different_key = ChangeKind::Grain {
+            subject: String::new(),
+            old: ab,
+            new: ac,
+        };
+        assert_eq!(different_key.direction(), Direction::Neutral);
+
+        // Keyed -> unkeyed stays a downgrade regardless of column-set logic.
         let full = Grain {
             keys: vec![vec!["id".to_string()]],
         };
         let empty = Grain::unkeyed();
-        let k = ChangeKind::Grain {
+        let unkeyed = ChangeKind::Grain {
             subject: String::new(),
-            old: full.clone(),
-            new: empty.clone(),
+            old: full,
+            new: empty,
         };
-        assert_eq!(k.direction(), Direction::Downgrade);
-
-        // Partial loss: had two keys, now only one — still a downgrade
-        // ("lost a key column").
-        let two_keys = Grain {
-            keys: vec![vec!["id".to_string()], vec!["email".to_string()]],
-        };
-        let one_key = Grain {
-            keys: vec![vec!["id".to_string()]],
-        };
-        let partial = ChangeKind::Grain {
-            subject: String::new(),
-            old: two_keys,
-            new: one_key,
-        };
-        assert_eq!(partial.direction(), Direction::Downgrade);
+        assert_eq!(unkeyed.direction(), Direction::Downgrade);
     }
 
     #[test]
@@ -1943,6 +2177,8 @@ mod tests {
         assert_eq!(
             ChangeKind::CellCorner {
                 cell: "x".to_string(),
+                group: "x".to_string(),
+                trigger_source: None,
                 old: "A".to_string(),
                 new: "B".to_string()
             }
@@ -2108,6 +2344,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: None,
                 new: Some(sd.clone()),
             }
@@ -2117,6 +2355,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: Some(sd.clone()),
                 new: None,
             }
@@ -2130,6 +2370,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: Some(sd),
                 new: Some(sd2),
             }
@@ -2139,6 +2381,8 @@ mod tests {
         assert_eq!(
             ChangeKind::StateDowngrade {
                 cell: "c".to_string(),
+                group: "c".to_string(),
+                trigger_source: None,
                 old: None,
                 new: None,
             }
@@ -2220,11 +2464,11 @@ mod tests {
     }
 
     #[test]
-    fn grain_composite_key_column_dropped_is_a_downgrade() {
-        // Key(["id", "region"]) -> Key(["id"]): the composite narrowed —
-        // "lost a key column" per spec §Direction. Before G5 this graded
-        // Neutral (the two KeySets are unequal as values, so the prior
-        // membership check saw both "lost" and "gained").
+    fn grain_composite_key_column_dropped_is_an_upgrade() {
+        // Key(["id", "region"]) -> Key(["id"]): the composite narrowed to a
+        // strict subset of the old column set — a *stronger* uniqueness
+        // claim ("proving one row per (id) implies one row per (id,
+        // region)"), per spec §Direction's paragraph on grain widening.
         let k = ChangeKind::Grain {
             subject: String::new(),
             old: Grain {
@@ -2234,9 +2478,10 @@ mod tests {
                 keys: vec![vec!["id".to_string()]],
             },
         };
-        assert_eq!(k.direction(), Direction::Downgrade);
+        assert_eq!(k.direction(), Direction::Upgrade);
 
-        // Symmetric: gaining a column on the composite is an upgrade.
+        // Symmetric: widening the composite by adding a column is a
+        // downgrade.
         let reverse = ChangeKind::Grain {
             subject: String::new(),
             old: Grain {
@@ -2246,7 +2491,7 @@ mod tests {
                 keys: vec![vec!["id".to_string(), "region".to_string()]],
             },
         };
-        assert_eq!(reverse.direction(), Direction::Upgrade);
+        assert_eq!(reverse.direction(), Direction::Downgrade);
     }
 
     #[test]
@@ -2576,6 +2821,7 @@ mod tests {
                 reason: None,
             },
             changes: vec![],
+            stories: vec![],
         }
     }
 
@@ -2657,6 +2903,7 @@ mod tests {
                 neutral: 0,
                 shifted_models: 2,
             },
+            headline: String::new(),
             models: vec![changed, dropped],
         };
         let selected: BTreeSet<String> = ["kept".to_string()].into_iter().collect();

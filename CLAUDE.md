@@ -94,7 +94,7 @@ pins the Rust toolchain and Node version, and sets `DUCKDB_LIB_DIR`/`LD_LIBRARY_
 dynamically). One-time setup in a fresh checkout:
 ```bash
 mise trust
-mise install          # installs the pinned rust/node
+mise install          # installs the pinned rust/node/mold
 mise run setup-duckdb  # installs libduckdb.so v1.5.4 to ~/.local/lib/duckdb if not already present
 ```
 After that, `DUCKDB_LIB_DIR`/`LD_LIBRARY_PATH` are set automatically in any shell mise
@@ -105,6 +105,37 @@ for d in /usr/local/lib "$HOME/.local/lib/duckdb"; do
 done
 export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR:$LD_LIBRARY_PATH"
 ```
+
+**Linker: do not add a mold `.cargo/config.toml`.** It has been tried twice and
+does not help this workspace. `[profile.dev]` already sets
+`debug = "line-tables-only"` with `debug = false` for all dependencies, which
+removes the DWARF section merging that makes GNU ld slow on Rust debug builds —
+so ld is already fast here and mold has nothing to win. Measured on one 110 MB
+test binary, best of three: GNU ld 2.14s vs mold 3.13s, i.e. mold is ~45%
+*slower*, and it emits a larger binary. Linking is also not the bottleneck at
+all: ~313 test binaries at ~2s each is ~660 CPU-seconds, which over 32 cores is
+~20s of a ~918s cold `cargo test --no-run`. That build is dominated by
+**compilation**, in particular each test crate re-monomorphizing generics from
+DuckDB/Arrow/salsa. (#149 committed a mold config and #150 reverted it for a
+different reason — CI had no mold.)
+
+**Parallelism.** `mise.toml` sets `CARGO_BUILD_JOBS=12`. Cargo otherwise defaults
+`-j` to the core count, so several agent sessions in several worktrees fan out to
+N x nproc rustc processes on one machine. Measured on the 32-core dev box: a
+clean `cargo test --no-run` is **197s idle and 987s with three sessions building
+concurrently** — a 5x penalty from oversubscription, not from the test suite. If
+a slow build surprises you, check `uptime` before concluding anything about the
+suite. Working alone, override with `CARGO_BUILD_JOBS=32 cargo test` or a
+`.mise.local.toml`. `.claude/scripts/cargo-queue-shim.sh` is an *inactive*
+prototype that additionally serialises builds machine-wide via `flock`; read its
+header before putting it on `PATH`.
+
+**Toolchain.** `rust-toolchain.toml` pins `1.95.0`, matching `[tools] rust` in
+`mise.toml`. mise exports `RUSTUP_TOOLCHAIN`, which takes precedence; the file
+exists so a *bare* shell (no mise) resolves to the same toolchain instead of
+rustup's `default`. Two toolchains sharing one 57 GB target directory rebuild
+the workspace on every switch as soon as their rustc versions differ. Keep the
+two pins in sync.
 
 **Commands (system DuckDB is now the default):**
 ```bash
