@@ -42,6 +42,7 @@ pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
             StateStructure::ReconciliationLedger,
             StateStructure::ObservedOutputDeltas,
             StateStructure::FingerprintSidecar,
+            StateStructure::TombstoneLedger,
         ],
         SqlDialect::SparkSQL | SqlDialect::BigQuery => vec![
             StateStructure::ObservedOutputDeltas,
@@ -65,6 +66,14 @@ pub enum StateStructure {
     ObservedOutputDeltas,
     /// The fingerprint sidecar (`sources.md` §"The fingerprint sidecar").
     FingerprintSidecar,
+    /// The succession grain's tombstone ledger — a per-model sibling table
+    /// holding `k ∪ {t}` for every recorded delete event
+    /// (`docs/specs/state.md`'s tombstone ledger row,
+    /// `docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+    /// state)"). DuckDB-only today (`realisable_state_structures`): a
+    /// `TombstonePatch` cell with no realisable ledger downgrades to
+    /// `DeleteInsert` (full refresh), never a ledger-less patch.
+    TombstoneLedger,
 }
 
 impl StateStructure {
@@ -76,6 +85,7 @@ impl StateStructure {
             StateStructure::ReconciliationLedger => "reconciliation ledger (frontier record)",
             StateStructure::ObservedOutputDeltas => "observed output deltas",
             StateStructure::FingerprintSidecar => "fingerprint sidecar",
+            StateStructure::TombstoneLedger => "tombstone ledger",
         }
     }
 }
@@ -90,6 +100,7 @@ pub fn required_state_structure(technique: Technique) -> Option<StateStructure> 
         Technique::ColumnScopedMerge | Technique::InPlaceUpdate => {
             Some(StateStructure::MergeLedger)
         }
+        Technique::SuccessionPatch => Some(StateStructure::TombstoneLedger),
         Technique::DeleteInsert | Technique::PerGroupRecompute => None,
     }
 }
@@ -112,6 +123,7 @@ impl StateAvailability {
                 StateStructure::ReconciliationLedger,
                 StateStructure::ObservedOutputDeltas,
                 StateStructure::FingerprintSidecar,
+                StateStructure::TombstoneLedger,
             ]
             .into_iter()
             .collect(),
@@ -162,6 +174,13 @@ pub struct StateDowngrade {
 /// cell (`Corner::RmwRegion`, `Corner::RecomputeRegion`) downgrades to
 /// `DeleteInsert`.
 pub fn recompute_equivalent(cell: &PlanCell) -> Technique {
+    // The succession grain's own recompute-equivalent is always the
+    // full-refresh region rewrite, never `PerGroupRecompute` — the grain has
+    // no group-scoped repair route (`docs/outcomes/
+    // 20260906-scd2-keyed-succession/outcome.md` phase 3 decision log).
+    if cell.technique == Technique::SuccessionPatch {
+        return Technique::DeleteInsert;
+    }
     if cell.key_scope.is_some() {
         return Technique::PerGroupRecompute;
     }

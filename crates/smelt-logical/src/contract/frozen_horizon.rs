@@ -6,8 +6,7 @@
 //! the late-arrival probe emitter (baseline snapshot + comparison) that
 //! disproves the frozen-band oracle at runtime.
 
-use smelt_core::config::Grain;
-
+use crate::contract::GrainLabel;
 use crate::maintenance::emit::{
     probe_dialect_string_type, MaintenanceDialect, MaintenanceStatement,
 };
@@ -20,11 +19,11 @@ use crate::maintenance::emit::{
 /// model's derived `grain`, unavailable to that pure-parse validator.
 ///
 /// Returns `Err` naming the offending grain when `grain` is not
-/// [`Grain::Partition`].
-pub fn validate_frozen_horizon(grain: Grain) -> Result<(), String> {
-    if grain != Grain::Partition {
+/// [`GrainLabel::Partition`].
+pub fn validate_frozen_horizon(grain: GrainLabel) -> Result<(), String> {
+    if grain != GrainLabel::Partition {
         return Err(format!(
-            "contract.frozen_horizon is admitted only on a partition-grain model; found grain {grain:?}"
+            "contract.frozen_horizon is admitted only on a partition-grain model; found grain {grain}"
         ));
     }
     Ok(())
@@ -186,16 +185,25 @@ mod tests {
 
     #[test]
     fn key_grain_declaration_is_refused() {
-        let err = validate_frozen_horizon(Grain::Key).unwrap_err();
+        let err = validate_frozen_horizon(GrainLabel::Key).unwrap_err();
         assert!(
-            err.contains("Key"),
+            err.contains("key"),
             "error must name the offending grain, got: {err}"
         );
     }
 
     #[test]
     fn partition_grain_declaration_is_admitted() {
-        assert!(validate_frozen_horizon(Grain::Partition).is_ok());
+        assert!(validate_frozen_horizon(GrainLabel::Partition).is_ok());
+    }
+
+    #[test]
+    fn frozen_horizon_refused_on_a_succession_model() {
+        let err = validate_frozen_horizon(GrainLabel::Succession).unwrap_err();
+        assert!(
+            err.contains("succession"),
+            "error must name the succession grain, not a Key fallback, got: {err}"
+        );
     }
 
     #[test]

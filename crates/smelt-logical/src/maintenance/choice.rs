@@ -481,7 +481,8 @@ pub fn technique_requires_row_identity(technique: Technique) -> bool {
         Technique::KeyedFold
         | Technique::ColumnScopedMerge
         | Technique::InPlaceUpdate
-        | Technique::PerGroupRecompute => true,
+        | Technique::PerGroupRecompute
+        | Technique::SuccessionPatch => true,
     }
 }
 

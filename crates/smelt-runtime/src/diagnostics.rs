@@ -819,6 +819,16 @@ fn build_technique_statements(
                 dialect,
             ))
         }
+        // The succession-patch emitter lands in a later phase
+        // (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md` phase
+        // 4) — no statement-group preview yet, mirroring how this function
+        // already refuses (never fabricates) when a technique's
+        // preconditions can't be assembled.
+        Technique::SuccessionPatch => Err(
+            "no statement-group preview yet for Technique::SuccessionPatch — the succession \
+             emitter lands in a later phase"
+                .to_string(),
+        ),
     }
 }
 

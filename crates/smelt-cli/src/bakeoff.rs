@@ -282,7 +282,11 @@ fn admitted_family(technique: &Technique) -> Option<CellTechnique> {
         // `derive_maintenance_plan`), and it has no `CellTechnique` family
         // pin of its own — mirrors `DeleteInsert`'s own "not a bakeoff
         // candidate" verdict.
-        Technique::DeleteInsert | Technique::PerGroupRecompute => None,
+        // The succession grain's own technique has no bakeoff family either
+        // — a succession cell derives exactly one technique
+        // (`Technique::SuccessionPatch`), never a bakeoff-resolvable
+        // alternative.
+        Technique::DeleteInsert | Technique::PerGroupRecompute | Technique::SuccessionPatch => None,
     }
 }
 

@@ -19,6 +19,60 @@ use crate::*;
 // Diagnostics (accumulator-based orchestrator)
 // ============================================================================
 
+/// The grain label a contract-lattice validator names in a refusal message
+/// (`smelt_logical::contract::GrainLabel`): the declared `grain:` when
+/// written, else the fact-derived label (`resolved_grain()`, `timeseries:`/
+/// `unique_key:`), else — for an undeclared-grain `refresh: incremental`
+/// model — the keyed-succession leaf classifier's own verdict over the same
+/// `(ref, SourceInfo)` pairs `smelt-db`'s own maintenance-plan derivation
+/// consults (`queries::maintenance::build_succession_context`). Falls back
+/// to `GrainLabel::Key` when none of those apply (unchanged from this
+/// check's pre-succession `metadata.grain.unwrap_or(Grain::Key)` default —
+/// a model with a `contract:` block but no incremental grain at all is an
+/// existing, unrelated malformed-declaration shape, not this phase's
+/// concern).
+fn model_grain_label(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project: Option<ProjectInput>,
+    metadata: &smelt_core::ModelMetadata,
+    sql_body: &str,
+) -> smelt_logical::contract::GrainLabel {
+    if let Some(g) = metadata.grain {
+        return g.into();
+    }
+    if let Some(g) = metadata.resolved_grain() {
+        return g.into();
+    }
+    let refs = smelt_logical::collect_path_refs(sql_body);
+    let source_refs: Vec<(String, Option<smelt_core::SourceInfo>)> = refs
+        .iter()
+        .filter_map(|r| {
+            let stripped = r.strip_prefix("smelt.")?;
+            let bare = stripped
+                .strip_prefix("sources.")
+                .unwrap_or(stripped)
+                .to_string();
+            Some((bare, ref_source_info(db, workspace, project, r)))
+        })
+        .collect();
+    let ctx = crate::queries::maintenance::build_succession_context(sql_body, &source_refs);
+    let verdict = match smelt_logical::analysis::walk::QueryTree::from_sql(sql_body) {
+        Some(tree) => smelt_logical::analysis::walk::model_keyed_succession(&tree, &ctx),
+        None => {
+            return smelt_logical::contract::GrainLabel::Key;
+        }
+    };
+    match verdict {
+        smelt_logical::analysis::succession::SuccessionVerdict::Recognized { .. } => {
+            smelt_logical::contract::GrainLabel::Succession
+        }
+        smelt_logical::analysis::succession::SuccessionVerdict::NotSuccession { .. } => {
+            smelt_logical::contract::GrainLabel::Key
+        }
+    }
+}
+
 /// Top-level file diagnostics. Internally dispatches to the parse/type checkers,
 /// which push into `DiagnosticAcc`. Returns the accumulated diagnostics.
 pub fn file_diagnostics(
@@ -423,6 +477,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             .accumulate(db);
         }
 
+        // The grain label the contract-lattice validators name in a refusal
+        // message (`smelt_logical::contract::GrainLabel`) — declared, else
+        // fact-derived (`resolved_grain()`), else the keyed-succession leaf
+        // classifier's own verdict for an undeclared-grain model, falling
+        // back to `GrainLabel::Key` (matching this check's pre-succession
+        // default) when the model is neither. Computed once and reused by
+        // the `frozen_horizon`/`retain_departed`/`deferral` checks below,
+        // never re-derived per check.
+        let grain_label = model_grain_label(db, workspace, project, metadata, sql_body);
+
         // Contract-lattice `frozen_horizon` grain-admissibility check
         // (`docs/specs/incremental_models.md` §"Contract relaxations
         // (`contract:`)"). Format validity was already checked at
@@ -433,8 +497,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // Salsa wrapper, decides admissibility).
         if let Some(contract) = &metadata.contract {
             if contract.frozen_horizon.is_some() {
-                let grain = metadata.grain.unwrap_or(smelt_core::config::Grain::Key);
-                if let Err(why) = smelt_logical::validate_frozen_horizon(grain) {
+                if let Err(why) = smelt_logical::validate_frozen_horizon(grain_label) {
                     DiagnosticAcc(Diagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!("ContractFrozenHorizonInvalid: {why}"),
@@ -500,10 +563,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         if let Some(contract) = &metadata.contract {
             if contract.deferral.is_some() {
                 let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
-                if let Err(why) = smelt_logical::validate_deferral(
-                    metadata.timeseries.is_some(),
-                    &format!("model '{model_name}'"),
-                ) {
+                // A succession model always carries a clock — the
+                // classifier-derived `clock_col`, never a declared
+                // `timeseries:` block — so `deferral` is admitted with
+                // unchanged frontier-lag semantics (2026-09-06 decision,
+                // `docs/outcomes/20260906-scd2-keyed-succession/outcome.md`).
+                let has_clock = metadata.timeseries.is_some()
+                    || grain_label == smelt_logical::contract::GrainLabel::Succession;
+                if let Err(why) =
+                    smelt_logical::validate_deferral(has_clock, &format!("model '{model_name}'"))
+                {
                     DiagnosticAcc(Diagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!("ContractDeferralInvalid: {why}"),
@@ -565,7 +634,6 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         if let Some(contract) = &metadata.contract {
             if let Some(retain_departed) = &contract.retain_departed {
                 let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
-                let grain = metadata.grain.unwrap_or(smelt_core::config::Grain::Key);
                 let refs = smelt_logical::collect_path_refs(sql_body);
                 let consumes_mutable_snapshot = refs.iter().any(|r| {
                     ref_source_info(db, workspace, project, r).is_some_and(|info| {
@@ -587,7 +655,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     .map(|c| c.name.clone())
                     .collect();
                 if let Err(why) = smelt_logical::validate_retain_departed(
-                    grain,
+                    grain_label,
                     consumes_mutable_snapshot,
                     tombstone_column,
                     &output_columns,

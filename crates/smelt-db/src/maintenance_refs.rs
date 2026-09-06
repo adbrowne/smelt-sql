@@ -907,6 +907,7 @@ pub fn maintenance_plan_report(
         &source_referential_integrity,
         deployed_model_sql.as_deref(),
         deployed_partition_column.as_deref(),
+        &source_refs,
     )?;
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`

@@ -1674,6 +1674,7 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("device_avg_amount must derive a maintenance plan");
     let cell = plan_result

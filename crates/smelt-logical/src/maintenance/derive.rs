@@ -870,7 +870,7 @@ impl ModelInputs<'_> {
     fn output_partition_col(&self) -> Option<&str> {
         match &self.output.grain {
             Grain::Partition { partition_col } => Some(partition_col),
-            Grain::Key { .. } => None,
+            Grain::Key { .. } | Grain::Succession { .. } => None,
         }
     }
 
@@ -881,7 +881,7 @@ impl ModelInputs<'_> {
     fn declared_unique_key(&self) -> &[String] {
         match &self.output.grain {
             Grain::Key { unique_key } => unique_key,
-            Grain::Partition { .. } => &[],
+            Grain::Partition { .. } | Grain::Succession { .. } => &[],
         }
     }
 }
@@ -1643,6 +1643,17 @@ fn derive_new_data(
                 key_scope: None,
                 state_downgrade: None,
             });
+        }
+        Grain::Succession { .. } => {
+            // Unreachable: a succession-grain output is derived by
+            // `maintenance::succession::derive_succession_plan`, which
+            // bypasses this general-purpose deriver entirely (mirroring
+            // `unsupported_grain_plan`/`locality_refused_plan`'s own
+            // bypass) — there is nothing meaningful to derive here.
+            unreachable!(
+                "Grain::Succession is derived by maintenance::succession::derive_succession_plan, \
+                 never by derive_maintenance_plan"
+            );
         }
     }
 }

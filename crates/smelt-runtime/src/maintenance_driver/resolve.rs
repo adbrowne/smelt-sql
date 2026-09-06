@@ -80,6 +80,7 @@ pub fn resolve_incremental_strategy(
             None,
             None,
             availability,
+            &[],
         )
     } else {
         // Edge-aware derivation — the SAME derivation
@@ -98,6 +99,7 @@ pub fn resolve_incremental_strategy(
             None,
             None,
             availability,
+            &[],
         )
     };
     let Some(result) = result else {
@@ -307,6 +309,7 @@ pub fn resolve_fold_deferral(
         None,
         None,
         availability,
+        &[],
     ) else {
         return no_deferral;
     };
@@ -571,6 +574,7 @@ pub fn resolve_live_column_scoped_cell(
         None,
         None,
         availability,
+        &[],
     ) else {
         return Ok(None);
     };
@@ -771,6 +775,7 @@ pub fn resolve_live_in_place_update_cell(
         None,
         None,
         availability,
+        &[],
     )?;
     let cell = result
         .plan

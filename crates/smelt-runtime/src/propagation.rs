@@ -963,6 +963,7 @@ fn derive_clamp_and_locality_pass(
             // one-seam-only rule holds without a second, dialect-aware
             // derivation this module has no per-model dialect to build.
             &smelt_logical::maintenance::availability::StateAvailability::all(),
+            &source_refs,
         ) else {
             continue;
         };

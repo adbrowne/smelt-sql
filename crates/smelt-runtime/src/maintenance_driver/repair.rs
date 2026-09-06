@@ -235,6 +235,7 @@ pub fn resolve_live_per_group_recompute_cell(
         None,
         None,
         availability,
+        &[],
     ) else {
         return Ok(None);
     };

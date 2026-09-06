@@ -115,6 +115,7 @@ fn sum_over_unclocked_append_only_source_is_refused_at_plan_layer() {
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -322,6 +323,7 @@ fn once_write_column_derives_keyed_fold_cell_at_plan_layer() {
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -383,6 +385,7 @@ fn avg_model_derives_fold_spec_and_keyed_fold_cell() {
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("refresh: incremental model must derive a plan");
     assert!(

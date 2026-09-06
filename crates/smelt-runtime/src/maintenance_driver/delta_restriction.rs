@@ -466,6 +466,7 @@ pub fn resolve_live_delta_restriction_facts(
         None,
         None,
         availability,
+        &[],
     ) else {
         return Ok(None);
     };
@@ -622,6 +623,7 @@ pub fn resolve_live_external_delta_restriction_facts(
         None,
         None,
         availability,
+        &[],
     ) else {
         return Ok(None);
     };

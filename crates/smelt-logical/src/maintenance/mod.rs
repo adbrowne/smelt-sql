@@ -38,6 +38,7 @@ pub mod probe_cadence;
 pub mod propagate;
 pub mod repair;
 pub mod skeleton;
+pub mod succession;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -144,6 +145,15 @@ pub enum Grain {
     Partition { partition_col: String },
     /// One row per key; rows are addressed individually (keyed end-state).
     Key { unique_key: Vec<String> },
+    /// One row per `(key, clock)` pair, patched via neighbour `LEAD`/`LAG`
+    /// (`docs/specs/incremental_shapes.md` §"The succession grain"). Never
+    /// declared — admitted only by the keyed-succession leaf classifier
+    /// (`analysis::succession::classify_keyed_succession`) over an
+    /// undeclared-grain `refresh: incremental` model.
+    Succession {
+        key_cols: Vec<String>,
+        clock_col: String,
+    },
 }
 
 /// The declared output surface the plan maintains.
@@ -228,6 +238,16 @@ pub enum Technique {
     /// whole-table operation. Admitted by [`repair::admit_per_group_recompute`]
     /// and emitted by [`emit::emit_per_group_recompute`].
     PerGroupRecompute,
+    /// The succession grain's own technique
+    /// (`docs/specs/incremental_shapes.md` §"The succession grain"): each
+    /// window's non-delete events are inserted, delete events are recorded
+    /// in the tombstone ledger, and each event's immediate neighbours are
+    /// patched over the union of presented rows, ledger, and batch. Requires
+    /// [`availability::StateStructure::TombstoneLedger`]
+    /// (`availability::required_state_structure`); downgrades to
+    /// [`Technique::DeleteInsert`] when unavailable
+    /// (`availability::recompute_equivalent`).
+    SuccessionPatch,
 }
 
 /// Whether a cell's maintenance is partition-local in each source it reads
@@ -526,6 +546,17 @@ pub enum Refusal {
         columns: Vec<String>,
         why: String,
     },
+    /// An undeclared-grain `refresh: incremental` model's SQL did not prove
+    /// the keyed-succession shape
+    /// (`analysis::succession::classify_keyed_succession` returned
+    /// `NotSuccession`) — the `SuccessionPatternUnrecognized` diagnostic and
+    /// the ten more specific `Succession*` codes
+    /// (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md` criterion
+    /// 2) map `reason` onto their own code; this refusal shape itself
+    /// carries the classifier's reason verbatim, never re-derived.
+    SuccessionNotRecognized {
+        reason: crate::analysis::succession::NotSuccessionReason,
+    },
 }
 
 /// The diagnostic-code **name** a refusal of this shape raises through the
@@ -573,6 +604,10 @@ pub fn refusal_code(refusal: &Refusal) -> Option<&'static str> {
             Some("MaintenanceColumnAddNotBackfillable")
         }
         Refusal::KeyedRetractableContribution { .. } => Some("KeyedRetractableContribution"),
+        // No diagnostic yet: the eleven `Succession*` codes land in phase 3a
+        // (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md`) —
+        // this phase derives the plan shape only, no diagnostics change.
+        Refusal::SuccessionNotRecognized { .. } => None,
     }
 }
 
@@ -590,6 +625,7 @@ mod refusal_code_tests {
             "ReachNotDerivable",
             "RepairKeysNotDiscoverable",
             "RepairSliceUnbounded",
+            "SuccessionNotRecognized",
         ];
         let sample: Vec<Refusal> = vec![
             Refusal::SkeletonChanged {
@@ -640,6 +676,11 @@ mod refusal_code_tests {
                 source: "s".to_string(),
                 columns: vec!["c".to_string()],
                 why: "w".to_string(),
+            },
+            Refusal::SuccessionNotRecognized {
+                reason: crate::analysis::succession::NotSuccessionReason::PatternUnrecognized(
+                    "r".to_string(),
+                ),
             },
         ];
         for r in &sample {
@@ -763,6 +804,20 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
     MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::LocalityNotEstablished { message }],
+        key_locality: None,
+    }
+}
+
+/// The plan derived when the keyed-succession leaf classifier
+/// (`analysis::succession::classify_keyed_succession`) returns
+/// `NotSuccession`: no cells, a single [`Refusal::SuccessionNotRecognized`]
+/// carrying the classifier's reason verbatim.
+pub fn succession_refused_plan(
+    reason: crate::analysis::succession::NotSuccessionReason,
+) -> MaintenancePlan {
+    MaintenancePlan {
+        cells: Vec::new(),
+        refusals: vec![Refusal::SuccessionNotRecognized { reason }],
         key_locality: None,
     }
 }

@@ -112,6 +112,7 @@ fn derive_plan_cells(
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .map(|r| (r.plan.cells, r.column_groups))
     .unwrap_or_default()
@@ -1237,6 +1238,7 @@ fn keyed_fold_preview_renders_the_suppressed_matched_arm() {
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("device_total must derive a maintenance plan");
     let cell = plan_result
@@ -1363,6 +1365,7 @@ fn explain_show_sql_keyed_fold_honours_the_pin() {
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("device_total must derive a maintenance plan");
     let cell = plan_result

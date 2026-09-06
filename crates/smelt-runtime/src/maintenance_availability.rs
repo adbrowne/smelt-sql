@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 
 use smelt_core::config::{Config, Granularity};
-use smelt_core::sources::KeyRecurrence;
+use smelt_core::sources::{KeyRecurrence, SourceInfo};
 use smelt_core::ModelMetadata;
 use smelt_dialect::SqlDialect;
 use smelt_logical::maintenance::availability::{
@@ -53,6 +53,12 @@ pub fn derive_resolved(
     deployed_model_sql: Option<&str>,
     deployed_partition_column: Option<&str>,
     availability: &StateAvailability,
+    // Threaded through to `smelt-db`'s succession classification
+    // (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md` phase 3);
+    // every runtime execution-path caller today passes `&[]` — full
+    // succession dispatch is a later phase's scope, and an empty slice
+    // fails closed to the classifier's own refusal, never a panic.
+    source_refs: &[(String, Option<SourceInfo>)],
 ) -> Option<MaintenancePlanResult> {
     let mut result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -66,6 +72,7 @@ pub fn derive_resolved(
         source_referential_integrity,
         deployed_model_sql,
         deployed_partition_column,
+        source_refs,
     )?;
     resolve_availability(&mut result.plan.cells, availability);
     Some(result)
@@ -89,6 +96,7 @@ pub fn derive_resolved_with_edges(
     deployed_model_sql: Option<&str>,
     deployed_partition_column: Option<&str>,
     availability: &StateAvailability,
+    source_refs: &[(String, Option<SourceInfo>)],
 ) -> Option<MaintenancePlanResult> {
     let mut result = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql,
@@ -103,6 +111,7 @@ pub fn derive_resolved_with_edges(
         source_referential_integrity,
         deployed_model_sql,
         deployed_partition_column,
+        source_refs,
     )?;
     resolve_availability(&mut result.plan.cells, availability);
     Some(result)

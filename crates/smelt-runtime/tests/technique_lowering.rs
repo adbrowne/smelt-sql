@@ -1342,6 +1342,7 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 
@@ -1470,6 +1471,7 @@ fn real_fixture_daily_events_status_admits_partition_local_yes_cell() {
         &std::collections::BTreeMap::new(),
         None,
         None,
+        &[],
     )
     .expect("daily_events_status has a maintenance plan (refresh: incremental + grain set)");
     let plan = result.plan;

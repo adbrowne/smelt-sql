@@ -392,6 +392,15 @@ pub fn derive_model_maintenance_plan(
     source_referential_integrity: &SourceReferentialIntegrity,
     deployed_model_sql: Option<&str>,
     deployed_partition_column: Option<&str>,
+    // The `(ref, SourceInfo)` pairs the keyed-succession classifier's
+    // `SuccessionContext` is built from (`build_succession_context`) — a
+    // side channel alongside `sources: &[SourceFacts]`, consulted only when
+    // `metadata.resolved_grain()` is `None`. An empty slice degrades to the
+    // classifier's own fail-closed refusal (`SingleSourceOnly`/
+    // `DrivingSourceNotAppendOnly`), never a panic — callers with no source
+    // declarations in scope (most `smelt-runtime` execution-path callers,
+    // pre-succession) pass `&[]`.
+    source_refs: &[(String, Option<SourceInfo>)],
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -403,7 +412,35 @@ pub fn derive_model_maintenance_plan(
     // `unique_key:`) — `docs/specs/models.md` §"Refresh axis". Reading the
     // resolved label here (rather than the raw `grain` field) is what admits
     // `refresh: incremental` on the facts alone, with no `grain:` written.
-    let grain = metadata.resolved_grain()?;
+    //
+    // `None` here (no declared/derivable `timeseries:`/`unique_key:`) is no
+    // longer "not incremental" — it's the keyed-succession grain's own
+    // undeclared-admission shape (`docs/specs/incremental_shapes.md`
+    // §"Succession-grain admission (no declaration)"): the leaf classifier
+    // decides admission on the model's own SQL, never a declared grain.
+    let Some(grain) = metadata.resolved_grain() else {
+        let ctx = build_succession_context(sql, source_refs);
+        let verdict = match smelt_logical::analysis::walk::QueryTree::from_sql(sql) {
+            Some(tree) => smelt_logical::analysis::walk::model_keyed_succession(&tree, &ctx),
+            None => smelt_logical::analysis::succession::SuccessionVerdict::NotSuccession {
+                reason:
+                    smelt_logical::analysis::succession::NotSuccessionReason::PatternUnrecognized(
+                        "SQL has no SELECT statement".to_string(),
+                    ),
+            },
+        };
+        let derivation =
+            smelt_logical::maintenance::succession::derive_succession_plan(&verdict, table);
+        return Some(MaintenancePlanResult {
+            plan: derivation.plan,
+            column_groups: Vec::new(),
+            degenerate: Vec::new(),
+            state_columns: Vec::new(),
+            execution_postures: None,
+            is_snapshot_reconcile: None,
+            comparability: Vec::new(),
+        });
+    };
     if grain == ConfigGrain::KeyPerPartition {
         // Not yet supported: deriving a real plan for `key_per_partition`
         // needs trajectory/backfill machinery that doesn't exist yet
@@ -628,6 +665,16 @@ pub fn derive_model_maintenance_plan(
             .as_ref()
             .map(|t| t.partition_column.as_str()),
         PlanGrain::Partition { .. } => None,
+        // Unreachable: this branch of `derive_model_maintenance_plan` only
+        // ever builds a `PlanGrain::Partition`/`PlanGrain::Key` output — a
+        // succession-grain output is derived by the separate
+        // `maintenance::succession::derive_succession_plan` path, which
+        // bypasses this code entirely (see the `resolved_grain()`-is-`None`
+        // branch above).
+        PlanGrain::Succession { .. } => unreachable!(
+            "PlanGrain::Succession is derived by maintenance::succession::derive_succession_plan, \
+             never by this branch of derive_model_maintenance_plan"
+        ),
     };
     let inputs = ModelInputs {
         sql,
@@ -717,6 +764,7 @@ pub fn derive_model_maintenance_plan_with_edges(
     source_referential_integrity: &SourceReferentialIntegrity,
     deployed_model_sql: Option<&str>,
     deployed_partition_column: Option<&str>,
+    source_refs: &[(String, Option<SourceInfo>)],
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -730,6 +778,7 @@ pub fn derive_model_maintenance_plan_with_edges(
         source_referential_integrity,
         deployed_model_sql,
         deployed_partition_column,
+        source_refs,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred). Reads the
@@ -896,6 +945,80 @@ pub fn build_source_referential_integrity(
         }
     }
     out
+}
+
+/// Build the [`SuccessionContext`] the keyed-succession leaf classifier
+/// (`smelt_logical::analysis::walk::model_keyed_succession`) reads, over the
+/// same `(ref_string ↔ bare source name, source_info)` pairs
+/// [`build_key_recurrences`] walks — a side channel built fresh here rather
+/// than two new `SourceFacts` fields, for the same rationale
+/// [`build_key_recurrences`]'s own doc comment gives.
+///
+/// Resolves the model's driving source as the FROM clause's first
+/// alias-scoped input (mirroring `smelt-db::file_check`'s own
+/// `frozen_horizon` driving-source resolution). `SuccessionContext::
+/// source_name` is set to the dot-joined path exactly as
+/// `analysis::walk::InputItem::Table::name` spells it (e.g.
+/// `"sources.customer_changes"`, never bare) — [`classify_keyed_succession`]
+/// compares the two verbatim (rule 1), so stripping the `sources.` segment
+/// here would make a real driving source unrecognisable. `refs` is keyed by
+/// BARE source name instead (matching [`build_key_recurrences`]'s own
+/// convention), so the lookup strips that segment separately. Fails closed
+/// to an empty/`None`-carrying context — never a panic — when the SQL has no
+/// FROM clause or the resolved source name has no declaration in `refs`:
+/// [`smelt_logical::analysis::succession::classify_keyed_succession`]'s own
+/// rule 1 (`FROM` is exactly one reference to the declared driving source)
+/// then refuses on the merits, since an empty `source_name` can never match
+/// a real `FROM` target.
+pub fn build_succession_context(
+    sql: &str,
+    refs: &[(String, Option<SourceInfo>)],
+) -> smelt_logical::analysis::succession::SuccessionContext {
+    use smelt_logical::analysis::input_delta::MutationProfile as AnalysisMutationProfile;
+    use smelt_logical::analysis::succession::SuccessionContext;
+
+    let driving_source_name = smelt_parser::File::cast(smelt_parser::parse(sql).syntax())
+        .and_then(|f| f.select_stmt())
+        .and_then(|s| s.from_clause())
+        .map(|fc| smelt_logical::analysis::source_bounds::from_clause_alias_sources(&fc))
+        .and_then(|sources| sources.into_iter().next())
+        .map(|(_, source_name)| source_name)
+        .unwrap_or_default();
+    let bare_name = driving_source_name
+        .strip_prefix("sources.")
+        .unwrap_or(&driving_source_name);
+
+    let info = refs
+        .iter()
+        .find(|(name, _)| name == bare_name)
+        .and_then(|(_, info)| info.as_ref());
+
+    let mutation_profile = info
+        .and_then(|s| s.mutation_profile.as_ref())
+        .map(|m| match m.kind {
+            SourceMutationKind::AppendOnly => AnalysisMutationProfile::AppendOnly,
+            SourceMutationKind::Mutable => AnalysisMutationProfile::Mutable,
+            SourceMutationKind::ChangeFeed => AnalysisMutationProfile::ChangeFeed,
+        });
+    let event_time_column = info
+        .and_then(|s| s.timeseries.as_ref())
+        .map(|t| t.event_time_column.clone());
+    let not_null_columns = info
+        .map(|s| {
+            s.columns
+                .iter()
+                .filter(|c| !c.nullable)
+                .map(|c| c.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    SuccessionContext {
+        source_name: driving_source_name,
+        mutation_profile,
+        event_time_column,
+        not_null_columns,
+    }
 }
 
 /// A Salsa-friendly (`PartialEq`) projection of a
@@ -1551,6 +1674,7 @@ pub fn maintenance_plan_diagnostics(
         &source_referential_integrity,
         deployed_model_sql,
         deployed_partition_column,
+        source_refs,
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -1597,6 +1721,7 @@ pub fn maintenance_plan_diagnostics(
             &source_referential_integrity,
             deployed_model_sql,
             deployed_partition_column,
+            source_refs,
         ) {
             result = admitted;
         }
@@ -1689,6 +1814,11 @@ pub fn maintenance_plan_diagnostics(
                 columns: columns.clone(),
                 why: why.clone(),
             }),
+            // The eleven `Succession*` diagnostic codes land in phase 3a
+            // (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md`) —
+            // left unmapped exactly as `ReachNotDerivable` above, for the
+            // same reason: a future phase's own diagnostic lands it.
+            smelt_logical::maintenance::Refusal::SuccessionNotRecognized { .. } => None,
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -2126,6 +2256,7 @@ mod tests {
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
             None,
             None,
+            &[],
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -2184,6 +2315,7 @@ mod tests {
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
             None,
             None,
+            &[],
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -2232,6 +2364,7 @@ mod tests {
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
             None,
             None,
+            &[],
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -2299,6 +2432,7 @@ mod tests {
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
             None,
             None,
+            &[],
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -2395,6 +2529,7 @@ mod tests {
             &real_ri,
             None,
             None,
+            &[],
         )
         .expect("model must derive a plan");
         let cell = with_real_ri
@@ -2421,6 +2556,7 @@ mod tests {
             &SourceReferentialIntegrity::new(),
             None,
             None,
+            &[],
         )
         .expect("model must derive a plan");
         let cell = with_empty_ri
@@ -2505,6 +2641,7 @@ mod tests {
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
             None,
             None,
+            &[],
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -2517,5 +2654,247 @@ mod tests {
              matching the runtime's `classify_cumulative` resolution: {:?}",
             result.plan.refusals
         );
+    }
+
+    const SUCCESSION_SQL: &str = "SELECT \
+         customer_id, \
+         changed_at, \
+         name, \
+         LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_changed_at \
+         FROM smelt.sources.customer_changes";
+
+    fn succession_source_info() -> SourceInfo {
+        SourceInfo {
+            path: std::path::PathBuf::from("/tmp/customer_changes.yml"),
+            address_segments: vec!["sources".to_string(), "customer_changes".to_string()],
+            columns: vec![
+                smelt_core::sources::SourceColumn {
+                    name: "customer_id".to_string(),
+                    data_type: smelt_types::DataType::Integer,
+                    nullable: false,
+                    description: None,
+                },
+                smelt_core::sources::SourceColumn {
+                    name: "changed_at".to_string(),
+                    data_type: smelt_types::DataType::Timestamp {
+                        with_timezone: false,
+                    },
+                    nullable: false,
+                    description: None,
+                },
+            ],
+            description: None,
+            name_override: None,
+            tags: vec![],
+            timeseries: Some(smelt_core::config::TimeseriesConfig {
+                event_time_column: "changed_at".to_string(),
+                partition_column: "changed_at".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            mutation_profile: Some(smelt_core::sources::SourceMutationProfile::from_kind(
+                SourceMutationKind::AppendOnly,
+            )),
+            source_lateness: None,
+            watermark: None,
+            unique_key: None,
+            retention: None,
+            referential_integrity: None,
+        }
+    }
+
+    fn succession_metadata() -> ModelMetadata {
+        ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn undeclared_grain_incremental_model_derives_the_succession_plan() {
+        let metadata = succession_metadata();
+        let source_refs = vec![(
+            "customer_changes".to_string(),
+            Some(succession_source_info()),
+        )];
+        let result = derive_model_maintenance_plan(
+            SUCCESSION_SQL,
+            "main.customer_history",
+            &metadata,
+            &[],
+            &std::collections::HashSet::new(),
+            None,
+            &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
+            &source_refs,
+        )
+        .expect(
+            "undeclared-grain incremental model with a succession-shaped SQL must derive a plan",
+        );
+        assert!(
+            result.plan.refusals.is_empty(),
+            "expected the succession cell to admit cleanly: {:?}",
+            result.plan.refusals
+        );
+        assert_eq!(result.plan.cells.len(), 1);
+        assert_eq!(
+            result.plan.cells[0].technique,
+            smelt_logical::maintenance::Technique::SuccessionPatch
+        );
+        assert_eq!(
+            result.plan.cells[0].trigger,
+            Trigger::NewData {
+                source: "customer_changes".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn undeclared_grain_unrecognised_shape_derives_the_succession_refusal() {
+        let metadata = succession_metadata();
+        let sql = "SELECT customer_id, COUNT(*) AS n FROM smelt.sources.customer_changes GROUP BY customer_id";
+        let result = derive_model_maintenance_plan(
+            sql,
+            "main.customer_counts",
+            &metadata,
+            &[],
+            &std::collections::HashSet::new(),
+            None,
+            &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
+            &[],
+        )
+        .expect("undeclared-grain incremental model must still derive a (refused) plan");
+        assert!(result.plan.cells.is_empty());
+        assert_eq!(result.plan.refusals.len(), 1);
+        assert!(matches!(
+            result.plan.refusals[0],
+            smelt_logical::maintenance::Refusal::SuccessionNotRecognized { .. }
+        ));
+    }
+
+    #[test]
+    fn succession_context_is_built_from_the_source_declarations() {
+        let source_refs = vec![(
+            "customer_changes".to_string(),
+            Some(succession_source_info()),
+        )];
+        let ctx = build_succession_context(SUCCESSION_SQL, &source_refs);
+        assert_eq!(ctx.source_name, "sources.customer_changes");
+        assert_eq!(ctx.event_time_column.as_deref(), Some("changed_at"));
+        assert!(ctx.not_null_columns.contains("customer_id"));
+        assert!(ctx.not_null_columns.contains("changed_at"));
+
+        // Undeclared profile fails closed: no `SourceInfo` for the driving
+        // source resolves to an empty/`None`-carrying context, never a panic.
+        let ctx_undeclared = build_succession_context(SUCCESSION_SQL, &[]);
+        assert_eq!(ctx_undeclared.mutation_profile, None);
+        assert_eq!(ctx_undeclared.event_time_column, None);
+        assert!(ctx_undeclared.not_null_columns.is_empty());
+    }
+
+    #[test]
+    fn declared_grain_models_are_unchanged() {
+        // A `grain: partition` model.
+        let partition_sql =
+            "SELECT event_date, COUNT(*) AS n FROM smelt.sources.events GROUP BY event_date";
+        let partition_metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Partition),
+            timeseries: Some(smelt_core::config::TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        };
+        let partition_sources = vec![SourceFacts {
+            name: "events".to_string(),
+            mutation: PlanMutationProfile::AppendOnly,
+            partition_col: Some("event_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        }];
+        let with_refs = derive_model_maintenance_plan(
+            partition_sql,
+            "main.events_daily",
+            &partition_metadata,
+            &partition_sources,
+            &std::collections::HashSet::new(),
+            None,
+            &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
+            &[(
+                "customer_changes".to_string(),
+                Some(succession_source_info()),
+            )],
+        )
+        .expect("grain: partition model must derive a plan");
+        let without_refs = derive_model_maintenance_plan(
+            partition_sql,
+            "main.events_daily",
+            &partition_metadata,
+            &partition_sources,
+            &std::collections::HashSet::new(),
+            None,
+            &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
+            &[],
+        )
+        .expect("grain: partition model must derive a plan");
+        assert_eq!(with_refs.plan.cells.len(), without_refs.plan.cells.len());
+        assert_eq!(
+            with_refs.plan.cells[0].technique,
+            without_refs.plan.cells[0].technique
+        );
+
+        // A `grain: key` model.
+        let key_sql = "SELECT user_id, SUM(amount) AS lifetime_spend FROM smelt.sources.payments GROUP BY user_id";
+        let key_metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Key),
+            ..Default::default()
+        };
+        let key_sources = vec![SourceFacts {
+            name: "payments".to_string(),
+            mutation: PlanMutationProfile::AppendOnly,
+            partition_col: Some("pay_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        }];
+        let key_result = derive_model_maintenance_plan(
+            key_sql,
+            "main.lifetime_spend",
+            &key_metadata,
+            &key_sources,
+            &std::collections::HashSet::new(),
+            None,
+            &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
+            None,
+            &[(
+                "customer_changes".to_string(),
+                Some(succession_source_info()),
+            )],
+        )
+        .expect("grain: key model must derive a plan");
+        assert!(!key_result.plan.cells.is_empty());
     }
 }

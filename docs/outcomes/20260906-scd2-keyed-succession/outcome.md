@@ -141,7 +141,7 @@ out-of-order and repeated windows, and the clamp.
 | 2 | Classifier leaf: `analysis/succession.rs` with the verdict type and every rule/refusal reason, wired into the walk as a leaf; `walk_coverage` classification; per-rule unit tests | done |
 | 2a | Gate hygiene: de-flake `smelt-core`'s `checkout_scratch_is_deleted_when_materialization_fails` (unique scratch-dir naming / narrower listing) so `verify-phase.sh` is unambiguously green for every later phase's verification | done |
 | 2b | Gate hygiene: fix the `hardening_budget` ratchet regression phase 2a's own `verify-phase.sh` run found (`smelt-logical` production `unwrap`/`expect` grew from baseline 1/1 to 2/4, all four new sites in phase 2's `analysis/succession.rs`) — classify each site as infallible or convert to `Result` per the fail-loud gate; no silent baseline bump without a reviewer sign-off note | done |
-| 3 | Plan model and derivation: `Grain::Succession { key_cols, clock_col }`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + the full-refresh availability downgrade; the pure succession-plan/refusal deriver in `smelt-logical`; the `resolved_grain()`-is-`None` branch in `smelt-db`'s `derive_model_maintenance_plan` that classifies and derives the one succession cell; `frozen_horizon`/`retain_departed` refusals naming the succession grain, `deferral` admitted | planned |
+| 3 | Plan model and derivation: `Grain::Succession { key_cols, clock_col }`, `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` + the full-refresh availability downgrade; the pure succession-plan/refusal deriver in `smelt-logical`; the `resolved_grain()`-is-`None` branch in `smelt-db`'s `derive_model_maintenance_plan` that classifies and derives the one succession cell; `frozen_horizon`/`retain_departed` refusals naming the succession grain, `deferral` admitted | done |
 | 3a | Diagnostics surface: the eleven `Succession*` `DiagnosticCode` variants, mapped from the plan's succession refusal in the pure owner into `check_file_diagnostics` (LSP and CLI alike), the advisory as a Warning that never changes admission; one `examples/broken` fixture per code; `diagnostics_catalogue` green | pending |
 | 4 | Emitters: event-delta `SELECT`, succession-patch `MERGE` over the neighbour domain, ledger rebuild `SELECT`, clock-tie probe in `smelt-logical`; ledger DDL in `smelt-state`; DuckDB-proven unit tests; `statement_parity` family leg; the `maintenance_plan_conformance` SCD2 matrix cell updated with the emitter-backed CLAIMED entry | pending |
 | 5 | Runtime: window-forward driver dispatch for succession cells with transactional ledger write, re-run-tolerant frontier grade, clock-tie probe → `SuccessionClockTie` rollback, `--full-refresh`/`smelt repair` ledger rebuild; `execute_parity` | pending |
@@ -340,6 +340,32 @@ out-of-order and repeated windows, and the clamp.
   `recompute_equivalent`'s keyed `PerGroupRecompute`; and the contract refusals name the grain
   through a grain *label* owned in `smelt-logical`, since `smelt_core::config::Grain` is the
   declarable-surface enum and succession is never declared.
+
+- 2026-09-06/07 (phase 3 done): landed as planned. `Grain::Succession`,
+  `Technique::SuccessionPatch`, `StateStructure::TombstoneLedger` added to
+  `smelt-logical`'s plan model; the pure deriver
+  (`maintenance/succession.rs`, new file) turns a `SuccessionVerdict` into
+  one `SuccessionPatch` cell or a `Refusal::SuccessionNotRecognized`.
+  `smelt-db`'s `derive_model_maintenance_plan` now classifies and derives
+  the succession cell on its `resolved_grain()`-is-`None` branch via
+  `build_succession_context` (a side channel over `(bare name, SourceInfo)`
+  pairs, the `build_key_recurrences` precedent). New `GrainLabel` enum in
+  `smelt-logical::contract` gives `frozen_horizon`/`retain_departed`
+  refusals the real "succession" name instead of the old `Key` fallback;
+  `deferral` is admitted on a succession model since its clock is
+  classifier-derived. Threading the new `source_refs` parameter through
+  `derive_model_maintenance_plan`/`_with_edges` and the `smelt-runtime`
+  availability seam touched ~20 call sites — the real value flows at the
+  `smelt-db` production sites and `propagation.rs` (already had it in
+  scope); every runtime execution-path resolver passes `&[]` for now (full
+  succession dispatch is phase 5's scope; an empty slice fails closed to a
+  refusal, never a panic). Two gates are red, both discussed and left
+  unfixed per the plan's own "record, don't force" instruction: the
+  large-file ratchet (mechanical 1-3-line growth across the ~20 fan-out
+  sites — same shape phase 2b hit, same non-blocking shrink-step
+  resolution) and `join_context_reach`'s `every_production_join_context_new_is_tagged`
+  (pre-existing, confirmed via `git log` to predate this phase, in a file
+  this phase never touched). See `phases/03-summary.md`.
 
 ## Blocked
 

@@ -17,8 +17,9 @@
 //! the default reconcile write is required to prove, not when a cell runs
 //! (`incremental_models.md` §"The equivalence invariant", key departure).
 
-use smelt_core::config::{Grain, RetainDeparted};
+use smelt_core::config::RetainDeparted;
 
+use crate::contract::GrainLabel;
 use crate::maintenance::emit::MaintenanceStatement;
 
 /// The runtime write-path disposition a reconcile write must apply for
@@ -62,16 +63,16 @@ pub fn reconcile_disposition(declared: Option<&RetainDeparted>) -> DepartedKeyDi
 /// Returns `Err` naming the offending posture or the missing tombstone
 /// column.
 pub fn validate(
-    grain: Grain,
+    grain: GrainLabel,
     consumes_mutable_snapshot: bool,
     tombstone_column: Option<&str>,
     output_columns: &[String],
     model_name: &str,
 ) -> Result<(), String> {
-    if grain != Grain::Key {
+    if grain != GrainLabel::Key {
         return Err(format!(
             "contract.retain_departed is admitted only on a keyed shape consuming a mutable \
-             snapshot; model '{model_name}' has grain {grain:?}"
+             snapshot; model '{model_name}' has grain {grain}"
         ));
     }
     if !consumes_mutable_snapshot {
@@ -170,22 +171,38 @@ mod tests {
 
     #[test]
     fn admitted_only_on_keyed_mutable_snapshot() {
-        assert!(validate(Grain::Key, true, None, &cols(&["id"]), "m").is_ok());
+        assert!(validate(GrainLabel::Key, true, None, &cols(&["id"]), "m").is_ok());
 
-        let err = validate(Grain::Partition, true, None, &cols(&["id"]), "m").unwrap_err();
-        assert!(err.contains("Partition"), "got: {err}");
+        let err = validate(GrainLabel::Partition, true, None, &cols(&["id"]), "m").unwrap_err();
+        assert!(err.contains("partition"), "got: {err}");
 
-        let err = validate(Grain::Key, false, None, &cols(&["id"]), "m").unwrap_err();
+        let err = validate(GrainLabel::Key, false, None, &cols(&["id"]), "m").unwrap_err();
         assert!(err.contains("mutable_snapshot"), "got: {err}");
     }
 
     #[test]
+    fn retain_departed_refused_on_a_succession_model() {
+        let err = validate(GrainLabel::Succession, true, None, &cols(&["id"]), "m").unwrap_err();
+        assert!(
+            err.contains("succession"),
+            "error must name the succession grain, not a Key fallback, got: {err}"
+        );
+    }
+
+    #[test]
     fn tombstone_column_must_exist_in_output() {
-        let err = validate(Grain::Key, true, Some("is_departed"), &cols(&["id"]), "m").unwrap_err();
+        let err = validate(
+            GrainLabel::Key,
+            true,
+            Some("is_departed"),
+            &cols(&["id"]),
+            "m",
+        )
+        .unwrap_err();
         assert!(err.contains("is_departed"), "got: {err}");
 
         assert!(validate(
-            Grain::Key,
+            GrainLabel::Key,
             true,
             Some("is_departed"),
             &cols(&["id", "is_departed"]),

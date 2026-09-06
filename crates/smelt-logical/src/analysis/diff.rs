@@ -86,7 +86,14 @@ pub enum Direction {
 /// ≻ `DeleteInsert`. Higher rank costs less per run.
 fn technique_rank(t: Technique) -> u8 {
     match t {
-        Technique::KeyedFold => 5,
+        // Shares `KeyedFold`'s tier: both are ledger-backed, targeted-write
+        // techniques with no full-table read. A succession cell never
+        // transitions to/from another technique in practice (the grain is
+        // derived, not declared, so there is no `contract:`/`grain:` edit
+        // that would trigger a property-diff comparison across techniques
+        // here) — the exact rank is a placeholder until a real transition
+        // exists to pin it against.
+        Technique::KeyedFold | Technique::SuccessionPatch => 5,
         Technique::ColumnScopedMerge => 4,
         Technique::InPlaceUpdate => 3,
         Technique::PerGroupRecompute => 2,

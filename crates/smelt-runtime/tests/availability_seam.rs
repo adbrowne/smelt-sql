@@ -103,6 +103,7 @@ fn derive_resolved_downgrades_a_keyed_fold_cell() {
         None,
         None,
         &ledger_less,
+        &[],
     )
     .expect("a keyed-fold model must derive a plan");
 
@@ -146,6 +147,7 @@ fn derive_resolved_with_edges_downgrades_the_same_keyed_fold_cell() {
         None,
         None,
         &ledger_less,
+        &[],
     )
     .expect("a keyed-fold model must derive a plan through the edge-aware entry point too");
 
@@ -175,6 +177,7 @@ fn derive_resolved_under_full_availability_is_byte_identical_to_the_raw_derivati
         &SourceReferentialIntegrity::new(),
         None,
         None,
+        &[],
     )
     .expect("raw derivation must succeed");
 
@@ -191,6 +194,7 @@ fn derive_resolved_under_full_availability_is_byte_identical_to_the_raw_derivati
         None,
         None,
         &StateAvailability::all(),
+        &[],
     )
     .expect("resolved derivation must succeed");
 

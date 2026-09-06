@@ -83,6 +83,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         None,
         None,
         availability,
+        &[],
     ) else {
         return Ok(None);
     };

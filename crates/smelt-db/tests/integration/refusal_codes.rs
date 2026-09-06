@@ -148,6 +148,11 @@ fn refusals_with_no_db_counterpart() -> Vec<Refusal> {
             source: "s".to_string(),
             why: "w".to_string(),
         },
+        Refusal::SuccessionNotRecognized {
+            reason: smelt_logical::analysis::succession::NotSuccessionReason::PatternUnrecognized(
+                "r".to_string(),
+            ),
+        },
     ]
 }
 
