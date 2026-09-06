@@ -142,6 +142,40 @@ cargo run -p smelt-lsp
 # (Configure your editor to use the LSP server, then open examples/test_workspace/)
 ```
 
+### Feature unification changes which code path you test
+
+`cargo test -p <crate>` and a workspace-wide `cargo test` do not necessarily
+build the same code. Cargo unifies features across all workspace members being
+built together, so a feature some *other* crate turns on by default is ON in the
+full-suite build and OFF when you test that crate alone.
+
+The live instance: **`smelt-lsp` declares `default = ["python"]`**, which pulls in
+`smelt-runtime/python` and `smelt-core/python`. So:
+
+- `cargo test -p smelt-runtime --lib` → the **subprocess** Python path
+  (`#[cfg(not(feature = "python"))]`), one interpreter per model file.
+- `cargo test` / `mise run verify` → the **embedded PyO3** path
+  (`#[cfg(feature = "python")]`), one process-global interpreter shared by every
+  concurrently running test.
+
+Consequences to keep in mind:
+
+- A bug that only exists in one path passes under `-p <crate>` and fails only in
+  the full suite. Issue #189 hid behind exactly this: a race on the embedded
+  interpreter's global model registry was unreproducible under
+  `cargo test -p smelt-runtime --lib` because that command does not build the
+  racy code at all.
+- Anything the embedded path touches is **process-global** — `sys.path`,
+  `sys.modules`, and `smelt.core._registered_models`. Treat it as shared mutable
+  state and serialise it (see `REGISTRY_HELD` in
+  `crates/smelt-core/src/python_models.rs`), rather than assuming the GIL is a
+  lock: CPython drops the GIL on every I/O call a model makes.
+
+When a test reproduces only under the full suite, check which feature set it is
+actually being built with before hunting for shared fixtures or temp-path
+collisions. Reproduce the full-suite path directly with
+`cargo test -p smelt-runtime --lib --features python`.
+
 ### Build and Test (Bundled DuckDB - No System Dependencies)
 
 If you don't have the system DuckDB library, bundled mode compiles DuckDB from source (slower first build).
