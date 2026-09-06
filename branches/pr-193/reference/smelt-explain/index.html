@@ -3414,6 +3414,16 @@ depends on changed is reported <code>(downstream of &lt;model&gt;[, &lt;model&gt
 ancestors — this is how a downgrade that silently propagates into a downstream mart gets caught.</p>
 <p>The baseline never touches a warehouse, a deployed snapshot, or the maintenance ledger — it is a
 pure comparison of two source trees.</p>
+<p>A new maintenance cell is graded on how it reads its data, not on the fact that it exists: a
+cell whose maintenance is not partition-local — it has no time column to scan, so every run reads
+it in full and any change to it rebuilds the whole model — is a <code>downgrade</code> when it's added to a
+model that was already maintained, because the model just gained a dependency that can silently
+force a full rebuild. A partition-local new cell is <code>neutral</code> instead; <code>cell_added</code> never grades
+<code>upgrade</code> on its own — a model going from unmaintained to maintained is reported once, as
+<code>maintenance_gained</code>. Symmetrically, a grain that <strong>widens</strong> (its keys now cover a strict
+superset of the old column set, a weaker uniqueness claim — proving one row per <code>(date, user)</code>
+implies one row per <code>(date, user, name)</code>, never the reverse) is a <code>downgrade</code>; a grain that
+<strong>narrows</strong> (a strict subset — a stronger claim) is an <code>upgrade</code>.</p>
 <p><strong>Text</strong> (default):</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>$ smelt explain --diff
 <a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
