@@ -1754,6 +1754,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -3610,6 +3638,7 @@
 <hr />
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <hr />
+<p><a id="columnsofrequirestableexpr"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ColumnsOfRequiresTableExpr</p>
 <p><strong>When it fires:</strong> <code>smelt.columns_of(x)</code> is called and <code>x</code> synthesises to a type that is not assignable to <code>TableExpr</code>.</p>
@@ -3622,6 +3651,7 @@
 <p><strong>What to fix:</strong> Pass a <code>TableExpr</code>-typed value — a <code>smelt.&lt;path&gt;</code> reference to a model, source, or seed, or a <code>TableExpr</code> parameter of the enclosing <code>smelt.define</code> function. Use <code>smelt.columns_of(smelt.orders)</code> rather than passing a non-table expression.</p>
 </div>
 <hr />
+<p><a id="columnsofnamedargument"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ColumnsOfNamedArgument</p>
 <p><strong>When it fires:</strong> <code>smelt.columns_of</code> is called with a named argument instead of a positional argument.</p>
@@ -3634,6 +3664,7 @@
 <p><strong>What to fix:</strong> Remove the <code>=&gt;</code> and pass the value positionally: <code>smelt.columns_of(smelt.orders)</code>.</p>
 </div>
 <hr />
+<p><a id="columnsofunresolvableschema"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ColumnsOfUnresolvableSchema</p>
 <p><strong>When it fires:</strong> At expansion time, <code>smelt.columns_of(t)</code> is evaluated but the schema for <code>t</code> cannot be statically determined (for example because an upstream model has an unknown schema).</p>
@@ -3642,6 +3673,7 @@
 <p><strong>What to fix:</strong> Ensure the <code>TableExpr</code> argument resolves to a model, source, or seed with a fully declared schema. If the upstream model itself has type errors, fix those first — the schema becomes resolvable once the upstream compiles cleanly. This diagnostic suppresses further errors from the surrounding HOF call; fix the schema resolution first, then re-check.</p>
 </div>
 <hr />
+<p><a id="columnreffieldunknown"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ColumnRefFieldUnknown</p>
 <p><strong>When it fires:</strong> Field access on a <code>ColumnRef</code>-typed value uses an identifier that is not one of the three declared fields.</p>
@@ -3770,6 +3802,7 @@
 <hr />
 <h2 id="wide-reflection-diagnostic-codes">Wide-reflection diagnostic codes<a class="headerlink" href="#wide-reflection-diagnostic-codes" title="Permanent link">&para;</a></h2>
 <hr />
+<p><a id="withtagrequirestext"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">WithTagRequiresText</p>
 <p><strong>When it fires:</strong> <code>smelt.models.with_tag(x)</code> or <code>smelt.sources.with_tag(x)</code> is called and <code>x</code> is not a compile-time Text literal (for example an integer, a function call, or a runtime expression).</p>
@@ -3782,6 +3815,7 @@
 <p><strong>What to fix:</strong> Use a string literal: <code>smelt.models.with_tag('cohort')</code>.</p>
 </div>
 <hr />
+<p><a id="withtagnamedargument"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">WithTagNamedArgument</p>
 <p><strong>When it fires:</strong> <code>with_tag</code> is called with a named argument instead of a positional argument.</p>
@@ -3794,6 +3828,7 @@
 <p><strong>What to fix:</strong> Remove the <code>=&gt;</code> and pass the tag string positionally: <code>with_tag('cohort')</code>.</p>
 </div>
 <hr />
+<p><a id="widereflectionunknownaccessor"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">WideReflectionUnknownAccessor</p>
 <p><strong>When it fires:</strong> <code>smelt.models.&lt;name&gt;</code> or <code>smelt.sources.&lt;name&gt;</code> uses an accessor name outside the closed set <code>{with_tag, all}</code>.</p>
@@ -3806,6 +3841,7 @@
 <p><strong>What to fix:</strong> Use <code>with_tag('my-tag')</code> to filter by tag, or <code>all()</code> to get every entity.</p>
 </div>
 <hr />
+<p><a id="widereflectionunexpectedargument"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">WideReflectionUnexpectedArgument</p>
 <p><strong>When it fires:</strong> <code>smelt.models.all</code> or <code>smelt.sources.all</code> is called with one or more arguments.</p>
@@ -3818,6 +3854,7 @@
 <p><strong>What to fix:</strong> Remove the argument: <code>smelt.models.all()</code>.</p>
 </div>
 <hr />
+<p><a id="modelreffieldunknown"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ModelRefFieldUnknown</p>
 <p><strong>When it fires:</strong> Field access on a <code>ModelRef</code>-typed value uses an identifier that is not one of the four declared fields.</p>
@@ -3830,6 +3867,7 @@
 <p><strong>What to fix:</strong> Use one of the four valid fields: <code>m.path</code>, <code>m.name</code>, <code>m.tags</code>, or <code>m.columns</code>. Additional fields (such as <code>materialization</code>) are not yet in the closed field set.</p>
 </div>
 <hr />
+<p><a id="sourcereffieldunknown"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">SourceRefFieldUnknown</p>
 <p><strong>When it fires:</strong> Field access on a <code>SourceRef</code>-typed value uses an identifier that is not one of the four declared fields.</p>

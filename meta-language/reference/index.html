@@ -2797,6 +2797,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -6234,7 +6262,7 @@
 <p><strong>When:</strong> Field access on a <code>ColumnRef</code> value uses an identifier that is not one of the three declared fields (<code>name</code>, <code>type</code>, <code>is_numeric</code>).</p>
 <p><strong>Message:</strong> <code>ColumnRef has no field {name}; expected one of: name, type, is_numeric</code></p>
 <p><strong>Fix:</strong> use <code>c.name</code> (Text), <code>c.type</code> (DataType), or <code>c.is_numeric</code> (Boolean). Any other field requires a spec extension.</p>
-<p>See <a href="../reflection/#columnrefieldunknown">Reflection — <code>ColumnRefFieldUnknown</code></a>.</p>
+<p>See <a href="../reflection/#columnreffieldunknown">Reflection — <code>ColumnRefFieldUnknown</code></a>.</p>
 <hr />
 <h3 id="columnsofnamedargument"><code>ColumnsOfNamedArgument</code><a class="headerlink" href="#columnsofnamedargument" title="Permanent link">&para;</a></h3>
 <p><strong>When:</strong> <code>smelt.columns_of</code> is called with a named argument instead of a positional one.</p>
@@ -6246,7 +6274,7 @@
 <p><strong>When:</strong> The argument to <code>smelt.columns_of</code> synthesises to a type not assignable to <code>TableExpr</code>.</p>
 <p><strong>Message:</strong> <code>smelt.columns_of expects TableExpr; found {actual}</code></p>
 <p><strong>Fix:</strong> pass a <code>smelt.&lt;path&gt;</code> reference to a model, source, or seed, or a <code>TableExpr</code> parameter of the enclosing <code>smelt.define</code> function.</p>
-<p>See <a href="../reflection/#columnsofRequirestableexpr">Reflection — <code>ColumnsOfRequiresTableExpr</code></a>.</p>
+<p>See <a href="../reflection/#columnsofrequirestableexpr">Reflection — <code>ColumnsOfRequiresTableExpr</code></a>.</p>
 <hr />
 <h3 id="columnsofunresolvableschema"><code>ColumnsOfUnresolvableSchema</code><a class="headerlink" href="#columnsofunresolvableschema" title="Permanent link">&para;</a></h3>
 <p><strong>When:</strong> At expansion time, <code>smelt.columns_of(t)</code> cannot resolve the schema for <code>t</code> (for example because an upstream model has an unknown schema).</p>
@@ -6276,7 +6304,7 @@
 <p><strong>When:</strong> The loaded file is not valid YAML or JSON.</p>
 <p><strong>Message:</strong> <code>failed to parse {format} file '{path}': {parser_error}</code></p>
 <p><strong>Fix:</strong> fix the syntax error at the reported line and column in the config file.</p>
-<p>See <a href="../config-loaders/#configloaderparseError">Config Loaders — <code>ConfigLoaderParseError</code></a>.</p>
+<p>See <a href="../config-loaders/#configloaderparseerror">Config Loaders — <code>ConfigLoaderParseError</code></a>.</p>
 <hr />
 <h3 id="configloaderpathbackslash"><code>ConfigLoaderPathBackslash</code><a class="headerlink" href="#configloaderpathbackslash" title="Permanent link">&para;</a></h3>
 <p><strong>When:</strong> The loader path literal contains a backslash <code>\</code>.</p>
@@ -6294,7 +6322,7 @@
 <p><strong>When:</strong> The <code>path</code> argument to a loader is not a string literal.</p>
 <p><strong>Message:</strong> <code>loader path must be a string literal; found {expr}</code></p>
 <p><strong>Fix:</strong> replace the argument with a string literal: <code>'configs/data.yaml'</code>.</p>
-<p>See <a href="../config-loaders/#configloaderpathnot-literal">Config Loaders — <code>ConfigLoaderPathNotLiteral</code></a>.</p>
+<p>See <a href="../config-loaders/#configloaderpathnotliteral">Config Loaders — <code>ConfigLoaderPathNotLiteral</code></a>.</p>
 <hr />
 <h3 id="configloaderrequiredfieldmissing"><code>ConfigLoaderRequiredFieldMissing</code><a class="headerlink" href="#configloaderrequiredfieldmissing" title="Permanent link">&para;</a></h3>
 <p><strong>When:</strong> A record entry in the loaded file omits a field required by the schema.</p>

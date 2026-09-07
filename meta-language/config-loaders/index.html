@@ -1482,6 +1482,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -3016,6 +3044,7 @@
 </ul>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <hr />
+<p><a id="configloaderpathnotliteral"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderPathNotLiteral</p>
 <p><strong>When it fires:</strong> The <code>path</code> argument to a loader is not a string literal.</p>
@@ -3027,6 +3056,7 @@
 <p><strong>What to fix:</strong> Replace the path argument with a string literal: <code>smelt.config.load_yaml('configs/data.yaml', …)</code>.</p>
 </div>
 <hr />
+<p><a id="configloaderpathescapesworkspace"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderPathEscapesWorkspace</p>
 <p><strong>When it fires:</strong> The path is absolute, contains a <code>..</code> segment that escapes the workspace root, or begins with a scheme prefix (<code>http://</code>, <code>s3://</code>, etc.).</p>
@@ -3038,6 +3068,7 @@
 <p><strong>What to fix:</strong> Use a path relative to the workspace root: <code>'configs/data.yaml'</code>. Move shared configs into the workspace, or symlink them.</p>
 </div>
 <hr />
+<p><a id="configloaderpathbackslash"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderPathBackslash</p>
 <p><strong>When it fires:</strong> The path literal contains a backslash <code>\</code>.</p>
@@ -3049,6 +3080,7 @@
 <p><strong>What to fix:</strong> Replace <code>\</code> with <code>/</code>: <code>'configs/tenants.yaml'</code>.</p>
 </div>
 <hr />
+<p><a id="configloaderfilenotfound"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderFileNotFound</p>
 <p><strong>When it fires:</strong> The resolved file does not exist at its workspace-relative path.</p>
@@ -3060,6 +3092,7 @@
 <p><strong>What to fix:</strong> Create the missing file, or correct the path to point to an existing file.</p>
 </div>
 <hr />
+<p><a id="configloaderschemaforbidden"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderSchemaForbidden</p>
 <p><strong>When it fires:</strong> The schema argument is not an admissible shape (bare scalar, <code>List&lt;Text&gt;</code>, <code>Map&lt;Integer, …&gt;</code>, etc.).</p>
@@ -3071,6 +3104,7 @@
 <p><strong>What to fix:</strong> Use a record schema (<code>{…}</code> or a named <code>smelt.record</code>), <code>List&lt;{…}&gt;</code>, or <code>Map&lt;Text, {…}&gt;</code>.</p>
 </div>
 <hr />
+<p><a id="configloadertomlnotyetsupported"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderTomlNotYetSupported</p>
 <p><strong>When it fires:</strong> <code>smelt.config.load_toml</code> is called.</p>
@@ -3082,6 +3116,7 @@
 <p><strong>What to fix:</strong> Convert the TOML file to YAML or JSON and use <code>load_yaml</code> / <code>load_json</code>.</p>
 </div>
 <hr />
+<p><a id="configloaderparseerror"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderParseError</p>
 <p><strong>When it fires:</strong> The loaded file is not valid YAML or JSON.</p>
@@ -3090,6 +3125,7 @@
 <p><strong>What to fix:</strong> Fix the syntax error in the config file. The parser error message includes the line and column where parsing stopped.</p>
 </div>
 <hr />
+<p><a id="configloaderrequiredfieldmissing"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderRequiredFieldMissing</p>
 <p><strong>When it fires:</strong> A record entry in the loaded file omits a field declared as required by the schema.</p>
@@ -3103,6 +3139,7 @@
 <p><strong>What to fix:</strong> Add the missing field to the YAML/JSON entry, or remove the field from the schema if it is truly optional.</p>
 </div>
 <hr />
+<p><a id="configloaderunknownfield"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderUnknownField</p>
 <p><strong>When it fires:</strong> A record entry in the loaded file contains a field not declared in the schema.</p>
@@ -3117,6 +3154,7 @@
 <p><strong>What to fix:</strong> Remove the extra field from the YAML/JSON entry, or add it to the schema if it should be present.</p>
 </div>
 <hr />
+<p><a id="configloadertypemismatch"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderTypeMismatch</p>
 <p><strong>When it fires:</strong> A field value in the loaded file is not assignable to the declared field type.</p>
@@ -3130,6 +3168,7 @@
 <p><strong>What to fix:</strong> Correct the value in the YAML/JSON file to match the declared field type.</p>
 </div>
 <hr />
+<p><a id="configloaderrootshapemismatch"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigLoaderRootShapeMismatch</p>
 <p><strong>When it fires:</strong> The file's top-level shape (sequence, mapping, scalar) does not match what the schema expects.</p>
@@ -3146,6 +3185,7 @@
 <p><strong>What to fix:</strong> Remove the duplicate key from the YAML/JSON file, keeping the intended value.</p>
 </div>
 <hr />
+<p><a id="configloadernullcoercion-warning"></a></p>
 <div class="admonition note">
 <p class="admonition-title">ConfigLoaderNullCoercion (warning)</p>
 <p><strong>When it fires:</strong> A YAML <code>null</code> scalar (<code>~</code> or <code>null</code>) appears at a schema field declared <code>Text</code>. The null coerces to empty string <code>''</code>.</p>

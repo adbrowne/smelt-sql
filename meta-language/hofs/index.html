@@ -1482,6 +1482,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -2963,6 +2991,7 @@
 <p>Both forms are semantically identical. Pipe is purely syntactic sugar; the type checker desugars it before checking.</p>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <hr />
+<p><a id="hofexpectslambda"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">HofExpectsLambda</p>
 <p><strong>When it fires:</strong> The second argument to <code>map</code> or <code>filter</code> is not a lambda.</p>
@@ -2975,6 +3004,7 @@
 <p><strong>What to fix:</strong> Replace the second argument with a <code>fn x =&gt; body</code> lambda. For example: <code>map([1, 2, 3], fn c =&gt; c + 1)</code>. Named <code>smelt.define</code> functions cannot be passed as HOF arguments; write the transformation inline as a lambda.</p>
 </div>
 <hr />
+<p><a id="hofexpectsreducer"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">HofExpectsReducer</p>
 <p><strong>When it fires:</strong> The second argument to <code>reduce</code> is not a bare reducer identifier from the closed registry.</p>
@@ -2987,6 +3017,7 @@
 <p><strong>What to fix:</strong> Replace the second argument with one of the seven registered reducer names: <code>comma_sep</code>, <code>and_all</code>, <code>or_any</code>, <code>union_all</code>, <code>intersect_all</code>, <code>plus_chain</code>, or <code>concat</code>. See <a href="../reducers/">Reducers</a> for the input type and output sort of each. You cannot define your own reducers in v1; the registry is closed.</p>
 </div>
 <hr />
+<p><a id="hofnameshadowed"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">HofNameShadowed</p>
 <p><strong>When it fires:</strong> A <code>smelt.define</code> function is declared with the name <code>map</code>, <code>filter</code>, or <code>reduce</code>.</p>

@@ -1571,6 +1571,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -3430,6 +3458,7 @@
 <p>Reserved names: <code>comma_sep</code>, <code>and_all</code>, <code>or_any</code>, <code>union_all</code>, <code>intersect_all</code>, <code>plus_chain</code>, <code>concat</code>, <code>concat_with</code>.</p>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <hr />
+<p><a id="reducerinputtypemismatch"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ReducerInputTypeMismatch</p>
 <p><strong>When it fires:</strong> <code>reduce</code> is called with a list whose element type is incompatible with the reducer's declared input.</p>
@@ -3443,6 +3472,7 @@
 <p><strong>What to fix:</strong> Check the reducer's declared input type in the table above. Use a lambda inside <code>map</code> to convert the list elements to the correct type before reducing, or choose a different reducer that accepts your element type. For example, to reduce integers, use <code>plus_chain</code>; to reduce booleans, use <code>and_all</code> or <code>or_any</code>.</p>
 </div>
 <hr />
+<p><a id="reduceremptynoidentity"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ReducerEmptyNoIdentity</p>
 <p><strong>When it fires:</strong> <code>reduce</code> is called with an empty list using <code>union_all</code> or <code>intersect_all</code>, which have no identity element for an empty list.</p>
@@ -3455,6 +3485,7 @@
 <p><strong>What to fix:</strong> Ensure the source list is non-empty before calling <code>reduce</code> with <code>union_all</code> or <code>intersect_all</code>. If the list might be empty at compile time, add a guard: use <code>filter</code> to check, or restructure the list construction so it always has at least one element. The other five reducers (<code>comma_sep</code>, <code>and_all</code>, <code>or_any</code>, <code>plus_chain</code>, <code>concat</code>) do have empty-list identities and are safe with an empty list.</p>
 </div>
 <hr />
+<p><a id="reducernameshadowed"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ReducerNameShadowed</p>
 <p><strong>When it fires:</strong> A <code>smelt.define</code> function is declared with a name that matches one of the seven reserved reducer names.</p>
