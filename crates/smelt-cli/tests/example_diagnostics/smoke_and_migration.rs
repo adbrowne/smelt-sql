@@ -42,6 +42,11 @@ fn web_analytics_no_diagnostics() {
 }
 
 #[test]
+fn github_activity_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/github_activity");
+}
+
+#[test]
 fn fn_tableexpr_star_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_tableexpr_star");
 }

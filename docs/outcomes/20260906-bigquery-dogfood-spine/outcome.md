@@ -110,7 +110,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
-| 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | planned |
+| 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | done |
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | pending |
 | 4 | The wider model set: re-pin `sample.sql` with `payload`, then the silver fan-out, `gold.events_enriched`, `gold.repo_activity_daily` and the remaining marts | pending |
 | 5 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
@@ -307,6 +307,25 @@ exists — so the live run is a test of the *backend*, not of the models.
   trailing name, different *owner*. Keyed succession over `repo.id` sees an ordinary
   attribute change; a grammar keyed on the owner/name pair sees a discontinuity. Phase 9
   should probe this case specifically, not only plain renames.
+
+- 2026-09-08 (phase 2 implement): **`silver.events_deduped`'s lookback is `allow_full_scan:
+  true` + declared `key_recurrence`, not a Form-B WHERE filter**, departing from phase 2's
+  plan text. A Form-B lookback needs a source column independent of event time that
+  correlates with when a row became visible (`events_parsed`'s `arrival_time`);
+  `raw.github_events` has none in this phase (the redelivered duplicate is byte-identical,
+  including `created_at`), so any self-referential WHERE filter on `created_at` is
+  tautological. Verified empirically both ways: removing `allow_full_scan` still produces
+  correct dedup counts, because a keyed `MERGE` is idempotent regardless of window width —
+  there is no "narrow it and duplicates survive" failure mode to construct here, unlike
+  `events_parsed`'s. The negative control that does exist and is tested instead: a duplicate
+  pair violating the declared zero-width `key_recurrence` fails transactionally
+  (`KeyedRecurrenceBoundViolated`). Mirrors `examples/web_analytics/silver/
+  events_deduped.sql`'s own precedent exactly. Full write-up: `phases/02-summary.md`.
+- 2026-09-08 (phase 2 implement): `mutation_profile.lateness: '6 hours'` on
+  `raw.github_events` is a placeholder, not the measurement task 2 asked for — the committed
+  Parquet fixture carries no ingestion-time column to measure real shard lag against
+  offline. Harmless: lateness is orchestration-only. Revisit once a session has live
+  BigQuery access (phase 7+).
 
 ## Blocked
 

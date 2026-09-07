@@ -138,6 +138,14 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          (upstream source tables not seeded in the standalone build env)",
     ),
     (
+        "github_activity",
+        "Error: 'silver.events_deduped' derives the window-forward run shape and \
+         requires an explicit --event-time-start/--event-time-end window (or \
+         --full-refresh); a bare `smelt build` in the standalone env supplies \
+         neither, and the source table is not seeded either way \
+         (same category as timeseries/web_analytics)",
+    ),
+    (
         "test_workspace",
         "Error: Failed to execute model: raw_events \
          (upstream source tables not seeded in the standalone build env)",

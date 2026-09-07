@@ -1,0 +1,56 @@
+description: >
+  Raw GitHub Archive sample (`sample.sql`), loaded into a day-partitioned
+  table by an external, at-least-once loader (`docs/outcomes/
+  20260906-bigquery-dogfood-spine/outcome.md`). smelt does not author the
+  load; this declaration is the contract the loader is trusted against.
+mutation_profile:
+  kind: append_only
+  # GitHub Archive publishes hourly shard files; an event minted near an hour
+  # boundary can land in the following hour's file, but the fixture carries
+  # no independent ingestion-time column to measure the real cross-day tail
+  # against (that arrives with `ingested_date` in a later phase). Declared
+  # conservatively pending a live measurement — orchestration-only
+  # (`docs/specs/sources.md` §Semantics: "never a plan input, never widens a
+  # scan"), so a wrong value here cannot affect correctness.
+  lateness: '6 hours'
+  redelivery: at_least_once
+  # The loader's redelivery rule (`sample.sql`-adjacent contract, see
+  # `models/silver/events_deduped.sql`) re-appends a slice of the previous
+  # day's rows byte-identical to the original — same `id`, same `created_at`.
+  # A duplicate pair's event-time distance is therefore always exactly zero;
+  # declared as the exact fact rather than a padded bound; a fixture that
+  # ever produced a wider gap would fail the run loudly
+  # (`KeyedRecurrenceBoundViolated`) rather than silently mis-dedup.
+  key_recurrence:
+    key: [id]
+    window: '0 days'
+unique_key: [id]
+# Matches the loader's own N-day trim (`docs/outcomes/
+# 20260906-bigquery-dogfood-spine/outcome.md` criterion 3); the fixture
+# itself only spans 30 days, well inside this bound.
+retention: '90 days'
+timeseries:
+  event_time_column: created_at
+  partition_column: created_at
+  granularity: day
+columns:
+  - name: id
+    type: VARCHAR
+    nullable: false
+  - name: type
+    type: VARCHAR
+  - name: created_at
+    type: TIMESTAMP
+    nullable: false
+  - name: actor_id
+    type: BIGINT
+  - name: actor_login
+    type: VARCHAR
+  - name: repo_id
+    type: BIGINT
+  - name: repo_name
+    type: VARCHAR
+  - name: org_id
+    type: BIGINT
+  - name: public
+    type: BOOLEAN

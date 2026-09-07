@@ -455,6 +455,11 @@ async fn web_analytics() {
 }
 
 #[tokio::test]
+async fn github_activity() {
+    assert_example_workspace_clean("github_activity").await;
+}
+
+#[tokio::test]
 async fn timeseries() {
     assert_example_workspace_clean("timeseries").await;
 }
