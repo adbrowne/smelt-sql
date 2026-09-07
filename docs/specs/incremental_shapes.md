@@ -1900,28 +1900,10 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The succession grain
 
-- **No implementation exists yet.** The classifier (`model_properties.md` §"Keyed-succession
-  classification"), the succession-patch technique (`model_transforms.md`), and this profile's
-  admission rules are specified but unimplemented; `refresh: incremental` over a
-  keyed-succession-shaped model today refuses with the ordinary "no maintainable shape" error
-  rather than the named diagnostics above. No plan exists yet — this spec diff is the input to
-  one.
-- **The generative conformance recipes this profile's splice and delete claims depend on do not
-  exist yet.** §"The maintenance theorem (bounded footprint)" and §"Delete events" are proved on
-  paper; the recipe families that will check them against the full-refresh oracle via
-  `cargo test -p smelt-cli --test maintenance_conformance` (`incremental_models.md`
-  §References) are: late-arriving splice (an event inserted between two folded events), delete
-  then later insert on the same key, late insert splicing before an already-folded delete, a key
-  whose only events are deletes, `LAG`-projecting models under each of those, out-of-order and
-  repeated window application, and an equal-`(k, t)` collision expecting `SuccessionClockTie`.
-  Until they exist, this profile's theorem is a design claim, not a verified one.
-- **The conformance pool has no arrival-partitioned source recipe.** The late-splice claims
-  above are only reachable through an arrival-partitioned driving source (§"Run shape and
-  late events"), and the typed recipe generator today partitions every clocked source by its
-  event time. The succession recipe family needs a source recipe whose `partition_column` is
-  a landing date distinct from `event_time_column`, with lateness schedules that land old
-  event times in new arrival windows — and a leg with the optional pre-window lateness clamp,
-  asserting the clamped-out rows are absent from both oracle and maintained state.
+- **No target other than DuckDB can realise the tombstone ledger.** Spark, BigQuery, and
+  `state.warehouse_tables: none` have no tombstone-ledger builder, so a succession cell on one
+  of those targets downgrades to full refresh with the recorded `MaintenanceStateDowngraded`
+  verdict (`smelt explain` surfaces it) rather than a ledger-less patch.
 - **A hand-authored model whose derived table name ends in the reserved `__tombstones` suffix
   collides silently** with a succession model's ledger table, with no dedicated collision
   diagnostic — the reserved-suffix collision the key grain's `__` state-column suffix already
@@ -2079,6 +2061,34 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
 
 ### The succession grain
 
+- **Code**:
+  - `crates/smelt-logical/src/analysis/succession/` — `classify_keyed_succession`, the leaf
+    classifier invoked from the composition walk
+  - `crates/smelt-logical/src/maintenance/succession.rs` — `Grain::Succession`,
+    `Technique::SuccessionPatch`, the pure succession-plan/refusal deriver and `SuccessionRecipe`
+    assembler
+  - `crates/smelt-logical/src/maintenance/emit/succession.rs` — the event-delta `SELECT`, the
+    succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and the clock-tie probe
+  - `crates/smelt-state/src/ddl_duckdb.rs` — `generate_tombstone_table_ddl`,
+    `generate_tombstone_table_drop_ddl` (ledger DDL, bookkeeping only)
+  - `crates/smelt-runtime/src/maintenance_driver/succession/` — the window-forward driver
+    dispatch, transactional ledger write, frontier recording, and append-only posture probes
+  - `crates/smelt-db` — the `resolved_grain()`-is-`None` branch of `derive_model_maintenance_plan`
+    that classifies and derives the succession cell
+- **Tests**:
+  - `crates/smelt-logical/src/analysis/succession/tests.rs` — per-rule classifier unit tests
+  - `crates/smelt-logical/tests/maintenance_availability/succession.rs`,
+    `crates/smelt-cli/tests/maintenance_conformance/succession.rs`,
+    `crates/smelt-cli/tests/explain_maintenance/succession.rs`
+  - `crates/smelt-runtime/tests/statement_parity/succession.rs` — executed-vs-emitted parity and
+    the structural no-authoring leg
+  - `crates/smelt-maintenance-testkit/src/gate_succession.rs`,
+    `crates/smelt-maintenance-testkit/src/recipe/succession.rs`,
+    `crates/smelt-maintenance-testkit/src/render/succession.rs` — the generative conformance
+    recipe family (splices, deletes, delete-then-late-insert, delete-only keys, `LAG`
+    projections, out-of-order/repeated windows, the pre-window clamp)
+  - `examples/scd2_succession/` — the `customer_changes`/`customer_history` fixture, zero
+    diagnostics
 - **Research**: `docs/research/20260723-scd2-succession-pattern.md` (the full design sketch this
   profile specifies: the pattern, the maintenance theorem, the four-layer machinery breakdown,
   the two hard parts, and the case for recognition over declaration).
@@ -2089,4 +2099,4 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   probe); `state.md` (the tombstone ledger's degradation contract); `diagnostics.md` §"Succession
   grain" (the code catalogue).
 - **User docs**: [`docs-site/docs/guide/scd2-succession.md`](../../docs-site/docs/guide/scd2-succession.md)
-- **Plans (history)**: none yet — this spec diff is the input to the first one.
+- **Plans (history)**: [`docs/outcomes/20260906-scd2-keyed-succession/outcome.md`](../outcomes/20260906-scd2-keyed-succession/outcome.md) — the classifier, plan, emitters, runtime driver, and conformance coverage this section cites.

@@ -1,7 +1,7 @@
 # Outcome: SCD2 — the keyed-succession grain, maintained
 
 **Created:** 2026-09-06
-**Status:** active
+**Status:** done
 **Source:** spec diff `git diff 1e5e0675..HEAD -- docs/specs/` (commits `1dacc2d2`..`91cec5e2`, all `spec(scd2): ...`); `docs/research/20260723-scd2-succession-pattern.md`
 **Spec anchors:** `docs/specs/incremental_shapes.md` §"Succession-grain admission (no declaration)", §"Diagnostics" (succession-grain codes), §"The succession grain" (§"The tombstone ledger (hidden state)", §"The maintenance theorem (bounded footprint)", §"Delete events", §"Run shape and late events", §"What stays out of this grain"), §"Succession-grain design", §"Succession-grain constraints", §Known Divergences "The succession grain"; `docs/specs/model_properties.md` §"Keyed-succession classification", §"Event-time monotonicity trace", §"The composition walk"; `docs/specs/model_transforms.md` (Succession-patch keyed `MERGE` row); `docs/specs/diagnostics.md` §"Succession grain"; `docs/specs/sources.md` §Known Divergences (append-only probe fingerprint leg); `docs/specs/state.md` (Tombstone ledger row, §"The degradation contract"); `docs/specs/incremental_models.md` §Limitations "SCD2 recognition is bounded to the keyed-succession pattern"
 
@@ -164,10 +164,21 @@ out-of-order and repeated windows, and the clamp.
 | 6c | Append-only probe dispatch for the succession grain (criterion 7; subsumes blocked phase 6): `dispatch_and_record_append_only_postures`/`append_only_posture_probes` are called only from the ordinary `match plan.incremental` sites in `crates/smelt-runtime/src/execute/project/mod.rs`, so a succession model's declared `mutation_profile: append_only` posture is never verified at runtime and its `ModelRunRecord` hardcodes `probes: Vec::new()`. Wire the dispatch into the succession window-forward loop (persisting the refreshed `SourcePostureStore` baseline as the ordinary path does), with unit tests, then land phase 6's two conformance `probes.rs` legs on top: a late append into a closed event-time partition re-presents its covering window, and a genuine in-place mutation fails with `SourceMutationProfileViolated` (not an incidental `SuccessionClockTie`) | done |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | done |
 | 9 | Fixture and docs: example workspace `customer_changes`/`customer_history` with zero diagnostics; docs-site guide page and diagnostics reference | done |
-| 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | planned |
+| 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | done |
 
 ## Decision log
 
+- 2026-09-07 (implement phase 10, close): closed the outcome. Rewrote §Known Divergences
+  and §References across `incremental_shapes.md`, and the status cells/references in
+  `model_properties.md`, `model_transforms.md`, and `diagnostics.md`, dropping every "not yet
+  built"/"unimplemented" claim now that phases 2-9 landed the classifier, plan, emitters,
+  runtime driver, and conformance coverage; amended `sources.md`'s mutation-profile divergence
+  to name the succession grain as the one place a declared `append_only` profile is already
+  load-bearing. `state.md` and `incremental_models.md` needed no edits — both already read as
+  shipped. New standing gate `crates/smelt-cli/tests/succession_docs_freshness.rs` keeps these
+  three specs from re-drifting. Ran a lightweight validate pass (timeless-oracle grep +
+  targeted spot checks) instead of the full `/smelt:validate` skill, since `verify-phase.sh`
+  in the same phase already re-runs fmt/clippy/test.
 - 2026-09-07 (implement phase 8): `smelt explain` renders the succession grain's eight lines
   (text) and `succession` object (`--json`) from a new `SuccessionExplainView`
   (`crates/smelt-cli/src/explain/succession.rs`, split into its own module to bound
