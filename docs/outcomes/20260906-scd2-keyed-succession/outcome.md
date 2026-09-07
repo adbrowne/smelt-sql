@@ -164,7 +164,7 @@ out-of-order and repeated windows, and the clamp.
 | 6c | Append-only probe dispatch for the succession grain (criterion 7; subsumes blocked phase 6): `dispatch_and_record_append_only_postures`/`append_only_posture_probes` are called only from the ordinary `match plan.incremental` sites in `crates/smelt-runtime/src/execute/project/mod.rs`, so a succession model's declared `mutation_profile: append_only` posture is never verified at runtime and its `ModelRunRecord` hardcodes `probes: Vec::new()`. Wire the dispatch into the succession window-forward loop (persisting the refreshed `SourcePostureStore` baseline as the ordinary path does), with unit tests, then land phase 6's two conformance `probes.rs` legs on top: a late append into a closed event-time partition re-presents its covering window, and a genuine in-place mutation fails with `SourceMutationProfileViolated` (not an incidental `SuccessionClockTie`) | done |
 | 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | done |
 | 9 | Fixture and docs: example workspace `customer_changes`/`customer_history` with zero diagnostics; docs-site guide page and diagnostics reference | done |
-| 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
+| 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | planned |
 
 ## Decision log
 
@@ -795,6 +795,13 @@ out-of-order and repeated windows, and the clamp.
   (b) Phase 6c's suggestion to surface succession probe records in `explain` is declined:
   the report's `probes` array is the offline declared-fact probe *plan* and is already
   model-generic, and criterion 8 lists no probe rendering.
+
+- **2026-09-07 (phase 10 planning).** No reshape: phases 1–9 are done and criteria 1–9 are
+  covered by their summaries, so phase 10 stays a single closing phase. Scope widened by one
+  durability gate — a `succession_docs_freshness` test asserting the succession §References
+  paths are live and the retired divergence phrasings are gone — so the spec closure this phase
+  performs cannot silently rot back. Scoped to the succession subsections only, since repo-wide
+  spec path drift is explicitly Out of scope.
 
 ## Blocked
 
