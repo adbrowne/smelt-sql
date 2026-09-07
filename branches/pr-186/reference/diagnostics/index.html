@@ -1355,6 +1355,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -2547,6 +2575,34 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#succession-grain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Succession grain
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Succession grain">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#example-successiondeletefiltermisplaced" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example: SuccessionDeleteFilterMisplaced
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -2840,6 +2896,34 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#succession-grain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Succession grain
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Succession grain">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#example-successiondeletefiltermisplaced" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example: SuccessionDeleteFilterMisplaced
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -2965,6 +3049,102 @@ compile time, smelt refuses rather than guess — guessing wrong here would sile
 <p><strong>Fix</strong>: Give the operands a resolvable type — for example, by declaring the upstream column's type
 or wrapping the operand in an explicit <code>CAST</code> — or rewrite the expression as a typed <code>FLOOR(a / b)</code>
 or <code>DIV(a, b)</code> call.</p>
+<h2 id="succession-grain">Succession grain<a class="headerlink" href="#succession-grain" title="Permanent link">&para;</a></h2>
+<p>The <a href="../../guide/scd2-succession/">succession grain</a> is recognised from a model's SQL shape, never
+declared — every rejection below names the offending clause and a fix rather than falling back to
+another grain silently. Full semantics: <a href="https://github.com/brownie/smelt/blob/main/docs/specs/incremental_shapes.md"><code>docs/specs/incremental_shapes.md</code> §"Succession-grain
+admission (no declaration)"</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Severity</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SuccessionWindowFunctionNotLead</code></td>
+<td>Error</td>
+<td>A window function in the projection is not <code>LEAD(t)</code>/<code>LAG(t)</code> over the clock column at the default offset, or not a scalar expression over one.</td>
+</tr>
+<tr>
+<td><code>SuccessionPartitionKeyMismatch</code></td>
+<td>Error</td>
+<td>Two or more window functions partition by different column sets, an unresolvable column set, or a column not proven <code>NOT NULL</code>.</td>
+</tr>
+<tr>
+<td><code>SuccessionOrderNotMonotoneClock</code></td>
+<td>Error</td>
+<td>A window's <code>ORDER BY</code> column does not trace as a strictly monotone clock to the driving source's <code>event_time_column</code>, is not proven <code>NOT NULL</code>, or the sort is descending or carries a second key.</td>
+</tr>
+<tr>
+<td><code>SuccessionRowLocalColumnViolation</code></td>
+<td>Error</td>
+<td>A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local.</td>
+</tr>
+<tr>
+<td><code>SuccessionIdentityNotProjected</code></td>
+<td>Error</td>
+<td>A key column or the clock column is not projected row-locally, so <code>(k, t)</code> cannot be recovered from the presented table.</td>
+</tr>
+<tr>
+<td><code>SuccessionSingleSourceOnly</code></td>
+<td>Error</td>
+<td>The <code>FROM</code> clause is not exactly one source reference — a join, CTE, subquery, or set operation is present.</td>
+</tr>
+<tr>
+<td><code>SuccessionDrivingSourceNotAppendOnly</code></td>
+<td>Error</td>
+<td>The driving source does not declare <code>mutation_profile.kind: append_only</code>, or declares no <code>timeseries:</code> block.</td>
+</tr>
+<tr>
+<td><code>SuccessionPreFilterNotRowLocal</code></td>
+<td>Error</td>
+<td>A filter precedes the window projection but is not one deterministic row-local predicate over the driving source's own columns.</td>
+</tr>
+<tr>
+<td><code>SuccessionDeleteFilterMisplaced</code></td>
+<td>Error</td>
+<td>A <code>QUALIFY</code> clause exists but is not exactly <code>QUALIFY NOT &lt;row-local NOT NULL boolean column&gt;</code>, or a same-scope <code>WHERE</code> tests a window-derived column.</td>
+</tr>
+<tr>
+<td><code>SuccessionPreFilterNegatesFlag</code></td>
+<td>Warning</td>
+<td>The pre-window <code>WHERE</code> is a bare negated boolean column — admitted unchanged, but named because a CDC delete flag filtered here never closes its predecessor's interval.</td>
+</tr>
+<tr>
+<td><code>SuccessionPatternUnrecognized</code></td>
+<td>Error</td>
+<td><code>refresh: incremental</code> with no <code>unique_key</code>, no <code>timeseries:</code>, and a SQL shape none of the rules above names — a stray <code>DISTINCT</code>/<code>GROUP BY</code>/<code>HAVING</code>/<code>ORDER BY</code>/<code>LIMIT</code>, or a model resembling no admitted grain.</td>
+</tr>
+<tr>
+<td><code>SuccessionClockTie</code></td>
+<td>Error</td>
+<td>Runtime: a delta presents two non-identical events at the same <code>(k, t)</code>, or a delete and a non-delete collide at one <code>(k, t)</code>. The run's transaction rolls back.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="example-successiondeletefiltermisplaced">Example: <code>SuccessionDeleteFilterMisplaced</code><a class="headerlink" href="#example-successiondeletefiltermisplaced" title="Permanent link">&para;</a></h3>
+<p><strong>Severity</strong>: Error</p>
+<p>A CDC delete flag must be filtered with <code>QUALIFY</code>, not <code>WHERE</code>, so its event still contributes to
+its predecessor's <code>LEAD</code>/<code>LAG</code>-derived column before it is dropped from the output.</p>
+<p><strong>Example</strong> — filtering the delete flag before the window computes:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">SELECT</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">    </span><span class="n">customer_id</span><span class="p">,</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">    </span><span class="n">effective_ts</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_from</span><span class="p">,</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span><span class="n">LEAD</span><span class="p">(</span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">customer_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_to</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">customer_changes</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="k">WHERE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="n">is_deleted</span>
+</code></pre></div>
+<p><strong>Fix</strong>: Move the filter after the window, as a <code>QUALIFY</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">SELECT</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">    </span><span class="n">customer_id</span><span class="p">,</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">    </span><span class="n">effective_ts</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_from</span><span class="p">,</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">    </span><span class="n">LEAD</span><span class="p">(</span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">customer_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_to</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">customer_changes</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="n">QUALIFY</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="n">is_deleted</span>
+</code></pre></div>
 
 
 

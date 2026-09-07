@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/schema-evolution/">
+        <link rel="canonical" href="https://smeltsql.com/guide/scd2-succession/">
       
       
-        <link rel="prev" href="../scd2-succession/">
+        <link rel="prev" href="../incremental-models/">
       
       
-        <link rel="next" href="../migrations/">
+        <link rel="next" href="../schema-evolution/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Schema Evolution - smelt</title>
+        <title>SCD2 Succession - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#schema-evolution" class="md-skip">
+        <a href="#the-succession-grain-scd2-style-history" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Schema Evolution
+              SCD2 Succession
             
           </span>
         </div>
@@ -1355,34 +1355,6 @@
                 
   
   
-  
-  
-    <li class="md-nav__item">
-      <a href="../scd2-succession/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    SCD2 Succession
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
     
   
   
@@ -1402,7 +1374,7 @@
   <span class="md-ellipsis">
     
   
-    Schema Evolution
+    SCD2 Succession
   
 
     
@@ -1420,7 +1392,7 @@
   <span class="md-ellipsis">
     
   
-    Schema Evolution
+    SCD2 Succession
   
 
     
@@ -1446,10 +1418,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#how-it-works" class="md-nav__link">
+  <a href="#why-it-needs-no-declaration" class="md-nav__link">
     <span class="md-ellipsis">
       
-        How it works
+        Why it needs no declaration
       
     </span>
   </a>
@@ -1457,221 +1429,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#configuration" class="md-nav__link">
+  <a href="#the-admitted-sql-outline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Configuration
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Configuration">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#frontmatter-example" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Frontmatter example
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#configuration-fields" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Configuration fields
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#per-column-fields" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Per-column fields
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#safe-vs-unsafe-changes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Safe vs unsafe changes
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Safe vs unsafe changes">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#safe-changes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Safe changes
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#unsafe-changes-require-full-refresh" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Unsafe changes (require full refresh)
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#complex-type-examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Complex type examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Complex type examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#adding-a-field-to-a-struct-column" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Adding a field to a struct column
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#widening-a-type-inside-a-struct" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Widening a type inside a struct
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#adding-a-field-to-an-array-of-structs" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Adding a field to an array-of-structs
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#map-value-evolution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Map value evolution
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#specifying-defaults-for-complex-types" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Specifying defaults for complex types
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multi-step-evolution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multi-step evolution
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#backend-capability-matrix" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Backend capability matrix
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Backend capability matrix">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#recommendations" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Recommendations
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#table-format-configuration" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Table format configuration
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-allow-full-refresh-flag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The --allow-full-refresh flag
+        The admitted SQL outline
       
     </span>
   </a>
@@ -1679,10 +1440,76 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
+  <a href="#the-derived-k-t-identity" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Further reading
+        The derived (k, t) identity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-delete-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The delete filter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-optional-pre-window-clamp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The optional pre-window clamp
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#arrival-vs-event-time-partitioning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Arrival- vs event-time partitioning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-tombstone-ledger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The tombstone ledger
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-smelt-explain-shows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What smelt explain shows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#refusal-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refusal codes
       
     </span>
   </a>
@@ -1693,6 +1520,34 @@
   
 </nav>
       
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -2957,10 +2812,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#how-it-works" class="md-nav__link">
+  <a href="#why-it-needs-no-declaration" class="md-nav__link">
     <span class="md-ellipsis">
       
-        How it works
+        Why it needs no declaration
       
     </span>
   </a>
@@ -2968,221 +2823,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#configuration" class="md-nav__link">
+  <a href="#the-admitted-sql-outline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Configuration
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Configuration">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#frontmatter-example" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Frontmatter example
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#configuration-fields" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Configuration fields
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#per-column-fields" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Per-column fields
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#safe-vs-unsafe-changes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Safe vs unsafe changes
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Safe vs unsafe changes">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#safe-changes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Safe changes
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#unsafe-changes-require-full-refresh" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Unsafe changes (require full refresh)
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#complex-type-examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Complex type examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Complex type examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#adding-a-field-to-a-struct-column" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Adding a field to a struct column
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#widening-a-type-inside-a-struct" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Widening a type inside a struct
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#adding-a-field-to-an-array-of-structs" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Adding a field to an array-of-structs
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#map-value-evolution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Map value evolution
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#specifying-defaults-for-complex-types" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Specifying defaults for complex types
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multi-step-evolution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multi-step evolution
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#backend-capability-matrix" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Backend capability matrix
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Backend capability matrix">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#recommendations" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Recommendations
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#table-format-configuration" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Table format configuration
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-allow-full-refresh-flag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The --allow-full-refresh flag
+        The admitted SQL outline
       
     </span>
   </a>
@@ -3190,10 +2834,76 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
+  <a href="#the-derived-k-t-identity" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Further reading
+        The derived (k, t) identity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-delete-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The delete filter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-optional-pre-window-clamp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The optional pre-window clamp
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#arrival-vs-event-time-partitioning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Arrival- vs event-time partitioning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-tombstone-ledger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The tombstone ledger
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-smelt-explain-shows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What smelt explain shows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#refusal-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refusal codes
       
     </span>
   </a>
@@ -3217,7 +2927,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/schema-evolution.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/scd2-succession.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -3225,436 +2935,179 @@
   
 
 
-<h1 id="schema-evolution">Schema Evolution<a class="headerlink" href="#schema-evolution" title="Permanent link">&para;</a></h1>
-<p>Schema evolution lets smelt automatically migrate incremental tables when your model's output schema changes. Instead of dropping and recreating a table from scratch, smelt compares the deployed schema against the new inferred schema and generates the minimal set of DDL statements to bring the table up to date.</p>
-<h2 id="how-it-works">How it works<a class="headerlink" href="#how-it-works" title="Permanent link">&para;</a></h2>
-<p>When an incremental model runs, smelt:</p>
-<ol>
-<li><strong>Compares schemas</strong> -- parses both the deployed and inferred column types into structured representations and diffs them recursively.</li>
-<li><strong>Classifies changes</strong> -- each change is categorized (column added, type widened, struct field added, etc.) and checked for safety.</li>
-<li><strong>Plans operations</strong> -- safe changes produce ALTER TABLE statements; unsafe changes trigger a full refresh.</li>
-<li><strong>Executes DDL</strong> -- the backend-specific DDL is generated and run. DuckDB, Spark+Delta, Spark+Parquet, and BigQuery each have their own code paths.</li>
-</ol>
-<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
-<p>Schema evolution is configured in the model's <strong>SQL frontmatter</strong>. The <code>schema_evolution</code> and <code>columns</code> keys are frontmatter-only — they have no effect if placed under <code>models.&lt;name&gt;:</code> in <code>smelt.yml</code>.</p>
-<h3 id="frontmatter-example">Frontmatter example<a class="headerlink" href="#frontmatter-example" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">---</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">schema_evolution</span><span class="p">:</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="n">strategy</span><span class="p">:</span><span class="w"> </span><span class="n">alter_and_backfill</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">columns</span><span class="p">:</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="n">status</span><span class="p">:</span>
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="k">default</span><span class="p">:</span><span class="w"> </span><span class="ss">&quot;&#39;pending&#39;&quot;</span>
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="n">metadata</span><span class="p">:</span>
-<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="k">default</span><span class="p">:</span><span class="w"> </span><span class="ss">&quot;STRUCT_PACK(version := 1, active := TRUE)&quot;</span>
-<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1">---</span>
-<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
-<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="k">SELECT</span>
-<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">    </span><span class="n">status</span><span class="p">,</span>
-<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">    </span><span class="n">metadata</span>
-<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">upstream_model</span>
+<h1 id="the-succession-grain-scd2-style-history">The succession grain (SCD2-style history)<a class="headerlink" href="#the-succession-grain-scd2-style-history" title="Permanent link">&para;</a></h1>
+<p>A <strong>succession</strong> model turns an append-only change stream into a keyed history table — one row
+per key per event, each row's validity window closed out by the row that follows it for the same
+key. This is the classic slowly-changing-dimension type-2 (SCD2) pattern, but smelt never asks
+you to declare it: the shape is <strong>recognised from the model's own SQL</strong>, the same way the key
+grain and the partition grain are recognised from a declared <code>unique_key:</code> or <code>timeseries:</code>.</p>
+<h2 id="why-it-needs-no-declaration">Why it needs no declaration<a class="headerlink" href="#why-it-needs-no-declaration" title="Permanent link">&para;</a></h2>
+<p>A succession model's identity is the pair <code>(k, t)</code> — a key and the clock value at which that
+key's row was recorded. There is no <code>GROUP BY</code>, so there is no aggregation to declare a
+<code>unique_key:</code> for; there is no model-level <code>timeseries:</code> to declare either, since the clock
+comes from the <em>driving source's</em> declared clock. The one fact left to communicate is the SQL
+shape itself — a window-function projection over an append-only source — and smelt's
+keyed-succession classifier reads it directly.</p>
+<h2 id="the-admitted-sql-outline">The admitted SQL outline<a class="headerlink" href="#the-admitted-sql-outline" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>SELECT &lt;row-local columns, including k and t&gt;,
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>       &lt;LEAD(t)/LAG(t) OVER (PARTITION BY k ORDER BY t) and scalar expressions over them&gt;
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>FROM smelt.&lt;one append-only, clocked source&gt;
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>[WHERE &lt;one deterministic row-local predicate&gt;]   -- optional lateness clamp
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>[QUALIFY NOT &lt;a NOT NULL boolean column&gt;]          -- optional delete-flag filter
 </code></pre></div>
-<h3 id="configuration-fields">Configuration fields<a class="headerlink" href="#configuration-fields" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Type</th>
-<th>Default</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>schema_evolution.strategy</code></td>
-<td>string</td>
-<td><code>alter_and_backfill</code></td>
-<td>How to handle schema changes. <code>alter_and_backfill</code> uses ALTER TABLE when possible; <code>full_refresh</code> always drops and recreates.</td>
-</tr>
-</tbody>
-</table>
-<h3 id="per-column-fields">Per-column fields<a class="headerlink" href="#per-column-fields" title="Permanent link">&para;</a></h3>
-<p>Per-column metadata is declared under the <code>columns</code> key:</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Type</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>default</code></td>
-<td>string</td>
-<td>SQL expression used as the DEFAULT value when adding a NOT NULL column via ALTER TABLE. Examples: <code>"0"</code>, <code>"'unknown'"</code>, <code>"NULL"</code>, <code>"STRUCT_PACK(a := 0)"</code>.</td>
-</tr>
-<tr>
-<td><code>backfill</code></td>
-<td>string</td>
-<td>SQL expression used in an UPDATE statement to backfill existing rows after a column is added. Example: <code>"CASE WHEN status IS NULL THEN 'unknown' ELSE status END"</code>.</td>
-</tr>
-</tbody>
-</table>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>The <code>default</code> value is a <strong>raw SQL expression</strong>, not a YAML value. To set a string default, wrap it in SQL quotes: <code>default: "'pending'"</code>. For numeric defaults, just use the number: <code>default: "0"</code>.</p>
-</div>
-<h2 id="safe-vs-unsafe-changes">Safe vs unsafe changes<a class="headerlink" href="#safe-vs-unsafe-changes" title="Permanent link">&para;</a></h2>
-<p>smelt classifies every schema change as <strong>safe</strong> (can be handled with ALTER TABLE) or <strong>unsafe</strong> (requires a full table refresh).</p>
-<h3 id="safe-changes">Safe changes<a class="headerlink" href="#safe-changes" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Change</th>
-<th>What happens</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><strong>Add a nullable column</strong></td>
-<td><code>ALTER TABLE ADD COLUMN</code></td>
-</tr>
-<tr>
-<td><strong>Add a NOT NULL column with default</strong></td>
-<td><code>ALTER TABLE ADD COLUMN ... DEFAULT expr</code></td>
-</tr>
-<tr>
-<td><strong>Widen a scalar type</strong> (e.g., INTEGER to BIGINT)</td>
-<td><code>ALTER TABLE ALTER COLUMN TYPE</code></td>
-</tr>
-<tr>
-<td><strong>Add a nullable field to a struct</strong></td>
-<td>Backend-specific DDL (see <a href="#backend-capability-matrix">backend matrix</a>)</td>
-</tr>
-<tr>
-<td><strong>Widen a type inside a struct</strong></td>
-<td><code>ALTER TABLE ALTER COLUMN TYPE</code> with the full struct type</td>
-</tr>
-<tr>
-<td><strong>Widen array element type</strong> (e.g., INTEGER[] to BIGINT[])</td>
-<td><code>ALTER TABLE ALTER COLUMN TYPE</code></td>
-</tr>
-<tr>
-<td><strong>Widen map value type</strong></td>
-<td><code>ALTER TABLE ALTER COLUMN TYPE</code></td>
-</tr>
-<tr>
-<td><strong>Change nullability</strong> (NOT NULL to nullable)</td>
-<td><code>ALTER TABLE ALTER COLUMN DROP NOT NULL</code></td>
-</tr>
-</tbody>
-</table>
-<h3 id="unsafe-changes-require-full-refresh">Unsafe changes (require full refresh)<a class="headerlink" href="#unsafe-changes-require-full-refresh" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Change</th>
-<th>Why</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><strong>Remove a column</strong></td>
-<td>Data loss. Allowed with <code>--allow-column-removal</code>.</td>
-</tr>
-<tr>
-<td><strong>Narrow a type</strong> (e.g., BIGINT to INTEGER)</td>
-<td>Data truncation.</td>
-</tr>
-<tr>
-<td><strong>Change a map's key type</strong></td>
-<td>No safe migration path.</td>
-</tr>
-<tr>
-<td><strong>Reorder struct fields</strong></td>
-<td>Positional storage mismatch.</td>
-</tr>
-<tr>
-<td><strong>Change between incompatible types</strong> (e.g., struct to scalar)</td>
-<td>No meaningful migration.</td>
-</tr>
-<tr>
-<td><strong>Add a NOT NULL column without default</strong></td>
-<td>Existing rows would violate the constraint.</td>
-</tr>
-</tbody>
-</table>
-<p>When an unsafe change is detected and the strategy is <code>alter_and_backfill</code>, smelt blocks execution and reports an error explaining the change. Use <code>--allow-full-refresh</code> to permit smelt to drop and recreate the table.</p>
-<h2 id="complex-type-examples">Complex type examples<a class="headerlink" href="#complex-type-examples" title="Permanent link">&para;</a></h2>
-<h3 id="adding-a-field-to-a-struct-column">Adding a field to a struct column<a class="headerlink" href="#adding-a-field-to-a-struct-column" title="Permanent link">&para;</a></h3>
-<p>Your model previously produced:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">-- v1: STRUCT(name VARCHAR, age INTEGER)</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">struct_pack</span><span class="p">(</span><span class="n">name</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">age</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">age</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">profile</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">...</span>
+<p>and nothing else: no join, CTE, subquery, or set operation in <code>FROM</code>; no <code>DISTINCT</code>,
+<code>GROUP BY</code>, <code>HAVING</code>, <code>ORDER BY</code>, or <code>LIMIT</code>; no aggregate, ranking, or frame-based window.
+<code>customer_history</code> in <a href="https://github.com/adbrowne/smelt-sql/tree/main/examples/scd2_succession"><code>examples/scd2_succession/</code></a>
+is the worked example:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">---</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1">---</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">SELECT</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="n">customer_id</span><span class="p">,</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="n">tier</span><span class="p">,</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="n">region</span><span class="p">,</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">    </span><span class="n">effective_ts</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_from</span><span class="p">,</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="n">LEAD</span><span class="p">(</span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">customer_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_to</span><span class="p">,</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="n">LEAD</span><span class="p">(</span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">customer_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">is_current</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">customer_changes</span>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="n">QUALIFY</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="n">is_deleted</span>
 </code></pre></div>
-<p>You add a new field:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">-- v2: STRUCT(name VARCHAR, age INTEGER, email VARCHAR)</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">struct_pack</span><span class="p">(</span><span class="n">name</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">age</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">age</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">email</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">profile</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">...</span>
+<p><code>customer_id</code> is the key <code>k</code>, <code>effective_ts</code> is the clock <code>t</code>. The <code>LEAD</code> derives <code>valid_to</code> (and,
+via a scalar expression over it, <code>is_current</code>) by looking one event ahead in each customer's own
+sequence. No <code>unique_key:</code> or <code>timeseries:</code> appears anywhere in this frontmatter — the grain is
+derived, not declared.</p>
+<h2 id="the-derived-k-t-identity">The derived <code>(k, t)</code> identity<a class="headerlink" href="#the-derived-k-t-identity" title="Permanent link">&para;</a></h2>
+<p>The output has one row per <code>(customer_id, effective_ts)</code> pair — every event a customer generates
+produces its own history row. This differs from the key grain (one row per key, latest value
+wins) and the partition grain (one row per time-partitioned slice): a succession table's rows
+accumulate, they don't collapse.</p>
+<h2 id="the-delete-filter">The delete filter<a class="headerlink" href="#the-delete-filter" title="Permanent link">&para;</a></h2>
+<p>A CDC delete flag must still close out its predecessor's validity interval before the deleted
+row itself disappears from the output — that's why the filter is a <code>QUALIFY</code>, evaluated <em>after</em>
+the window functions run, rather than a <code>WHERE</code> evaluated before them. <code>QUALIFY NOT is_deleted</code>
+lets <code>LEAD(effective_ts)</code> see the delete event (so the previous row's <code>valid_to</code> closes
+correctly) and only then drops it from the materialized table. Writing <code>WHERE NOT is_deleted</code>
+instead is accepted as a legitimate pre-window clamp, but it means something different: the
+delete's timestamp never reaches its predecessor, so the previous version is left open forever.
+Because that's the classic mistake, smelt warns (<code>SuccessionPreFilterNegatesFlag</code>) whenever a
+pre-window filter is a bare negated boolean column, without refusing the model — you may have
+meant it as an ordinary lateness clamp.</p>
+<h2 id="the-optional-pre-window-clamp">The optional pre-window clamp<a class="headerlink" href="#the-optional-pre-window-clamp" title="Permanent link">&para;</a></h2>
+<p>A single deterministic, row-local <code>WHERE</code> before the window functions bounds which events count
+at all — for example, dropping versions that land implausibly late:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">customer_changes</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">ingested_at</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">effective_ts</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;7 days&#39;</span>
 </code></pre></div>
-<p>smelt detects the <code>StructFieldAdded</code> change and runs:</p>
-<div class="tabbed-set tabbed-alternate" data-tabs="1:4"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><input id="__tabbed_1_4" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">DuckDB</label><label for="__tabbed_1_2">Spark (Delta)</label><label for="__tabbed_1_3">Spark (Parquet)</label><label for="__tabbed_1_4">BigQuery</label></div>
-<div class="tabbed-content">
-<div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">profile</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">;</span>
-</code></pre></div>
-</div>
-<div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">catalog</span><span class="p">.</span><span class="k">schema</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="n">COLUMNS</span><span class="w"> </span><span class="p">(</span><span class="n">profile</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="n">STRING</span><span class="p">);</span>
-</code></pre></div>
-</div>
-<div class="tabbed-block">
-<p>Not expressible: a v1 Parquet table rejects a qualified path in <code>ADD COLUMNS</code>. The run is
-refused with a message naming the struct column and the field, and needs
-<code>--allow-full-refresh</code> to rebuild the model instead.</p>
-</div>
-<div class="tabbed-block">
-<p>Not expressible: GoogleSQL has no dotted <code>ADD COLUMN</code>, and <code>ALTER COLUMN … SET DATA TYPE</code>
-refuses a struct that gained a field. The run is refused with a message naming the struct
-column and the field, and needs <code>--allow-full-refresh</code> to rebuild the model instead.</p>
-</div>
-</div>
-</div>
-<p>Existing rows get <code>NULL</code> for the new field.</p>
-<h3 id="widening-a-type-inside-a-struct">Widening a type inside a struct<a class="headerlink" href="#widening-a-type-inside-a-struct" title="Permanent link">&para;</a></h3>
-<p>Change a field from INTEGER to BIGINT:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1">-- v1: STRUCT(score INTEGER, label VARCHAR)</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1">-- v2: STRUCT(score BIGINT, label VARCHAR)</span>
-</code></pre></div>
-<div class="tabbed-set tabbed-alternate" data-tabs="2:3"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><input id="__tabbed_2_3" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">DuckDB</label><label for="__tabbed_2_2">Spark (Delta)</label><label for="__tabbed_2_3">Spark (Parquet)</label></div>
-<div class="tabbed-content">
-<div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ALTER</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">TYPE</span><span class="w"> </span><span class="n">STRUCT</span><span class="p">(</span><span class="n">score</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">,</span><span class="w"> </span><span class="n">label</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">);</span>
-</code></pre></div>
-<p>DuckDB handles the INTEGER to BIGINT cast automatically inside the struct.</p>
-</div>
-<div class="tabbed-block">
-<p>Spark cannot ALTER COLUMN TYPE with USING expressions, so smelt performs a <strong>table rewrite</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tmp_my_table</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">stats</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">STRUCT</span><span class="o">&lt;</span><span class="n">score</span><span class="p">:</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">,</span><span class="w"> </span><span class="n">label</span><span class="p">:</span><span class="w"> </span><span class="n">STRING</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">DROP</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tmp_my_table</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
-</code></pre></div>
-</div>
-<div class="tabbed-block">
-<p>Parquet files contain the original types and cannot be rewritten in place. This requires <code>--allow-full-refresh</code>.</p>
-</div>
-</div>
-</div>
-<h3 id="adding-a-field-to-an-array-of-structs">Adding a field to an array-of-structs<a class="headerlink" href="#adding-a-field-to-an-array-of-structs" title="Permanent link">&para;</a></h3>
-<p>Your column is <code>STRUCT(id INTEGER, name VARCHAR)[]</code> and you add a <code>score</code> field:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">-- v2: STRUCT(id INTEGER, name VARCHAR, score DOUBLE)[]</span>
-</code></pre></div>
-<div class="tabbed-set tabbed-alternate" data-tabs="3:2"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">DuckDB</label><label for="__tabbed_3_2">Spark (Delta/Parquet)</label></div>
-<div class="tabbed-content">
-<div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ALTER</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">items</span><span class="w"> </span><span class="k">TYPE</span><span class="w"> </span><span class="n">STRUCT</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">,</span><span class="w"> </span><span class="n">score</span><span class="w"> </span><span class="n">DOUBLE</span><span class="p">)[];</span>
-</code></pre></div>
-</div>
-<div class="tabbed-block">
-<p>Delta adds the field in place:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">catalog</span><span class="p">.</span><span class="k">schema</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="n">COLUMNS</span><span class="w"> </span><span class="p">(</span><span class="n">items</span><span class="p">.</span><span class="n">element</span><span class="p">.</span><span class="n">score</span><span class="w"> </span><span class="n">DOUBLE</span><span class="p">);</span>
-</code></pre></div>
-<p>Parquet rejects a qualified path in <code>ADD COLUMNS</code>; the change needs <code>--allow-full-refresh</code>.</p>
-</div>
-</div>
-</div>
-<h3 id="map-value-evolution">Map value evolution<a class="headerlink" href="#map-value-evolution" title="Permanent link">&para;</a></h3>
-<p>Change map value type from INTEGER to BIGINT:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="c1">-- v1: MAP(VARCHAR, INTEGER)</span>
-<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="c1">-- v2: MAP(VARCHAR, BIGINT)</span>
-</code></pre></div>
-<div class="tabbed-set tabbed-alternate" data-tabs="4:3"><input checked="checked" id="__tabbed_4_1" name="__tabbed_4" type="radio" /><input id="__tabbed_4_2" name="__tabbed_4" type="radio" /><input id="__tabbed_4_3" name="__tabbed_4" type="radio" /><div class="tabbed-labels"><label for="__tabbed_4_1">DuckDB</label><label for="__tabbed_4_2">Spark (Delta)</label><label for="__tabbed_4_3">Spark (Parquet)</label></div>
-<div class="tabbed-content">
-<div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ALTER</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">lookup</span><span class="w"> </span><span class="k">TYPE</span><span class="w"> </span><span class="k">MAP</span><span class="p">(</span><span class="nb">VARCHAR</span><span class="p">,</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">);</span>
-</code></pre></div>
-</div>
-<div class="tabbed-block">
-<p>Table rewrite (Delta does not support ALTER COLUMN TYPE for maps).</p>
-</div>
-<div class="tabbed-block">
-<p>Requires <code>--allow-full-refresh</code>.</p>
-</div>
-</div>
-</div>
-<h3 id="specifying-defaults-for-complex-types">Specifying defaults for complex types<a class="headerlink" href="#specifying-defaults-for-complex-types" title="Permanent link">&para;</a></h3>
-<p>Use SQL expressions for complex type defaults:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="nt">columns</span><span class="p">:</span>
-<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="w">  </span><span class="nt">metadata</span><span class="p">:</span>
-<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="w">    </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;STRUCT_PACK(status</span><span class="nv"> </span><span class="s">:=</span><span class="nv"> </span><span class="s">&#39;unknown&#39;,</span><span class="nv"> </span><span class="s">count</span><span class="nv"> </span><span class="s">:=</span><span class="nv"> </span><span class="s">0)&quot;</span>
-<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="w">  </span><span class="nt">tags</span><span class="p">:</span>
-<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="w">    </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;[]::VARCHAR[]&quot;</span>
-<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="w">  </span><span class="nt">settings</span><span class="p">:</span>
-<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="w">    </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;MAP</span><span class="nv"> </span><span class="s">{}&quot;</span>
-<a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="w">  </span><span class="nt">scores</span><span class="p">:</span>
-<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a><span class="w">    </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;ARRAY[1,</span><span class="nv"> </span><span class="s">2,</span><span class="nv"> </span><span class="s">3]&quot;</span>
-</code></pre></div>
-<h3 id="multi-step-evolution">Multi-step evolution<a class="headerlink" href="#multi-step-evolution" title="Permanent link">&para;</a></h3>
-<p>Multiple changes to the same struct are combined into a single ALTER:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="c1">-- v1: STRUCT(a INTEGER, b VARCHAR)</span>
-<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="c1">-- v2: STRUCT(a BIGINT, b VARCHAR, c BOOLEAN)</span>
-</code></pre></div>
-<p>smelt detects both the type widening (<code>a: INTEGER -&gt; BIGINT</code>) and the field addition (<code>c</code>) and handles them in one operation.</p>
-<h2 id="backend-capability-matrix">Backend capability matrix<a class="headerlink" href="#backend-capability-matrix" title="Permanent link">&para;</a></h2>
-<p>Not all backends support the same schema evolution operations. The table below shows what each backend can handle natively vs. what requires a fallback.</p>
-<table>
-<thead>
-<tr>
-<th>Operation</th>
-<th>DuckDB</th>
-<th>Spark + Delta</th>
-<th>Spark + Parquet</th>
-<th>BigQuery</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Add nullable column</td>
-<td>ALTER TABLE</td>
-<td>ALTER TABLE</td>
-<td>ALTER TABLE</td>
-<td>ALTER TABLE</td>
-</tr>
-<tr>
-<td>Add nullable column with a <code>default:</code></td>
-<td>ALTER TABLE</td>
-<td>ALTER TABLE, then UPDATE</td>
-<td>Full refresh</td>
-<td>ALTER TABLE, SET DEFAULT, then UPDATE</td>
-</tr>
-<tr>
-<td>Add NOT NULL column (with default)</td>
-<td>ALTER TABLE</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-</tr>
-<tr>
-<td>Remove column</td>
-<td>ALTER TABLE</td>
-<td>Table rewrite</td>
-<td>Full refresh</td>
-<td>ALTER TABLE</td>
-</tr>
-<tr>
-<td>Widen scalar type</td>
-<td>ALTER COLUMN TYPE</td>
-<td>Table rewrite</td>
-<td>Full refresh</td>
-<td>ALTER COLUMN SET DATA TYPE (nullable columns)</td>
-</tr>
-<tr>
-<td>Relax NOT NULL to nullable</td>
-<td>ALTER COLUMN</td>
-<td>ALTER COLUMN DROP NOT NULL</td>
-<td>Full refresh</td>
-<td>ALTER COLUMN DROP NOT NULL</td>
-</tr>
-<tr>
-<td>Add struct field (nullable)</td>
-<td><code>ADD COLUMN col.field</code></td>
-<td><code>ADD COLUMNS (col.field)</code></td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-</tr>
-<tr>
-<td>Remove struct field</td>
-<td><code>DROP COLUMN col.field</code></td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-</tr>
-<tr>
-<td>Widen type in struct</td>
-<td>ALTER COLUMN TYPE (full struct)</td>
-<td>Table rewrite</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-</tr>
-<tr>
-<td>Widen array element type</td>
-<td>ALTER COLUMN TYPE</td>
-<td>Table rewrite</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-</tr>
-<tr>
-<td>Add field to array-of-structs</td>
-<td>ALTER COLUMN TYPE (full type)</td>
-<td><code>ADD COLUMNS (col.element.field)</code></td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-</tr>
-<tr>
-<td>Widen map value type</td>
-<td>ALTER COLUMN TYPE</td>
-<td>Table rewrite</td>
-<td>Full refresh</td>
-<td>Full refresh (no map type)</td>
-</tr>
-<tr>
-<td>Change map key type</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-<td>Full refresh</td>
-</tr>
-<tr>
-<td>Backfill expression (UPDATE)</td>
-<td>UPDATE statement</td>
-<td>UPDATE statement</td>
-<td>Full refresh</td>
-<td>UPDATE statement</td>
-</tr>
-</tbody>
-</table>
-<h3 id="recommendations">Recommendations<a class="headerlink" href="#recommendations" title="Permanent link">&para;</a></h3>
+<p>A row the clamp drops never enters the sequence, in the oracle or in the maintained state, so
+equivalence holds by construction. Nothing requires a clamp — the write footprint is the same
+either way — it's a semantic choice, not a performance one.</p>
+<h2 id="arrival-vs-event-time-partitioning">Arrival- vs event-time partitioning<a class="headerlink" href="#arrival-vs-event-time-partitioning" title="Permanent link">&para;</a></h2>
+<p>The driving source's <code>timeseries.partition_column</code> is the model's <strong>run axis</strong> — what a run
+window covers. The clock in the window functions' <code>ORDER BY</code> is the <strong>succession clock</strong>, and it
+must trace back to the source's declared <code>event_time_column</code>. These two columns may differ, and
+which case you're in decides how late events reach the grain:</p>
 <ul>
-<li><strong>DuckDB</strong> has the most complete schema evolution support. All safe changes can be handled with ALTER TABLE.</li>
-<li><strong>Spark + Delta</strong> migrates additive changes in place -- new columns, new struct fields, relaxing <code>NOT NULL</code> -- and expresses the rest as a table rewrite. Three limits are worth knowing before you plan a migration, and all three are properties of the table smelt creates rather than of Delta itself: a column cannot be added <code>NOT NULL</code> or tightened to it; a <code>DEFAULT</code> clause cannot ride on the add, so a <code>default:</code> becomes an <code>UPDATE</code> that fills the rows already there; and dropping or widening a column needs a Delta table feature (<code>columnMapping</code>, <code>enableTypeWidening</code>) that smelt does not turn on, since enabling one irreversibly raises the table's protocol version. Those changes rewrite the table instead, which needs <code>--allow-full-refresh</code>.</li>
-<li><strong>Spark + Parquet</strong> is the most limited: it takes a new nullable column and nothing else. Consider switching to Delta format if you need frequent schema changes. When a run is refused, the reason names the column and the limitation rather than failing mid-migration.</li>
-<li><strong>BigQuery</strong> migrates every flat change -- adding and dropping columns, widening a scalar type, relaxing <code>NOT NULL</code> -- but nothing that reaches inside a struct or array: GoogleSQL has no dotted <code>ADD COLUMN</code>, and its <code>SET DATA TYPE</code> refuses a struct that gained or lost a field. Those changes need <code>--allow-full-refresh</code>. Two GoogleSQL rules are worth knowing before you plan a migration: a column cannot be <em>added</em> <code>NOT NULL</code> (nor tightened to it) at all, and an existing <code>NOT NULL</code> column cannot be widened -- both resolve to a full refresh, with a message naming the column. When a run is refused, the reason names the exact limitation rather than a generic failure.</li>
+<li><strong>Arrival-partitioned</strong> — the source's <code>partition_column</code> is a landing/ingest date, distinct
+  from its <code>event_time_column</code>. <code>customer_changes</code> in the worked example partitions by
+  <code>ingested_date</code> but clocks by <code>effective_ts</code>. A late event is simply an event in a later
+  arrival window — no special handling.</li>
+<li><strong>Event-time-partitioned</strong> — <code>partition_column</code> and <code>event_time_column</code> are the same column. A
+  late event surfaces as an observed delta on an already-closed partition, and that partition's
+  window is safely re-presented (the grain is re-run tolerant — see below).</li>
 </ul>
-<h3 id="table-format-configuration">Table format configuration<a class="headerlink" href="#table-format-configuration" title="Permanent link">&para;</a></h3>
-<p>Spark targets default to Delta format. The target-level <code>format</code> field is set in <code>smelt.yml</code> under the target's config:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="c1"># smelt.yml — target-level format</span>
-<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="nt">targets</span><span class="p">:</span>
-<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="w">  </span><span class="nt">spark_prod</span><span class="p">:</span>
-<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark</span>
-<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a><span class="w">    </span><span class="nt">connect_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sc://localhost:15002</span>
-<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
-<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="w">    </span><span class="nt">format</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">delta</span><span class="w">  </span><span class="c1"># or &quot;parquet&quot;</span>
+<p><code>smelt explain &lt;model&gt;</code> prints which posture a model has, so you can see whether a late event
+costs a closed-partition re-presentation.</p>
+<p>Both postures are re-run tolerant and order-independent (but never concurrent): a window may be
+folded again, or windows may apply out of temporal order, and the result is always the same as
+folding them in order exactly once.</p>
+<h2 id="the-tombstone-ledger">The tombstone ledger<a class="headerlink" href="#the-tombstone-ledger" title="Permanent link">&para;</a></h2>
+<p>Beside the presented table, a succession model keeps one piece of hidden state: the
+<strong>tombstone ledger</strong>, a table holding <code>(k, t)</code> for every delete event ever folded. Non-delete
+events are represented by their presented rows alone; the ledger exists only because a delete
+event has no presented row, yet its timestamp is still load-bearing for its predecessor's
+<code>valid_to</code>. <code>smelt explain</code> reports the ledger as internal state, not part of the model's public
+schema — you never query it directly, and it degrades together with the presented table on
+<code>--full-refresh</code> or <code>smelt repair</code>.</p>
+<h2 id="what-smelt-explain-shows">What <code>smelt explain</code> shows<a class="headerlink" href="#what-smelt-explain-shows" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>$ smelt explain customer_history
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>model customer_history  (emits: event history keyed by [customer_id], event-addressed by (customer_id, effective_ts))
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>  grain: succession
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>  identity: (customer_id, effective_ts)
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>  technique: succession-patch
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>  run axis: ingested_date (arrival-partitioned)
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>  clock: effective_ts
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>  posture: re-run tolerant; order-independent but serial
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>  internal state: tombstone ledger customer_history__tombstones (customer_id, effective_ts) — not part of the model&#39;s public schema
 </code></pre></div>
-<p>To override the format for an individual model, declare <code>format</code> in that model's <strong>SQL frontmatter</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="c1">---</span>
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="n">format</span><span class="p">:</span><span class="w"> </span><span class="n">parquet</span>
-<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="c1">---</span>
-<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>
-<a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...</span>
-</code></pre></div>
-<p>See <a href="../../reference/smelt-yml/">Project Configuration</a> for full target configuration details.</p>
-<h2 id="the-allow-full-refresh-flag">The <code>--allow-full-refresh</code> flag<a class="headerlink" href="#the-allow-full-refresh-flag" title="Permanent link">&para;</a></h2>
-<p>When smelt detects a schema change that cannot be handled with ALTER TABLE, it blocks execution by default:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>Error: Schema evolution requires full refresh for model &#39;my_model&#39;:
-<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>  Parquet format does not support nested type widening.
-<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>  Consider using Delta format or run with --allow-full-refresh.
-</code></pre></div>
-<p>Pass <code>--allow-full-refresh</code> to permit smelt to drop and recreate the table:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--allow-full-refresh
-</code></pre></div>
-<div class="admonition warning">
-<p class="admonition-title">Warning</p>
-<p>Full refresh reprocesses the entire table from scratch. For large tables, this can be expensive. The flag exists to make this an intentional choice rather than a silent surprise.</p>
-</div>
-<h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
-<ul>
-<li><a href="../incremental-models/">Incremental Models</a> for how incremental processing works</li>
-<li><a href="../migrations/">Migrations</a> for migrating a deployed table when the
-  model's <em>definition</em> changes, an alternative to a full refresh for large tables</li>
-<li><a href="../targets/">Targets &amp; Backends</a> for backend configuration</li>
-<li><a href="../../reference/smelt-yml/">Project Configuration</a> for <code>smelt.yml</code> reference</li>
-</ul>
+<p><code>smelt explain &lt;model&gt; --json</code> carries the same facts under a <code>succession</code> object
+(<code>key_columns</code>, <code>clock_column</code>, <code>run_axis</code>, <code>partitioning</code>, <code>lead_columns</code>, <code>lag_columns</code>,
+<code>delete_flag</code>, <code>pre_window_filter</code>, <code>tombstone_ledger</code>, and the <code>rerun_tolerant</code>/
+<code>order_independent</code>/<code>concurrent</code> execution postures), plus a <code>delta_signature</code> object with
+<code>shape: "keyed_succession"</code> and <code>addressing: "event"</code>.</p>
+<h2 id="refusal-codes">Refusal codes<a class="headerlink" href="#refusal-codes" title="Permanent link">&para;</a></h2>
+<p>Every clause outside the admitted outline is refused by a named diagnostic, never silently
+demoted to another grain. Each names the offending clause and a fix.</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SuccessionWindowFunctionNotLead</code></td>
+<td>Only <code>LEAD(t)</code>/<code>LAG(t)</code> over the clock column, default offset, are admitted — remove the extra offset/default argument, or window over the clock column instead.</td>
+</tr>
+<tr>
+<td><code>SuccessionPartitionKeyMismatch</code></td>
+<td>Make every window function partition by the same, <code>NOT NULL</code>-proven key set.</td>
+</tr>
+<tr>
+<td><code>SuccessionOrderNotMonotoneClock</code></td>
+<td><code>ORDER BY</code> must be the single, ascending, <code>NOT NULL</code> column that traces to the source's <code>event_time_column</code> — remove extra sort keys or <code>DESC</code>.</td>
+</tr>
+<tr>
+<td><code>SuccessionRowLocalColumnViolation</code></td>
+<td>Every non-window column must be row-local — remove the aggregate or nested window function, or move it into a window expression.</td>
+</tr>
+<tr>
+<td><code>SuccessionIdentityNotProjected</code></td>
+<td>Project the key column and the clock column row-locally so <code>(k, t)</code> is recoverable from the output.</td>
+</tr>
+<tr>
+<td><code>SuccessionSingleSourceOnly</code></td>
+<td>Remove the join/CTE/subquery/set operation — the <code>FROM</code> clause must be exactly one source.</td>
+</tr>
+<tr>
+<td><code>SuccessionDrivingSourceNotAppendOnly</code></td>
+<td>Declare <code>mutation_profile: append_only</code> and a <code>timeseries:</code> block on the driving source.</td>
+</tr>
+<tr>
+<td><code>SuccessionPreFilterNotRowLocal</code></td>
+<td>The pre-window <code>WHERE</code> must be one deterministic, row-local predicate over the source's own columns.</td>
+</tr>
+<tr>
+<td><code>SuccessionDeleteFilterMisplaced</code></td>
+<td>Use exactly <code>QUALIFY NOT &lt;flag&gt;</code> for a <code>NOT NULL</code> boolean delete flag, not a <code>WHERE</code>.</td>
+</tr>
+<tr>
+<td><code>SuccessionPreFilterNegatesFlag</code> (warning)</td>
+<td>Advisory only — if the negated column is a delete flag, prefer <code>QUALIFY NOT &lt;col&gt;</code> so its timestamp still closes its predecessor's interval.</td>
+</tr>
+<tr>
+<td><code>SuccessionPatternUnrecognized</code></td>
+<td>The model matches no admitted grain — declare <code>unique_key:</code>/<code>timeseries:</code> to reach another grain, or use <code>refresh: full</code>/<code>refresh: materialized_view</code>.</td>
+</tr>
+<tr>
+<td><code>SuccessionClockTie</code> (runtime)</td>
+<td>Two non-identical events (or a delete and a non-delete) landed at the same <code>(k, t)</code> — the run rolls back; resolve the upstream duplicate/collision.</td>
+</tr>
+</tbody>
+</table>
+<p>See the <a href="../../reference/diagnostics/#succession-grain">diagnostics reference</a> for full
+descriptions, and <a href="https://github.com/adbrowne/smelt-sql/blob/main/docs/specs/incremental_shapes.md"><code>docs/specs/incremental_shapes.md</code> §"The succession grain"</a>
+for the normative spec.</p>
 
 
 

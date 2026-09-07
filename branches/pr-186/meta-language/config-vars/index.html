@@ -1471,6 +1471,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -2942,6 +2970,7 @@
 </ul>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <hr />
+<p><a id="configvarnotfound"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigVarNotFound</p>
 <p><strong>When it fires:</strong> <code>smelt.config.var('name')</code> is called but <code>name</code> is not present in the <code>vars:</code> block of <code>smelt.yml</code>.</p>
@@ -2958,6 +2987,7 @@
 If the variable is environment-specific, declare it in a per-target overlay (see the <code>smelt.yml</code> reference for target-level <code>vars:</code> overrides).</p>
 </div>
 <hr />
+<p><a id="configvarnamenotliteral"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">ConfigVarNameNotLiteral</p>
 <p><strong>When it fires:</strong> The argument to <code>smelt.config.var</code> is not a string literal.</p>
@@ -2970,6 +3000,7 @@ If the variable is environment-specific, declare it in a per-target overlay (see
 <p><strong>What to fix:</strong> Replace the argument with a string literal: <code>smelt.config.var('the_variable_name')</code>. Dynamic variable-name resolution (computing the name at compile time from another meta value) is planned but not yet implemented.</p>
 </div>
 <hr />
+<p><a id="configvarnullcoercion-warning"></a></p>
 <div class="admonition note">
 <p class="admonition-title">ConfigVarNullCoercion (warning)</p>
 <p><strong>When it fires:</strong> A <code>vars:</code> entry has a YAML <code>null</code> value (<code>~</code> or <code>null</code>), which is coerced to an empty string <code>''</code>.</p>
