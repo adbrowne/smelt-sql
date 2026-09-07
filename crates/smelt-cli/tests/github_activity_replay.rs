@@ -88,18 +88,32 @@ fn create_empty_raw_table(db: &Path, sample: &Path) {
         db,
         &format!(
             "CREATE OR REPLACE TABLE main.sources_raw_github_events AS \
-             SELECT * FROM read_parquet('{}') WHERE 1 = 0;",
+             SELECT * FROM read_parquet('{}') WHERE 1 = 0; \
+             CREATE OR REPLACE TABLE main.sources_raw_github_events_arrival AS \
+             SELECT *, CAST(NULL AS DATE) AS ingested_date \
+             FROM read_parquet('{}') WHERE 1 = 0;",
+            sample.display(),
             sample.display()
         ),
     );
 }
 
 /// Append day `day`'s real rows, plus (unless `first_day`) a 2% redelivered
-/// slice of `day - 1`'s rows — mirrors `run_incremental.py::load_day`.
+/// slice of `day - 1`'s rows, into both the event-time and
+/// arrival-partitioned relations — mirrors `run_incremental.py::load_day`.
 fn load_day(db: &Path, sample: &Path, day: &str, prev: Option<&str>) {
     let redelivery = match prev {
         Some(p) => format!(
             "UNION ALL SELECT * FROM read_parquet('{}') \
+             WHERE CAST(created_at AS DATE) = DATE '{p}' \
+             AND MOD(CAST(id AS BIGINT), 50) = 0",
+            sample.display()
+        ),
+        None => String::new(),
+    };
+    let redelivery_arrival = match prev {
+        Some(p) => format!(
+            "UNION ALL SELECT *, DATE '{day}' AS ingested_date FROM read_parquet('{}') \
              WHERE CAST(created_at AS DATE) = DATE '{p}' \
              AND MOD(CAST(id AS BIGINT), 50) = 0",
             sample.display()
@@ -111,7 +125,11 @@ fn load_day(db: &Path, sample: &Path, day: &str, prev: Option<&str>) {
         &format!(
             "INSERT INTO main.sources_raw_github_events \
              SELECT * FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{day}' {redelivery};",
+             WHERE CAST(created_at AS DATE) = DATE '{day}' {redelivery}; \
+             INSERT INTO main.sources_raw_github_events_arrival \
+             SELECT *, DATE '{day}' AS ingested_date FROM read_parquet('{}') \
+             WHERE CAST(created_at AS DATE) = DATE '{day}' {redelivery_arrival};",
+            sample.display(),
             sample.display()
         ),
     );
@@ -317,7 +335,10 @@ fn full_refresh_matches_incremental_replay() {
     duckdb_exec(
         &full_db,
         &format!(
-            "INSERT INTO main.sources_raw_github_events SELECT * FROM read_parquet('{}');",
+            "INSERT INTO main.sources_raw_github_events SELECT * FROM read_parquet('{}'); \
+             INSERT INTO main.sources_raw_github_events_arrival \
+             SELECT *, CAST(created_at AS DATE) AS ingested_date FROM read_parquet('{}');",
+            full_sample.display(),
             full_sample.display()
         ),
     );
@@ -340,6 +361,67 @@ fn full_refresh_matches_incremental_replay() {
             "row count mismatch for {table}: incremental={incr_count} full_refresh={full_count}"
         );
     }
+    // `silver.repo_naming`/`silver.actor_naming` do NOT satisfy criterion 7's
+    // full-refresh equivalence at the raw row-count level — a genuine
+    // divergence discovered by this phase, not fixed here
+    // (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` decision
+    // log). The incremental window-forward patch loop addresses the
+    // presented table by `(key, clock)` (its `MERGE ... ON` condition), so a
+    // redelivered duplicate or a genuine same-second tie whose payload
+    // agrees converges to one presented row; `--full-refresh` re-runs the
+    // model's raw compiled `SELECT` (`LEAD`/`LAG` over every physical row)
+    // with no such addressing, so it keeps every tied row. The gap matches
+    // exactly the fixture's own measured tie counts — 139 extra
+    // `(repo_id, created_at)` rows, 145 extra `(actor_id, created_at)` rows
+    // (`same_second_events_fold_once_within_a_key`) — so this is a
+    // regression-checkable, understood divergence, not slop.
+    let repo_naming_incr =
+        duckdb_scalar_i64(&incr_db, "SELECT count(*) FROM main.silver_repo_naming");
+    let repo_naming_full =
+        duckdb_scalar_i64(&full_db, "SELECT count(*) FROM main.silver_repo_naming");
+    assert_eq!(
+        repo_naming_incr, 64_174,
+        "silver_repo_naming incremental row count regressed"
+    );
+    assert_eq!(
+        repo_naming_full - repo_naming_incr,
+        139,
+        "expected the full-refresh oracle to retain exactly the 139 known tied rows \
+         silver_repo_naming's incremental replay folds away (incr={repo_naming_incr}, \
+         full={repo_naming_full})"
+    );
+
+    let actor_naming_incr =
+        duckdb_scalar_i64(&incr_db, "SELECT count(*) FROM main.silver_actor_naming");
+    let actor_naming_full =
+        duckdb_scalar_i64(&full_db, "SELECT count(*) FROM main.silver_actor_naming");
+    assert_eq!(
+        actor_naming_incr, 64_168,
+        "silver_actor_naming incremental row count regressed"
+    );
+    assert_eq!(
+        actor_naming_full - actor_naming_incr,
+        145,
+        "expected the full-refresh oracle to retain exactly the 145 known tied rows \
+         silver_actor_naming's incremental replay folds away (incr={actor_naming_incr}, \
+         full={actor_naming_full})"
+    );
+
+    // `marts.naming_history` is unaffected: it derives renames via `LAG`
+    // comparing *consecutive distinct* names, and a tie's duplicated row
+    // never differs from its neighbour on the projected name, so the
+    // `prior_name != name` filter drops the duplicate on both legs alike.
+    // The business-meaningful output agrees even though the raw per-event
+    // silver tables do not.
+    let naming_history_incr =
+        duckdb_scalar_i64(&incr_db, "SELECT count(*) FROM main.marts_naming_history");
+    let naming_history_full =
+        duckdb_scalar_i64(&full_db, "SELECT count(*) FROM main.marts_naming_history");
+    assert_eq!(
+        naming_history_incr, naming_history_full,
+        "marts_naming_history row count mismatch: incremental={naming_history_incr} \
+         full_refresh={naming_history_full}"
+    );
 
     let incr_deduped = duckdb_scalar_i64(
         &incr_db,
@@ -354,5 +436,239 @@ fn full_refresh_matches_incremental_replay() {
         incr_deduped, 64_313,
         "expected the full fixture to dedup to the measured 64,313 distinct ids \
          (docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md)"
+    );
+}
+
+/// Run `smelt explain <model> --project-dir <workspace>` against a staged (not
+/// yet built) workspace and return stdout as text.
+fn smelt_explain(workspace: &Path, model: &str) -> String {
+    let out = Command::new(smelt_bin())
+        .args(["explain", model, "--project-dir"])
+        .arg(workspace)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn smelt explain: {e}"));
+    assert!(
+        out.status.success(),
+        "smelt explain {model} failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Test 1 (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/03-plan.md`):
+/// `silver.repo_naming` is recognised as the succession grain from its SQL
+/// shape alone, driven by the event-time-partitioned source.
+#[test]
+fn repo_naming_is_recognised_as_the_succession_grain() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, _db, _sample) = stage_workspace(tmp.path());
+    let report = smelt_explain(&workspace, "silver.repo_naming");
+
+    assert!(
+        report.contains("grain: succession"),
+        "expected `grain: succession`: {report}"
+    );
+    assert!(
+        report.contains("identity: (repo_id, created_at)"),
+        "expected `identity: (repo_id, created_at)`: {report}"
+    );
+    assert!(
+        report.contains("technique: succession-patch"),
+        "expected `technique: succession-patch`: {report}"
+    );
+    assert!(
+        report.contains("run axis: created_at (event-time-partitioned)"),
+        "expected the event-time-partitioned run axis line: {report}"
+    );
+    assert!(
+        report.contains("clock: created_at"),
+        "expected the clock line: {report}"
+    );
+}
+
+/// Test 2: `silver.actor_naming` is the same grain, driven by the
+/// arrival-partitioned twin source.
+#[test]
+fn actor_naming_is_arrival_partitioned() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, _db, _sample) = stage_workspace(tmp.path());
+    let report = smelt_explain(&workspace, "silver.actor_naming");
+
+    assert!(
+        report.contains("run axis: ingested_date (arrival-partitioned)"),
+        "expected the arrival-partitioned run axis line: {report}"
+    );
+    assert!(
+        report.contains("clock: created_at"),
+        "expected the clock line: {report}"
+    );
+}
+
+/// Test 3: after the full 30-day day-by-day replay, both succession models
+/// have exactly `count(DISTINCT (key, created_at))` rows over their driving
+/// relation — the loader's deliberate previous-day redelivery folds once
+/// rather than duplicating history, and neither run fails with
+/// `SuccessionClockTie` or `SourceMutationProfileViolated`.
+#[test]
+fn redelivery_folds_once_in_both_succession_models() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let repo_naming_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.silver_repo_naming");
+    let repo_distinct = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM (SELECT DISTINCT repo_id, created_at FROM \
+         main.sources_raw_github_events)",
+    );
+    assert_eq!(
+        repo_naming_rows, repo_distinct,
+        "repo_naming must fold the redelivery to exactly \
+         count(DISTINCT (repo_id, created_at)) (rows={repo_naming_rows}, \
+         distinct={repo_distinct})"
+    );
+
+    let actor_naming_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.silver_actor_naming");
+    let actor_distinct = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM (SELECT DISTINCT actor_id, created_at FROM \
+         main.sources_raw_github_events_arrival)",
+    );
+    assert_eq!(
+        actor_naming_rows, actor_distinct,
+        "actor_naming must fold the redelivery to exactly \
+         count(DISTINCT (actor_id, created_at)) (rows={actor_naming_rows}, \
+         distinct={actor_distinct})"
+    );
+}
+
+/// Test 4: the fixture's own same-second ties (139 `(repo_id, created_at)`,
+/// 145 `(actor_id, created_at)` — measured, `docs/outcomes/
+/// 20260906-bigquery-dogfood-spine/outcome.md` decision log) exist in the raw
+/// sample and, since every tied pair agrees on the projected name, fold once
+/// exactly like a redelivery rather than raising `SuccessionClockTie`.
+#[test]
+fn same_second_events_fold_once_within_a_key() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+
+    // "Ties" here counts extra rows beyond the first per key — count(*) minus
+    // count(DISTINCT (key, created_at)) — matching how the outcome's decision
+    // log measured 139/145 (not the number of tied groups).
+    let repo_tie_count = {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        conn.query_row(
+            &format!(
+                "SELECT count(*) - count(DISTINCT (repo_id, created_at)) \
+                 FROM read_parquet('{}')",
+                sample.display()
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query repo ties")
+    };
+    let actor_tie_count = {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        conn.query_row(
+            &format!(
+                "SELECT count(*) - count(DISTINCT (actor_id, created_at)) \
+                 FROM read_parquet('{}')",
+                sample.display()
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query actor ties")
+    };
+    assert_eq!(
+        repo_tie_count, 139,
+        "expected the fixture's measured 139 same-second (repo_id, created_at) ties"
+    );
+    assert_eq!(
+        actor_tie_count, 145,
+        "expected the fixture's measured 145 same-second (actor_id, created_at) ties"
+    );
+
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    // No tie failure was raised (`replay_days` would have panicked via
+    // `smelt_run`'s success assertion), and the ties collapsed into the
+    // fold-once row counts already proven by
+    // `redelivery_folds_once_in_both_succession_models`.
+    let repo_naming_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.silver_repo_naming");
+    let repo_distinct = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM (SELECT DISTINCT repo_id, created_at FROM \
+         main.sources_raw_github_events)",
+    );
+    assert_eq!(repo_naming_rows, repo_distinct);
+}
+
+/// Test 5: `marts.naming_history` surfaces the real renames — 34 distinct
+/// renamed `repo_id`s, 4 renamed `actor_id`s, the owner-change row, and the 2
+/// reused repo names each appearing under both `repo_id`s (`docs/outcomes/
+/// 20260906-bigquery-dogfood-spine/outcome.md` decision log).
+#[test]
+fn naming_history_surfaces_the_real_renames() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let renamed_repos = duckdb_scalar_i64(
+        &db,
+        "SELECT count(DISTINCT entity_id) FROM main.marts_naming_history WHERE entity_kind = \
+         'repo'",
+    );
+    assert_eq!(
+        renamed_repos, 34,
+        "expected 34 distinct renamed repo_ids in naming_history"
+    );
+
+    let renamed_actors = duckdb_scalar_i64(
+        &db,
+        "SELECT count(DISTINCT entity_id) FROM main.marts_naming_history WHERE entity_kind = \
+         'actor'",
+    );
+    assert_eq!(
+        renamed_actors, 4,
+        "expected 4 distinct renamed actor_ids in naming_history"
+    );
+
+    let owner_change_row = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM main.marts_naming_history \
+         WHERE entity_kind = 'repo' AND from_name = 'mikiKG45/noob-devops-project' \
+         AND to_name = 'guslariR45/noob-devops-project'",
+    );
+    assert_eq!(
+        owner_change_row, 1,
+        "expected the owner-change rename row (same repo_id, different owner) to appear"
+    );
+
+    // The 2 repo names reused across different repo_ids each appear under
+    // both ids somewhere in the naming stream (as either a from_name, a
+    // to_name, or the current name in silver.repo_naming).
+    let reused_names = duckdb_scalar_i64(
+        &db,
+        "WITH names AS (
+            SELECT repo_id, repo_name AS name FROM main.silver_repo_naming
+            UNION
+            SELECT entity_id AS repo_id, from_name AS name FROM main.marts_naming_history \
+         WHERE entity_kind = 'repo'
+            UNION
+            SELECT entity_id AS repo_id, to_name AS name FROM main.marts_naming_history \
+         WHERE entity_kind = 'repo'
+         )
+         SELECT count(*) FROM (
+            SELECT name FROM names GROUP BY name HAVING count(DISTINCT repo_id) > 1
+         )",
+    );
+    assert!(
+        reused_names >= 2,
+        "expected at least 2 repo names reused across different repo_ids, found {reused_names}"
     );
 }

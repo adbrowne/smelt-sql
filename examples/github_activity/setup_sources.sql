@@ -10,3 +10,11 @@
 -- here declares `schema: main`.
 CREATE OR REPLACE TABLE main.sources_raw_github_events AS
 SELECT * FROM read_parquet('seeds/github_events_sample.parquet') WHERE 1 = 0;
+
+-- Arrival-partitioned twin (`docs/outcomes/20260906-bigquery-dogfood-spine/
+-- phases/03-plan.md`): same columns plus a loader-stamped `ingested_date`.
+-- `run_incremental.py` appends to this table alongside the event-time one.
+CREATE OR REPLACE TABLE main.sources_raw_github_events_arrival AS
+SELECT *, CAST(NULL AS DATE) AS ingested_date
+FROM read_parquet('seeds/github_events_sample.parquet')
+WHERE 1 = 0;

@@ -111,7 +111,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 |---|-------|--------|
 | 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
 | 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | done |
-| 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | planned |
+| 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | done |
 | 4 | The wider model set: re-pin `sample.sql` with `payload`, then the silver fan-out, `gold.events_enriched`, `gold.repo_activity_daily` and the remaining marts | pending |
 | 5 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
 | 6 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
@@ -354,6 +354,36 @@ exists — so the live run is a test of the *backend*, not of the models.
   `QUALIFY NOT <flag>` over it would assert something untrue about the entity's history.
   The tombstone ledger stays covered by `examples/scd2_succession`; this pipeline covers the
   rename stream and the two postures. Criterion 9 asks for neither.
+- 2026-09-08 (phase 3 implement): **the succession clock column must be projected
+  verbatim, not aliased away** — `crates/smelt-runtime/src/maintenance_driver/succession/
+  execute.rs` resolves the clock column's type from the model's own output schema by name,
+  so `effective_ts AS valid_from`-style aliasing (which
+  `examples/scd2_succession/models/customer_history.sql` itself does) fails at run time
+  with "clock column has no resolved output type". `silver.repo_naming`/
+  `silver.actor_naming` project `created_at` bare. The pre-existing `scd2_succession`
+  example has never actually been executed for real (only via `explain_maintenance`'s
+  static plan-report path and the generative `maintenance_conformance` suite, whose
+  `SuccessionRecipe::new_lead` projects the clock column unaliased) — worth a follow-up.
+- 2026-09-08 (phase 3 implement): **a genuine full-refresh/incremental divergence for
+  succession models with ties, found and recorded, not fixed.** `silver.repo_naming`/
+  `silver.actor_naming` fail criterion 7's row-count equivalence: the incremental
+  window-forward patch loop folds same-`(key, clock)` rows via its `MERGE ... ON`
+  addressing; `--full-refresh`'s `emit_succession_full_rebuild` re-runs the model's raw
+  compiled `SELECT` with no such addressing and keeps every duplicated row. Measured
+  exactly — 139 extra rows (`repo_naming`), 145 (`actor_naming`), matching the fixture's
+  own same-second tie counts — and asserted explicitly rather than silently tolerated
+  (`crates/smelt-cli/tests/github_activity_replay.rs::full_refresh_matches_incremental_replay`).
+  `marts.naming_history` is unaffected (its `LAG` filter drops the duplicate identically
+  on both legs). A `SELECT DISTINCT *` fix was tried and found insufficient — `LEAD`/`LAG`
+  over an un-deduped source gives tied rows *different* computed values via the window's
+  arbitrary tie-break order, so only byte-identical full-row duplicates fold (50 of 139).
+  The general fix needs an aggregate fold on `(key_cols, clock_col)` (e.g. `MAX` per other
+  column), threading the full output schema into `emit_succession_full_rebuild` and
+  touching its statement-parity fixtures and every succession consumer — real,
+  well-scoped work for `docs/outcomes/20260906-scd2-keyed-succession`'s decision log, not
+  this pipeline. Also: `emit_succession_full_rebuild` never runs the clock-tie probe, so a
+  content-*disagreeing* tie would silently corrupt a full-refresh today, undetected by
+  this fixture (which measured zero disagreeing ties).
 
 ## Blocked
 

@@ -96,10 +96,19 @@ def setup_sources(db: Path) -> None:
 
 def load_day(db: Path, day: date, first_day: bool) -> int:
     """Append day `day`'s real rows plus (unless first_day) a redelivered
-    slice of `day - 1`'s rows. Returns the number of redelivered rows."""
+    slice of `day - 1`'s rows, into both the event-time and arrival-
+    partitioned relations. Returns the number of redelivered rows."""
     prev = day - timedelta(days=1)
     redelivery_clause = (
         f"UNION ALL SELECT * FROM read_parquet('{SAMPLE_PARQUET}') "
+        f"WHERE CAST(created_at AS DATE) = DATE '{prev.isoformat()}' "
+        f"AND MOD(CAST(id AS BIGINT), {REDELIVERY_MODULUS}) = 0"
+        if not first_day
+        else ""
+    )
+    redelivery_clause_arrival = (
+        f"UNION ALL SELECT *, DATE '{day.isoformat()}' AS ingested_date "
+        f"FROM read_parquet('{SAMPLE_PARQUET}') "
         f"WHERE CAST(created_at AS DATE) = DATE '{prev.isoformat()}' "
         f"AND MOD(CAST(id AS BIGINT), {REDELIVERY_MODULUS}) = 0"
         if not first_day
@@ -110,6 +119,15 @@ def load_day(db: Path, day: date, first_day: bool) -> int:
         f"SELECT * FROM read_parquet('{SAMPLE_PARQUET}') "
         f"WHERE CAST(created_at AS DATE) = DATE '{day.isoformat()}' "
         f"{redelivery_clause};"
+        # Arrival-partitioned twin: same rows (real day D plus the same
+        # redelivered slice of D-1), all stamped `ingested_date = D` — so the
+        # redelivered rows land in the *open* partition here, unlike the
+        # event-time relation above where they land in a *closed* one.
+        f"INSERT INTO main.sources_raw_github_events_arrival "
+        f"SELECT *, DATE '{day.isoformat()}' AS ingested_date "
+        f"FROM read_parquet('{SAMPLE_PARQUET}') "
+        f"WHERE CAST(created_at AS DATE) = DATE '{day.isoformat()}' "
+        f"{redelivery_clause_arrival};"
     )
     proc = subprocess.run(["duckdb", str(db), "-c", sql], capture_output=True, text=True)
     if proc.returncode != 0:

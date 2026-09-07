@@ -75,3 +75,46 @@ arrives with a loader-stamped `ingested_date` in a later phase — so the model'
 `maintenance.scan_bounds` declares `allow_full_scan: true` on `raw.github_events` instead;
 the keyed `MERGE` this model compiles to is idempotent regardless of window width, so the
 full scan costs re-read, never correctness.
+
+## The rename stream: two succession models, two partition postures
+
+`silver.repo_naming` and `silver.actor_naming` are recognised as the succession grain
+(`docs/specs/incremental_shapes.md` §"The succession grain") from their SQL shape alone —
+neither declares `grain:`, `unique_key:` or `timeseries:`. Each is one row per
+`(key, created_at)` carrying the name in force at that event, not one row per rename:
+"only the rows where the name changed" needs `LAG`, and the classifier admits exactly one
+row-local pre-window filter, so that reduction happens downstream in
+`marts.naming_history` instead, which unions both histories and keeps the rows where
+`LAG(name)` differs from the current name.
+
+The two models exercise both succession partition postures from one pipeline
+(`docs/outcomes/20260906-bigquery-dogfood-spine/phases/03-plan.md`):
+
+- `silver.repo_naming` reads `raw.github_events` directly — **event-time-partitioned**
+  (`timeseries.partition_column == event_time_column == created_at`). The loader's
+  deliberate previous-day redelivery lands in a **closed** partition here, exercising the
+  append-only probe's late-arrival classification.
+- `silver.actor_naming` reads `raw.github_events_arrival` — a second physical relation,
+  same columns plus a loader-stamped `ingested_date`, **arrival-partitioned**
+  (`partition_column: ingested_date` differs from `event_time_column: created_at`). The
+  same redelivered rows are stamped with *today's* `ingested_date` there, landing in the
+  **open** partition instead.
+
+Both `created_at` clock columns are projected verbatim (not aliased away): the
+succession-patch technique's tombstone ledger resolves the clock column's type from the
+model's own output schema by name, so the clock column must survive under its source name.
+
+**A genuine divergence, discovered rather than fixed here**: `silver.repo_naming` and
+`silver.actor_naming` do not satisfy the full-refresh/incremental equivalence invariant
+(criterion 7) at the raw row-count level. The window-forward patch loop addresses the
+presented table by `(key, clock)` (its `MERGE ... ON` condition), so a redelivered
+duplicate or a same-second tie whose payload agrees converges to one presented row;
+`--full-refresh` re-runs the model's raw compiled `SELECT` with no such addressing, so it
+keeps every tied row. The gap matches exactly the fixture's own measured tie counts (139
+extra rows for `repo_naming`, 145 for `actor_naming`) —
+`crates/smelt-cli/tests/github_activity_replay.rs`'s
+`full_refresh_matches_incremental_replay` asserts the divergence explicitly rather than
+silently tolerating it. `marts.naming_history` is unaffected, since its `LAG`-based
+"only where the name changed" filter drops a duplicated tie row identically on both legs.
+This is recorded for `docs/outcomes/20260906-scd2-keyed-succession`'s decision log, not
+fixed in this pipeline.
