@@ -1,0 +1,19 @@
+name: scd2_succession
+version: 1
+
+# Worked example for the succession grain (docs/specs/incremental_shapes.md
+# §"The succession grain", docs-site/docs/guide/scd2-succession.md):
+# `customer_changes` is an arrival-partitioned append-only change stream;
+# `customer_history` is recognised as a keyed-succession history table with
+# no declared `grain:` or `unique_key:` — the shape is derived from its SQL.
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

@@ -9,6 +9,11 @@
 # threaded through `delta_signature_headline`/`build_maintenance_plan_report`/
 # `build_maintenance_plan_json`) that would fragment those functions'
 # single ownership if pushed out further.
+# Updated: 2026-09-07 — bumped crates/smelt-lsp/tests/example_workspaces.rs
+# (1473 -> 1480) for one new `#[tokio::test]` covering the succession-grain
+# worked example (phase 9, docs/outcomes/20260906-scd2-keyed-succession);
+# mechanical one-test addition following the file's existing per-example
+# pattern, not new structure.
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -87,7 +92,7 @@ crates/smelt-lsp/src/backend/rename_impl.rs 1173
 crates/smelt-lsp/src/hover.rs 3032
 crates/smelt-lsp/src/tests.rs 2828
 crates/smelt-lsp/tests/e2e.rs 1406
-crates/smelt-lsp/tests/example_workspaces.rs 1473
+crates/smelt-lsp/tests/example_workspaces.rs 1480
 crates/smelt-lsp/tests/integration.rs 4810
 crates/smelt-maintenance-testkit/src/link_c_harness.rs 1025
 crates/smelt-maintenance-testkit/src/recipe.rs 2316

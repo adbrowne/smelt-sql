@@ -46,6 +46,15 @@ fn fn_tableexpr_star_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_tableexpr_star");
 }
 
+/// The succession grain's worked example (`docs/specs/incremental_shapes.md`
+/// §"The succession grain"): `customer_history` recognised as keyed
+/// succession over an arrival-partitioned append-only source, with no
+/// declared `grain:`, `unique_key:`, or `timeseries:` on the model itself.
+#[test]
+fn scd2_succession_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/scd2_succession");
+}
+
 /// D1 phase: functions × incremental × timeseries happy-path fixture.
 /// Verifies that a workspace mixing smelt.define predicates (called in WHERE)
 /// and partition-aligned window-function helpers inside incremental models

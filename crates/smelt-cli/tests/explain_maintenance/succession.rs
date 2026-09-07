@@ -183,6 +183,42 @@ fn non_succession_model_prints_no_succession_lines() {
     }
 }
 
+/// Test: `example_workspace_customer_history_is_a_succession_cell` —
+/// `examples/scd2_succession`'s `customer_history` model, built via the real
+/// discovery + Salsa pipeline (not a staged fixture), is recognised as the
+/// succession grain: without this the fixture could be diagnostics-clean
+/// yet silently *not* recognised as succession.
+#[test]
+fn example_workspace_customer_history_is_a_succession_cell() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/scd2_succession")
+        .canonicalize()
+        .expect("examples/scd2_succession exists");
+
+    let report = build_report_for(&project_dir, "customer_history")
+        .expect("customer_history has a maintenance plan");
+
+    assert!(
+        report.contains("grain: succession"),
+        "expected `grain: succession` in report: {report}"
+    );
+    assert!(
+        report.contains("identity: (customer_id, effective_ts)"),
+        "expected `identity: (customer_id, effective_ts)` in report: {report}"
+    );
+    assert!(
+        report.contains("technique: succession-patch"),
+        "expected `technique: succession-patch` in report: {report}"
+    );
+    assert!(
+        report.contains(
+            "internal state: tombstone ledger customer_history__tombstones (customer_id, \
+             effective_ts) — not part of the model's public schema"
+        ),
+        "expected the tombstone-ledger internal-state line: {report}"
+    );
+}
+
 /// Spawn the real `smelt explain <model> --json` binary against a staged
 /// project and parse its stdout as JSON.
 fn explain_json(project_dir: &Path, model_name: &str) -> serde_json::Value {

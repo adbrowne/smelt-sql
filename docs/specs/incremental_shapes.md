@@ -2088,4 +2088,5 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   profile admits vs. what stays plain SQL); `sources.md` (the `append_only` posture and its
   probe); `state.md` (the tombstone ledger's degradation contract); `diagnostics.md` §"Succession
   grain" (the code catalogue).
+- **User docs**: [`docs-site/docs/guide/scd2-succession.md`](../../docs-site/docs/guide/scd2-succession.md)
 - **Plans (history)**: none yet — this spec diff is the input to the first one.
