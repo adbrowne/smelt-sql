@@ -2,10 +2,11 @@
 
 **Created:** 2026-09-06
 **Status:** in progress
-**Driver:** split. Phases 2–5 are loop-grindable (no warehouse, no credentials) and this
-outcome sits in `.claude/outcome-backlog` for them. Phases 6–12 are **human-gated** —
-they provision cloud resources and run live BigQuery, which a headless loop cannot do, so
-phase 6 must emit `<<PHASE_BLOCKED>>` rather than attempt it.
+**Driver:** split. Phases 2–4 and 6 are loop-grindable (no warehouse, no credentials) and
+this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
+BigQuery token for one fixture regeneration (see "## Blocked"); phases 7–13 are
+**human-gated** — they provision cloud resources and run live BigQuery, which a headless
+loop cannot do, so phase 7 must emit `<<PHASE_BLOCKED>>` rather than attempt it.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/multi_backend.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/smelt_yml.md`; `docs/specs/run_state.md`; `docs/specs/state.md`
 
@@ -112,17 +113,51 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
 | 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | done |
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | done |
-| 4 | The wider model set: re-pin `sample.sql` with `payload`, then the silver fan-out, `gold.events_enriched`, `gold.repo_activity_daily` and the remaining marts | pending |
-| 5 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
-| 6 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
-| 7 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
-| 8 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
-| 9 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
-| 10 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
-| 11 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
-| 12 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
+| 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | planned |
+| 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
+| 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
+| 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
+| 8 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
+| 9 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
+| 10 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 11 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
+| 12 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
+| 13 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 4 plan): **the `payload` re-pin is split out of phase 4 and blocked.**
+  Phase 4 as written opened with re-pinning `sample.sql` to project `payload` and
+  regenerating the fixture — which is a live BigQuery query, and the credential path is a
+  1-hour token that only a human can mint (`scripts/bigquery-auth.sh` prompts for the
+  passphrase protecting the encrypted key; probed this session, no valid token exists and
+  `Read(//home/andrew/.config/gcloud-smelt-bq/**)` is denied besides). A headless loop
+  cannot do it, so it becomes its own row (new phase 5, `blocked`) together with the only
+  work that actually depends on it — the typed silver fan-out, whose whole subject is
+  extraction *from JSON*. Everything else the old phase 4 named is payload-independent and
+  stays as phase 4: `gold.events_enriched`, `gold.repo_activity_daily` and the remaining
+  marts. Nothing is deferred out of the outcome; criterion 4's fan-out clause is still
+  owned by a row, it is just a row a human has to unblock. Re-fetching the payloads from
+  gharchive.org's public hourly files instead was considered and rejected: reproducing the
+  30-day sample that way is tens of GB of download, and it would no longer be `sample.sql`
+  run verbatim — which is the whole basis of criterion 3's comparability.
+- 2026-09-08 (phase 4 plan): **the enrichment dimension is a smelt model, and its derived
+  technique is measured rather than assumed.** `manual.repo_watchlist` is out of scope, so
+  the `unique_key`-declaring dimension `gold.events_enriched` left-joins is a new
+  `gold.repo_dim` (one row per repo, current name from `silver.repo_naming`). The shipped
+  `ColumnScopedMerge` shape (`ValueEnrichedRecipe` in `smelt-maintenance-testkit`) is
+  proven over a declared **source** with `mutation_profile: mutable_snapshot` and
+  `unique_key:`; whether an upstream *model* presents the same mutation-sensitivity facts
+  is not established anywhere in the tree. Phase 4 therefore asserts the technique the
+  plan actually derives via `smelt explain --json` and records it. A verdict other than
+  `ColumnScopedMerge` is a **finding for criterion 8's handoff**, not a phase failure —
+  this outcome builds and records, it does not fix derivation.
+- 2026-09-08 (phase 4 plan): **`marts.star_growth` is thin on purpose.** The fixture holds
+  47 `WatchEvent`s over 30 days (measured). That is enough to pin exact counts in a test and
+  not enough to look like an analytics product — the same skew finding as the leaderboard
+  (92% `PushEvent`), and `repo_leaderboard` is built anyway because the research doc's full
+  sketch names it and a mart that reads oddly under a known-skewed sample is still a real
+  consumer of `gold.repo_activity_daily`.
 
 - 2026-09-06 (scaffold, human): **split by driver.** This programme is human-gated —
   provisioning, credentials and live runs cannot be executed by a headless loop — so this
@@ -387,4 +422,12 @@ exists — so the live run is a test of the *backend*, not of the models.
 
 ## Blocked
 
-(none)
+- 2026-09-08 — **phase 5 (`payload` re-pin + typed silver fan-out).** Needs a live
+  BigQuery credential: `bash scripts/bigquery-auth.sh`, which prompts a human for the
+  passphrase protecting the encrypted service-account key and mints a 1-hour token. What a
+  human must do: mint the token, then run `bash examples/github_activity/refresh_sample.sh`
+  against a `sample.sql` re-pinned to project `payload` (~12 GB scanned, ~US$0.06 — cost
+  already accepted in the decision log of 2026-09-08). If the regenerated Parquet is
+  unreasonably large, the decision log's standing instruction is to shorten the day range
+  rather than narrow the payload. Once the fixture is committed the rest of the phase is
+  ordinary loop work.
