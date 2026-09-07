@@ -4,7 +4,7 @@
 //! `dags_bigquery::diamond_propagation_suffices_on_bigquery`, case 0,
 //! `BadRequest: 400 Syntax error: Expected ")" but got "%"`).
 //!
-//! `%` is DuckDB/PostgreSQL/Spark infix syntax that DuckDB's own printer
+//! `%` is DuckDB/Spark infix syntax that DuckDB's own printer
 //! passes through verbatim (the default path — see `printer.rs`'s
 //! `SyntaxKind::BINARY_EXPR` fallthrough). The dialect printer must lower it
 //! for BigQuery, the same way it already lowers `MEDIAN`
@@ -30,6 +30,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> St
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -76,7 +77,6 @@ fn other_dialects_keep_infix_modulo_verbatim() {
     for (dialect, caps) in [
         (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         (SqlDialect::SparkSQL, BackendCapabilities::spark()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
     ] {
         let sql = "SELECT * FROM events WHERE id % 2 = 0";
         let out = print_with(sql, &dialect, &caps);

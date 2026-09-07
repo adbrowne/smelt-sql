@@ -240,6 +240,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         batch_size_days: args.batch_size,
         per_partition: args.per_partition,
         full_refresh: args.full_refresh,
+        rebuild: false,
         dry_run: args.dry_run,
         enforce_safety: !args.allow_downgrade,
         allow_column_removal: args.allow_column_removal,
@@ -496,6 +497,7 @@ async fn run_since_upstream(
 
         if had_runs_before_scoping && plan.runs.is_empty() {
             print!("{}", plan.dirty_set_report);
+            // stdout: --since-upstream intersected with the selector(s) leaves nothing to run
             eprintln!("smelt: no models matched the selector(s)");
             return Ok(());
         }
@@ -554,6 +556,7 @@ async fn run_since_upstream(
             batch_size_days: args.batch_size,
             per_partition: args.per_partition,
             full_refresh: args.full_refresh,
+            rebuild: false,
             dry_run: args.dry_run,
             enforce_safety: !args.allow_downgrade,
             allow_column_removal: args.allow_column_removal,

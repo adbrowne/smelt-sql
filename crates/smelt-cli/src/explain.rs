@@ -15,6 +15,12 @@ use smelt_planner::{analyze_batch_safety, BatchSafety, BoundResult, ModelInfo};
 use smelt_runtime::{CompilerRegistry, EphemeralResolver, SourceBound, TimeRange};
 use std::collections::BTreeMap;
 
+mod succession;
+pub use succession::{
+    build_succession_explain_view, SuccessionExplainView, SuccessionJson,
+    SuccessionTombstoneLedgerJson,
+};
+
 /// Top-level JSON output for `smelt explain --json`.
 #[derive(Debug, Serialize)]
 pub struct ExplainOutput {
@@ -218,6 +224,10 @@ pub struct DeltaSignatureHeadline {
     /// second label.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grain: Option<String>,
+    /// `keyed_succession` only, for [`Self::render_text`]'s `(<k>, <t>)`
+    /// clause. Never serialized — already on `succession.clock_column`.
+    #[serde(skip)]
+    pub clock: Option<String>,
 }
 
 /// The output axis a [`smelt_logical::maintenance::locality::LocalitySlice`]
@@ -245,11 +255,14 @@ fn locality_axis(slice: &smelt_logical::maintenance::locality::LocalitySlice) ->
 /// admitted `grain: key` + `timeseries:` model, appending the slice-bound
 /// and settle-bound clauses the composed-shape worked example shows.
 /// `own_contract` supplies the SAME `derived_grain` the report's own
-/// Relation Contract block prints.
+/// Relation Contract block prints. `succession`, when present, takes
+/// precedence over `shape` (`docs/specs/cli.md` §"Delta-signature
+/// headline": `keyed_succession`).
 pub fn delta_signature_headline(
     shape: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
     key_locality: Option<&smelt_logical::maintenance::KeyLocality>,
     own_contract: &RelationContractView,
+    succession: Option<&SuccessionExplainView>,
 ) -> DeltaSignatureHeadline {
     use smelt_logical::analysis::output_delta::OutputDelta;
 
@@ -268,6 +281,10 @@ pub fn delta_signature_headline(
         None => (None, None, None),
     };
 
+    if let Some(view) = succession {
+        return succession::succession_delta_signature(view, grain);
+    }
+
     match shape {
         Some(OutputDelta::KeyedUpsert { keys }) => DeltaSignatureHeadline {
             shape: "keyed_upsert".to_string(),
@@ -278,6 +295,7 @@ pub fn delta_signature_headline(
             slice_bound,
             settle_bound,
             grain,
+            clock: None,
         },
         Some(OutputDelta::AppendOnlyWindow { axis }) => DeltaSignatureHeadline {
             shape: "append_only_window".to_string(),
@@ -288,6 +306,7 @@ pub fn delta_signature_headline(
             slice_bound: None,
             settle_bound: None,
             grain,
+            clock: None,
         },
         Some(OutputDelta::General { reason }) => DeltaSignatureHeadline {
             shape: "general".to_string(),
@@ -298,6 +317,7 @@ pub fn delta_signature_headline(
             slice_bound: None,
             settle_bound: None,
             grain,
+            clock: None,
         },
         None => DeltaSignatureHeadline {
             shape: "general".to_string(),
@@ -308,6 +328,7 @@ pub fn delta_signature_headline(
             slice_bound: None,
             settle_bound: None,
             grain,
+            clock: None,
         },
     }
 }
@@ -328,6 +349,10 @@ impl DeltaSignatureHeadline {
                 let axis = self.axis.as_deref().unwrap_or("?");
                 format!("append-only within a window, window-addressed by {axis}")
             }
+            "keyed_succession" => succession::render_keyed_succession_emits(
+                &self.keys.as_deref().unwrap_or_default().join(", "),
+                self.clock.as_deref().unwrap_or("?"),
+            ),
             _ => {
                 let reason = self.degraded_by.as_deref().unwrap_or("unclassified");
                 format!("general (degraded by: {reason}), not delta-addressable")
@@ -420,6 +445,7 @@ pub fn build_maintenance_plan_report(
     pending_definition_delta: Option<&(MigrationVerdict, String)>,
     own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
     profile: &smelt_logical::analysis::profile::PropertyProfile,
+    succession: Option<&SuccessionExplainView>,
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -433,6 +459,7 @@ pub fn build_maintenance_plan_report(
         own_output_delta,
         result.plan.key_locality.as_ref(),
         own_contract,
+        succession,
     );
     let _ = writeln!(out, "model {}  {}", model_name, headline.render_text());
     let _ = writeln!(out);
@@ -928,6 +955,15 @@ pub fn build_maintenance_plan_report(
                     let _ = writeln!(out, "      diff_patch delete leg: {delete_leg_line}");
                 }
             }
+
+            // Succession grain (`docs/specs/cli.md` §"Succession grain").
+            if cell.technique == Technique::SuccessionPatch {
+                if let Some(view) = succession {
+                    for line in view.render_text_lines() {
+                        let _ = writeln!(out, "      {line}");
+                    }
+                }
+            }
         }
     }
     let _ = writeln!(out);
@@ -1085,6 +1121,12 @@ pub fn build_maintenance_plan_report(
             };
             let _ = writeln!(out, "  - {} ({})", edge.name, provider);
             write_relation_contract(&mut out, "      ", &edge.contract);
+            if let Some(lateness) = &edge.lateness {
+                let _ = writeln!(
+                    out,
+                    "      orchestration-only fact: lateness = {lateness} (never a plan input)"
+                );
+            }
             if let Some((_, shape)) = edge_delta_types.iter().find(|(name, _)| name == &edge.name) {
                 let _ = writeln!(out, "      delta type: {}", format_output_delta(shape));
             }
@@ -1645,6 +1687,10 @@ pub struct ExplainMaintenanceJson {
     /// (`docs/specs/cli.md` §Constraints item 5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub definition_delta: Option<ExplainDefinitionDeltaJson>,
+    /// The model's succession grain object (`docs/specs/cli.md` §"Succession
+    /// grain"), absent for a non-succession model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub succession: Option<SuccessionJson>,
 }
 
 /// A pending definition delta, as reported by `smelt explain --json`
@@ -1724,8 +1770,11 @@ pub fn build_maintenance_plan_json(
     pending_definition_delta: Option<&(MigrationVerdict, String)>,
     own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
     key_locality: Option<&smelt_logical::maintenance::KeyLocality>,
+    succession: Option<&SuccessionExplainView>,
 ) -> ExplainMaintenanceJson {
-    let delta_signature = delta_signature_headline(own_output_delta, key_locality, &own_contract);
+    let delta_signature =
+        delta_signature_headline(own_output_delta, key_locality, &own_contract, succession);
+    let succession_json = succession.map(SuccessionExplainView::to_json);
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
         .into_iter()
@@ -1824,6 +1873,7 @@ pub fn build_maintenance_plan_json(
         probes,
         refusals,
         definition_delta,
+        succession: succession_json,
     }
 }
 

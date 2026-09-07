@@ -16,6 +16,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities, schem
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -39,6 +40,7 @@ fn print_with_ephemerals(
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -147,19 +149,7 @@ fn source_resolution() {
     insta::assert_snapshot!(result, @"SELECT * FROM raw.events");
 }
 
-// ===== QUALIFY rewrite (PostgreSQL/Spark) =====
-
-#[test]
-fn qualify_rewrite_postgresql() {
-    let sql = "SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t QUALIFY rn = 1";
-    let result = print_with(
-        sql,
-        &SqlDialect::PostgreSQL,
-        &BackendCapabilities::postgresql(),
-        "main",
-    );
-    insta::assert_snapshot!(result);
-}
+// ===== QUALIFY rewrite (Spark) =====
 
 #[test]
 fn qualify_rewrite_spark() {
@@ -352,12 +342,12 @@ fn unnest_to_explode_spark() {
 }
 
 #[test]
-fn explode_to_unnest_postgresql() {
+fn explode_to_unnest_bigquery() {
     let sql = "SELECT EXPLODE(arr) FROM t";
     let result = print_with(
         sql,
-        &SqlDialect::PostgreSQL,
-        &BackendCapabilities::postgresql(),
+        &SqlDialect::BigQuery,
+        &BackendCapabilities::bigquery(),
         "main",
     );
     insta::assert_snapshot!(result, @"SELECT UNNEST(arr) FROM t");
@@ -400,12 +390,13 @@ fn bool_or_to_some_spark() {
 }
 
 #[test]
-fn every_unchanged_postgresql() {
+fn every_unchanged_spark() {
+    // Spark has no registry emission row for EVERY — it defaults to native.
     let sql = "SELECT EVERY(b) FROM t";
     let result = print_with(
         sql,
-        &SqlDialect::PostgreSQL,
-        &BackendCapabilities::postgresql(),
+        &SqlDialect::SparkSQL,
+        &BackendCapabilities::spark(),
         "main",
     );
     insta::assert_snapshot!(result, @"SELECT EVERY(b) FROM t");
@@ -444,6 +435,7 @@ fn make_path_ref_ctx<'a>(
         smelt_path_ref: Some(resolver),
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     }
 }
 
@@ -464,6 +456,7 @@ fn make_path_call_ctx<'a>(
         smelt_path_ref: None,
         smelt_path_call: Some(expander),
         restructure_plans: &[],
+        settled_emissions: &[],
     }
 }
 

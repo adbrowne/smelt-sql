@@ -1,0 +1,916 @@
+use serde::Serialize;
+
+use smelt_core::ModelFile;
+use smelt_logical::analysis::join_shape::JoinContext;
+use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::maintenance::choice::{
+    effective_override, resolve_cell_write_suppression, technique_requires_row_identity,
+    WriteSuppression,
+};
+use smelt_logical::maintenance::derive::row_identity;
+use smelt_logical::maintenance::emit::{
+    emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_delete_insert,
+    emit_in_place_update, emit_keyed_fold, emit_keyed_fold_suppressed, emit_per_group_recompute,
+    MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
+};
+use smelt_logical::maintenance::{ColumnGroup, PlanCell, RowIdentity, Technique, Trigger};
+
+use smelt_planner::SourceTimeseriesMap;
+
+use crate::compile::{CompilerRegistry, EphemeralResolver};
+use crate::cumulative::classify_cumulative_sql;
+use crate::transformer::{inject_source_filters, inject_time_filter, SourceBound, TimeRange};
+
+/// The full closed technique registry the technique-preview set enumerates,
+/// one entry per [`Technique`] variant (`docs/specs/ui_model_diagnostics.md`
+/// §Semantics "Technique preview set": "never partial by omission"). There
+/// is no separate "region recompute" registry member: `Technique::
+/// DeleteInsert` **is** region recompute — the DELETE-the-window/INSERT-its-
+/// recompute op, named twice in the spec prose (once as the family a cell
+/// may itself admit for a `RecomputeRegion` corner, once as the
+/// always-available fallback every other cell's preview set offers) but a
+/// single emitted-statement shape and a single [`Technique`] value.
+const ALL_TECHNIQUES: [Technique; 5] = [
+    Technique::DeleteInsert,
+    Technique::KeyedFold,
+    Technique::ColumnScopedMerge,
+    Technique::InPlaceUpdate,
+    Technique::PerGroupRecompute,
+];
+
+/// One statement of a [`TechniquePreview`]'s illustrative SQL — a
+/// `Serialize`-able projection of [`smelt_logical::maintenance::emit::
+/// MaintenanceStatement`] (which does not itself derive `Serialize`, kept
+/// out of `smelt-logical`'s dependency-free emit module by design).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreviewStatement {
+    pub sql: String,
+}
+
+/// A preview entry's admissibility verdict
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility
+/// verdict"). Exactly one entry per cell is `Admitted`; a `NotApplicable`
+/// entry always carries a non-empty `reason` (fail-loud discipline,
+/// `CLAUDE.md` §"Fail-loud discipline").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum Admissibility {
+    /// This is the technique the derived plan actually resolved for the
+    /// cell (`cell.technique`) — its statements are byte-identical to what
+    /// a live run executing this cell would emit
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
+    /// owner)").
+    Admitted,
+    /// Proven sound for this cell by the same admission logic that governs
+    /// real execution (`smelt_logical::maintenance::choice`), but not the
+    /// technique the plan resolved. Today this is exactly `Technique::
+    /// DeleteInsert` (region recompute) whenever it is not itself the
+    /// admitted technique — always sound, contract-agnostic over replayable
+    /// input (`docs/specs/ui_model_diagnostics.md` §Semantics
+    /// "Admissibility verdict").
+    InterchangeableAlternative,
+    /// This technique's structural preconditions are not met for this cell.
+    /// The emitter is still called against the cell's own contract/
+    /// identity/column data to render illustrative SQL where that is
+    /// possible — `reason` makes clear the rendered SQL is not a real
+    /// option for this cell, never silently indistinguishable from
+    /// `InterchangeableAlternative`.
+    NotApplicable { reason: String },
+}
+
+/// One technique's rendered SQL for one cell, plus its admissibility
+/// verdict (`docs/specs/ui_model_diagnostics.md` §Surface "smelt-runtime
+/// builder"; §Semantics "Technique preview set").
+#[derive(Debug, Clone, Serialize)]
+pub struct TechniquePreview {
+    pub technique: Technique,
+    /// Whether `statements` must run inside a single backend transaction
+    /// (`smelt_logical::maintenance::emit::StatementGroup::transactional`).
+    /// `false` (with an empty `statements`) when the technique's statements
+    /// could not be built at all for this cell.
+    pub transactional: bool,
+    pub statements: Vec<PreviewStatement>,
+    pub admissibility: Admissibility,
+}
+
+/// A maintenance cell's identifying fields plus its technique-preview set
+/// (`docs/specs/ui_model_diagnostics.md` §Surface "smelt-runtime builder";
+/// §Semantics "Technique preview set").
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanCellDiagnostics {
+    /// The cell's column group name (`smelt_logical::maintenance::PlanCell::group`).
+    pub group: String,
+    /// `{:?}`-rendered `smelt_logical::maintenance::Trigger` — mirrors the
+    /// existing CLI report's own rendering (`explain::
+    /// build_maintenance_plan_report`), not a re-derivation.
+    pub trigger: String,
+    /// `{:?}`-rendered `smelt_logical::maintenance::Corner`.
+    pub corner: String,
+    /// The technique the derived plan actually resolved for this cell —
+    /// the same value as the one `technique_previews` entry carrying
+    /// [`Admissibility::Admitted`].
+    pub admitted_technique: Technique,
+    /// The cell's own region row identity (P2,
+    /// `model_properties.md` §"Region row identity").
+    pub row_identity: RowIdentity,
+    /// One entry per [`ALL_TECHNIQUES`] member — never partial by omission.
+    pub technique_previews: Vec<TechniquePreview>,
+}
+
+/// Resolve `cell`'s own write-suppression verdict for the preview builder —
+/// the same override-ladder + P2/P3 proof `smelt-cli/src/explain.rs`'s
+/// "write variant: …" report line already runs, folded through
+/// [`resolve_cell_write_suppression`] so this preview's rendered SQL can
+/// never drift from what a live run would execute
+/// (`docs/specs/incremental_models.md` §"Statement emission (single
+/// owner)"). `column_groups` is the model's derived column-group set
+/// (`smelt_logical::maintenance::derive::derive_maintenance_plan`'s
+/// `MaintenancePlanResult::column_groups`); `cell.group`'s display name
+/// matches exactly one member, or none for a synthetic/unit-test cell (an
+/// empty `group_columns` then fails the P3 proof fail-closed, same as a
+/// genuinely empty group).
+fn resolve_preview_write_suppression(
+    model: &ModelFile,
+    cell: &PlanCell,
+    column_groups: &[ColumnGroup],
+    sql: &str,
+) -> Result<WriteSuppression, String> {
+    let group_columns: Vec<String> = column_groups
+        .iter()
+        .find(|g| g.name() == cell.group)
+        .map(|g| g.columns.clone())
+        .unwrap_or_default();
+    let trigger_address = match &cell.trigger {
+        Trigger::NewData { source } | Trigger::UpstreamMutation { source } => Some(source.clone()),
+        Trigger::Backfill => Some("backfill".to_string()),
+        Trigger::ColumnAdded { .. } => None,
+    };
+    let maintenance_cfg = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.maintenance.as_ref());
+    let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+    let cells_cfg = maintenance_cfg
+        .map(|m| m.cells.as_slice())
+        .unwrap_or_default();
+    let overrides = trigger_address
+        .as_deref()
+        .map(|addr| effective_override(defaults_cfg, cells_cfg, addr, &group_columns))
+        .unwrap_or_default();
+    resolve_cell_write_suppression(sql, &group_columns, cell, &overrides)
+        .map_err(|refusal| format!("{WRITE_SUPPRESSION_REFUSAL_MARKER}{refusal}"))
+}
+
+/// Prefix marker on a [`build_technique_statements`] error string that
+/// distinguishes a write-suppression [`smelt_logical::maintenance::choice::
+/// ChoiceRefusal`] (`resolve_preview_write_suppression`'s own `Err`, e.g. a
+/// `technique: suppress` pin over a refused P2/P3 proof — a shape a live run
+/// hard-fails on, `maintenance_driver.rs`'s own `ChoiceRefusal` propagation)
+/// from every other structural build failure (a missing `unique_key`, an
+/// unclassifiable cumulative shape, …) that has always been possible for a
+/// cell's own admitted technique's illustrative preview to hit. Only the
+/// former downgrades [`Admissibility::Admitted`] to `NotApplicable` in
+/// [`resolve_technique_admissibility`] — every other structural failure
+/// keeps the pre-existing `Admitted`-despite-empty-statements convention
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility verdict":
+/// "Exactly one preview entry per cell is `Admitted`").
+const WRITE_SUPPRESSION_REFUSAL_MARKER: &str = "MaintenanceWriteSuppressionRefused: ";
+
+/// Build one technique's illustrative [`StatementGroup`] for `cell`, using
+/// the same pure emitters a live run uses
+/// (`docs/specs/incremental_models.md` §"Statement emission (single
+/// owner)") — parameterized by an explicit `technique` argument rather than
+/// reading `cell.technique`, so every technique in [`ALL_TECHNIQUES`] can be
+/// previewed regardless of which one the cell actually admitted
+/// (`docs/specs/ui_model_diagnostics.md` §Design "Why preview *every*
+/// technique").
+///
+/// This is the sole owner of the symbolic (no real `--period` window)
+/// statement derivation — `smelt-cli::explain` no longer keeps a second copy
+/// (`smelt_cli::explain::build_admitted_statement_group` reads this
+/// function's output, verbatim, out of the `Admitted` technique-preview
+/// entry rather than re-deriving it). This version always renders the
+/// symbolic `{{window_start}}`/`{{window_end}}` output-window placeholders:
+/// a technique-preview build is a display-only illustration of a cell's
+/// shape, not a `--period`-bound dry run. `smelt-cli`'s own
+/// `build_delete_insert_period_statement_group` is the one surviving
+/// CLI-side re-derivation, scoped to exactly the one case a real `--period`
+/// changes in a way plain token substitution over this function's
+/// placeholder output cannot reproduce (`Technique::DeleteInsert`'s skew
+/// inversion and widened source-scan pushdown) — every other technique's
+/// real-`--period` rendering is plain substitution over this function's own
+/// output, not a second derivation.
+///
+/// Returns `Err(reason)` when this technique's structural preconditions
+/// (a declared `timeseries.partition_column` for `DeleteInsert`, a
+/// classifiable cumulative shape for `KeyedFold`, a non-empty `unique_key`
+/// for `ColumnScopedMerge`, a `Trigger::ColumnAdded` cell for
+/// `InPlaceUpdate`) cannot be assembled from `cell`/`model`'s own data —
+/// never a fabricated statement group.
+#[allow(clippy::too_many_arguments)]
+fn build_technique_statements(
+    technique: Technique,
+    model: &ModelFile,
+    schema: &str,
+    target: &str,
+    registry: &CompilerRegistry,
+    resolver: &EphemeralResolver,
+    dialect: MaintenanceDialect,
+    unique_key: &[String],
+    source_timeseries: &SourceTimeseriesMap,
+    cell: &PlanCell,
+    column_groups: &[ColumnGroup],
+) -> Result<StatementGroup, String> {
+    let trigger = &cell.trigger;
+    let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+    let table_name = format!("{schema}.{}", model.db_name_owned());
+    let placeholder_range = || TimeRange {
+        start: "{{window_start}}".to_string(),
+        end: "{{window_end}}".to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
+    };
+
+    match technique {
+        Technique::DeleteInsert => {
+            let partition_col = model
+                .metadata
+                .as_deref()
+                .and_then(|m| m.timeseries.as_ref())
+                .map(|t| t.partition_column.clone())
+                .ok_or_else(|| {
+                    "no timeseries.partition_column declared — cannot build the region \
+                     DELETE+INSERT pair"
+                        .to_string()
+                })?;
+
+            let wrapped_raw =
+                inject_time_filter(&stripped_sql, &partition_col, &placeholder_range())
+                    .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
+
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &wrapped_raw, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+            let region = Region {
+                start: "'{{window_start}}'".to_string(),
+                end: "'{{window_end}}'".to_string(),
+            };
+
+            Ok(emit_delete_insert(
+                &table_name,
+                &partition_col,
+                &region,
+                &compiled.sql,
+                dialect,
+            ))
+        }
+        Technique::KeyedFold => {
+            let model_has_timeseries = model
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.timeseries.is_some());
+            let declared_fds: &[smelt_core::config::FunctionalDependency] = model
+                .metadata
+                .as_ref()
+                .map(|m| m.functional_dependencies.as_slice())
+                .unwrap_or(&[]);
+            let classification = classify_cumulative_sql(
+                &model.name,
+                &stripped_sql,
+                source_timeseries,
+                model_has_timeseries,
+                declared_fds,
+            )
+            .map_err(|e| format!("{e}"))?;
+
+            // `Technique::KeyedFold` cells are only synthesized for the
+            // window-forward run shape today (`derive_new_data`'s
+            // `Grain::Key` arm requires a `FoldSpec`, which the
+            // plain-overwrite/snapshot-reconcile family does not populate —
+            // `docs/plans/20260809-keyed-frontier.md` Phase 3's own scope
+            // note). A `None` here would mean this cell reached a
+            // snapshot-reconcile model — an internal invariant violation,
+            // not a model error.
+            let driving_ts = classification
+                .driving_source
+                .timeseries
+                .clone()
+                .ok_or_else(|| {
+                    "internal error: KeyedFold cell resolved for a snapshot-reconcile model \
+                 (no clocked driving source)"
+                        .to_string()
+                })?;
+            let time_range = placeholder_range();
+            let mut bound_map = std::collections::HashMap::new();
+            bound_map.insert(
+                classification.driving_source.name.clone(),
+                SourceBound {
+                    partition_col: driving_ts.partition_column.clone(),
+                    before_secs: 0,
+                    after_secs: 0,
+                },
+            );
+            let pushed = inject_source_filters(&stripped_sql, &bound_map, &time_range);
+
+            // State augmentation happens on this RAW, pre-compile SQL, not
+            // the compiled/cast-wrapped output — mirrors
+            // `smelt-runtime::cumulative::execute_cumulative_aggregate`'s
+            // ordering fix (`docs/outcomes/20260809-rung2-state-shapes` row
+            // 5): a state expression's `per_partition_expr` needs the
+            // model's own raw source columns, only in scope before the
+            // compiler's `_smelt_typed` cast wrapper.
+            let state_columns = classification.state_columns();
+            let pushed = smelt_logical::maintenance::emit::state_augmented_projection(
+                &pushed,
+                &state_columns,
+            )
+            .map_err(|_| {
+                "failed to append decomposed-state columns: SELECT could not be parsed".to_string()
+            })?;
+
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+            // Single-owner statement rule: the same fold-expansion emitter
+            // the executed `MERGE` uses
+            // (`smelt-runtime::cumulative::build_cumulative_merge_sql`), so
+            // this preview's fold shape can never diverge from what the
+            // real run executes (`docs/outcomes/20260809-rung2-state-shapes`
+            // row 7).
+            let folds: Vec<(String, String)> = classification
+                .aggregator_columns
+                .iter()
+                .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
+                .collect();
+
+            // Mirrors `crate::cumulative::resolve_cumulative_write_suppression`
+            // exactly: raw P2/P3 proof (group columns = the classification's
+            // own aggregator output names, row identity re-derived from the
+            // classification's proven unique key over the pre-augmentation
+            // SQL), then the override ladder's write-suppression dimension
+            // folded in via `resolve_write_variant` over `Trigger::NewData`/
+            // `ledger_catch_up: false` — the live keyed-fold write path folds
+            // the SAME ladder in now (`docs/outcomes/
+            // 20260815-definition-delta-migrate/phases/33-plan.md`), so this
+            // preview and the live run agree.
+            let fold_group_columns: Vec<String> = classification
+                .aggregator_columns
+                .iter()
+                .map(|col| col.output_name.clone())
+                .collect();
+            let fold_identity = row_identity(&classification.unique_key, &stripped_sql);
+            let fold_comparability = model_property_vector(&stripped_sql, &JoinContext::new())
+                .map(|v| v.comparability)
+                .unwrap_or_default();
+            let fold_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+                &fold_group_columns,
+                &fold_comparability,
+                &fold_identity,
+            );
+            let fold_overrides = model
+                .metadata
+                .as_deref()
+                .map(|m| {
+                    smelt_db::queries::maintenance::keyed_fold_effective_override(
+                        m,
+                        &classification.driving_source.name,
+                    )
+                })
+                .unwrap_or_default();
+            let fold_trigger = Trigger::NewData {
+                source: classification.driving_source.name.clone(),
+            };
+            let (fold_suppression, _) = smelt_logical::maintenance::choice::resolve_write_variant(
+                &fold_suppression,
+                &fold_trigger,
+                false,
+                &fold_overrides,
+            )
+            .map_err(|refusal| format!("{WRITE_SUPPRESSION_REFUSAL_MARKER}{refusal}"))?;
+            match fold_suppression {
+                WriteSuppression::Suppressed { compared_columns } => {
+                    Ok(emit_keyed_fold_suppressed(
+                        &table_name,
+                        &classification.unique_key,
+                        &folds,
+                        &compiled.sql,
+                        None,
+                        &compared_columns,
+                        dialect,
+                    ))
+                }
+                WriteSuppression::Unconditional { .. } => Ok(emit_keyed_fold(
+                    &table_name,
+                    &classification.unique_key,
+                    &folds,
+                    &compiled.sql,
+                    None,
+                    dialect,
+                )),
+            }
+        }
+        Technique::ColumnScopedMerge => {
+            if unique_key.is_empty() {
+                return Err(
+                    "no unique_key declared — cannot build the column-scoped MERGE".to_string(),
+                );
+            }
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+            match resolve_preview_write_suppression(model, cell, column_groups, &stripped_sql)? {
+                WriteSuppression::Suppressed { compared_columns } => {
+                    Ok(emit_column_scoped_merge_suppressed(
+                        &table_name,
+                        unique_key,
+                        &compiled.sql,
+                        &compared_columns,
+                        &compiled.output_columns,
+                        dialect,
+                    ))
+                }
+                WriteSuppression::Unconditional { .. } => Ok(emit_column_scoped_merge(
+                    &table_name,
+                    unique_key,
+                    &compiled.sql,
+                    &compiled.output_columns,
+                    dialect,
+                )),
+            }
+        }
+        Technique::InPlaceUpdate => {
+            let Trigger::ColumnAdded { columns } = trigger else {
+                return Err(
+                    "Technique::InPlaceUpdate only serves a Trigger::ColumnAdded cell — this \
+                     cell's own trigger is not one"
+                        .to_string(),
+                );
+            };
+            if columns.is_empty() {
+                return Err(
+                    "Trigger::ColumnAdded carries no columns — nothing to backfill".to_string(),
+                );
+            }
+            // Every emitter in this module only assembles plain strings a
+            // caller already resolved (this module's own doc comment on
+            // `emit_keyed_fold`'s `folds` parameter) — the added columns'
+            // defining expressions come straight from the model's own
+            // current SQL, the same source
+            // `smelt_logical::maintenance::derive::derive_column_added`
+            // reads via `column_def_from_sql` to classify each column
+            // `PureBackfill` in the first place. A `PureBackfill` verdict
+            // means every dependency is an already-stored target column —
+            // no upstream compile/read is needed, unlike
+            // `ColumnScopedMerge`'s `compiled.sql` above.
+            let mut assignments = Vec::with_capacity(columns.len());
+            for col in columns {
+                let def =
+                    smelt_logical::maintenance::derive::column_def_from_sql(&stripped_sql, col)
+                        .ok_or_else(|| {
+                            format!(
+                                "could not resolve added column '{col}''s expression in the \
+                                 model's own SQL"
+                            )
+                        })?;
+                assignments.push((col.clone(), def.expr.syntax().text().to_string()));
+            }
+            Ok(StatementGroup {
+                statements: emit_in_place_update(&table_name, &assignments, None)
+                    .into_iter()
+                    .map(|sql| MaintenanceStatement { sql })
+                    .collect(),
+                transactional: false,
+            })
+        }
+        Technique::PerGroupRecompute => {
+            // The repair family (`docs/specs/incremental_models.md` §"The
+            // repair family"), built through the SAME two string builders
+            // the live keyed run path uses
+            // (`crate::maintenance_driver::repair_affected_keys_select` /
+            // `repair_candidate_select`) before handing them to the single
+            // owner `emit_per_group_recompute` — so this preview's shape
+            // can never diverge from what a real run executes.
+            let key: Vec<String> = match &cell.row_identity.identity {
+                RowIdentity::Key(k) if !k.is_empty() => k.clone(),
+                _ if !unique_key.is_empty() => unique_key.to_vec(),
+                _ => {
+                    return Err(
+                        "no proven row identity (RowIdentity::WholeRow) and no declared \
+                         unique_key — per-group recompute recomputes whole key groups and has \
+                         no meaning without a group key"
+                            .to_string(),
+                    );
+                }
+            };
+            // The bounded per-group read slice is admission obligation 4;
+            // a cell carrying none has no affected-key read to illustrate.
+            let clamp = cell.scans.first().ok_or_else(|| {
+                "this cell carries no derived scan clamp — the repair's affected-key read is \
+                 bounded by the cell's own proven slice, never by an assumed one"
+                    .to_string()
+            })?;
+            // The mutated source's physical table, named the same way the
+            // default source mapping does (`SourceInfo::db_name_for_target`
+            // — `<schema>.<address segments joined by _>`, and a
+            // `PlanCell`'s clamp carries the bare address `raw.orders`,
+            // i.e. the `sources.` prefix already stripped). A preview has
+            // no `SourceInfo` to consult, so a `name:` override is not
+            // reflected here — this SQL is illustrative and never executed.
+            let source_table = format!("{schema}.sources_{}", clamp.source.replace('.', "_"));
+            // Typed literals, unlike `DeleteInsert`'s bare quoted
+            // placeholders: `widened_scan_predicate` uses the region's
+            // endpoints as arithmetic operands, so the substituted text
+            // must bind as a timestamp (mirrors the live run path in
+            // `crate::execute`).
+            let region = Region {
+                start: "TIMESTAMP '{{window_start}}'".to_string(),
+                end: "TIMESTAMP '{{window_end}}'".to_string(),
+            };
+            let affected_keys_select = crate::maintenance_driver::repair_affected_keys_select(
+                &source_table,
+                &key,
+                Some(clamp),
+                &region,
+            );
+            // The fold's own create/merge path already carries a decomposed
+            // combiner's hidden state columns in the physical table (P10,
+            // `docs/outcomes/20260809-repair-family/phases/10-plan.md`) — a
+            // repair candidate must widen for them too, or this preview's
+            // shape would diverge from what a real run executes. A live
+            // `Technique::PerGroupRecompute` cell only ever exists for a
+            // model that already classified as a cumulative aggregate
+            // (`derive_new_data`'s key-grain narrowing), but this preview
+            // can be asked to illustrate the technique against an
+            // arbitrary `PlanCell`/model pairing that never classifies —
+            // fall back to "no hidden state" rather than refusing the
+            // whole preview.
+            let model_has_timeseries = model
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.timeseries.is_some());
+            let declared_fds: &[smelt_core::config::FunctionalDependency] = model
+                .metadata
+                .as_ref()
+                .map(|m| m.functional_dependencies.as_slice())
+                .unwrap_or(&[]);
+            let state_columns = classify_cumulative_sql(
+                &model.name,
+                &stripped_sql,
+                source_timeseries,
+                model_has_timeseries,
+                declared_fds,
+            )
+            .map(|c| c.state_columns())
+            .unwrap_or_default();
+            let augmented_sql = crate::maintenance_driver::repair_augmented_model_sql(
+                &stripped_sql,
+                &state_columns,
+            )
+            .map_err(|e| format!("{e}"))?;
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &augmented_sql, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+            let candidate_select = crate::maintenance_driver::repair_candidate_select(
+                &compiled.sql,
+                &key,
+                &affected_keys_select,
+            );
+            Ok(emit_per_group_recompute(
+                &table_name,
+                &crate::maintenance_driver::repair_staged_relation(&model.db_name_owned()),
+                &key,
+                &affected_keys_select,
+                &candidate_select,
+                dialect,
+            ))
+        }
+        // The succession-patch emitter lands in a later phase
+        // (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md` phase
+        // 4) — no statement-group preview yet, mirroring how this function
+        // already refuses (never fabricates) when a technique's
+        // preconditions can't be assembled.
+        Technique::SuccessionPatch => Err(
+            "no statement-group preview yet for Technique::SuccessionPatch — the succession \
+             emitter lands in a later phase"
+                .to_string(),
+        ),
+    }
+}
+
+/// Resolve one technique preview entry's [`Admissibility`], given `cell`'s
+/// own admitted technique/row-identity and `technique`'s already-attempted
+/// build outcome ([`build_technique_statements`]'s result, or an
+/// equivalent caller-supplied one for a synthetic/unit-test cell).
+///
+/// Pure and read-only: consults `cell.technique` (equality only, never
+/// re-derived) and [`technique_requires_row_identity`] (the new additive
+/// `choice.rs` classifier) — never [`smelt_logical::maintenance::choice::
+/// resolve_cell_choice`] itself, so this function cannot influence real
+/// execution admission (`docs/specs/ui_model_diagnostics.md` §Design "Why
+/// preview *every* technique").
+fn resolve_technique_admissibility(
+    cell: &PlanCell,
+    technique: Technique,
+    build_result: &Result<StatementGroup, String>,
+) -> Admissibility {
+    if technique == cell.technique {
+        // Ordinarily the cell's own admitted technique always builds — it
+        // was constructed from the same facts `derive_maintenance_plan`
+        // proved admission over. The one exception is a `technique:
+        // suppress` pin whose P2/P3 write-suppression proof itself refused
+        // (`resolve_preview_write_suppression`'s `ChoiceRefusal`): a live
+        // run over that same cell would hard-fail the whole run
+        // (`maintenance_driver.rs`'s own `.map_err(...)?` propagation), so
+        // there is no statement a live run would actually emit here to
+        // label `Admitted` — `NotApplicable` with the refusal's own reason
+        // is the honest verdict, never a silent claim of admission over an
+        // empty statement list.
+        return match build_result {
+            Err(reason) if reason.starts_with(WRITE_SUPPRESSION_REFUSAL_MARKER) => {
+                Admissibility::NotApplicable {
+                    reason: reason
+                        .strip_prefix(WRITE_SUPPRESSION_REFUSAL_MARKER)
+                        .unwrap_or(reason)
+                        .to_string(),
+                }
+            }
+            _ => Admissibility::Admitted,
+        };
+    }
+    if technique == Technique::DeleteInsert {
+        // Region recompute is always sound and contract-agnostic over
+        // replayable input when it is not itself the admitted technique
+        // (`docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility
+        // verdict") — unless this specific cell's model cannot even build
+        // the illustrative statements (no declared partition axis), in
+        // which case there is nothing to be interchangeable with.
+        return match build_result {
+            Ok(_) => Admissibility::InterchangeableAlternative,
+            Err(reason) => Admissibility::NotApplicable {
+                reason: reason.clone(),
+            },
+        };
+    }
+    if technique_requires_row_identity(technique)
+        && matches!(cell.row_identity.identity, RowIdentity::WholeRow)
+    {
+        return Admissibility::NotApplicable {
+            reason: format!(
+                "no proven row identity (RowIdentity::WholeRow) for this cell — {technique:?} \
+                 addresses rows individually and requires a key"
+            ),
+        };
+    }
+    if let Err(reason) = build_result {
+        return Admissibility::NotApplicable {
+            reason: reason
+                .strip_prefix(WRITE_SUPPRESSION_REFUSAL_MARKER)
+                .unwrap_or(reason)
+                .to_string(),
+        };
+    }
+    // Building succeeded, but `smelt_logical::maintenance::choice`'s own
+    // admission logic never proves two different targeted-write technique
+    // families interchangeable for the same cell — a derived plan admits
+    // exactly one family per cell (`choice.rs`'s own module doc comment:
+    // "the resolvable set" is `{the cell's own admitted technique,
+    // RegionRecompute}`), so any other family is structurally not a real
+    // option here even when the emitter itself could render SQL for it.
+    Admissibility::NotApplicable {
+        reason: format!(
+            "this cell's derived plan resolved {:?}, not {technique:?} — smelt_logical::\
+             maintenance::choice's admission logic does not prove different targeted-write \
+             technique families interchangeable for the same cell",
+            cell.technique
+        ),
+    }
+}
+
+/// Build one cell's [`PlanCellDiagnostics`]: one [`TechniquePreview`] per
+/// [`ALL_TECHNIQUES`] member, never partial by omission
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Technique preview
+/// set").
+#[allow(clippy::too_many_arguments)]
+pub fn build_plan_cell_diagnostics(
+    cell: &PlanCell,
+    model: &ModelFile,
+    schema: &str,
+    target: &str,
+    registry: &CompilerRegistry,
+    resolver: &EphemeralResolver,
+    dialect: MaintenanceDialect,
+    unique_key: &[String],
+    source_timeseries: &SourceTimeseriesMap,
+    column_groups: &[ColumnGroup],
+) -> PlanCellDiagnostics {
+    let technique_previews = ALL_TECHNIQUES
+        .into_iter()
+        .map(|technique| {
+            let build_result = build_technique_statements(
+                technique,
+                model,
+                schema,
+                target,
+                registry,
+                resolver,
+                dialect,
+                unique_key,
+                source_timeseries,
+                cell,
+                column_groups,
+            );
+            let (statements, transactional) = match &build_result {
+                Ok(group) => (
+                    group
+                        .statements
+                        .iter()
+                        .map(|s| PreviewStatement { sql: s.sql.clone() })
+                        .collect(),
+                    group.transactional,
+                ),
+                Err(_) => (Vec::new(), false),
+            };
+            let admissibility = resolve_technique_admissibility(cell, technique, &build_result);
+            TechniquePreview {
+                technique,
+                transactional,
+                statements,
+                admissibility,
+            }
+        })
+        .collect();
+
+    PlanCellDiagnostics {
+        group: cell.group.clone(),
+        trigger: format!("{:?}", cell.trigger),
+        corner: format!("{:?}", cell.corner),
+        admitted_technique: cell.technique,
+        row_identity: cell.row_identity.identity.clone(),
+        technique_previews,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::config::{Config, Materialization, Target};
+    use smelt_core::metadata::ModelMetadata;
+    use smelt_core::{Granularity, RefInfo, SmeltRef};
+    use smelt_logical::maintenance::RowIdentityVerdict;
+    use std::collections::HashMap;
+
+    /// A minimal `Trigger::Backfill` cell — `build_technique_statements`
+    /// reads only the trigger off it for the arms this module unit-tests.
+    fn synthetic_backfill_cell() -> PlanCell {
+        PlanCell {
+            group: "{*}".to_string(),
+            trigger: Trigger::Backfill,
+            corner: smelt_logical::maintenance::Corner::RecomputeRegion,
+            technique: Technique::DeleteInsert,
+            partition_local: smelt_logical::maintenance::PartitionLocal::Yes,
+            scans: vec![],
+            ledger_catch_up: false,
+            row_identity: RowIdentityVerdict {
+                identity: RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
+            skeleton_source_closure: None,
+            fingerprint_projections: Default::default(),
+            key_scope: None,
+            state_downgrade: None,
+        }
+    }
+
+    fn duckdb_target() -> Target {
+        Target {
+            target_type: "duckdb".to_string(),
+            database: Some("test.duckdb".to_string()),
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: None,
+            dataset: None,
+            location: None,
+        }
+    }
+
+    fn test_config() -> Config {
+        let mut targets = HashMap::new();
+        targets.insert("dev".to_string(), duckdb_target());
+        Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets,
+            default_materialization: Materialization::View,
+            models: HashMap::new(),
+            python: None,
+            target: None,
+            state: Default::default(),
+            maintenance: None,
+            probes: Default::default(),
+        }
+    }
+
+    /// `build_technique_statements`'s `Technique::DeleteInsert` branch must
+    /// succeed for a model whose outermost FROM is a `TableExpr`-returning
+    /// function call (`smelt.functions.windowed(...)`) — the shape
+    /// `silver.sessions` uses in `examples/web_analytics`
+    /// (`crates/smelt-cli/tests/explain_model.rs::sessions_show_sql_emits_statements`
+    /// is the real-`--period` counterpart of this unit test). Clamping the
+    /// raw, unexpanded model body *before* compiling — never the compiled
+    /// output, which the compiler's own printer has already expanded — is
+    /// what makes this succeed: `inject_time_filter`'s reparse only ever
+    /// sees a plain FROM clause referencing a CTE, never the
+    /// function-expansion's reparse-hostile output.
+    ///
+    /// Ported from `smelt-cli::explain`'s own regression test of the same
+    /// name when the CLI's duplicate no-`--period` derivation was retired in
+    /// favor of this shared builder
+    /// (`docs/plans/20260725-ui-model-diagnostics.md`).
+    #[test]
+    fn delete_insert_clamp_succeeds_on_table_expr_function_from() {
+        use smelt_core::config::TimeseriesConfig;
+
+        let content = "SELECT device_id, d FROM smelt.functions.windowed(src => raw_events)";
+        let path: std::path::PathBuf = "sessions.sql".into();
+        let model = ModelFile {
+            name: "sessions".to_string(),
+            model_id: smelt_core::ModelId::from_path(path.clone()),
+            path,
+            content: content.to_string(),
+            refs: vec![RefInfo {
+                has_named_params: false,
+                range: Default::default(),
+                smelt_ref: SmeltRef::Path(vec!["raw_events".to_string()]),
+            }],
+            parse_errors: Vec::new(),
+            metadata: Some(Box::new(ModelMetadata {
+                materialization: Some(Materialization::Table),
+                timeseries: Some(TimeseriesConfig {
+                    event_time_column: "d".to_string(),
+                    partition_column: "d".to_string(),
+                    granularity: Granularity::Day,
+                    week_start: None,
+                    assert_monotonic: false,
+                }),
+                ..Default::default()
+            })),
+            kind: smelt_core::ModelKind::Sql,
+            address_segments: vec!["sessions".to_string()],
+        };
+
+        let config = test_config();
+        let mut registry = CompilerRegistry::new(&config, &config.targets);
+        let mut fn_bodies: crate::fn_bodies::FnBodyMap = HashMap::new();
+        fn_bodies.insert(
+            "windowed".to_string(),
+            (
+                vec![("src".to_string(), None)],
+                "(SELECT * FROM src)".to_string(),
+            ),
+        );
+        registry.set_function_bodies_all(fn_bodies);
+        let resolver = registry
+            .get("dev")
+            .build_ephemeral_resolver(&[], "main")
+            .expect("no ephemerals");
+
+        let source_timeseries = SourceTimeseriesMap::new();
+
+        let group = build_technique_statements(
+            Technique::DeleteInsert,
+            &model,
+            "main",
+            "dev",
+            &registry,
+            &resolver,
+            MaintenanceDialect::DuckDb,
+            &[],
+            &source_timeseries,
+            &synthetic_backfill_cell(),
+            &[],
+        )
+        .unwrap_or_else(|e| {
+            panic!("expected Ok (clamp injection over the expanded FROM), got Err: {e}")
+        });
+
+        assert!(
+            group
+                .statements
+                .iter()
+                .any(|s| s.sql.contains("_smelt_output_clamp")),
+            "expected the output clamp wrapper in the emitted statements: {:?}",
+            group.statements
+        );
+    }
+}

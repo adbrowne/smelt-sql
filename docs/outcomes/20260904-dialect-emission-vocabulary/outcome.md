@@ -1,7 +1,7 @@
 # Outcome: Dialect emission vocabulary — templates and operand-conditional verdicts
 
 **Created:** 2026-09-04
-**Status:** queued
+**Status:** done
 **Source:** `docs/specs/multi_backend.md` §"Template emission", §"Operand-conditional verdicts" (spec commit `03828a14`); GitHub issues #173, #174, #177, #178, #179, #181
 **Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Emission is scoped to call position", §"Template emission", §"Operand-conditional verdicts", §"Cross-engine emission audit", §Constraints ("Template interpretation is generic", "Operand-conditional verdicts are settled on the compile path"); `docs/specs/architecture.md` §Constraints item 14
 
@@ -72,14 +72,16 @@ audit before it is claimed — never from documentation.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | pending |
-| 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | pending |
-| 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | pending |
-| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb` | pending |
-| 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | pending |
-| 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | pending |
-| 7 | Close the Spark gaps (#178) and the Spark arms of #174 (`LOG` arity, `DAYOFWEEK`), `//` per operand class, `TRUNC`/`TO_JSON` by class — verified on a live Spark via `scripts/spark-up.sh`; tighten `dialect_gaps_spark` (block, never fake, if the server cannot start) | pending |
-| 8 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | pending |
+| 1 | Retire the PostgreSQL emission dialect (#181): remove the variant, capabilities, coverage column, and baseline entry with sign-off; keep the pg_query grammar anchor | done |
+| 2 | `Emission::Template` in the registry with build-time validation; the generic interpreter in the printer with structural parenthesisation; migrate `ModuloCall`/`PowerCall` with byte-identical pins | done |
+| 3 | Compile-time refusal of modifiers a template cannot carry; `emission_ownership` extended (no names in the interpreter, every `RewriteId` justified); coverage table gains `template` | done |
+| 4 | Close the DuckDB gaps (#177) with templates/`Unsupported`, verified by the in-process audit; tighten `dialect_gaps_duckdb`; add the end-to-end compile-path modifier-refusal test over the first function-call template row | done |
+| 5 | Operand-conditional verdicts: `OperandClass`, arms with mandatory `otherwise`, compile-path settlement threaded into the printer, `dialect_seam` refusal for unresolved wrong-number entries | done |
+| 6 | Audit probes every arm: fixture columns per class, coverage totality counts arms, ledger rows keyed by arm, coverage table renders arm sets | done |
+| 7 | The Spark arms of #174 (`LOG` arity, `DAYOFWEEK`) plus `//` per operand class and `TRUNC`/`TO_JSON` by class — the first production `Conditional`/`Template` Spark rows, verified on a live Spark via `scripts/spark-up.sh`; `dialect_gaps_spark` 27 → 23 (block, never fake, if the server cannot start) | done |
+| 8 | Close the remaining #178 Spark schema gaps (`Rename`/`Template`/`Unsupported { reason }`, live-verified) including the three running-window rows; tighten `dialect_gaps_spark` with a sign-off line | done |
+| 9 | Close the `DATE_ADD`/`DATE_SUB` type-leg family on both DuckDB and Spark (a `SyntaxForm::Special` registry row is probed as a call but never reaches `try_registry_inference`), so criterion 5's `dialect_gaps_duckdb ≤ 5` and `dialect_gaps_spark ≤ 4` land with every surviving row a `#175`/`#176` `type_gap`; also validate a `Conditional` arm's `Template` verdict at registry construction | done |
+| 10 | Land the invariant in `architecture.md` item 14 and CLAUDE.md; docs-site diagnostics page for the new `UnsupportedOnBackend` reasons; ROADMAP; update the tracking issues with what remains for the BigQuery sweep | done |
 
 ## Decision log
 
@@ -93,6 +95,309 @@ audit before it is claimed — never from documentation.
   pg_query grammar anchor is a different thing and stays. When a PostgreSQL backend is built, the
   audit derives its column from probes; nothing authored today would survive that anyway.
   Recorded as the recommendation the user asked for; reverse by deleting phase 1 and criterion 8.
+
+- 2026-09-06 — **Phase 1 scope note (no reshape).** Planning found two string-keyed
+  PostgreSQL paths beyond the emission enums: `backend_dialect_for` /
+  `backend_write_capabilities_for` in `smelt-db/src/queries/maintenance.rs`, and the `"postgres"`
+  branch of `smelt-logical`'s `as_struct` lowering. Both are unreachable surface —
+  `Target::backend_type` already rejects `type: postgres` — so removing them is not a user-visible
+  behaviour change, and they are folded into phase 1 rather than becoming a phase of their own.
+
+- 2026-09-06 (implement 01) — phase 1 done. `DialectId::PostgreSql`/`SqlDialect::PostgreSQL`,
+  `BackendCapabilities::postgresql()`, the three registry rows, the two string-keyed
+  `smelt-db`/`smelt-logical` paths, and the baseline entry are all removed; two new durable gates
+  added (`no_registry_row_names_a_retired_dialect`, `baseline_names_exactly_the_audited_dialects`);
+  coverage doc regenerated; #181 was already closed. `verify-phase.sh` ALL GREEN. No new gaps
+  surfaced; the pg_query anchor and ROADMAP are confirmed untouched.
+
+- 2026-09-06 (plan 02) — **No reshape.** Phase 1's summary surfaced nothing outside its task
+  list, so phases 2–8 stand as written. Phase 2's plan fixes three design points the outcome left
+  open, all inside its own scope: `Emission::Template` carries a `&'static str` with zero-based
+  `{n}` placeholders; validation is a pure `validate_template` called from the registry seed
+  (asserting, not `.expect(`, so the hardening ratchet is untouched); and a template on a
+  **variadic** signature is rejected at build time, since a placeholder cannot name a variadic
+  tail. A `PAREN_EXPR` argument counts as an atom on substitution — double-wrapping it would break
+  the byte-identical pins criterion 1 requires.
+
+- 2026-09-06 (implement 02) — phase 2 done. `Emission::Template` +
+  `validate_template` + `is_call_shaped_template` shipped in
+  `smelt-types::signatures`; `RewriteId::ModuloCall`/`PowerCall` deleted; `%`,
+  `^`, `**` now templates; generic `print_template` interpreter in
+  `smelt-dialect::printer` dispatched from both the function-call and
+  operator emission sites. Discovered no `PAREN_EXPR` `SyntaxKind` exists in
+  this grammar — the plan's design-decision text named it informally; the
+  real mechanism is the transparent `EXPRESSION` wrapper the parser puts
+  around every function argument and parenthesised group, verified
+  empirically. Argument-level wrapping is gated on the whole template being
+  call-shaped (never wraps for `MOD`/`POWER`, matching the pinned
+  byte-identity tests); a non-call template additionally wraps its own whole
+  output. `docs/reference/dialect-coverage.md` regenerated;
+  `docs/specs/multi_backend.md`'s stale divergence bullet removed. Full
+  `verify-phase.sh` green plus every gate the plan's Verification section
+  named. See `phases/02-summary.md` for detail.
+
+- 2026-09-06 (plan 03) — **Small reshape: the end-to-end leg of criterion 3 moves to phase 4.**
+  Every `Emission::Template` row today is an infix operator (`%`, `^`, `**`), and a `BINARY_EXPR`
+  can carry none of the seven modifiers, so phase 3 has no production call site to refuse
+  end-to-end. Phase 3 therefore ships the refusal as a pure detector wired into
+  `unsupported_emissions`, tested one-modifier-per-test against real parsed SQL; phase 4's row
+  gains the compile-path test once it registers the first function-call template. Nothing leaves
+  the outcome. Phase 3 also needs no spec delta — `multi_backend.md` §"Template emission" already
+  states the refusal rule and the per-`RewriteId` justification line normatively.
+
+- 2026-09-06 (implement 03) — phase 3 done. `template_unsupported_modifier` refuses a template
+  call carrying `DISTINCT`, `FILTER`, `WITHIN GROUP`, an argument-list `ORDER BY`, `IGNORE`/
+  `RESPECT NULLS`, a named argument, or `*`, inspecting only the call's own children and its own
+  `ARG_LIST`'s direct children (never `descendants()`, avoiding the nested-call misattribution
+  trap). `emission_ownership` gained two gates (every `RewriteId` justified with a `Not a
+  template:` doc line; the interpreter holds no target text). Coverage legend gained
+  `template:X`; doc regenerated. Discovered empirically that `COUNT(*)`'s argument is
+  `EXPRESSION(EXPRESSION(STAR))`, not one wrapper layer — `is_star_expression` peels to
+  arbitrary depth. `verify-phase.sh` ALL GREEN after updating 5 line-number-keyed
+  `.claude/unknown-census.toml` entries shifted by the `signatures.rs` doc-comment edit. See
+  `phases/03-summary.md`.
+
+- 2026-09-06 (plan 04) — **No reshape.** Phase 3's summary surfaced nothing outside its task
+  list. Planning measured the seven DuckDB emission rows against a live DuckDB: four names
+  (`INITCAP`, `TO_CHAR`, `QUOTE_IDENT`, `QUOTE_LITERAL`) do not exist on the engine at all and
+  get `Unsupported`; `DATE_SUB` is a template (`{0} - {1}`) and becomes the first *function-call*
+  template row, so it carries criterion 3's end-to-end refusal test; the two `PERCENTILE_*`
+  `Position::Window` ledger rows are already `Emission::Unsupported` in the registry and are
+  simply redundant. Open risk recorded in the plan rather than deferred: templating `DATE_SUB`
+  makes its type leg run for the first time, and `DATE_ADD`'s existing row suggests the
+  unquoted `INTERVAL 1 DAY` argument infers `Unknown`. The plan carries a bounded contingency
+  (infer the unquoted interval literal; correct `DATE_ADD`/`DATE_SUB`'s return type to
+  `Timestamp`, matching `binary.rs` and the engine) so criterion 5's `≤ 5` stays reachable
+  without touching the `#175`/`#176` rows it deliberately leaves standing.
+
+- 2026-09-06 (implement 04) — phase 4 done. DuckDB gap count 12 → 6:
+  `PERCENTILE_CONT`/`PERCENTILE_DISC` Window rows deleted (redundant with the
+  registry's existing `Unsupported`); `INITCAP`/`TO_CHAR`/`QUOTE_IDENT`/
+  `QUOTE_LITERAL` given `Emission::Unsupported`; `DATE_SUB` given
+  `Emission::Template("{0} - {1}")` — the first function-call template row,
+  closing criterion 3's deferred end-to-end leg. Measured against the pinned
+  DuckDB 1.5.4 library, not the ambient CLI (v1.4.4) — the CLI would have
+  wrongly claimed `INITCAP` unsupported; the audit's own two-sided check
+  caught it. Contingency triggered: the plan's unquoted-`INTERVAL`-literal
+  guess was wrong (that literal already infers correctly); the real cause is
+  `DATE_ADD`/`DATE_SUB` having no `SqlFunction` enum variant at all, so the
+  registry's return type (corrected to `Timestamp`, matching `binary.rs`) is
+  never reached — landed as fresh `type_gap` rows per the bail-out clause
+  (count 6, not 4). Also rewrote `a_ledger_row_the_engine_now_accepts_is_reported_stale`
+  to unit-test a new pure `classify_accepted` helper directly, since phase 4
+  closed the only DuckDB Schema-leg row that test used to borrow. `verify-phase.sh`
+  ALL GREEN. See `phases/04-summary.md`.
+
+- 2026-09-06 (plan 05) — **No reshape** (phase 4's summary explicitly says phase 5 stands).
+  Planning fixed four design points inside phase 5's own scope. (a) `OperandClass` lives in
+  `smelt-types::signatures` as a total `of(&DataType)` with no `_` arm. (b) The arm's verdict is
+  a distinct `SettledEmission` type, so a nested conditional is unrepresentable rather than
+  merely rejected, and "the printer receives settled verdicts only" is a type-level fact rather
+  than a convention. (c) Settlement runs inside `print_checked_for` — the single funnel
+  `dialect_seam` already guards — fed by the same `TypeContext` the projection derives from; a
+  caller without one settles every class as `Unresolved`, landing on `otherwise`. (d) Since
+  `smelt-dialect` cannot depend on `smelt-db`, the walk takes a type-lookup callback owned by
+  `smelt-runtime`. Two small spec amendments follow from the code: there is no `DataType::Json`,
+  so the class list swaps `Json` for `Binary` (`Blob`), and `Null`/`Unknown` both classify
+  `Unresolved`. No production registry row becomes conditional here — every candidate row
+  (#173 BigQuery, #174/#178 Spark, `//` per class) needs a live engine the phase cannot reach,
+  so the mechanism is tested on synthetic signatures and the rows land in phase 7, as the
+  outcome already schedules. Nothing leaves the outcome.
+
+- 2026-09-06 (implement 05) — phase 5 done. `OperandClass`/`SettledEmission`/`ConditionalArm`/
+  `CallFacts`/`Signature::settle_at` in `smelt-types`; `crates/smelt-dialect/src/emission_settle.rs`
+  (new) does the compile-path walk and the printer's lookup-or-arity-fallback; `printer.rs`,
+  `restructure.rs`, `emission_check.rs` moved off `emission_at` onto `settle_at`; `print_checked_for`
+  now threads a `TypeContext` into settlement, same construction `derive_projection_for` uses. Spec
+  edits landed (`Json` → `Binary`, `Null`/`Unknown` → `Unresolved`, Known Divergences narrowed). No
+  production row is `Conditional` yet (phase 7's job, per plan 05's note); mechanism tests use
+  synthetic signatures (`registry_coverage.rs`) plus the real `//` entry for walk-mechanics coverage
+  (`operand_conditional.rs`, new). `verify-phase.sh` ALL GREEN. See `phases/05-summary.md`.
+
+- 2026-09-06 (plan 06) — **No reshape**; phase 5's summary named phase 6 as exactly this work and
+  found nothing out of scope. Planning fixed four design points inside phase 6's own scope. (a) The
+  fixture gains `iv_interval` and `bin_blob` columns so every `OperandClass` has a typed column,
+  except `Unresolved`, which no typed column can classify — it is probed with a bare `NULL`
+  literal, and that is the phase's one spec sentence. (b) Arm probes are derived per *distinct arm
+  guard across dialects*, keeping the probe axis dialect-independent as it is today, and the
+  argument classes for arm *k* are found by searching assignments until `settle_at` actually
+  resolves to arm *k* — so an arm shadowed by an earlier one is reported by index rather than
+  silently under-probed. (c) `TypeConstraint`→column (existing) and `OperandClass`→column (new) stay
+  two separate mappings: they answer different questions, and merging them would perturb the
+  existing probe set and surface gaps that belong to phase 7. (d) The registry-wide arm gates land
+  green-but-vacuous because no production row is `Conditional` yet; the mechanism is proven
+  red-green on synthetic signatures, and the gate must exist before phase 7's rows or those arms
+  land unprobed. `.claude/dialect-gaps-baseline.txt` must be unchanged by this phase.
+
+- 2026-09-06 (implement 06) — phase 6 done. `fixture.rs` gained `iv_interval`/`bin_blob` columns
+  (14-cell rows, one NULL each); `probe.rs` gained `arg_for_class` (the arm-guard-class→fixture-arg
+  mapping, distinct from `column_for`), `Probe.arm`/`Probe.facts`, and `conditional_arm_probes`
+  (one probe per distinct arm guard across dialects, proven reachable by an exhaustive
+  `OperandClass` search rather than trusted from list position; an unreachable arm is named, never
+  dropped) — wired into `derive_probes()` so a future `Conditional` row is probed with no further
+  harness work. `main.rs`'s declared-unsupported exemption now settles through
+  `Signature::settle_at` with the probe's own facts, so an arm-specific `Unsupported` exempts only
+  that arm; `every_conditional_arm_is_covered_by_a_probe` is a new registry-wide totality gate
+  (green-but-vacuous today, by design — no production entry is `Conditional` yet). `ledger.rs`
+  rows are now keyed by arm too (`arm_at`, `find`/`row_matches` re-keyed). `report.rs` renders a
+  conditional cell as its arm set. Spec sentence on `Unresolved`'s bare-`NULL` probe landed.
+  `.claude/dialect-gaps-baseline.txt` unchanged. `verify-phase.sh` green except one pre-existing,
+  unrelated flaky `smelt-runtime` test (`python::tests::non_convergent_set_errors`, a temp-file
+  race under parallel execution; passes in isolation). See `phases/06-summary.md`.
+
+- 2026-09-06 (plan 07) — **Reshape: phase 7 splits in two; the old phase 8 becomes phase 9.**
+  Nothing leaves the outcome. Phase 7 as written bundled two unlike jobs: (a) the four rows that
+  need the *new* vocabulary — `LOG` (arity arm), `DAYOFWEEK` (template), `//` (per operand class),
+  `TRUNC`/`TO_JSON` (class arms) — which are the first production `Emission::Conditional` entries
+  and carry exactly the `.with_emission` wiring trap phase 6's summary flagged, and which turn
+  phase 6's arm-totality and arm-keyed-ledger gates from green-but-vacuous into real checks; and
+  (b) nineteen further `#178` rows (`AGE`, `GLOB`, five `JSON_*`, two `MAKE_*`, two `QUOTE_*`,
+  `TO_SECONDS`, `TRUNCATE`, `GROUP_CONCAT`, `DATE_ADD`/`DATE_SUB`, and the three
+  running-window `gap_at` rows) that are ordinary rename/template/`Unsupported` closures. Counted
+  against the ledger, phase 7 as written was 23 live-verified closures in one implement step. The
+  split puts the risky, mechanism-exercising rows first (ratchet 27 → 23) and the bulk paydown
+  second (23 → 4, satisfying criterion 5). Both halves still require a live Spark and both still
+  block rather than fake if it cannot start.
+
+- 2026-09-06 (plan 07, design) — Two points fixed inside phase 7's own scope. `ConditionalArm`
+  already carries an `arity: Option<usize>` guard, so `LOG` needs no new mechanism — arity 1 →
+  `Rename("LOG10")`, `otherwise` → `Native`. And an arm whose verdict is `Unsupported` is
+  *exempting*, not gap-preserving (phase 6 routed `is_declared_unsupported` through
+  `settle_at` with the probe's own facts), so a refused `TRUNC(numeric)` arm closes the ledger
+  row outright rather than leaving an arm-scoped `Gap` — which is why 27 → 23 is a firm target
+  rather than a range.
+
+- 2026-09-06 (implement 07) — phase 7 done. `LOG` (`arity=1 -> Rename(LOG10)`, `otherwise ->
+  Native`), `DAYOFWEEK` (`Template("DAYOFWEEK({0}) - 1")`), `TRUNC` (`Conditional` on **both**
+  SparkSql and DuckDb — DuckDB turned out to have no temporal `TRUNC` at any arity either,
+  measured live) and `TO_JSON` (`Conditional`, `Composite -> Native`) landed on Spark; `//`'s
+  wholesale Spark `Unsupported` became `Conditional` per operand class
+  (`Integral,Integral -> DIV`; `Floating`/`Decimal -> plain /`). `dialect_gaps_spark` 27 → 23.
+  Measurement surfaced three structural harness bugs, all fixed (not per-entry, so phase 8 needs
+  none of this again): (1) `probe::print_for` never threaded real fixture column types into
+  `settle_emissions`, so any `Conditional` probe printed via the blind arity-only fallback —
+  invisible until this phase because no production `Conditional` entry existed to print; (2) the
+  *ordinary* (non-arm) probe for a `Conditional` entry carried blind `CallFacts::unresolved`,
+  which for `//` disagreed with what `print_for`'s (correct) type-aware settlement actually
+  printed, so the exemption decision and the printed SQL diverged; (3) `conditional_arm_probes`
+  derived a probe's position from the emission table's own `Position::Any` key (a lookup wildcard
+  `suffix()` explicitly cannot render) instead of `sig.kind`'s concrete position(s). Also fixed:
+  the `iv_interval` fixture column's `CAST('1 day' AS INTERVAL DAY)` is invalid on Spark (wants a
+  bare-integer string), which had silently broken `schema_leg_spark`/`value_leg_spark` *wholesale*
+  since phase 6 added the column — nobody had run those live since. `verify-phase.sh`: fmt/clippy/
+  example_diagnostics green; `cargo test` red only on a pre-existing, unrelated `smelt-runtime`
+  python-discovery test flake (temp-file race, 216/216 green single-threaded, confirmed across
+  three runs hitting a different subset of tests each time — flagged for a future outcome, not
+  this one's to fix). Live Spark dialect_audit: 61/61 green. See `phases/07-summary.md`.
+
+- 2026-09-06 (plan 08) — **Reshape: a new phase 9 closes the `DATE_ADD`/`DATE_SUB` type-leg
+  family; the docs phase becomes phase 10.** Criterion 5 is currently unmet on DuckDB —
+  `dialect_gaps_duckdb` is 6, not `≤ 5` — because phase 4's bail-out clause landed two new
+  `type_gap` rows, and phase 8 templating `DATE_SUB` on Spark would land the same two there,
+  putting Spark at 6 rather than the criterion's 4. This is work the Success criteria require, so
+  it gets a row rather than a note. Root cause measured while planning: both names are
+  `SyntaxForm::Special` registry rows (they exist to type the *infix* interval add/sub, and are
+  deliberately exempt from `SqlFunction` by `registry_consistency`'s `syntax_form != Call`
+  exemption), yet the audit derives an ordinary *call* probe for them, and
+  `infer_function_type` bails at `SqlFunction::from_name(...)?` before `try_registry_inference`
+  runs. Phase 9 decides between making the pair genuinely callable and excluding non-`Call`
+  syntax forms from the probe axis; phase 8 does not pre-empt that choice — it records whatever
+  the Spark type legs report as `type_gap` rows under the same bail-out clause phase 4 used.
+
+- 2026-09-06 (plan 08, design) — Two points fixed inside phase 8's own scope. The three
+  `gap_at(..., Position::Window)` Spark rows (`MEDIAN`, `PERCENTILE_CONT`, `PERCENTILE_DISC`) are
+  **already** `Emission::Unsupported` in the registry — exactly the redundancy phase 4 found and
+  deleted on the DuckDB side — so they close by deleting the ledger rows, with the audit's
+  declared-unsupported exemption doing the verification. And most of the sixteen surviving
+  schema rows have `any_args()` signatures, on which `validate_template` rejects a template
+  outright: for those the vocabulary offers only `Rename` or `Unsupported { reason }`, so the
+  phase is predominantly a measured-`Unsupported` paydown rather than a lowering-authoring one.
+
+- 2026-09-06 (implement 08) — phase 8 done. `dialect_gaps_spark` 23 → 6. All 15 `gap(...)`
+  #178 rows closed with live-verified `Emission::Template`/`Native`/`Unsupported` verdicts; the
+  3 redundant `gap_at(..., Position::Window)` rows deleted. `JSON_ARRAY_LENGTH`/
+  `JSON_OBJECT_KEYS` turned out to already work under their own name — the original "wants a
+  JSON string, not a number" gap was a probe-shape bug (an un-overridden `any_args()` probe
+  picking a numeric fixture column), fixed with two new `overrides.rs` rows, not a real
+  emission gap. `DATE_SUB` on Spark surfaced the same missing-`SqlFunction`-enum-variant
+  `type_gap` phase 4 found for it on DuckDB — the bail-out clause this phase's plan named in
+  advance — left for phase 9. Five `divergent` rows record pure textual-representation
+  mismatches with no semantic gap. `verify-phase.sh`: fmt/clippy/example_diagnostics green; the
+  full-workspace `cargo test` leg's only failures were the pre-existing python-discovery
+  test-isolation flake (`smelt-runtime`'s `python::tests::*` / `tests/combined_loop.rs`),
+  confirmed unrelated via `--test-threads=1` (216/216, 5/5). Every dialect/registry-specific
+  gate green, including the live `dialect_audit` Spark legs. Surfaced but not fixed:
+  `validate_conditional` never validates a `SettledEmission::Template` arm's placeholders, so a
+  future `Conditional`+`Template`-arm combination (considered and rejected here for
+  `GROUP_CONCAT`) would have no build-time guard. See `phases/08-summary.md`.
+
+- 2026-09-06 (plan 09) — **Small reshape: phase 9's row gains the `Conditional`-arm template
+  validation phase 8 surfaced.** `validate_conditional` never calls `validate_template` on a
+  `SettledEmission::Template` arm verdict, so the registry can construct a template with an
+  out-of-range placeholder that only misbehaves at print time. That is a hole in criterion 2
+  ("registry construction validates templates"), so it belongs inside the outcome rather than in
+  a note; it is a ~20-line change and rides along with phase 9 instead of taking a row of its own.
+
+- 2026-09-06 (plan 09, design) — **Phase 8's open question is decided: make the pair genuinely
+  callable, not exclude non-`Call` forms from the probe axis.** Measured while planning: nothing
+  in production consumes the `DATE_ADD`/`DATE_SUB` registry rows — `binary.rs` types the infix
+  interval add/sub itself and never resolves either name — so the `SyntaxForm::Special`
+  classification is simply wrong, not load-bearing. Both names parse as ordinary
+  `FUNCTION_CALL`s in smelt SQL and DuckDB accepts `date_add(DATE, INTERVAL)` (its schema leg
+  already passes), so the probe axis is right and the registry row is the defect. Excluding them
+  from the probe axis would hide a real inference hole rather than close one. Consequences fixed
+  here: the pair joins `REGISTRY_MIGRATED` in the same edit that gives them `SqlFunction`
+  variants, so the `legacy_match_ratchet` count is unchanged; and `architecture.md` item 14's
+  consistency-gate parenthetical, which names them as dedicated-syntax exemptions, is the phase's
+  spec delta. On Spark the closure is a lowering, not a reclassification: bare `DATE ± INTERVAL`
+  returns `DATE` where smelt (and DuckDB) declare `Timestamp`, so the template carries the cast.
+  The plan's contingency — a type-leg `Divergent` row if no measured spelling makes the engine
+  agree — is bounded and may only be taken after the cast is attempted live.
+
+- 2026-09-06 (implement 09) — phase 9 done. `DATE_ADD`/`DATE_SUB` gained `SqlFunction` variants
+  and joined `REGISTRY_MIGRATED`, dropped `SyntaxForm::Special`; both now infer `Timestamp`
+  correctly on DuckDB (measured live, DuckDB 1.5.4). Spark got measured `Emission::Template`
+  casts (`CAST({0} ± {1} AS TIMESTAMP)`) — the plan's a-priori guess was confirmed correct
+  against a freshly bootstrapped `.smelt-spark-venv` (this worktree had none; one-time setup
+  from `scripts/README-spark.md`) and live Spark 4.0.0 Connect. `validate_conditional` now
+  validates a `Template`-verdict arm through `validate_template` (new
+  `ConditionalError::InvalidTemplateArm`), closing the criterion-2 hole phase 8 surfaced.
+  `dialect_gaps_duckdb` 6→4, `dialect_gaps_spark` 6→4 — criterion 5 now lands on both engines,
+  each with exactly the four `#175`/`#176` rows. Live `dialect_audit`: 61/61 green (DuckDB +
+  Spark legs). `verify-phase.sh`: fmt/clippy/example_diagnostics green; the workspace `cargo
+  test` leg's only failure is a pre-existing, unrelated `smelt-core --test baseline` temp-file
+  race (`materialize_tests::checkout_scratch_is_deleted_when_materialization_fails`), confirmed
+  unrelated via `git diff --stat -- crates/smelt-core/` (empty) and a clean 21/21
+  single-threaded rerun. See `phases/09-summary.md`.
+
+- 2026-09-06 (plan 10) — **No reshape.** Phase 9's summary explicitly says phase 10 is unaffected by
+  its scope, and every other row is `done`. Two design points fixed inside phase 10's own scope.
+  (a) The two *new* families of `UnsupportedOnBackend` reason this outcome introduced — a template
+  call carrying one of the seven refused modifiers, and a `Conditional`'s `otherwise -> Unsupported`
+  arm (`//` on Spark with a non-numeric operand) — are documented with **pinned** example blocks,
+  extending `dialect_seam`'s existing `docs_quoted_refusal_text_matches_the_live_diagnostic`
+  marker mechanism to two more markers rather than hand-copying message text; a doc quoting a
+  message the compiler does not emit is the same unverified claim the outcome exists to remove.
+  (b) Issue disposition is split by subject: #177 and #178 are *closed* (their subject — a missing
+  emission verdict on DuckDB/Spark — is fully paid down; the four surviving rows per dialect belong
+  to #175/#176, which stay open), while #173/#174/#179 get comments only, since their BigQuery arms
+  need the human-run billing sweep the outcome placed out of scope.
+
+- 2026-09-06 (implement 10) — phase 10 done, outcome done. `architecture.md` item 14 and CLAUDE.md's
+  Function-registry single-ownership bullet name `Template`/`Conditional` and the compile-path
+  settlement rule; `dialect_seam.rs`'s doc-quote extraction is now a shared
+  `assert_doc_quote_matches_live_diagnostic(marker, model_sql, backend)` helper, and two new tests
+  pin `docs-site/docs/reference/diagnostics.md` against the live `DATE_SUB(DISTINCT …)` template
+  refusal and the live `a // b` Spark operand-class refusal — both doc blocks captured from actual
+  compiler output, never hand-written. `targets.md` gained a short "Per-operand-type lowering"
+  note. ROADMAP flipped to ✅ with the measured gap counts. #177/#178 closed on GitHub; #173/#174/#179
+  commented with what remains (the human-run BigQuery sweep, out of scope here). `verify-phase.sh`
+  green except the pre-existing `smelt-core --test baseline` scratch-dir flake, confirmed unrelated
+  by an isolated `--test-threads=1` rerun (21/21 passed). `git diff --stat` touched only docs +
+  the test file — no baseline or emission-row change. All 10 phases and the outcome itself are
+  `done`; the outcome loop should advance to the next backlog entry
+  (`docs/outcomes/20260904-decision-residue`, already `done`, so the loop's actual next work is
+  whichever entry after it is first non-done/blocked per `.claude/outcome-backlog`).
 
 ## Blocked
 

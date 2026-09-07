@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -415,6 +415,11 @@ contract:
 - An unparseable or negative `deferral`, or a `deferral` on a model or cell with no clock to
   measure lag against, is `ContractDeferralInvalid`.
 - Absent `contract:` (the common case) is the default point: strict equivalence, no relaxation.
+- On a succession-grain model (`incremental_shapes.md` §"The succession grain"),
+  `frozen_horizon` and `retain_departed` fall to the same refusals as any non-partition,
+  non-mutable-snapshot-consuming model (`incremental_shapes.md` §"Succession-grain constraints"
+  rule 12); `deferral` is admitted unchanged, measuring frontier lag against the model's own
+  clock. No lattice point is defined specifically for this grain.
 - The effective contract per cell — default or relaxed, with the relaxation's parameters — is
   always printed by `smelt explain`; a relaxation is never silent (§"CLI").
 
@@ -2217,7 +2222,7 @@ none of it may be relied on or implemented against until it graduates into
 
 - **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit}.rs` (the per-cell
   derivation); `crates/smelt-logical/src/maintenance/propagate.rs` (the pure graph-layer
-  composition math — `propagate`/`required_inputs`); `crates/smelt-runtime/src/propagation.rs`
+  composition math — `propagate`/`required_inputs`); `crates/smelt-runtime/src/propagation/`
   (the real per-workspace graph assembly, `smelt run --since-upstream` planning, and
   `smelt build --include-upstreams` planning — `build_forward_graph`, `plan_since_upstream`,
   `resolve_build_plan`, all consuming the same `Edge` list);

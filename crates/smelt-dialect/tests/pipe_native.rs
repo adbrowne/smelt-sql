@@ -42,6 +42,7 @@ fn print_with(sql: &str, dialect: SqlDialect, caps: BackendCapabilities) -> Stri
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -95,11 +96,6 @@ fn lowering_backends_emit_no_pipes_for_the_same_query() {
             SqlDialect::SparkSQL,
             BackendCapabilities::spark_delta(),
             "Spark(Delta)",
-        ),
-        (
-            SqlDialect::PostgreSQL,
-            BackendCapabilities::postgresql(),
-            "PostgreSQL",
         ),
     ] {
         let out = print_with(PIPE_SQL, dialect, caps);

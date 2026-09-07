@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -158,7 +158,14 @@ partition-locality verdict, any admission refusals, the model's own **Relation C
 contract block per inbound edge (upstream dependency) — a declared source or an upstream
 maintained model, rendered through the identical `clock:` / `identity:` / `derived grain:` rows
 and labelled `(source)` or `(model)` so the reader knows which provider filled them; a row prints
-`(none)` when that provider declares neither fact. For every presented column that folds through
+`(none)` when that provider declares neither fact. An inbound **source** edge that declares
+`mutation_profile.lateness` renders an `orchestration-only fact: lateness = <interval> (never a
+plan input)` line — declared lateness is read by nothing in plan derivation
+(`model_properties.md` §Constraints "Declared lateness is orchestration-only"); an edge with no
+declared lateness prints no such line. With `--json`, the corresponding entry in the per-model
+report's `inbound_edges` array carries the same fact as an append-stable `lateness: "<interval>"`
+field (§Constraints item 5); an edge with no declared lateness omits the key entirely, never
+`null`. For every presented column that folds through
 decomposed state (`incremental_shapes.md` §"Decomposed state (rung 2) in keyed models"), the
 report also lists that column's hidden state columns and the presentation expression `π` that
 recomputes the presented value from them, labelled as internal state and explicitly not part of
@@ -174,16 +181,20 @@ grain: <label>)`. `<shape>` is `keyed upsert over [<keys>], key-addressed` for a
 key` model; the same with `, slice-bounded by <axis> under key temporal locality (settle bound:
 <bound>)` appended once key temporal locality is admitted (`incremental_shapes.md` §"Key
 temporal locality"); `append-only within a window, window-addressed by <axis>` for a
-partition-grain model; or `general (degraded by: <reason>), not delta-addressable` when the
-model's own SQL degrades — naming the construct or world-fact responsible, matching the vocabulary
-`format_output_delta` already uses for inbound edges. `<label>` is the identical string the
-report's own `derived grain:` row prints — one derivation, never a second label. With `--json`,
-the report carries a top-level `delta_signature` object (§Constraints item 5): `{"shape":
-"keyed_upsert"|"append_only_window"|"general", "addressing": "key"|"window"|"none", "keys":
-[...], "axis": "...", "degraded_by": "...", "slice_bound": "...", "settle_bound": "...", "grain":
-"..."}` — `keys` only for `keyed_upsert`, `axis` for `append_only_window` and for `keyed_upsert`
-once locality is admitted, `degraded_by` only for `general`, and `slice_bound`/`settle_bound`
-only once key temporal locality is admitted; an absent field is omitted, never `null`.
+partition-grain model; `event history keyed by [<k>], event-addressed by (<k>, <t>)` for a
+succession-grain model (`incremental_shapes.md` §"The succession grain"); or `general (degraded
+by: <reason>), not delta-addressable` when the model's own SQL degrades — naming the construct or
+world-fact responsible, matching the vocabulary `format_output_delta` already uses for inbound
+edges. `<label>` is the identical string the report's own `derived grain:` row prints — one
+derivation, never a second label. With `--json`, the report carries a top-level
+`delta_signature` object (§Constraints item 5): `{"shape": "keyed_upsert"|"append_only_window"|
+"keyed_succession"|"general", "addressing": "key"|"window"|"event"|"none", "keys": [...], "axis":
+"...", "degraded_by": "...", "slice_bound": "...", "settle_bound": "...", "grain": "..."}` —
+`keys` for `keyed_upsert` and `keyed_succession`, `axis` for `append_only_window`, for
+`keyed_succession` (the succession model's run axis), and for `keyed_upsert` once locality is
+admitted, `degraded_by` only for `general`, and `slice_bound`/`settle_bound` only once key
+temporal locality is admitted; an absent field is omitted, never `null`. This is an enum-value
+addition to an already append-stable field (§Constraints item 5), not a shape change.
 
 `smelt explain --diff [<ref>]` diffs this report's underlying property profile between a git
 baseline and the working tree rather than rendering one project version; see
@@ -260,6 +271,21 @@ yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each
 and/or `deferral` (plus `deferral_origin`: `"model"` or `"cell"`) and/or `retain_departed` when a
 relaxation applies; a default cell's `contract_point` is an empty object — absent relaxations are
 omitted, never rendered `null`.
+
+**Succession grain.** A cell whose model is admitted to the succession grain
+(`incremental_shapes.md` §"The succession grain") prints these lines after the ordinary cell
+block, in this order, each omitted when it has no value: `grain: succession`; `identity:
+(<k…>, <t>)`; `technique: succession-patch`; `run axis: <partition_column> (arrival-partitioned |
+event-time-partitioned)`; `clock: <event_time_column>`; `posture: re-run tolerant;
+order-independent but serial`; `pre-window filter: <sql>`; `internal state: tombstone ledger
+<table>__tombstones (<k…>, <t>) — not part of the model's public schema`. With `--json`, the
+model's entry carries a `succession` object: `key_columns`, `clock_column`, `run_axis`,
+`partitioning: "arrival"|"event_time"`, `lead_columns`, `lag_columns`, `delete_flag`,
+`pre_window_filter`, `tombstone_ledger: {"table": "...", "columns": [...]}`, and the fixed
+postures `rerun_tolerant: true`, `order_independent: true`, `concurrent: false`; an absent field
+(no pre-window filter, no delete flag) is omitted, never `null`. A recorded downgrade on a
+succession cell renders through the same `state_downgrade` object described below — there is no
+succession-specific downgrade rendering.
 
 **State downgrade.** Availability resolution (`state.md` §"The degradation contract" step 2) is
 resolved offline, from the model's declared target dialect and `state.warehouse_tables`, before
@@ -583,7 +609,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **`smelt status` reads from live DB.** Gap detection requires a database connection; this is not documented clearly in the command help.
 - **No project-wide compile-only flag (TB-3).** `smelt build --dry-run` does not exist; `smelt build --show-plan` requires a positional model-file argument. There is no single command to compile every model and show the plan without executing. Two candidate resolutions: (1) extend `--show-plan` to accept no positional argument for project-wide output, or (2) add `smelt build --dry-run` mirroring `smelt run --dry-run` semantics across the seed→run lifecycle.
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
-- **The maintenance CLI surface is landed; one technique-resolution gap remains.** `smelt run --since-upstream --source <address> --landed <start>..<end>` (`incremental_models.md` §"CLI") is landed: `RunArgs` accepts the repeatable `--source`/`--landed` pair, forward-propagates the declared per-source deltas through the real per-workspace propagation graph (`smelt_runtime::propagation`), prints the dirty set, and runs exactly the propagated `(model, region)` pairs through `execute_project`. The propagation graph's edges are derived from every model's own `MaintenancePlan` scan clamps — the same clamp the maintenance SQL itself sizes — for both `sources.*` refs and refs to another maintained model in the workspace: the graph builder (`build_forward_graph`) routes a maintained-model upstream through the SAME edge-aware plan derivation (`derive_model_maintenance_plan_with_edges`) that produces the creation cells `smelt explain` reports, so a model-edge clamp in the propagation graph agrees with the clamp `smelt explain` shows for the same edge, and an underivable upstream clock is a `MaintenanceReachNotDerivable` refusal (contributing no walkable edge) rather than a permissive whole-table synthesis. `--source` accepts a maintained-model address as the delta origin (validated through the canonical `resolve_ref_path` resolver — an address that is neither a declared source nor a maintained model is a named error), and the origin model itself is never re-run. What remains is that `execute.rs`'s technique resolution does not yet key off a model-ref cell (`incremental_models.md` §"Known Divergences"). `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution) is also landed: `BuildArgs` accepts the positional target model plus `--period`/`--include-upstreams`, resolves the required per-ancestor slices and the ancestor-first/target-last build order over the SAME propagation graph (`smelt_runtime::propagation::resolve_build_plan`, backed by `smelt_logical::maintenance::propagate::required_inputs`), prints the resolved-slices report, and builds exactly that set through `execute_project`. `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`) is landed — see §"`smelt bakeoff <model>` flags" above and `incremental_models.md` §"CLI". `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
+- **The maintenance CLI surface is landed; one technique-resolution gap remains.** `smelt run --since-upstream --source <address> --landed <start>..<end>` (`incremental_models.md` §"CLI") is landed: `RunArgs` accepts the repeatable `--source`/`--landed` pair, forward-propagates the declared per-source deltas through the real per-workspace propagation graph (`smelt_runtime::propagation`), prints the dirty set, and runs exactly the propagated `(model, region)` pairs through `execute_project`. The propagation graph's edges are derived from every model's own `MaintenancePlan` scan clamps — the same clamp the maintenance SQL itself sizes — for both `sources.*` refs and refs to another maintained model in the workspace: the graph builder (`build_forward_graph`) routes a maintained-model upstream through the SAME edge-aware plan derivation (`derive_model_maintenance_plan_with_edges`) that produces the creation cells `smelt explain` reports, so a model-edge clamp in the propagation graph agrees with the clamp `smelt explain` shows for the same edge, and an underivable upstream clock is a `MaintenanceReachNotDerivable` refusal (contributing no walkable edge) rather than a permissive whole-table synthesis. `--source` accepts a maintained-model address as the delta origin (validated through the canonical `resolve_ref_path` resolver — an address that is neither a declared source nor a maintained model is a named error), and the origin model itself is never re-run. What remains is that the execute pipeline's technique resolution does not yet key off a model-ref cell (`incremental_models.md` §"Known Divergences"). `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution) is also landed: `BuildArgs` accepts the positional target model plus `--period`/`--include-upstreams`, resolves the required per-ancestor slices and the ancestor-first/target-last build order over the SAME propagation graph (`smelt_runtime::propagation::resolve_build_plan`, backed by `smelt_logical::maintenance::propagate::required_inputs`), prints the resolved-slices report, and builds exactly that set through `execute_project`. `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`) is landed — see §"`smelt bakeoff <model>` flags" above and `incremental_models.md` §"CLI". `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
 - **The keyed-grain fold-candidate detector admits only a single aggregate projection.** The
   per-model maintenance-plan derivation (`smelt-db`'s `maintenance_plan_report`) resolves a
   `smelt.<path>` ref to another maintained model in the same project into a creation-trigger cell

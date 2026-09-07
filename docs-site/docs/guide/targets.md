@@ -480,6 +480,16 @@ around the affected call isn't a shape the restructure can rewrite in place: `RO
 rewrite: pull the affected aggregate into its own `GROUP BY`/join or correlated-subquery form
 before joining it back into the original query shape.
 
+### Per-operand-type lowering
+
+Some built-ins lower differently depending on the type of the values passed to them, not just on
+where they're called. `a // b` is DuckDB's native floor/true division operator; on Spark it lowers
+to `a DIV b` when both operands are integral and to plain `a / b` when both are floating-point or
+decimal. When an operand's type cannot be resolved at compile time, smelt refuses with
+`UnsupportedOnBackend` rather than guess — a wrong guess here would silently compute a different
+number, not fail loudly. See [Diagnostics reference: a verdict that depends on operand
+type](../reference/diagnostics.md#a-verdict-that-depends-on-operand-type).
+
 ## Further reading
 
 - [Materializations](materializations.md) for how tables and views are created in each target

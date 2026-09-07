@@ -497,6 +497,8 @@ fn print_json(entries: &[ModelDiffEntry]) {
         }
     });
 
+    // invariant: `output` is built only from String/bool/Vec/integer fields (json! above) —
+    // no non-string map key and no NaN/Infinity float, so serde_json::to_string_pretty cannot fail
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("JSON serialization should not fail")

@@ -174,18 +174,46 @@ fn known_bug_still_reproduces(id: &str) -> bool {
     match id {
         "known_bug_incremental_path_skips_schema_snapshot" => {
             // `save_deployed_schema` is called from exactly one place in
-            // `execute.rs` (the full-refresh branch) — never a second call
+            // the execute pipeline (the full-refresh branch) — never a second call
             // site in the incremental branch.
-            let src = include_str!("../../../smelt-runtime/src/execute.rs");
+            let src = concat!(
+                include_str!("../../../smelt-runtime/src/execute/backend.rs"),
+                include_str!("../../../smelt-runtime/src/execute/bootstrap.rs"),
+                include_str!("../../../smelt-runtime/src/execute/key_addressed.rs"),
+                include_str!("../../../smelt-runtime/src/execute/mod.rs"),
+                include_str!("../../../smelt-runtime/src/execute/outcome.rs"),
+                include_str!("../../../smelt-runtime/src/execute/plan.rs"),
+                include_str!("../../../smelt-runtime/src/execute/project/mod.rs"),
+                include_str!("../../../smelt-runtime/src/execute/project/dry_run.rs"),
+                include_str!("../../../smelt-runtime/src/execute/retry.rs"),
+                include_str!("../../../smelt-runtime/src/execute/sink.rs"),
+                include_str!("../../../smelt-runtime/src/execute/sources.rs"),
+                include_str!("../../../smelt-runtime/src/execute/targets.rs"),
+                include_str!("../../../smelt-runtime/src/execute/window.rs"),
+            );
             src.matches("save_deployed_schema").count() == 1
         }
         "known_bug_keyed_upstream_partition_downstream_no_live_dispatch" => {
             // `resolve_live_key_addressed_model_edge_cell` is consulted
-            // from exactly one call site in `execute.rs`, inside the
+            // from exactly one call site in the execute pipeline, inside the
             // `grain: key` (`plan_is_keyed`) branch — the moment a second
             // call site wires it into the `grain: partition` branch too,
             // this count changes and the entry goes stale.
-            let src = include_str!("../../../smelt-runtime/src/execute.rs");
+            let src = concat!(
+                include_str!("../../../smelt-runtime/src/execute/backend.rs"),
+                include_str!("../../../smelt-runtime/src/execute/bootstrap.rs"),
+                include_str!("../../../smelt-runtime/src/execute/key_addressed.rs"),
+                include_str!("../../../smelt-runtime/src/execute/mod.rs"),
+                include_str!("../../../smelt-runtime/src/execute/outcome.rs"),
+                include_str!("../../../smelt-runtime/src/execute/plan.rs"),
+                include_str!("../../../smelt-runtime/src/execute/project/mod.rs"),
+                include_str!("../../../smelt-runtime/src/execute/project/dry_run.rs"),
+                include_str!("../../../smelt-runtime/src/execute/retry.rs"),
+                include_str!("../../../smelt-runtime/src/execute/sink.rs"),
+                include_str!("../../../smelt-runtime/src/execute/sources.rs"),
+                include_str!("../../../smelt-runtime/src/execute/targets.rs"),
+                include_str!("../../../smelt-runtime/src/execute/window.rs"),
+            );
             src.matches("resolve_live_key_addressed_model_edge_cell")
                 .count()
                 == 1

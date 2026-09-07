@@ -41,16 +41,41 @@ const FORBIDDEN_TOKENS: &[&str] = &[
     "Repository::open",
 ];
 
+/// `diff.rs` split into `diff/{mod,change_kind,change_types,diff_graph,
+/// diff_property_set,diff_cell_verdicts,diff_profile,tests}.rs` — every file
+/// under the directory is part of the module this gate covers, so the scan
+/// walks the whole directory rather than a single path.
+fn diff_module_files() -> Vec<PathBuf> {
+    let dir = repo_root().join("crates/smelt-logical/src/analysis/diff");
+    let mut out = Vec::new();
+    let entries = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("diff_purity gate could not read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|e| panic!("diff_purity gate could not read a dir entry: {e}"))
+            .path();
+        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "diff_purity gate found no .rs files under {}",
+        dir.display()
+    );
+    out
+}
+
 #[test]
 fn diff_module_performs_no_io_reads_no_ledger_snapshot_or_backend() {
-    let path = repo_root().join("crates/smelt-logical/src/analysis/diff.rs");
-    let text = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("diff_purity gate could not read {}: {e}", path.display()));
-
     let mut violations = Vec::new();
-    for token in FORBIDDEN_TOKENS {
-        if text.contains(token) {
-            violations.push(*token);
+    for path in diff_module_files() {
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("diff_purity gate could not read {}: {e}", path.display()));
+        for token in FORBIDDEN_TOKENS {
+            if text.contains(token) {
+                violations.push(format!("{} in {}", token, path.display()));
+            }
         }
     }
 
@@ -58,8 +83,7 @@ fn diff_module_performs_no_io_reads_no_ledger_snapshot_or_backend() {
         violations.is_empty(),
         "diff_profiles must stay a pure function over two profile maps and a graph \
          (docs/specs/property_diff.md §Constraints item 2, \"Diff purity\") — found \
-         forbidden token(s) {violations:?} in {}. A baseline-materialisation seam (git \
+         forbidden token(s) {violations:?}. A baseline-materialisation seam (git \
          archive, workspace loading) belongs in the caller that builds DiffGraph, not here.",
-        path.display()
     );
 }

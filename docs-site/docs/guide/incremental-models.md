@@ -1034,3 +1034,4 @@ When an incremental model's output schema changes (columns added, types widened,
 - [Deduplication without the workaround](../examples/web-analytics/deduplication.md) for the composed key + time shape, worked end to end
 - [Model Selection](model-selection.md) for running specific models with `--select`
 - [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs
+- [SCD2 Succession](scd2-succession.md) for the keyed-history shape smelt recognises with no `unique_key:` or `timeseries:` declared on the model itself

@@ -26,16 +26,22 @@
 //! (`crates/smelt-logical/src/maintenance/locality.rs`'s own tests).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_core::config::{Granularity, TimeseriesConfig};
+use smelt_core::config::{Config, Granularity, Target, TimeseriesConfig};
+use smelt_core::graph::DependencyGraph;
+use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
     AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
 };
+use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
 use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
+use smelt_runtime::types::ExecuteRequest;
+use tokio_util::sync::CancellationToken;
 
 /// A retry policy that never retries — these tests exercise the
 /// windowed-keyed-maintenance driver directly against a real DuckDB
@@ -483,5 +489,200 @@ async fn derived_route3_bound_never_emits_the_check() {
         "a derived (unchecked) route-3 slice must never execute the out-of-slice match \
          probe: {:?}",
         *executed
+    );
+}
+
+// ---- KeyedRecurrenceDeclarationMismatch (key-grain rule 16) ---------------
+//
+// The run path itself (`cumulative.rs`'s `execute_cumulative_aggregate`,
+// which calls `establish_locality` before ever emitting a merge) must
+// refuse a model whose declared `key_recurrence` disagrees with the
+// model's own statically-derived recurrence bound — the same refusal
+// `smelt-db`'s static plan-derivation query already surfaces, proving the
+// two call sites agree rather than the runtime silently trusting a bad
+// declaration `smelt explain` would have refused.
+
+struct PlainDuckDbFactory {
+    db_path: std::path::PathBuf,
+}
+
+impl BackendFactory for PlainDuckDbFactory {
+    fn create<'a>(
+        &'a self,
+        _target_name: &'a str,
+        target_config: &'a Target,
+        _project_dir: &'a Path,
+    ) -> BackendFuture<'a> {
+        let path = self.db_path.clone();
+        let schema = target_config.schema.clone();
+        Box::pin(async move {
+            let inner = DuckDbBackend::new(&path, &schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("DuckDB init failed: {}", e))?;
+            Ok(Box::new(inner) as Box<dyn Backend>)
+        })
+    }
+}
+
+fn stage_mismatch_project(project_dir: &Path, db_path: &Path) {
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    // Declares a 7-day recurrence bound over `event_id` — disagrees with
+    // the model's own SQL, which statically proves 3 days.
+    let source_yml = r#"description: Raw events, append-only, redelivery-prone.
+columns:
+  - name: event_id
+    type: INTEGER
+  - name: event_date
+    type: DATE
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+mutation_profile:
+  kind: append_only
+  key_recurrence:
+    key: [event_id]
+    window: '7 days'
+"#;
+    std::fs::write(project_dir.join("models/sources/events.yml"), source_yml).unwrap();
+
+    let model_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: last_seen_date
+  partition_column: last_seen_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
+---
+SELECT
+    event_id,
+    MAX(event_date) AS last_seen_date,
+    COUNT(*) AS event_count
+FROM smelt.sources.events
+WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '3 days'
+GROUP BY event_id
+"#;
+    std::fs::write(project_dir.join("models/events_last_seen.sql"), model_sql).unwrap();
+
+    let smelt_yml = format!(
+        "name: keyed_recurrence_declaration_mismatch_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+}
+
+fn seed_mismatch_tables(db_path: &Path) -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open(db_path)?;
+    conn.execute_batch(
+        r#"
+        CREATE SCHEMA IF NOT EXISTS main;
+        CREATE OR REPLACE TABLE main.sources_events AS
+        SELECT * FROM (VALUES
+            (1, DATE '2026-01-01')
+        ) AS t(event_id, event_date);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn build_db_and_graph_for_mismatch(
+    project_dir: &Path,
+    config: &Config,
+) -> (
+    Arc<tokio::sync::Mutex<smelt_db::Database>>,
+    Arc<tokio::sync::Mutex<DependencyGraph>>,
+) {
+    let discovery = ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+    let sql_models = discovery.discover_models().expect("discover_models");
+
+    let mut db = smelt_db::Database::default();
+    let project = db.set_project_input(project_dir.to_path_buf(), String::new());
+    let source_files: Vec<_> = sql_models
+        .iter()
+        .map(|m| db.set_source_file(m.path.clone(), m.content.clone(), project_dir.to_path_buf()))
+        .collect();
+    db.set_workspace(source_files, vec![project]);
+
+    let graph = DependencyGraph::build(sql_models, None).expect("build graph");
+
+    (
+        Arc::new(tokio::sync::Mutex::new(db)),
+        Arc::new(tokio::sync::Mutex::new(graph)),
+    )
+}
+
+fn mismatch_run_request(start: &str, end: &str) -> ExecuteRequest {
+    ExecuteRequest {
+        target: "dev".to_string(),
+        select: vec![],
+        exclude: vec![],
+        start: Some(start.to_string()),
+        end: Some(end.to_string()),
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: false,
+        rebuild: false,
+        dry_run: false,
+        enforce_safety: false,
+        allow_column_removal: false,
+        allow_full_refresh: false,
+        ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
+    }
+}
+
+/// The run path (`cumulative.rs`'s `establish_locality` bail) fails with
+/// the `KeyedRecurrenceDeclarationMismatch` message — naming both values —
+/// rather than silently ignoring the disagreeing declaration and running
+/// anyway.
+#[tokio::test]
+async fn disagreeing_declaration_refuses_the_run() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_mismatch_project(&project_dir, &db_path);
+    seed_mismatch_tables(&db_path).expect("seed tables");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph_for_mismatch(&project_dir, &config);
+
+    let err = execute_project(
+        "keyed-recurrence-declaration-mismatch".to_string(),
+        mismatch_run_request("2026-01-01", "2026-01-02"),
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &PlainDuckDbFactory {
+            db_path: db_path.clone(),
+        },
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("a disagreeing declared key_recurrence must refuse the run");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("KeyedRecurrenceDeclarationMismatch"),
+        "refusal must name the diagnostic: {message}"
+    );
+    assert!(
+        message.contains("3 day") && message.contains("7 day"),
+        "refusal must name both the derived and declared values: {message}"
     );
 }

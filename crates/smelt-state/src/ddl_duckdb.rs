@@ -894,6 +894,60 @@ pub fn generate_fingerprint_sidecar_gc_sql(
     )
 }
 
+// ── Warehouse-resident succession-grain tombstone ledger ────────────────
+//
+// `docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+// state)": a per-model sibling table holding `k ∪ {t}` for every delete
+// event the succession-patch technique has ever folded. Bookkeeping DDL in
+// the SAME excluded class as the reconciliation ledger and the
+// observed-output-delta table above (`CLAUDE.md` §"Maintenance-plan
+// purity" — "ledger DDL/DML in `smelt-state` excluded as bookkeeping").
+// `smelt-state` sits below `smelt-logical` in the crate layering
+// (`docs/specs/architecture.md` §"Layered single-ownership"), so this
+// module takes the derived `<presented table>__tombstones` name as a
+// parameter (`smelt_logical::maintenance::emit::tombstone_table_name` is
+// the single owner of the suffix) rather than re-deriving it here.
+
+/// DDL creating one model's tombstone ledger table, if it does not already
+/// exist. Columns are **exactly** `key_cols ++ [clock_col]`, each `NOT
+/// NULL`, each in the model's own inferred type — no payload, no delete
+/// flag, no run-metadata column (`incremental_shapes.md` §"The tombstone
+/// ledger (hidden state)" — "Physical shape"). `PRIMARY KEY (k…, t)`.
+pub fn generate_tombstone_table_ddl(
+    qualified_name: &str,
+    key_cols: &[(String, DataType)],
+    clock_col: &str,
+    clock_type: &DataType,
+) -> String {
+    let mut col_defs: Vec<String> = key_cols
+        .iter()
+        .map(|(name, ty)| format!("{} {} NOT NULL", quote_identifier(name), ty.to_sql()))
+        .collect();
+    col_defs.push(format!(
+        "{} {} NOT NULL",
+        quote_identifier(clock_col),
+        clock_type.to_sql()
+    ));
+    let pk_cols = key_cols
+        .iter()
+        .map(|(name, _)| quote_identifier(name))
+        .chain(std::iter::once(quote_identifier(clock_col)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE TABLE IF NOT EXISTS {qualified_name} ({}, PRIMARY KEY ({pk_cols}))",
+        col_defs.join(", ")
+    )
+}
+
+/// DDL dropping one model's tombstone ledger table — the same lifecycle
+/// event as the presented table itself
+/// (`incremental_shapes.md` §"The tombstone ledger (hidden state)" —
+/// "Physical shape": "created with it, dropped with it").
+pub fn generate_tombstone_table_drop_ddl(qualified_name: &str) -> String {
+    format!("DROP TABLE IF EXISTS {qualified_name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1783,5 +1837,47 @@ mod tests {
         );
         assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
         assert!(sql.contains("consumer_address = 'smelt.models.consumer''s_a'"));
+    }
+
+    #[test]
+    fn tombstone_table_ddl_declares_key_and_clock_not_null_with_primary_key() {
+        let sql = generate_tombstone_table_ddl(
+            "main.customer_history__tombstones",
+            &[("customer_id".to_string(), DataType::Integer)],
+            "changed_at",
+            &DataType::Timestamp {
+                with_timezone: false,
+            },
+        );
+        assert_eq!(
+            sql,
+            "CREATE TABLE IF NOT EXISTS main.customer_history__tombstones (customer_id INTEGER \
+             NOT NULL, changed_at TIMESTAMP NOT NULL, PRIMARY KEY (customer_id, changed_at))"
+        );
+
+        let drop_sql = generate_tombstone_table_drop_ddl("main.customer_history__tombstones");
+        assert_eq!(
+            drop_sql,
+            "DROP TABLE IF EXISTS main.customer_history__tombstones"
+        );
+    }
+
+    #[test]
+    fn tombstone_table_ddl_supports_composite_keys() {
+        let sql = generate_tombstone_table_ddl(
+            "main.orders__tombstones",
+            &[
+                ("tenant_id".to_string(), DataType::Integer),
+                ("order_id".to_string(), DataType::BigInt),
+            ],
+            "changed_at",
+            &DataType::Timestamp {
+                with_timezone: false,
+            },
+        );
+        assert!(
+            sql.contains("PRIMARY KEY (tenant_id, order_id, changed_at)"),
+            "{sql}"
+        );
     }
 }

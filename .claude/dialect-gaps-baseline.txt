@@ -16,7 +16,110 @@
 #     justification and a new ledger entry — never a silent skip.
 # `gap_count_ratchet` in tests/dialect_audit/main.rs enforces an exact match
 # (a decrease is a "stale baseline" failure prompting you to tighten here).
-dialect_gaps_duckdb 12
-dialect_gaps_spark 27
-dialect_gaps_postgres 0
+#
+# 2026-09-06 (#181, docs/outcomes/20260904-dialect-emission-vocabulary phase 1,
+# sign-off: Andrew Browne): `dialect_gaps_postgres` removed. The PostgreSQL
+# emission dialect is retired — no backend crate ever existed to verify its
+# verdicts, so the metric is removed because the dialect no longer exists,
+# not because its gaps were absorbed.
+#
+# 2026-09-06 (#177, docs/outcomes/20260904-dialect-emission-vocabulary phase 4,
+# sign-off: Andrew Browne): dialect_gaps_duckdb 12 -> 6. Closed: PERCENTILE_CONT
+# and PERCENTILE_DISC at Window (already Unsupported in the registry, rows were
+# redundant), INITCAP/TO_CHAR/QUOTE_IDENT/QUOTE_LITERAL (Emission::Unsupported —
+# none exists on DuckDB 1.5.4, measured live), DATE_SUB (Emission::Template,
+# DuckDB spells interval subtraction infix). DATE_ADD's existing type_gap
+# survives, and DATE_SUB gained a new one: templating DATE_SUB made its type
+# leg run for the first time, and both `DATE_ADD`/`DATE_SUB` turned out to have
+# no `SqlFunction` enum variant at all, so the registry's now-corrected
+# `Timestamp` return type is never reached by `infer_function_type` — a deeper
+# registry-wiring gap than the contingency's unquoted-`INTERVAL`-literal guess
+# (that literal already infers `Interval` correctly on its own, measured
+# directly). Net: 12 - 7 + 1 = 6.
+dialect_gaps_duckdb 4
+dialect_gaps_spark 4
 dialect_gaps_bigquery 42
+
+# 2026-09-06 (#174, docs/outcomes/20260904-dialect-emission-vocabulary phase 7,
+# sign-off: Andrew Browne): dialect_gaps_spark 27 -> 23. Closed, each verified
+# live against `scripts/spark-up.sh` (Spark 4.0.0 Connect) and DuckDB 1.5.4:
+# LOG (Emission::Conditional, arity=1 -> Rename("LOG10"), otherwise -> Native —
+# Spark's one-arg `log(x)` is natural log, DuckDB's is base-10; the two-arg
+# `log(base, x)` already agrees), DAYOFWEEK (Emission::Template,
+# `DAYOFWEEK({0}) - 1` — Spark numbers the week from Sunday=1, DuckDB from
+# Sunday=0), TRUNC (Emission::Conditional on both SparkSql and DuckDb: the
+# two-argument temporal form is Native on Spark and Unsupported on DuckDB,
+# which has no temporal `TRUNC` at any arity — verified live; the numeric
+# form is the reverse), TO_JSON (Emission::Conditional, arg0 Composite ->
+# Native, otherwise -> Unsupported — Spark's `to_json` refuses a scalar
+# argument). `//` on Spark also moved from wholesale Unsupported to
+# Emission::Conditional per operand class (Integral -> `{0} DIV {1}`,
+# Floating/Decimal -> `{0} / {1}`, otherwise -> Unsupported) but carried no
+# ledger row of its own, so it does not change this count.
+
+# 2026-09-06 (#178, docs/outcomes/20260904-dialect-emission-vocabulary phase 8,
+# sign-off: Andrew Browne): dialect_gaps_spark 23 -> 6. Every remaining
+# `gap(...)`/`gap_at(...)` row against Spark named by #178 is closed with an
+# explicit, live-verified registry verdict (Spark 4.0.0 Connect via
+# `scripts/spark-up.sh`, DuckDB 1.5.4):
+#   - AGE: Emission::Template("{0} - {1}") — Spark has no `age`; plain
+#     timestamp subtraction is its interval-difference form.
+#   - DATE_SUB: Emission::Template("{0} - {1}") — infix DATE - INTERVAL,
+#     mirroring DuckDB's own DuckDB-side template from phase 4.
+#   - TO_SECONDS: Emission::Template("make_interval(0, 0, 0, 0, 0, 0, {0})").
+#   - GLOB, JSON_ARRAY, JSON_OBJECT, JSON_CONTAINS, MAKE_TIME,
+#     MAKE_TIMESTAMPTZ, QUOTE_IDENT, QUOTE_LITERAL, TRUNCATE, GROUP_CONCAT:
+#     Emission::Unsupported, each with a reason naming what's missing or why
+#     the shape change (variadic signature, argument reordering, pattern
+#     translation) can't be expressed as a rename or fixed-arity template.
+#   - JSON_ARRAY_LENGTH, JSON_OBJECT_KEYS: Emission::Native (explicit, not
+#     the implicit default) — both already resolve correctly under their own
+#     name once given the right fixture argument (a JSON-shaped column, not
+#     the `Variadic(Any)`-derived numeric one the un-overridden probe had
+#     been calling them with — the true cause behind the original "wants a
+#     JSON string, not a number" gap note). Two new `overrides.rs` entries
+#     fix the probe shape.
+#   - The three redundant `gap_at(..., Position::Window)` rows (MEDIAN,
+#     PERCENTILE_CONT, PERCENTILE_DISC) are deleted: each was already
+#     `Emission::Unsupported` at that position in the registry (the same
+#     finding phase 4 acted on for DuckDB).
+# Two new findings surfaced by giving DATE_SUB its first Spark emission
+# verdict (the bail-out clause the phase 8 plan named in advance): its type
+# leg now runs and disagrees (Unknown(Dynamic) vs. Spark's DATE, the same
+# missing-`SqlFunction`-variant gap phase 4 found on DuckDB) — registered as
+# a new `type_gap`, left for phase 9 — and its value diverges from DuckDB's
+# TIMESTAMP-widening subtraction (both name the same day) — registered as
+# `divergent`. Three more `divergent` rows record pure textual-representation
+# differences with no semantic gap: AGE and TO_SECONDS render a day-time
+# interval differently (`0 00:00:00.000000000` vs `0 secs`), and
+# JSON_OBJECT_KEYS renders a TEXT[] as JSON array syntax vs DuckDB's own
+# array literal syntax. None of these five is a schema gap, so none affects
+# the ratchet. Net: 23 - 18 (closed) + 1 (new type_gap) = 6.
+
+# 2026-09-06 (#175/#176, docs/outcomes/20260904-dialect-emission-vocabulary
+# phase 9, sign-off: Andrew Browne): dialect_gaps_duckdb 6 -> 4,
+# dialect_gaps_spark 6 -> 4. Root cause: `DATE_ADD`/`DATE_SUB` were
+# `SyntaxForm::Special` registry rows (exempting them from the callable
+# surface `infer_function_type` reaches), yet nothing in production consumed
+# that classification — `binary.rs` types the infix interval add/sub itself
+# — so it was simply a defect, not load-bearing dedicated syntax. Both names
+# are now ordinary `SyntaxForm::Call` rows with `SqlFunction` variants on
+# `REGISTRY_MIGRATED`, closing:
+#   - type_gap(DATE_ADD, DuckDb) / type_gap(DATE_SUB, DuckDb): both now infer
+#     TIMESTAMP via the registry, matching DuckDB's own reported type.
+#   - gap(DATE_ADD, SparkSql): `Emission::Template("CAST({0} + {1} AS
+#     TIMESTAMP)")` — Spark's bare `DATE + INTERVAL` infix reports DATE, not
+#     TIMESTAMP; the cast makes the engine agree with smelt's declared type.
+#     Measured live (Spark 4.0.0 Connect via `scripts/spark-up.sh`):
+#     `typeof(CAST(DATE '2026-01-02' + INTERVAL '1' DAY AS TIMESTAMP))` =
+#     `timestamp`.
+#   - type_gap(DATE_SUB, SparkSql): same reasoning, `Emission::Template("CAST
+#     ({0} - {1} AS TIMESTAMP)")`, replacing the untyped `Emission::Template
+#     ("{0} - {1}")` phase 8 gave it. Measured live: `typeof(CAST(DATE
+#     '2026-01-02' - INTERVAL '1' DAY AS TIMESTAMP))` = `timestamp`.
+#   - The now-stale `divergent(DATE_SUB, SparkSql)` value row (Spark DATE vs.
+#     DuckDB TIMESTAMP) is also deleted — the cast closes the value
+#     difference along with the schema one.
+# Both dialects now stand at exactly the four rows criterion 5 names:
+# `FIRST`/`LAST` (#175, lexed as keywords) and `EXPLODE`/`UNNEST` (#176,
+# unnest inference returning Unknown). Net: 6 - 2 = 4 on each dialect.

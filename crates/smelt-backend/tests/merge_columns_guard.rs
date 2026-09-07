@@ -55,13 +55,7 @@ fn bigquery_admits_a_whole_row_merge_that_has_a_column_list() {
 /// correctly today, turning a BigQuery-only limitation into a global one.
 #[test]
 fn star_dialects_accept_an_empty_column_list() {
-    for dialect in [
-        SqlDialect::DuckDB,
-        SqlDialect::SparkSQL,
-        // PostgreSQL maps onto the Spark maintenance dialect, which spells the
-        // matched arm `UPDATE SET *` too.
-        SqlDialect::PostgreSQL,
-    ] {
+    for dialect in [SqlDialect::DuckDB, SqlDialect::SparkSQL] {
         assert!(
             require_merge_columns(dialect, SCHEMA, TABLE, &[]).is_ok(),
             "{dialect:?} spells the matched arm `UPDATE SET *` and never reads the column \

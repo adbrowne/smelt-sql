@@ -212,6 +212,8 @@ export interface InboundEdgeContract {
   name: string;
   provider: 'source' | 'model';
   contract: RelationContractView;
+  /** Orchestration-only fact — never a plan input. */
+  lateness?: string;
 }
 
 export type Technique = 'DeleteInsert' | 'KeyedFold' | 'ColumnScopedMerge' | 'InPlaceUpdate';

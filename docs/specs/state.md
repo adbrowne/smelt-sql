@@ -1,7 +1,7 @@
 ---
 feature: state
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -69,7 +69,7 @@ structure's format and semantics; this table owns only its class.
 | Reconciliation ledger (frontier record) | correctness | backend table, transactional with the fold | `incremental_models.md` §"The frontier record (reconciliation ledger)" |
 | Observed output deltas | correctness | backend table, transactional with the conditional write | `incremental_models.md` §"The graph layer" |
 | Fingerprint sidecar | correctness | backend table (digest refresh in the maintenance run) | `sources.md` §"The fingerprint sidecar" |
-| Tombstone ledger (succession grain) | correctness | backend table, transactional with the succession-patch `MERGE` | `incremental_shapes.md` §"The tombstone ledger (hidden state)" |
+| Tombstone ledger (succession grain) | correctness | per-model sibling table `<presented table>__tombstones`, transactional with the succession-patch `MERGE` | `incremental_shapes.md` §"The tombstone ledger (hidden state)" |
 | Run manifests + run reports | observability | `.smelt/targets/<t>/runs/`, `reports/` | `run_state.md` |
 | Interval ledger | observability | `.smelt/targets/<t>/intervals.json` | `run_state.md` |
 | Landed-delta record | observability | `.smelt/targets/<t>/landed_deltas.json` | `run_state.md` |
@@ -316,7 +316,7 @@ this spec describes normatively above.
   `reconciliation.rs`, `landed_deltas.rs`, `schema_tracking.rs`, `snapshot_store.rs`,
   `source_postures.rs`, `frozen_band_baselines.rs`; backend ledger DDL: `ddl_duckdb.rs`,
   `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`, `parse_warehouse_tables`);
-  `crates/smelt-runtime/src/execute.rs` (state-write sites); `crates/smelt-logical/src/maintenance/availability.rs`
+  `crates/smelt-runtime/src/execute/` (state-write sites); `crates/smelt-logical/src/maintenance/availability/`
   (the pure availability-resolution step)
 - **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance/`
   (the standing equivalence-oracle gate; `state_deletion.rs` is the leg that interleaves

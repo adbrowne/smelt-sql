@@ -69,3 +69,104 @@ UnsupportedOnBackend: this model uses 2 constructs the DuckDB backend cannot exp
   `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
   `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
 ```
+
+#### A template's spelling cannot carry a modifier
+
+A built-in whose target spelling is a fixed template over its own positional arguments — DuckDB's
+`DATE_SUB(d, i)`, spelled `d - i` — has no place in that spelling for a call modifier: `DISTINCT`,
+`FILTER (WHERE …)`, `WITHIN GROUP (ORDER BY …)`, an `ORDER BY` inside the argument list, `IGNORE
+NULLS`/`RESPECT NULLS`, a named (`=>`) argument, or a `*` argument. Dropping the modifier would
+change the answer — a dropped `DISTINCT` counts duplicates the author excluded — so the call is
+refused at compile time rather than silently stripped.
+
+**Example** — targeting DuckDB, `DATE_SUB` carrying `DISTINCT`:
+
+```sql
+SELECT DATE_SUB(DISTINCT d, INTERVAL 1 DAY) AS x FROM events
+```
+
+<!-- unsupported-on-backend-template-modifier-refusal-text -->
+```text
+UnsupportedOnBackend: this model uses 1 construct the DuckDB backend cannot express:
+  `DATE_SUB` — this built-in's target spelling is a fixed template over positional arguments; DISTINCT cannot be expressed by a template (a dropped DISTINCT would count duplicates the author excluded) and is refused rather than silently dropped
+```
+
+**Fix**: Rewrite the query without the modifier — for example, deduplicate the input rows in a CTE
+before calling the function — or pick a target backend whose registry entry for that built-in is
+not a template.
+
+#### A verdict that depends on operand type
+
+Some built-ins lower differently depending on the type of the values passed to them, not only on
+where they're called. `//` is DuckDB's native floor/true division operator, but Spark and BigQuery
+have no infix `//`: on Spark, `a // b` lowers to `a DIV b` when both operands are integral and to
+plain `a / b` when both are floating-point or decimal. When an operand's type cannot be resolved at
+compile time, smelt refuses rather than guess — guessing wrong here would silently compute a
+*different number*, not fail loudly.
+
+**Example** — targeting Spark, `//` over a column whose type cannot be resolved:
+
+```sql
+SELECT a // b AS x FROM t
+```
+
+<!-- unsupported-on-backend-operand-class-refusal-text -->
+```text
+UnsupportedOnBackend: this model uses 1 construct the Spark SQL backend cannot express:
+  `//` — Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)
+```
+
+**Fix**: Give the operands a resolvable type — for example, by declaring the upstream column's type
+or wrapping the operand in an explicit `CAST` — or rewrite the expression as a typed `FLOOR(a / b)`
+or `DIV(a, b)` call.
+
+## Succession grain
+
+The [succession grain](../guide/scd2-succession.md) is recognised from a model's SQL shape, never
+declared — every rejection below names the offending clause and a fix rather than falling back to
+another grain silently. Full semantics: [`docs/specs/incremental_shapes.md` §"Succession-grain
+admission (no declaration)"](https://github.com/brownie/smelt/blob/main/docs/specs/incremental_shapes.md).
+
+| Code | Severity | Trigger |
+|---|---|---|
+| `SuccessionWindowFunctionNotLead` | Error | A window function in the projection is not `LEAD(t)`/`LAG(t)` over the clock column at the default offset, or not a scalar expression over one. |
+| `SuccessionPartitionKeyMismatch` | Error | Two or more window functions partition by different column sets, an unresolvable column set, or a column not proven `NOT NULL`. |
+| `SuccessionOrderNotMonotoneClock` | Error | A window's `ORDER BY` column does not trace as a strictly monotone clock to the driving source's `event_time_column`, is not proven `NOT NULL`, or the sort is descending or carries a second key. |
+| `SuccessionRowLocalColumnViolation` | Error | A projected column that is not a window function (or an expression over one) is itself an aggregate, a further window function, or otherwise not row-local. |
+| `SuccessionIdentityNotProjected` | Error | A key column or the clock column is not projected row-locally, so `(k, t)` cannot be recovered from the presented table. |
+| `SuccessionSingleSourceOnly` | Error | The `FROM` clause is not exactly one source reference — a join, CTE, subquery, or set operation is present. |
+| `SuccessionDrivingSourceNotAppendOnly` | Error | The driving source does not declare `mutation_profile.kind: append_only`, or declares no `timeseries:` block. |
+| `SuccessionPreFilterNotRowLocal` | Error | A filter precedes the window projection but is not one deterministic row-local predicate over the driving source's own columns. |
+| `SuccessionDeleteFilterMisplaced` | Error | A `QUALIFY` clause exists but is not exactly `QUALIFY NOT <row-local NOT NULL boolean column>`, or a same-scope `WHERE` tests a window-derived column. |
+| `SuccessionPreFilterNegatesFlag` | Warning | The pre-window `WHERE` is a bare negated boolean column — admitted unchanged, but named because a CDC delete flag filtered here never closes its predecessor's interval. |
+| `SuccessionPatternUnrecognized` | Error | `refresh: incremental` with no `unique_key`, no `timeseries:`, and a SQL shape none of the rules above names — a stray `DISTINCT`/`GROUP BY`/`HAVING`/`ORDER BY`/`LIMIT`, or a model resembling no admitted grain. |
+| `SuccessionClockTie` | Error | Runtime: a delta presents two non-identical events at the same `(k, t)`, or a delete and a non-delete collide at one `(k, t)`. The run's transaction rolls back. |
+
+### Example: `SuccessionDeleteFilterMisplaced`
+
+**Severity**: Error
+
+A CDC delete flag must be filtered with `QUALIFY`, not `WHERE`, so its event still contributes to
+its predecessor's `LEAD`/`LAG`-derived column before it is dropped from the output.
+
+**Example** — filtering the delete flag before the window computes:
+
+```sql
+SELECT
+    customer_id,
+    effective_ts AS valid_from,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to
+FROM smelt.sources.customer_changes
+WHERE NOT is_deleted
+```
+
+**Fix**: Move the filter after the window, as a `QUALIFY`:
+
+```sql
+SELECT
+    customer_id,
+    effective_ts AS valid_from,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to
+FROM smelt.sources.customer_changes
+QUALIFY NOT is_deleted
+```

@@ -146,7 +146,7 @@ fn promote_numeric_operands_for_op(
     // handling above/below, but for `/` it previously produced a concrete,
     // confidently wrong result (e.g. `<unresolved> / 2` inferring `SmallInt`
     // from the literal `2` alone). Surfaced live: BigQuery's `MEDIAN`
-    // lowering (`crates/smelt-dialect/src/printer.rs::print_bigquery_median`)
+    // lowering (`crates/smelt-dialect/src/printer/registry_emit.rs::print_bigquery_median`)
     // emits `(CAST(x AS FLOAT64) + CAST(y AS FLOAT64)) / 2`; `FLOAT64` is a
     // GoogleSQL spelling `smelt_types::parse_type` doesn't recognise, so both
     // operands resolve to `None`, and this fallback used to type the whole
