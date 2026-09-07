@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788775583202,
+  "lastUpdate": 1788775586046,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 10.740861,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "af60af612e0aafd34c043ed4c6e571b7fd029da5",
+          "message": "Merge pull request #186 from adbrowne/outcome-loop-20260904-programme-hygiene\n\noutcome: 2026-09-04 programme hygiene + backlog",
+          "timestamp": "2026-09-07T20:02:38+10:00",
+          "tree_id": "ecb8feaeb7fe48dc2761b8634599433c2b672181",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/af60af612e0aafd34c043ed4c6e571b7fd029da5"
+        },
+        "date": 1788775585043,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.094819959033074,
+            "unit": "MB/s"
           }
         ]
       }
