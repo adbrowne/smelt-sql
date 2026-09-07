@@ -1,7 +1,7 @@
 # Phase 2 — `examples/github_activity/` green on DuckDB
 
 **Outcome:** `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`
-**Serves criteria:** 4 (DuckDB leg, in CI), and sets up 6/7 by fixing the model set
+**Serves criteria:** 4 (DuckDB leg, in CI), and sets up criteria 6 and 7 by putting the workspace, the source contract and the replay driver in place
 **Driver:** Claude-executable end to end — no warehouse, no credentials
 **Spec delta:** none. Every construct used is already specced (`sources.md`,
 `timeseries.md`, `incremental_models.md`); if a model needs surface that is not, that is a
@@ -24,10 +24,11 @@ phase 5 freezes it, once succession and the fan-out have landed.
 Phase 1's findings change three things the research doc assumed:
 
 - **`payload` is not in the sample**, so `bronze.events` is a typed passthrough *without*
-  the JSON payload. The research doc's silver fan-out (`push_events`, `pr_events`, …) is
-  already out of scope, and this is why: nothing downstream can extract from a payload
-  that was never landed. Widening the projection is a `sample.sql` edit plus a fixture
-  regeneration, and it is not done here.
+  the JSON payload. The silver fan-out (`push_events`, `pr_events`, …) cannot be built on
+  it: nothing downstream can extract from a payload that was never landed. Widening the
+  projection is a `sample.sql` edit plus a fixture regeneration, and **phase 4 does it** —
+  not this phase. Nothing built here may assume `payload` exists, and nothing here may
+  make adding it a breaking change to the source declaration.
 - **`id` is STRING.** The dedup key is textual. Worth stating because a `BIGINT` guess
   would type-check against nothing until the first live run.
 - **The feed has no duplicate ids of its own.** See below.
@@ -37,7 +38,7 @@ Phase 1's findings change three things the research doc assumed:
 `silver.events_deduped` exists because the *loader* is at-least-once. GitHub Archive is
 not: 64,313 rows, 64,313 distinct ids. If the DuckDB leg loads the fixture once and runs,
 the dedup is a no-op that would pass every gate while being completely untested — and it
-would keep passing right up until the live BigQuery leg replayed a window in phase 6.
+would keep passing right up until the live BigQuery leg replayed a window in phase 8.
 
 So the loader **deliberately redelivers**: each day's load re-appends a fixed slice of the
 *previous* day's rows (human decision of 2026-09-07). The black box is declared
@@ -67,7 +68,7 @@ Three properties the redelivery rule must have:
   6's parity check diffs noise instead of behaviour. So no `RAND()`, and no
   `FARM_FINGERPRINT` (which DuckDB has no equivalent of). Event ids are numeric strings,
   so `MOD(CAST(id AS BIGINT), 50) = 0` evaluates identically on DuckDB and GoogleSQL. The
-  rule joins `sample.sql` as pinned contract — phase 4's loader reproduces it verbatim.
+  rule joins `sample.sql` as pinned contract — phase 7's loader reproduces it verbatim.
 - **2%, not 0.1%.** The fixture averages ~2,144 rows/day, so 0.1% is ~2 redelivered rows
   per day and ~64 across the run — thin enough that a lookback wrong by one day could pass
   on luck. 2% is ~43/day and ~1,290 total, and matches the ~2% duplicate rate
@@ -131,7 +132,11 @@ cheapest things for a reviewer to overrule:
 7. Assert the fixture and the models: the redelivered rows are present and counted before
    dedup, and `silver.events_deduped` emits exactly `count(DISTINCT id)`; sessions do not
    span the gap; a session that crosses midnight stays one session.
-8. Wire the example into per-PR CI beside `web_analytics`.
+8. Correct `examples/github_activity/README.md`: its dedup note still describes the
+   superseded overlapping-window shape ("the *loader* replays overlapping windows"). State
+   the previous-day redelivery rule instead, and add the synthetic-duplicates consequence
+   beside the existing bot-repo skew note.
+9. Wire the example into per-PR CI beside `web_analytics`.
 
 ## Tests (red first)
 
@@ -173,7 +178,7 @@ The DuckDB leg reproduces the loader's at-least-once redelivery on purpose:
 GitHub Archive has no duplicate event ids of its own, so a single load
 would leave silver.events_deduped a no-op that passes every gate until the
 live leg first replays a window. setup_sources.sql loads each day over a
-range overlapping the previous one, exactly as the phase-4 loader will, and
+range overlapping the previous one, exactly as the phase-7 loader will, and
 a test asserts the duplicates are really there before asserting they are
 gone.
 

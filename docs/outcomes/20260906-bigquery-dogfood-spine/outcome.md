@@ -110,7 +110,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
-| 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | pending |
+| 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | planned |
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | pending |
 | 4 | The wider model set: re-pin `sample.sql` with `payload`, then the silver fan-out, `gold.events_enriched`, `gold.repo_activity_daily` and the remaining marts | pending |
 | 5 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
@@ -181,6 +181,18 @@ exists — so the live run is a test of the *backend*, not of the models.
   `gold.events_enriched` is built instead and is the same shape occurring on a real
   pipeline rather than in a testkit recipe — a weaker reason than the original, and an
   honest one.
+- 2026-09-08 (plan step): **phase 2's plan was already written and is kept, not rewritten.**
+  The plan step of 2026-09-07 wrote `phases/02-plan.md` but never flipped the row, so the
+  loop re-selected the phase; the human's reshape then revised the plan in place. It is
+  corrected rather than replaced: the phase numbers it cited moved under the reshape (the
+  loader is now 7, the first live run 8), `payload` and the fan-out are **deferred to
+  phase 4** rather than out of scope — so nothing built here may assume `payload` exists
+  or make adding it a breaking change to the source declaration — and the commit message's
+  body still described the superseded overlapping-window shape. One task is added:
+  `examples/github_activity/README.md` carries the same superseded description and is
+  corrected with the models. No phase rows are reshaped; there is no phase-1 summary to
+  reshape from, phase 1's findings having landed in this log directly.
+
 - 2026-09-06 (human): **a small subset first, widened later.** The human asked for a cheap
   slice. Sampling is `MOD(repo.id, 1000) = 0` rather than a `repo.name` prefix: a name
   prefix is unstable under rename, so a renamed repo would silently leave the sample —
