@@ -362,6 +362,33 @@ baseline `.claude/large-file-baseline.txt`) and dispatches a bounded shrink
 step to split any offending file the moment it regresses — see
 [`docs/outcome_loop.md` §"The large-file shrink step"](docs/outcome_loop.md#the-large-file-shrink-step).
 
+## Herdr (terminal environment)
+
+Andrew runs Claude Code sessions inside [Herdr](https://herdr.dev), a tmux-like
+terminal workspace manager for coding agents (workspaces → tabs → panes, with
+agent-aware lifecycle detection: `idle`/`working`/`blocked`/`done`/`unknown`).
+Any Claude Code session may be running inside a Herdr-managed pane — check
+`HERDR_ENV=1` before assuming so.
+
+- Interact with the current session via the `herdr` CLI, never by assuming
+  tmux. It's self-documenting: run `herdr --help`, then a command group with
+  no subcommand (`herdr agent`, `herdr pane`, `herdr workspace`, `herdr tab`,
+  `herdr worktree`) for that group's options, and `herdr --skill` for the full
+  agent-usage skill (targets, IDs, `agent prompt`/`agent wait`/`pane
+  run`/`pane read`, safety rules). Prefer that live output over memorizing
+  syntax here — it drifts with the installed version.
+  - Only use it when the task actually calls for inspecting or controlling
+    another pane/agent/workspace (e.g. spawning a sibling agent to run a
+    command, checking on a neighboring session) — not merely because a
+    background terminal could help.
+- If a `herdr` command hangs waiting for approval or seems to refuse to run,
+  it's very likely the session's permission mode, not an actual Herdr-side
+  block — check whether Claude Code is in manual-approval mode vs. auto mode
+  (`skipAutoPermissionPrompt`/`defaultMode` in settings) before concluding
+  Herdr itself is broken.
+- Never run `herdr server stop` or close a workspace/tab/pane/session created
+  by someone else, unless explicitly asked.
+
 ## Architecture
 
 ### High-Level Design
