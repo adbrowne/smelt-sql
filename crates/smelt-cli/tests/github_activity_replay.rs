@@ -437,6 +437,26 @@ fn full_refresh_matches_incremental_replay() {
         "expected the full fixture to dedup to the measured 64,313 distinct ids \
          (docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md)"
     );
+
+    // The payload-independent widening (`docs/outcomes/
+    // 20260906-bigquery-dogfood-spine/phases/04-plan.md`): all four new
+    // models agree between the incremental replay and the full-refresh
+    // oracle, measured with no divergence (unlike the succession models
+    // above).
+    for table in [
+        "gold_repo_dim",
+        "gold_events_enriched",
+        "gold_repo_activity_daily",
+        "marts_repo_leaderboard",
+        "marts_star_growth",
+    ] {
+        let incr_count = duckdb_scalar_i64(&incr_db, &format!("SELECT count(*) FROM main.{table}"));
+        let full_count = duckdb_scalar_i64(&full_db, &format!("SELECT count(*) FROM main.{table}"));
+        assert_eq!(
+            incr_count, full_count,
+            "row count mismatch for {table}: incremental={incr_count} full_refresh={full_count}"
+        );
+    }
 }
 
 /// Run `smelt explain <model> --project-dir <workspace>` against a staged (not
@@ -670,5 +690,262 @@ fn naming_history_surfaces_the_real_renames() {
     assert!(
         reused_names >= 2,
         "expected at least 2 repo names reused across different repo_ids, found {reused_names}"
+    );
+}
+
+/// Run `smelt explain <model> --json --project-dir <workspace>` and parse
+/// stdout as JSON.
+fn smelt_explain_json(workspace: &Path, model: &str) -> serde_json::Value {
+    let out = Command::new(smelt_bin())
+        .args(["explain", model, "--json", "--project-dir"])
+        .arg(workspace)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn smelt explain --json: {e}"));
+    assert!(
+        out.status.success(),
+        "smelt explain {model} --json failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "smelt explain {model} --json produced invalid JSON: {e}\nstdout:\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
+/// Test (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/04-plan.md`):
+/// `gold.repo_dim` has exactly one row per `repo_id` (5,016 in the fixture),
+/// and a renamed repo's `current_repo_name` matches its `is_current` row in
+/// `silver.repo_naming`.
+#[test]
+fn repo_dim_is_one_row_per_repo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let repo_dim_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.gold_repo_dim");
+    assert_eq!(
+        repo_dim_rows, 5_016,
+        "expected one row per repo in the fixture"
+    );
+
+    let distinct_repo_ids = duckdb_scalar_i64(
+        &db,
+        "SELECT count(DISTINCT repo_id) FROM main.gold_repo_dim",
+    );
+    assert_eq!(
+        repo_dim_rows, distinct_repo_ids,
+        "gold.repo_dim must have exactly one row per repo_id, no duplicates"
+    );
+
+    // The owner-change repo (`docs/outcomes/20260906-bigquery-dogfood-spine/
+    // outcome.md` decision log): current name must match `silver.repo_naming`'s
+    // `is_current` row, not an earlier name.
+    let matches = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM main.gold_repo_dim d
+         JOIN main.silver_repo_naming n ON d.repo_id = n.repo_id AND n.is_current
+         WHERE d.repo_id = 1136323000 AND d.current_repo_name = n.repo_name",
+    );
+    assert_eq!(
+        matches, 1,
+        "gold.repo_dim's current_repo_name for the owner-change repo must match \
+         silver.repo_naming's is_current row"
+    );
+}
+
+/// Test: `gold.events_enriched` is row-preserving over `silver.events_deduped`
+/// and every fact row's repo is present in the dimension.
+#[test]
+fn events_enriched_preserves_every_fact_row() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let deduped_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.silver_events_deduped");
+    let enriched_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.gold_events_enriched");
+    assert_eq!(
+        deduped_rows, enriched_rows,
+        "the LEFT JOIN must preserve every fact row (deduped={deduped_rows}, \
+         enriched={enriched_rows})"
+    );
+
+    let null_names = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM main.gold_events_enriched WHERE current_repo_name IS NULL",
+    );
+    assert_eq!(
+        null_names, 0,
+        "every fact repo must be present in gold.repo_dim — a NULL current_repo_name \
+         means the dimension is missing a repo the fact table references"
+    );
+}
+
+/// Test: for a repo the fixture renames, an *early* event (before the
+/// rename) is enriched with the repo's CURRENT name, not the name in force
+/// at that event — the property that makes the dimension join worth having.
+#[test]
+fn events_enriched_renamed_repo_carries_current_name() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    // repo_id 1322474000 renames from `Smpn4arjasa/dapuremmak` to
+    // `dapuremmak/dapuremmak` at 2026-08-07 08:25:42 (measured). Its earliest
+    // event (2026-08-07 06:11:35) predates the rename.
+    let early_event_name = duckdb::Connection::open(&db)
+        .unwrap_or_else(|e| panic!("open {db:?}: {e}"))
+        .query_row(
+            "SELECT current_repo_name FROM main.gold_events_enriched \
+             WHERE repo_id = 1322474000 ORDER BY created_at ASC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("query early event's enriched name");
+    assert_eq!(
+        early_event_name, "dapuremmak/dapuremmak",
+        "an early event for a renamed repo must carry the CURRENT name, not the \
+         name in force at event time"
+    );
+}
+
+/// Test: the `{current_repo_name}` `UpstreamMutation(gold.repo_dim)` cell's
+/// resolved verdict, characterised exactly as `smelt explain --json`
+/// produces it — not forced to `ColumnScopedMerge`. Measured (`docs/outcomes/
+/// 20260906-bigquery-dogfood-spine/phases/04-plan.md` decision log): `gold.
+/// repo_dim` is a clockless upstream MODEL feeding a `grain: partition`
+/// downstream, a combination `append_model_edge_cells`'s key-addressed route
+/// cannot admit (it needs the DOWNSTREAM's own declared `unique_key`, which a
+/// `grain: partition` output has none of by construction) — so NO cell is
+/// derived for it at all; instead a `RepairKeysNotDiscoverable` refusal names
+/// it. This is a criterion-8 finding (`phases/04-summary.md`), not fixed
+/// here.
+#[test]
+fn events_enriched_dimension_mutation_cell_technique() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, _db, _sample) = stage_workspace(tmp.path());
+    let json = smelt_explain_json(&workspace, "gold.events_enriched");
+
+    let cells = json["cells"].as_array().expect("cells array");
+    let repo_dim_cell = cells.iter().find(|c| {
+        c["trigger"]
+            .as_str()
+            .unwrap_or("")
+            .contains("gold.repo_dim")
+    });
+    assert!(
+        repo_dim_cell.is_none(),
+        "expected NO cell to be derived for gold.repo_dim (see this test's doc \
+         comment) — found one instead, meaning the derivation gap this test \
+         characterises has been closed; update the test and this model's \
+         header comment to describe the new (presumably ColumnScopedMerge) \
+         verdict rather than deleting this assertion: {repo_dim_cell:?}"
+    );
+
+    let refusals = json["refusals"].as_array().expect("refusals array");
+    let repo_dim_refusal = refusals
+        .iter()
+        .find(|r| r["text"].as_str().unwrap_or("").contains("gold.repo_dim"));
+    assert_eq!(
+        repo_dim_refusal.and_then(|r| r["text"].as_str()),
+        Some(
+            "RepairKeysNotDiscoverable { source: \"gold.repo_dim\", why: \"model has no \
+             proven grain and no declared unique key\" }"
+        ),
+        "expected the exact characterised refusal text for gold.repo_dim: {refusals:?}"
+    );
+}
+
+/// Test: `SUM(event_count)` over `gold.repo_activity_daily` equals
+/// `silver.events_deduped`'s row count — every deduped event is counted
+/// exactly once across the per-(repo, day) rollup.
+#[test]
+fn repo_activity_daily_totals_match_events() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let deduped_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.silver_events_deduped");
+    let activity_total = duckdb_scalar_i64(
+        &db,
+        "SELECT SUM(event_count) FROM main.gold_repo_activity_daily",
+    );
+    assert_eq!(
+        activity_total, deduped_rows,
+        "gold.repo_activity_daily's total event_count must equal \
+         silver.events_deduped's row count"
+    );
+}
+
+/// Test: `marts.star_growth`'s final cumulative value is exactly the
+/// fixture's measured `WatchEvent` count (47), and the series is
+/// non-decreasing.
+#[test]
+fn star_growth_counts_the_fixtures_watch_events() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let watch_events = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM main.gold_events_enriched WHERE type = 'WatchEvent'",
+    );
+    assert_eq!(
+        watch_events, 47,
+        "expected the fixture's measured 47 WatchEvents"
+    );
+
+    let final_cumulative = duckdb_scalar_i64(
+        &db,
+        "SELECT cumulative_stars FROM main.marts_star_growth ORDER BY event_date DESC LIMIT 1",
+    );
+    assert_eq!(
+        final_cumulative, 47,
+        "marts.star_growth's final cumulative value must equal the total WatchEvent count"
+    );
+
+    let non_monotonic = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM (
+            SELECT cumulative_stars,
+                   LAG(cumulative_stars) OVER (ORDER BY event_date) AS prev
+            FROM main.marts_star_growth
+         ) WHERE prev IS NOT NULL AND cumulative_stars < prev",
+    );
+    assert_eq!(non_monotonic, 0, "marts.star_growth must be non-decreasing");
+}
+
+/// Test: `marts.repo_leaderboard`'s top row reproduces the sample's
+/// documented skew rather than hiding it — the top repo is the fixture's
+/// known highest-event-count repo (measured: repo_id 1331137000,
+/// `mosleyamanda283/eltuxy`, 1,750 events).
+#[test]
+fn repo_leaderboard_top_repo_is_the_bot_repo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let conn = duckdb::Connection::open(&db).unwrap_or_else(|e| panic!("open {db:?}: {e}"));
+    let (top_repo_id, top_repo_name, top_events): (i64, String, i64) = conn
+        .query_row(
+            "SELECT repo_id, current_repo_name, total_events FROM main.marts_repo_leaderboard \
+             ORDER BY total_events DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("query top leaderboard row");
+
+    assert_eq!(
+        top_repo_id, 1_331_137_000,
+        "expected the known highest-event-count repo"
+    );
+    assert_eq!(top_repo_name, "mosleyamanda283/eltuxy");
+    assert_eq!(
+        top_events, 1_750,
+        "expected the fixture's measured top event count"
     );
 }

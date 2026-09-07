@@ -118,3 +118,32 @@ silently tolerating it. `marts.naming_history` is unaffected, since its `LAG`-ba
 "only where the name changed" filter drops a duplicated tie row identically on both legs.
 This is recorded for `docs/outcomes/20260906-scd2-keyed-succession`'s decision log, not
 fixed in this pipeline.
+
+## Gold and marts
+
+`gold.repo_dim` (one row per repo, current name from `silver.repo_naming`'s `is_current`
+flag), `gold.events_enriched` (every deduped event enriched with the repo's current name —
+the `LEFT JOIN`-against-a-`unique_key`-declaring-dimension shape), `gold.repo_activity_daily`
+(per-`(repo, day)` event and distinct-actor counts), and two marts over it:
+`marts.repo_leaderboard` (total events per repo — reproduces the sample's documented skew
+rather than hiding it: the top row is a single bot repo with 1,750 of the fixture's 64,313
+events) and `marts.star_growth` (a cumulative daily `WatchEvent` count, thin on purpose — the
+fixture holds only 47 `WatchEvent`s over 30 days).
+
+**A genuine derivation gap, discovered and recorded rather than fixed here**: no maintenance
+cell is ever derived for `gold.repo_dim`'s mutation sensitivity — a repo rename does not
+re-derive `gold.events_enriched.current_repo_name` on already-written rows through any
+tracked technique. `gold.repo_dim` is a clockless upstream model (no `timeseries:`), and
+`gold.events_enriched` is `grain: partition`; the only route open to a clockless
+upstream (`append_model_edge_cells`'s key-addressed route) needs the *downstream's own*
+declared `unique_key` to scope the recompute, and a `grain: partition` output has none by
+construction. `smelt explain gold.events_enriched --json` shows the resulting
+`RepairKeysNotDiscoverable` refusal rather than an `UpstreamMutation(gold.repo_dim)` cell —
+characterised by `events_enriched_dimension_mutation_cell_technique` in
+`crates/smelt-cli/tests/github_activity_replay.rs`. This is a criterion-8 finding for
+`docs/outcomes/20260906-bigquery-correctness`, not fixed in this pipeline.
+
+The typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) needs
+`payload`, which needs a `sample.sql` re-pin and a human-minted BigQuery token — it is a
+separate, currently blocked phase (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`
+phase 5), not an oversight.

@@ -113,7 +113,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
 | 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | done |
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | done |
-| 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | planned |
+| 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
@@ -126,6 +126,39 @@ exists — so the live run is a test of the *backend*, not of the models.
 
 ## Decision log
 
+- 2026-09-08 (phase 4 implement): **measured, not assumed: NO maintenance cell is derived
+  for `gold.repo_dim`'s mutation sensitivity at all — a stronger gap than "wrong
+  technique".** `smelt explain gold.events_enriched --json` shows no
+  `UpstreamMutation(gold.repo_dim)` cell; instead a `RepairKeysNotDiscoverable { source:
+  "gold.repo_dim", why: "model has no proven grain and no declared unique key" }` refusal.
+  Root cause, read from `crates/smelt-logical/src/maintenance/derive/model_edge.rs::
+  append_model_edge_cells`: the key-addressed route (the only one open to a **clockless**
+  upstream model) requires the **downstream's own** declared `unique_key` to scope the
+  recompute (`admit_key_addressed_recompute`'s `declared_unique_key` parameter), and
+  `gold.events_enriched` is `grain: partition`, which has no top-level `unique_key:` slot by
+  construction — the clock-based route also does not apply since `gold.repo_dim` declares no
+  `timeseries:`. So a `grain: partition` enrichment reading a clockless keyed-model dimension
+  has **no reachable route** in the current derivation, independent of whether the dimension
+  is itself cleanly classified (`gold.repo_dim`'s own `delta_signature` is `keyed_upsert` over
+  `["repo_id"]`, confirmed via its own `smelt explain --json`). Concretely: renaming a repo
+  today does not re-derive `current_repo_name` on `gold.events_enriched`'s already-written
+  rows through any tracked technique — silent staleness, not a loud refusal at run time (the
+  refusal only surfaces via `explain`, not `run`). Characterised (not fixed) by
+  `events_enriched_dimension_mutation_cell_technique` in `crates/smelt-cli/tests/
+  github_activity_replay.rs`; handed to `docs/outcomes/20260906-bigquery-correctness` as a
+  criterion-8 finding. Also measured: a self-join of two CTEs over the same upstream model
+  resolves to no classifiable `OutputDelta` at all for `own_output_delta_shape`, while a
+  plain `GROUP BY <declared_unique_key>` aggregate over the same source resolves cleanly to
+  `KeyedUpsert` — `gold.repo_dim`'s SQL uses the latter shape for exactly this reason, though
+  it does not change the finding above (the refusal traces to `events_enriched`'s own grain,
+  not to `repo_dim`'s shape).
+- 2026-09-08 (phase 4 implement): **the sample's measured skew moved between planning and
+  implementation.** The 2026-09-07 decision log entry recorded "one bot repo has 527" events;
+  the committed 30-day fixture (measured now, via `marts.repo_leaderboard`) actually tops out
+  at repo_id 1331137000 (`mosleyamanda283/eltuxy`) with **1,750** events. `README.md` and
+  `repo_leaderboard_top_repo_is_the_bot_repo` use the current measured figure; the 527 number
+  was evidently from an earlier, smaller probe of the same sample query and was never
+  load-bearing (no code or test depended on it before this phase).
 - 2026-09-08 (phase 4 plan): **the `payload` re-pin is split out of phase 4 and blocked.**
   Phase 4 as written opened with re-pinning `sample.sql` to project `payload` and
   regenerating the fixture — which is a live BigQuery query, and the credential path is a
