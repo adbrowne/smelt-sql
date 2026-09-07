@@ -1042,6 +1042,24 @@ fn frontmatter_has_generates(source: &str) -> bool {
 ///   rather than a custom diagnostic, because `PartitionGrainConfig` no longer
 ///   declares those fields.
 /// - `partition_column` absent from the SQL body SELECT aliases → `MalformedTimeseries`
+///
+/// A cheap syntactic pre-filter for "could this undeclared-grain
+/// `refresh: incremental` model plausibly be the keyed-succession grain?" —
+/// a bare textual scan for a `LEAD(`/`LAG(` call, case-insensitive. Never a
+/// substitute for `classify_keyed_succession`'s real proof (which this
+/// module cannot run — it needs the model's parsed `SelectNode` and its
+/// source declarations, neither available to a pure metadata validator);
+/// this only keeps `validate_timeseries`'s hard `GrainRequiredForIncremental`
+/// gate from rejecting a real succession candidate before the classifier
+/// ever gets to see it. A false positive here (a `LEAD`/`LAG` call that
+/// turns out not to be succession-shaped) still fails closed downstream:
+/// maintenance-plan derivation records `Refusal::SuccessionNotRecognized`
+/// rather than admitting a cell.
+fn sql_may_be_succession_shaped(sql_body: &str) -> bool {
+    let upper = sql_body.to_uppercase();
+    upper.contains("LEAD(") || upper.contains("LAG(")
+}
+
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
@@ -1057,7 +1075,21 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     let has_clock = metadata.timeseries.is_some();
     let has_identity = metadata.unique_key.is_some();
     match (&metadata.refresh, &metadata.grain) {
-        (Some(RefreshStrategy::Incremental), None) if !has_clock && !has_identity => {
+        // The keyed-succession grain (`docs/specs/incremental_shapes.md`
+        // §"The succession grain") is admitted with **no** declared
+        // `timeseries:`/`unique_key:`/`grain:` at all — the leaf classifier
+        // (`smelt_logical::analysis::succession::classify_keyed_succession`)
+        // decides admission from the model's own SQL plus its source
+        // declarations, neither of which this pure, metadata-only validator
+        // has access to. A cheap syntactic pre-filter (a `LEAD`/`LAG` call
+        // somewhere in the body) is the most this function can check; the
+        // real proof still runs at maintenance-plan derivation, which
+        // refuses fail-closed (`SuccessionVerdict::NotSuccession`) for a
+        // model this pre-filter let through but the classifier does not
+        // actually recognise.
+        (Some(RefreshStrategy::Incremental), None)
+            if !has_clock && !has_identity && !sql_may_be_succession_shaped(sql_body) =>
+        {
             return Err(MetadataError::GrainRequiredForIncremental);
         }
         (refresh, Some(_)) if *refresh != Some(RefreshStrategy::Incremental) => {

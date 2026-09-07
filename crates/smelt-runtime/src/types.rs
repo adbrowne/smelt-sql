@@ -57,6 +57,15 @@ pub struct ExecuteRequest {
     #[serde(default)]
     pub full_refresh: bool,
 
+    /// Set by `smelt rebuild`. Consumed only by the succession dispatch,
+    /// where it means re-derive the presented table and tombstone ledger in
+    /// full from the whole source (`docs/specs/incremental_shapes.md`
+    /// §"The tombstone ledger (hidden state)" — Lifecycle); ignored by every
+    /// other grain, which already takes its rebuild path from `full_refresh`
+    /// or the window-forward driver's own force-full-refresh logic.
+    #[serde(default)]
+    pub rebuild: bool,
+
     /// Compute the run plan and report what *would* run without invoking
     /// any backend. Used by the UI's `/api/run/plan` preview endpoint.
     #[serde(default)]

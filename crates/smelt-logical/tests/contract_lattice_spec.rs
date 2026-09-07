@@ -7,6 +7,11 @@
 //! specified-and-unimplemented Known Divergence all exist before any code
 //! consumes them.
 
+#[path = "support/module_source.rs"]
+mod module_source;
+#[path = "support/test_only_files.rs"]
+mod test_only_files;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -222,7 +227,10 @@ fn constraint_and_claude_md_state_the_lattice_invariant() {
 
 #[test]
 fn frozen_horizon_triple_is_complete() {
-    let module = read("crates/smelt-logical/src/contract/frozen_horizon.rs");
+    let module = module_source::read_module(
+        &repo_root(),
+        "crates/smelt-logical/src/contract/frozen_horizon",
+    );
     assert!(
         module.contains("pub fn validate_frozen_horizon"),
         "the declaration-schema validator leg must be present"
@@ -249,6 +257,34 @@ fn frozen_horizon_triple_is_complete() {
         mod_doc.contains("has landed") || mod_doc.contains("landed —"),
         "contract/mod.rs must state that the frozen_horizon triple has landed"
     );
+}
+
+#[test]
+fn gate_detects_a_missing_leg() {
+    // Negative proof: the read_module rewrite above must still catch a real
+    // absence, not turn frozen_horizon_triple_is_complete into a tautology
+    // that passes regardless of what the module contains.
+    let dir = std::env::temp_dir().join(format!(
+        "smelt-contract-lattice-gate-detects-missing-leg-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let module_dir = dir.join("fixture_module");
+    fs::create_dir_all(&module_dir).expect("create fixture module dir");
+    fs::write(
+        module_dir.join("mod.rs"),
+        "pub fn validate_frozen_horizon() {}\npub fn emit_frozen_band_snapshot() {}\n",
+    )
+    .expect("write fixture mod.rs");
+
+    let text = module_source::read_module(&dir, "fixture_module");
+    assert!(
+        !text.contains("pub fn clamp_write_range"),
+        "fixture module deliberately omits clamp_write_range; read_module must not \
+         fabricate it, or frozen_horizon_triple_is_complete could never fail"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -406,10 +442,12 @@ fn explain_contract_rendering_is_single_owned() {
     // the CLI's `smelt explain` per-cell contract row/`contract_point` JSON
     // field must resolve through `smelt_logical::contract::effective_contract`
     // — no local model-vs-cell ladder over `ContractConfig` in `smelt-cli`.
-    let module = read("crates/smelt-logical/src/contract/mod.rs");
-    assert!(
-        module.contains("pub fn effective_contract"),
-        "the per-cell effective-contract resolution must be single-owned in smelt-logical"
+    let module = module_source::read_module(&repo_root(), "crates/smelt-logical/src/contract");
+    let occurrences = module.matches("pub fn effective_contract").count();
+    assert_eq!(
+        occurrences, 1,
+        "the per-cell effective-contract resolution must be defined exactly once in \
+         smelt-logical's contract module (found {occurrences} definitions)"
     );
 
     let explain_rs = read("crates/smelt-cli/src/explain.rs");

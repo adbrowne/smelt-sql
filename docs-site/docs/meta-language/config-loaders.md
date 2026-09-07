@@ -160,6 +160,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderpathnotliteral"></a>
 !!! warning "ConfigLoaderPathNotLiteral"
     **When it fires:** The `path` argument to a loader is not a string literal.
 
@@ -175,6 +176,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderpathescapesworkspace"></a>
 !!! warning "ConfigLoaderPathEscapesWorkspace"
     **When it fires:** The path is absolute, contains a `..` segment that escapes the workspace root, or begins with a scheme prefix (`http://`, `s3://`, etc.).
 
@@ -190,6 +192,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderpathbackslash"></a>
 !!! warning "ConfigLoaderPathBackslash"
     **When it fires:** The path literal contains a backslash `\`.
 
@@ -205,6 +208,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderfilenotfound"></a>
 !!! warning "ConfigLoaderFileNotFound"
     **When it fires:** The resolved file does not exist at its workspace-relative path.
 
@@ -220,6 +224,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderschemaforbidden"></a>
 !!! warning "ConfigLoaderSchemaForbidden"
     **When it fires:** The schema argument is not an admissible shape (bare scalar, `List<Text>`, `Map<Integer, …>`, etc.).
 
@@ -235,6 +240,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloadertomlnotyetsupported"></a>
 !!! warning "ConfigLoaderTomlNotYetSupported"
     **When it fires:** `smelt.config.load_toml` is called.
 
@@ -250,6 +256,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderparseerror"></a>
 !!! warning "ConfigLoaderParseError"
     **When it fires:** The loaded file is not valid YAML or JSON.
 
@@ -261,6 +268,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderrequiredfieldmissing"></a>
 !!! warning "ConfigLoaderRequiredFieldMissing"
     **When it fires:** A record entry in the loaded file omits a field declared as required by the schema.
 
@@ -279,6 +287,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderunknownfield"></a>
 !!! warning "ConfigLoaderUnknownField"
     **When it fires:** A record entry in the loaded file contains a field not declared in the schema.
 
@@ -298,6 +307,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloadertypemismatch"></a>
 !!! warning "ConfigLoaderTypeMismatch"
     **When it fires:** A field value in the loaded file is not assignable to the declared field type.
 
@@ -316,6 +326,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloaderrootshapemismatch"></a>
 !!! warning "ConfigLoaderRootShapeMismatch"
     **When it fires:** The file's top-level shape (sequence, mapping, scalar) does not match what the schema expects.
 
@@ -338,6 +349,7 @@ SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout:
 
 ---
 
+<a id="configloadernullcoercion-warning"></a>
 !!! note "ConfigLoaderNullCoercion (warning)"
     **When it fires:** A YAML `null` scalar (`~` or `null`) appears at a schema field declared `Text`. The null coerces to empty string `''`.
 

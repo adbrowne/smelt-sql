@@ -1,7 +1,7 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -1124,17 +1124,34 @@ table is therefore exactly the oracle's output for every reader, inside or outsi
 **Lifecycle.** The ledger is always a pure function of the processed input: its contents are
 exactly `SELECT k, t FROM <source> WHERE <pre-filter> AND <delete flag>` over every window
 ever folded. Every path that rebuilds presented state rebuilds the ledger from that
-definition, in the same transaction: a `--full-refresh` rebuilds both from the whole source;
-`smelt repair` over a range re-derives the ledger rows whose run-axis partition lies in that
-range alongside the presented rows; a definition delta that touches the key, the clock, the
-delete flag, or the pre-window filter changes what the ledger *is* and is a skeleton change —
-a new relation, ledger included (`definition_deltas.md` §"Skeleton changes are a new
-relation"). A definition delta that touches only row-local payload columns leaves the ledger
-untouched. The ledger-rebuild `SELECT` is the third emitter output of the succession-patch
-technique (`model_transforms.md`), never authored by a backend. Ledger size is proportional
-to the number of delete events ever folded and is never compacted: a tombstone stays
-load-bearing for as long as a later-arriving event could splice next to it, which under the
-default contract point is forever.
+definition, in the same transaction. Both `--full-refresh` and `smelt rebuild` take this same
+whole-source rebuild path for a succession model: neighbour relationships cross window
+boundaries and neither the presented table nor the ledger carries a run-axis column to
+restrict by, so a `smelt rebuild --event-time-start/-end` range selects *which* models
+rebuild, never how much of one model's state is re-derived — both tables are always re-derived
+from the whole (`append_only`, retained) source. A definition delta that
+touches the key, the clock, the delete flag, or the pre-window filter changes what the ledger
+*is* and is a skeleton change — a new relation, ledger included (`definition_deltas.md`
+§"Skeleton changes are a new relation"). A definition delta that touches only row-local
+payload columns leaves the ledger untouched. The ledger-rebuild `SELECT` is the third emitter
+output of the succession-patch technique (`model_transforms.md`), never authored by a
+backend. Ledger size is proportional to the number of delete events ever folded and is never
+compacted: a tombstone stays load-bearing for as long as a later-arriving event could splice
+next to it, which under the default contract point is forever.
+
+**Physical shape.** The ledger is a **per-model sibling table**, never the shared
+`_smelt_ledger`: the neighbour lookup runs `LEAD`/`LAG` over the union of presented rows and
+ledger rows ordered by `t`, so `k` and `t` must be stored in the model's own column types — a
+shared VARCHAR-keyed table would force a cast into every neighbour lookup. Its name is derived
+from the presented table: `<presented table>__tombstones`, in the model's own schema.
+`__tombstones` is a **reserved relation-name suffix**, on the same terms as the reserved `__`
+column suffix that §"Decomposed state (rung 2) in keyed models" establishes for hidden state
+columns. Its columns are **exactly** `k ∪ {t}` — the classifier verdict's `key_cols` then
+`clock_col`, in that order, each in the model's own inferred type, each `NOT NULL` — with primary
+key `(k, t)`; no payload, no delete flag (every row is a delete by construction), and no
+run-metadata column. Its lifecycle is tied to the presented table: created with it, dropped with
+it, rebuilt from the whole source in the same transaction on `--full-refresh` and `smelt
+rebuild`, and replaced wholesale by a skeleton change, per the Lifecycle paragraph above.
 
 #### The maintenance theorem (bounded footprint)
 
@@ -1215,7 +1232,11 @@ grain"). The driving source must declare `mutation_profile.kind: append_only`
 into the event sequence, and a source that can rewrite or retract an already-folded event
 would leave the stored sequence disagreeing with the oracle. The declaration is paired with
 its usual verification mechanism, the append-only posture probe (`sources.md` §Semantics,
-`SourceMutationProfileViolated`).
+`SourceMutationProfileViolated`): a succession run dispatches that probe before its fold, on
+the same terms as every other maintained grain, so a late append into a closed partition is an
+observation whose covering window is re-presented, while an in-place mutation of a closed
+partition fails the run with `SourceMutationProfileViolated` before either the presented table
+or the ledger is touched.
 
 **Two axes, deliberately distinct.** The **run axis** is the source's `partition_column` —
 what a window covers and what the driver steps. The **succession clock** is the `ORDER BY`
@@ -1287,7 +1308,7 @@ events the delta presents. Under arrival partitioning that is every event, howev
 clock value, in the open partition; under event-time partitioning a late event arrives as an
 observed delta on a closed partition and that window is re-presented. Either way, presenting
 an event is always safe and always cheap, and a window may be re-presented — by the probe's
-late-arrival classification, a re-run, an explicit `--landed` range, or `smelt repair` —
+late-arrival classification, a re-run, an explicit `--landed` range, or `smelt rebuild` —
 without refusal.
 
 **Clock ties.** The derived identity `(k, t)` requires that no two distinct events share a key
@@ -1323,6 +1344,13 @@ for it is not produced — a declared boundary of the grain (§Constraints), not
 to close. Under `redelivery: none` the source has promised that no row arrives twice within
 a delivery, so two identical rows in one delta are two events at one `(k, t)` and refuse
 (`SuccessionClockTie`) like any other collision.
+
+A succession model's completed window-forward run records its own run window in the interval
+ledger and its driving source's landing on exactly the same terms as every other maintained
+grain (`run_state.md` §"Interval ledger", `sources.md` §"Landed-delta (derived, recorded)"),
+which is what makes `contract.deferral`'s frontier lag measurable for this grain; the
+whole-source rebuild path (`--full-refresh` / `smelt rebuild`) has no run window and records
+neither.
 
 #### What stays out of this grain
 
@@ -1774,6 +1802,16 @@ inferred *output* facts (§Future Extensions).
 11. **SCD2-over-mutable-snapshots is never admitted, regardless of SQL shape** — this grain
     requires a source that already carries change events with their own event times
     (§"What stays out of this grain").
+12. **`contract.frozen_horizon` and `contract.retain_departed` are refused on a succession
+    model by the existing rules, naming the succession grain; `contract.deferral` is admitted
+    with unchanged semantics.** `frozen_horizon` is admitted only on the partition grain
+    (`ContractFrozenHorizonInvalid`); `retain_departed` is admitted only on a keyed shape
+    consuming a `mutable_snapshot`, which this grain never does (`ContractRetainDepartedInvalid`).
+    Neither refusal is grain-specific machinery — both are the partition-grain-only and
+    mutable-snapshot-only rules already stated for those points, applied here. `deferral`
+    measures frontier lag against the model's clock, a grain-independent measurement, and a
+    succession model always carries a clock (its `clock_col`), so it is admitted unchanged.
+    No new contract-lattice point is defined for this grain.
 
 ## Known Divergences / Open Questions
 
@@ -1798,7 +1836,7 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   `unique_key`** — a `unique_key`-member candidate (bare, or `MAX`/`MIN`-wrapped, with or without
   a fallback) is admitted with no decomposed state and no declared functional dependency (the
   route-2 skip, `crates/smelt-logical/src/rules/cumulative.rs::classify_once_write`, with
-  plan-layer parity in `crates/smelt-db/tests/maintenance_fold_spec_companion.rs` and an
+  plan-layer parity in `crates/smelt-db/tests/maintenance_fold_spec_companion/` and an
   end-to-end DuckDB witness in `crates/smelt-cli/tests/maintenance_conformance/gate.rs::
   once_write_key_fallback_pool_upholds_end_state_equivalence`), but a driving-clock-derived
   payload still takes the decomposed-state route: the classifier resolves no driving source, so
@@ -1862,28 +1900,14 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The succession grain
 
-- **No implementation exists yet.** The classifier (`model_properties.md` §"Keyed-succession
-  classification"), the succession-patch technique (`model_transforms.md`), and this profile's
-  admission rules are specified but unimplemented; `refresh: incremental` over a
-  keyed-succession-shaped model today refuses with the ordinary "no maintainable shape" error
-  rather than the named diagnostics above. No plan exists yet — this spec diff is the input to
-  one.
-- **The generative conformance recipes this profile's splice and delete claims depend on do not
-  exist yet.** §"The maintenance theorem (bounded footprint)" and §"Delete events" are proved on
-  paper; the recipe families that will check them against the full-refresh oracle via
-  `cargo test -p smelt-cli --test maintenance_conformance` (`incremental_models.md`
-  §References) are: late-arriving splice (an event inserted between two folded events), delete
-  then later insert on the same key, late insert splicing before an already-folded delete, a key
-  whose only events are deletes, `LAG`-projecting models under each of those, out-of-order and
-  repeated window application, and an equal-`(k, t)` collision expecting `SuccessionClockTie`.
-  Until they exist, this profile's theorem is a design claim, not a verified one.
-- **The conformance pool has no arrival-partitioned source recipe.** The late-splice claims
-  above are only reachable through an arrival-partitioned driving source (§"Run shape and
-  late events"), and the typed recipe generator today partitions every clocked source by its
-  event time. The succession recipe family needs a source recipe whose `partition_column` is
-  a landing date distinct from `event_time_column`, with lateness schedules that land old
-  event times in new arrival windows — and a leg with the optional pre-window lateness clamp,
-  asserting the clamped-out rows are absent from both oracle and maintained state.
+- **No target other than DuckDB can realise the tombstone ledger.** Spark, BigQuery, and
+  `state.warehouse_tables: none` have no tombstone-ledger builder, so a succession cell on one
+  of those targets downgrades to full refresh with the recorded `MaintenanceStateDowngraded`
+  verdict (`smelt explain` surfaces it) rather than a ledger-less patch.
+- **A hand-authored model whose derived table name ends in the reserved `__tombstones` suffix
+  collides silently** with a succession model's ledger table, with no dedicated collision
+  diagnostic — the reserved-suffix collision the key grain's `__` state-column suffix already
+  has a diagnostic for (`KeyedStateColumnCollision`) has no relation-name counterpart here.
 
 ## Future Extensions
 
@@ -1962,9 +1986,9 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-logical/src/analysis/partition_axis.rs` — `PartitionAxis`
   - `crates/smelt-logical/src/analysis/source_bounds.rs` — `resolve_scan_window`
   - `crates/smelt-runtime/src/windowing.rs` — `PartitionPoint`, `IncrementalBatch` axis dispatch (calendar / unit-step integer)
-  - `crates/smelt-logical/src/maintenance/derive.rs` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
+  - `crates/smelt-logical/src/maintenance/derive/` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
   - `crates/smelt-state/src/schema_tracking.rs` — `DeployedSchema::partition_column`
-  - `crates/smelt-db/src/maintenance_refs.rs` — `model_source_clamps`
+  - `crates/smelt-db/src/maintenance_refs/` — `model_source_clamps`
 - **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI
   integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition
   full-refresh-equivalence harness; `crates/smelt-cli/tests/partition_residue_probes.rs`;
@@ -1996,12 +2020,12 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   `crates/smelt-logical/src/rules/cumulative.rs` (the built classifier seed — combiner lookup,
   GROUP-BY key derivation, driving-source resolution — and `execution_postures`, the derived
   re-run-tolerance/order-independence/reprocessing-refusal verdicts);
-  `crates/smelt-logical/src/maintenance/derive.rs` (the `KeyedRetractableContribution` classifier
-  seam); `crates/smelt-runtime/src/maintenance_driver.rs` (the windowed-keyed-maintenance driver,
+  `crates/smelt-logical/src/maintenance/derive/` (the `KeyedRetractableContribution` classifier
+  seam); `crates/smelt-runtime/src/maintenance_driver/` (the windowed-keyed-maintenance driver,
   `WindowedKeyedRule`); `crates/smelt-runtime/src/cumulative.rs` (per-window merge execution);
   `crates/smelt-backend/src/lib.rs` (`merge_into`, `Backend::execute_write_with_bookkeeping` —
   the transactional-write seam), impls in `crates/smelt-backend-duckdb` (the transactional
-  override) `/-spark`; `crates/smelt-logical/src/maintenance/availability.rs`
+  override) `/-spark`; `crates/smelt-logical/src/maintenance/availability/`
   (`resolve_availability` — the recorded `MaintenanceStateDowngraded` downgrade a non-DuckDB
   target's ledger-requiring cell carries, surfaced by `smelt explain`; see §Known Divergences).
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`);
@@ -2037,6 +2061,34 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
 
 ### The succession grain
 
+- **Code**:
+  - `crates/smelt-logical/src/analysis/succession/` — `classify_keyed_succession`, the leaf
+    classifier invoked from the composition walk
+  - `crates/smelt-logical/src/maintenance/succession.rs` — `Grain::Succession`,
+    `Technique::SuccessionPatch`, the pure succession-plan/refusal deriver and `SuccessionRecipe`
+    assembler
+  - `crates/smelt-logical/src/maintenance/emit/succession.rs` — the event-delta `SELECT`, the
+    succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and the clock-tie probe
+  - `crates/smelt-state/src/ddl_duckdb.rs` — `generate_tombstone_table_ddl`,
+    `generate_tombstone_table_drop_ddl` (ledger DDL, bookkeeping only)
+  - `crates/smelt-runtime/src/maintenance_driver/succession/` — the window-forward driver
+    dispatch, transactional ledger write, frontier recording, and append-only posture probes
+  - `crates/smelt-db` — the `resolved_grain()`-is-`None` branch of `derive_model_maintenance_plan`
+    that classifies and derives the succession cell
+- **Tests**:
+  - `crates/smelt-logical/src/analysis/succession/tests.rs` — per-rule classifier unit tests
+  - `crates/smelt-logical/tests/maintenance_availability/succession.rs`,
+    `crates/smelt-cli/tests/maintenance_conformance/succession.rs`,
+    `crates/smelt-cli/tests/explain_maintenance/succession.rs`
+  - `crates/smelt-runtime/tests/statement_parity/succession.rs` — executed-vs-emitted parity and
+    the structural no-authoring leg
+  - `crates/smelt-maintenance-testkit/src/gate_succession.rs`,
+    `crates/smelt-maintenance-testkit/src/recipe/succession.rs`,
+    `crates/smelt-maintenance-testkit/src/render/succession.rs` — the generative conformance
+    recipe family (splices, deletes, delete-then-late-insert, delete-only keys, `LAG`
+    projections, out-of-order/repeated windows, the pre-window clamp)
+  - `examples/scd2_succession/` — the `customer_changes`/`customer_history` fixture, zero
+    diagnostics
 - **Research**: `docs/research/20260723-scd2-succession-pattern.md` (the full design sketch this
   profile specifies: the pattern, the maintenance theorem, the four-layer machinery breakdown,
   the two hard parts, and the case for recognition over declaration).
@@ -2046,4 +2098,5 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   profile admits vs. what stays plain SQL); `sources.md` (the `append_only` posture and its
   probe); `state.md` (the tombstone ledger's degradation contract); `diagnostics.md` §"Succession
   grain" (the code catalogue).
-- **Plans (history)**: none yet — this spec diff is the input to the first one.
+- **User docs**: [`docs-site/docs/guide/scd2-succession.md`](../../docs-site/docs/guide/scd2-succession.md)
+- **Plans (history)**: [`docs/outcomes/20260906-scd2-keyed-succession/outcome.md`](../outcomes/20260906-scd2-keyed-succession/outcome.md) — the classifier, plan, emitters, runtime driver, and conformance coverage this section cites.

@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -181,16 +181,20 @@ grain: <label>)`. `<shape>` is `keyed upsert over [<keys>], key-addressed` for a
 key` model; the same with `, slice-bounded by <axis> under key temporal locality (settle bound:
 <bound>)` appended once key temporal locality is admitted (`incremental_shapes.md` §"Key
 temporal locality"); `append-only within a window, window-addressed by <axis>` for a
-partition-grain model; or `general (degraded by: <reason>), not delta-addressable` when the
-model's own SQL degrades — naming the construct or world-fact responsible, matching the vocabulary
-`format_output_delta` already uses for inbound edges. `<label>` is the identical string the
-report's own `derived grain:` row prints — one derivation, never a second label. With `--json`,
-the report carries a top-level `delta_signature` object (§Constraints item 5): `{"shape":
-"keyed_upsert"|"append_only_window"|"general", "addressing": "key"|"window"|"none", "keys":
-[...], "axis": "...", "degraded_by": "...", "slice_bound": "...", "settle_bound": "...", "grain":
-"..."}` — `keys` only for `keyed_upsert`, `axis` for `append_only_window` and for `keyed_upsert`
-once locality is admitted, `degraded_by` only for `general`, and `slice_bound`/`settle_bound`
-only once key temporal locality is admitted; an absent field is omitted, never `null`.
+partition-grain model; `event history keyed by [<k>], event-addressed by (<k>, <t>)` for a
+succession-grain model (`incremental_shapes.md` §"The succession grain"); or `general (degraded
+by: <reason>), not delta-addressable` when the model's own SQL degrades — naming the construct or
+world-fact responsible, matching the vocabulary `format_output_delta` already uses for inbound
+edges. `<label>` is the identical string the report's own `derived grain:` row prints — one
+derivation, never a second label. With `--json`, the report carries a top-level
+`delta_signature` object (§Constraints item 5): `{"shape": "keyed_upsert"|"append_only_window"|
+"keyed_succession"|"general", "addressing": "key"|"window"|"event"|"none", "keys": [...], "axis":
+"...", "degraded_by": "...", "slice_bound": "...", "settle_bound": "...", "grain": "..."}` —
+`keys` for `keyed_upsert` and `keyed_succession`, `axis` for `append_only_window`, for
+`keyed_succession` (the succession model's run axis), and for `keyed_upsert` once locality is
+admitted, `degraded_by` only for `general`, and `slice_bound`/`settle_bound` only once key
+temporal locality is admitted; an absent field is omitted, never `null`. This is an enum-value
+addition to an already append-stable field (§Constraints item 5), not a shape change.
 
 `smelt explain --diff [<ref>]` diffs this report's underlying property profile between a git
 baseline and the working tree rather than rendering one project version; see
@@ -267,6 +271,21 @@ yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each
 and/or `deferral` (plus `deferral_origin`: `"model"` or `"cell"`) and/or `retain_departed` when a
 relaxation applies; a default cell's `contract_point` is an empty object — absent relaxations are
 omitted, never rendered `null`.
+
+**Succession grain.** A cell whose model is admitted to the succession grain
+(`incremental_shapes.md` §"The succession grain") prints these lines after the ordinary cell
+block, in this order, each omitted when it has no value: `grain: succession`; `identity:
+(<k…>, <t>)`; `technique: succession-patch`; `run axis: <partition_column> (arrival-partitioned |
+event-time-partitioned)`; `clock: <event_time_column>`; `posture: re-run tolerant;
+order-independent but serial`; `pre-window filter: <sql>`; `internal state: tombstone ledger
+<table>__tombstones (<k…>, <t>) — not part of the model's public schema`. With `--json`, the
+model's entry carries a `succession` object: `key_columns`, `clock_column`, `run_axis`,
+`partitioning: "arrival"|"event_time"`, `lead_columns`, `lag_columns`, `delete_flag`,
+`pre_window_filter`, `tombstone_ledger: {"table": "...", "columns": [...]}`, and the fixed
+postures `rerun_tolerant: true`, `order_independent: true`, `concurrent: false`; an absent field
+(no pre-window filter, no delete flag) is omitted, never `null`. A recorded downgrade on a
+succession cell renders through the same `state_downgrade` object described below — there is no
+succession-specific downgrade rendering.
 
 **State downgrade.** Availability resolution (`state.md` §"The degradation contract" step 2) is
 resolved offline, from the model's declared target dialect and `state.warehouse_tables`, before

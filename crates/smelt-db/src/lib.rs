@@ -64,6 +64,7 @@
 
 mod diagnostic_mapping;
 mod file_check;
+mod file_check_tail;
 mod function_graph;
 mod ids;
 mod maintenance_refs;

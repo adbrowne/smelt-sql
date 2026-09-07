@@ -21,6 +21,7 @@ mod extended_aggregates;
 mod extended_math;
 mod extended_string;
 mod extended_temporal;
+mod extended_temporal_construction;
 mod extended_window;
 mod infix_operators;
 mod null_compare;
@@ -86,6 +87,7 @@ pub(super) static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new
         extended_string::register(&mut insert);
         extended_math::register(&mut insert);
         extended_temporal::register(&mut insert);
+        extended_temporal_construction::register(&mut insert);
         remaining::register(&mut insert);
         operator_stubs::register(&mut insert);
         infix_operators::register(&mut insert);

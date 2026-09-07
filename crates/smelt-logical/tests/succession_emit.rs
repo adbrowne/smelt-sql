@@ -1,0 +1,650 @@
+//! DuckDB-executed proofs for the succession-patch technique's emitters
+//! (`docs/outcomes/20260906-scd2-keyed-succession/phases/04-plan.md`):
+//! `emit_succession_patch` applied window-by-window against a real DuckDB,
+//! compared against the model's own `LEAD`/`LAG` SQL as the full-refresh
+//! oracle (`docs/specs/incremental_shapes.md` §"The succession grain" —
+//! "the projection's own `LEAD`/`LAG` over the full processed input is the
+//! executable oracle"). Text-shape assertions for the emitters live in
+//! `crates/smelt-logical/src/maintenance/emit/succession.rs`'s own
+//! `#[cfg(test)]` module; this file proves the *result*.
+//!
+//! Skips loudly (never silently) when the system DuckDB library is
+//! unavailable, matching `maintenance_plan_conformance.rs`'s own note: this
+//! crate's dev-profile already requires it to compile.
+
+use duckdb::Connection;
+
+use smelt_logical::analysis::input_delta::MutationProfile;
+use smelt_logical::analysis::succession::{classify_keyed_succession, SuccessionContext};
+use smelt_logical::analysis::walk::{QueryNode, QueryTree};
+use smelt_logical::maintenance::emit::{
+    emit_succession_clock_tie_probe, emit_succession_event_delta, emit_succession_full_rebuild,
+    emit_succession_patch, DerivedColumn, MaintenanceDialect, StatementGroup,
+};
+use smelt_logical::maintenance::succession::SuccessionRecipe;
+
+const PRESENTED: &str = "main.customer_history";
+const TOMBSTONES: &str = "main.customer_history__tombstones";
+const SOURCE: &str = "customer_changes";
+
+fn stage(conn: &Connection, with_delete_flag: bool) {
+    conn.execute_batch(&format!(
+        "CREATE TABLE {SOURCE} (customer_id INTEGER, changed_at TIMESTAMP, tier TEXT{});
+         CREATE TABLE {PRESENTED} (customer_id INTEGER, changed_at TIMESTAMP, tier TEXT, \
+         valid_to TIMESTAMP);
+         CREATE TABLE {TOMBSTONES} (customer_id INTEGER, changed_at TIMESTAMP);",
+        if with_delete_flag {
+            ", is_deleted BOOLEAN"
+        } else {
+            ""
+        }
+    ))
+    .expect("stage");
+}
+
+fn insert_events(conn: &Connection, rows: &[(i64, &str, &str)]) {
+    for (id, ts, tier) in rows {
+        conn.execute_batch(&format!(
+            "INSERT INTO {SOURCE} (customer_id, changed_at, tier) VALUES ({id}, TIMESTAMP '{ts}', '{tier}')"
+        ))
+        .expect("insert event");
+    }
+}
+
+fn insert_events_with_delete(conn: &Connection, rows: &[(i64, &str, &str, bool)]) {
+    for (id, ts, tier, deleted) in rows {
+        conn.execute_batch(&format!(
+            "INSERT INTO {SOURCE} (customer_id, changed_at, tier, is_deleted) VALUES ({id}, \
+             TIMESTAMP '{ts}', '{tier}', {deleted})"
+        ))
+        .expect("insert event");
+    }
+}
+
+fn batch_group(conn: &Connection, group: &StatementGroup) {
+    for stmt in &group.statements {
+        conn.execute_batch(&stmt.sql)
+            .unwrap_or_else(|e| panic!("statement failed: {e}\n{}", stmt.sql));
+    }
+}
+
+/// Two relations are equal multisets iff `EXCEPT ALL` is empty both ways
+/// (the Link-C oracle idiom, duplicated per `maintenance_plan_conformance.rs`'s
+/// own precedent — each integration-test file compiles as an independent
+/// binary).
+fn multiset_equal(conn: &Connection, left_sql: &str, right_sql: &str) -> bool {
+    let count = |l: &str, r: &str| -> i64 {
+        conn.query_row(
+            &format!("SELECT count(*) FROM (({l}) EXCEPT ALL ({r})) AS d"),
+            [],
+            |row| row.get(0),
+        )
+        .expect("except all count query")
+    };
+    count(left_sql, right_sql) == 0 && count(right_sql, left_sql) == 0
+}
+
+fn row_count(conn: &Connection, sql: &str) -> i64 {
+    conn.query_row(&format!("SELECT count(*) FROM ({sql}) AS t"), [], |row| {
+        row.get(0)
+    })
+    .expect("count")
+}
+
+fn lead_only() -> (Vec<DerivedColumn>, Vec<DerivedColumn>) {
+    (vec![("valid_to".to_string(), "{lead}".to_string())], vec![])
+}
+
+fn lag_only() -> (Vec<DerivedColumn>, Vec<DerivedColumn>) {
+    (
+        vec![],
+        vec![("previous_ts".to_string(), "{lag}".to_string())],
+    )
+}
+
+fn apply_window(
+    conn: &Connection,
+    window_predicate: &str,
+    lead_derived: &[DerivedColumn],
+    lag_derived: &[DerivedColumn],
+    delete_flag_expr: Option<&str>,
+) {
+    let mut projection = vec![
+        ("customer_id".to_string(), "customer_id".to_string()),
+        ("changed_at".to_string(), "changed_at".to_string()),
+        ("tier".to_string(), "tier".to_string()),
+    ];
+    if delete_flag_expr.is_some() {
+        projection.push(("is_deleted".to_string(), "is_deleted".to_string()));
+    }
+    let event_delta = emit_succession_event_delta(SOURCE, &projection, None, window_predicate);
+    let group = emit_succession_patch(
+        PRESENTED,
+        &["customer_id".to_string()],
+        "changed_at",
+        &["tier".to_string()],
+        lead_derived,
+        lag_derived,
+        delete_flag_expr,
+        &event_delta.sql,
+        MaintenanceDialect::DuckDb,
+    );
+    batch_group(conn, &group);
+}
+
+fn oracle_sql(delete_flag: bool) -> String {
+    if delete_flag {
+        "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER (PARTITION BY customer_id \
+         ORDER BY changed_at) AS valid_to FROM customer_changes QUALIFY NOT is_deleted"
+            .to_string()
+    } else {
+        "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER (PARTITION BY customer_id \
+         ORDER BY changed_at) AS valid_to FROM customer_changes"
+            .to_string()
+    }
+}
+
+#[test]
+fn patch_matches_full_refresh_for_a_late_splice() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-03 00:00:00", "silver"),
+        ],
+    );
+    let (lead, lag) = lead_only();
+    apply_window(
+        &conn,
+        "changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-03 00:00:00')",
+        &lead,
+        &lag,
+        None,
+    );
+
+    // Late event splices between the two already-folded events.
+    insert_events(&conn, &[(1, "2026-01-02 00:00:00", "platinum")]);
+    apply_window(
+        &conn,
+        "changed_at = TIMESTAMP '2026-01-02 00:00:00'",
+        &lead,
+        &lag,
+        None,
+    );
+
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            &oracle_sql(false),
+        ),
+        "a late-splicing event must patch its predecessor and successor to match the oracle"
+    );
+}
+
+#[test]
+fn patch_matches_full_refresh_for_a_delete_then_a_later_insert() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, true);
+    insert_events_with_delete(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold", false),
+            (1, "2026-01-02 00:00:00", "silver", true),
+        ],
+    );
+    let (lead, lag) = lead_only();
+    apply_window(
+        &conn,
+        "changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-02 00:00:00')",
+        &lead,
+        &lag,
+        Some("is_deleted"),
+    );
+
+    // A later event arrives after the delete — the tombstone must still be
+    // findable as its predecessor.
+    insert_events_with_delete(&conn, &[(1, "2026-01-03 00:00:00", "platinum", false)]);
+    apply_window(
+        &conn,
+        "changed_at = TIMESTAMP '2026-01-03 00:00:00'",
+        &lead,
+        &lag,
+        Some("is_deleted"),
+    );
+
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            &oracle_sql(true),
+        ),
+        "the ledger must be load-bearing for the later event's predecessor lookup"
+    );
+
+    // Prove the ledger is load-bearing: with its row removed, the neighbour
+    // lookup for the later event's predecessor would find nothing —
+    // demonstrated by the ledger genuinely holding the tombstone's `(k, t)`.
+    assert_eq!(
+        row_count(
+            &conn,
+            &format!(
+                "SELECT * FROM {TOMBSTONES} WHERE customer_id = 1 AND changed_at = TIMESTAMP \
+                 '2026-01-02 00:00:00'"
+            )
+        ),
+        1,
+        "the delete event must be recorded in the tombstone ledger"
+    );
+}
+
+#[test]
+fn patch_matches_full_refresh_for_a_lag_projecting_model() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+    conn.execute_batch(
+        "ALTER TABLE main.customer_history DROP COLUMN valid_to; \
+         ALTER TABLE main.customer_history ADD COLUMN previous_ts TIMESTAMP;",
+    )
+    .expect("reshape for lag model");
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-03 00:00:00", "silver"),
+        ],
+    );
+    let (lead, lag) = lag_only();
+    apply_window(
+        &conn,
+        "changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-03 00:00:00')",
+        &lead,
+        &lag,
+        None,
+    );
+
+    // A late event splices in — the SUCCESSOR's `previous_ts` must patch to
+    // point at the new event.
+    insert_events(&conn, &[(1, "2026-01-02 00:00:00", "platinum")]);
+    apply_window(
+        &conn,
+        "changed_at = TIMESTAMP '2026-01-02 00:00:00'",
+        &lead,
+        &lag,
+        None,
+    );
+
+    let oracle = "SELECT customer_id, changed_at, tier, LAG(changed_at) OVER (PARTITION BY \
+                  customer_id ORDER BY changed_at) AS previous_ts FROM customer_changes";
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, previous_ts FROM main.customer_history",
+            oracle,
+        ),
+        "a LAG-projecting model's successor must patch to the new event"
+    );
+}
+
+#[test]
+fn refolding_a_window_leaves_table_and_ledger_unchanged() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-02 00:00:00", "silver"),
+        ],
+    );
+    let (lead, lag) = lead_only();
+    let window = "changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-02 \
+                  00:00:00')";
+    apply_window(&conn, window, &lead, &lag, None);
+    let before: Vec<String> = conn
+        .prepare(
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history \
+                  ORDER BY changed_at",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok(format!(
+                "{:?}|{:?}|{:?}|{:?}",
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    apply_window(&conn, window, &lead, &lag, None);
+    let after: Vec<String> = conn
+        .prepare(
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history \
+                  ORDER BY changed_at",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok(format!(
+                "{:?}|{:?}|{:?}|{:?}",
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(
+        before, after,
+        "re-folding an already-applied window must be a no-op"
+    );
+}
+
+#[test]
+fn two_windows_applied_in_either_order_converge() {
+    let make_conn_and_apply = |first: &str, second: &str| -> Connection {
+        let conn = Connection::open_in_memory().expect("duckdb");
+        stage(&conn, false);
+        insert_events(
+            &conn,
+            &[
+                (1, "2026-01-01 00:00:00", "gold"),
+                (1, "2026-01-02 00:00:00", "silver"),
+                (1, "2026-01-03 00:00:00", "platinum"),
+            ],
+        );
+        let (lead, lag) = lead_only();
+        apply_window(&conn, first, &lead, &lag, None);
+        apply_window(&conn, second, &lead, &lag, None);
+        conn
+    };
+
+    let window_a = "changed_at IN (TIMESTAMP '2026-01-01 00:00:00')";
+    let window_b = "changed_at IN (TIMESTAMP '2026-01-02 00:00:00', TIMESTAMP '2026-01-03 \
+                    00:00:00')";
+
+    let conn_ab = make_conn_and_apply(window_a, window_b);
+    let conn_ba = make_conn_and_apply(window_b, window_a);
+
+    assert!(
+        multiset_equal(
+            &conn_ab,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            &oracle_sql(false),
+        ),
+        "applying window A then B must reproduce the oracle"
+    );
+
+    // Compare the two final tables against each other by staging one's rows
+    // into the other's connection (each connection is independent).
+    let ab_rows: Vec<(i64, i64, String, Option<i64>)> = conn_ab
+        .prepare(
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history ORDER BY \
+             changed_at",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let ba_rows: Vec<(i64, i64, String, Option<i64>)> = conn_ba
+        .prepare(
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history ORDER BY \
+             changed_at",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        ab_rows, ba_rows,
+        "windows applied in either order must converge to the same final table"
+    );
+}
+
+#[test]
+fn clock_tie_probe_fires_on_a_non_identical_collision_and_is_silent_on_a_redelivery() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+    insert_events(&conn, &[(1, "2026-01-01 00:00:00", "gold")]);
+    let (lead, _lag) = lead_only();
+    apply_window(
+        &conn,
+        "changed_at = TIMESTAMP '2026-01-01 00:00:00'",
+        &lead,
+        &[],
+        None,
+    );
+
+    // A redelivery of the exact same row: silent.
+    let redelivery_delta = emit_succession_event_delta(
+        SOURCE,
+        &[
+            ("customer_id".to_string(), "customer_id".to_string()),
+            ("changed_at".to_string(), "changed_at".to_string()),
+            ("tier".to_string(), "tier".to_string()),
+        ],
+        None,
+        "changed_at = TIMESTAMP '2026-01-01 00:00:00'",
+    );
+    let probe = emit_succession_clock_tie_probe(
+        PRESENTED,
+        &["customer_id".to_string()],
+        "changed_at",
+        &["tier".to_string()],
+        None,
+        &redelivery_delta.sql,
+        MaintenanceDialect::DuckDb,
+    );
+    let violation_count: i64 = conn
+        .query_row(&probe.sql, [], |row| row.get(0))
+        .expect("probe query");
+    assert_eq!(
+        violation_count, 0,
+        "a redelivered identical row must not fire the clock-tie probe"
+    );
+
+    // A non-identical collision: same `(k, t)`, different tier.
+    conn.execute_batch(
+        "INSERT INTO customer_changes (customer_id, changed_at, tier) VALUES (1, TIMESTAMP \
+         '2026-01-01 00:00:00', 'silver')",
+    )
+    .expect("stage colliding row");
+    let colliding_delta = emit_succession_event_delta(
+        SOURCE,
+        &[
+            ("customer_id".to_string(), "customer_id".to_string()),
+            ("changed_at".to_string(), "changed_at".to_string()),
+            ("tier".to_string(), "tier".to_string()),
+        ],
+        None,
+        "changed_at = TIMESTAMP '2026-01-01 00:00:00' AND tier = 'silver'",
+    );
+    let probe2 = emit_succession_clock_tie_probe(
+        PRESENTED,
+        &["customer_id".to_string()],
+        "changed_at",
+        &["tier".to_string()],
+        None,
+        &colliding_delta.sql,
+        MaintenanceDialect::DuckDb,
+    );
+    let violation_count2: i64 = conn
+        .query_row(&probe2.sql, [], |row| row.get(0))
+        .expect("probe query");
+    assert!(
+        violation_count2 > 0,
+        "a non-identical row at the same (k, t) must fire the clock-tie probe"
+    );
+}
+
+/// Build the recipe from a *classified* model — not hand-written emitter
+/// arguments — proving the phase-5a derivation itself, not just the
+/// emitters' own shape (`docs/outcomes/20260906-scd2-keyed-succession/
+/// phases/05a-plan.md` test 7).
+fn recipe_for(sql: &str) -> SuccessionRecipe {
+    let ctx = SuccessionContext {
+        source_name: "customer_changes".to_string(),
+        mutation_profile: Some(MutationProfile::AppendOnly),
+        event_time_column: Some("changed_at".to_string()),
+        not_null_columns: ["customer_id", "changed_at"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    };
+    let tree = QueryTree::from_sql(sql).expect("sql parses to a query tree");
+    let QueryNode::Select(node) = &tree.root else {
+        panic!("expected a top-level SELECT scope, got {:?}", tree.root);
+    };
+    let verdict = classify_keyed_succession(node, &ctx);
+    SuccessionRecipe::from_verdict(&verdict).expect("model classifies as Recognized")
+}
+
+#[test]
+fn recipe_feeds_emitters_end_to_end() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-03 00:00:00", "silver"),
+        ],
+    );
+
+    let model_sql = "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER (PARTITION BY \
+                      customer_id ORDER BY changed_at) AS valid_to FROM customer_changes";
+    let recipe = recipe_for(model_sql);
+    assert_eq!(recipe.source_table, "customer_changes");
+    assert_eq!(recipe.key_cols, vec!["customer_id".to_string()]);
+    assert_eq!(recipe.clock_col, "changed_at");
+    assert_eq!(recipe.payload_columns, vec!["tier".to_string()]);
+    assert_eq!(
+        recipe.lead_derived,
+        vec![("valid_to".to_string(), "{lead}".to_string())]
+    );
+    assert!(recipe.lag_derived.is_empty());
+    assert_eq!(recipe.delete_flag_expr, None);
+
+    let apply = |predicate: &str| {
+        let event_delta = emit_succession_event_delta(
+            &recipe.source_table,
+            &recipe.row_local_projection,
+            recipe.pre_filter.as_deref(),
+            predicate,
+        );
+        let group = emit_succession_patch(
+            PRESENTED,
+            &recipe.key_cols,
+            &recipe.clock_col,
+            &recipe.payload_columns,
+            &recipe.lead_derived,
+            &recipe.lag_derived,
+            recipe.delete_flag_expr.as_deref(),
+            &event_delta.sql,
+            MaintenanceDialect::DuckDb,
+        );
+        batch_group(&conn, &group);
+    };
+
+    apply("changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-03 00:00:00')");
+
+    // Late event splices between the two already-folded events.
+    insert_events(&conn, &[(1, "2026-01-02 00:00:00", "platinum")]);
+    apply("changed_at = TIMESTAMP '2026-01-02 00:00:00'");
+
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            model_sql,
+        ),
+        "the recipe-driven patch must match the model's own LEAD SQL at full refresh"
+    );
+}
+
+/// Test 2 (`docs/outcomes/20260906-scd2-keyed-succession/phases/
+/// 05c-plan.md`): `emit_succession_full_rebuild` executed against a real
+/// DuckDB after two ordinary patched windows (one of which tombstones a
+/// row) reproduces both relations from scratch — the presented table
+/// matches the model SQL's own full-refresh oracle, and the tombstone
+/// ledger equals the delete-flagged rows of the whole source, proving the
+/// rebuild is a genuine re-derivation and not an incremental continuation
+/// of whatever the patch loop left behind.
+#[test]
+fn full_rebuild_executes_against_duckdb_and_matches_the_oracle() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, true);
+    insert_events_with_delete(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold", false),
+            (1, "2026-01-02 00:00:00", "silver", true),
+        ],
+    );
+    let (lead, lag) = lead_only();
+    apply_window(
+        &conn,
+        "changed_at IN (TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-02 00:00:00')",
+        &lead,
+        &lag,
+        Some("is_deleted"),
+    );
+    insert_events_with_delete(&conn, &[(1, "2026-01-03 00:00:00", "platinum", false)]);
+    apply_window(
+        &conn,
+        "changed_at = TIMESTAMP '2026-01-03 00:00:00'",
+        &lead,
+        &lag,
+        Some("is_deleted"),
+    );
+
+    // The runtime driver drops the presented table as idempotent DDL before
+    // the transactional rebuild group (`execute_succession_maintenance`'s
+    // own precedent of idempotent DDL preceding a transactional write) —
+    // mirrored by hand here since this file drives the emitter directly.
+    conn.execute_batch(&format!("DROP TABLE {PRESENTED}"))
+        .expect("drop presented table");
+
+    let group = emit_succession_full_rebuild(
+        PRESENTED,
+        &oracle_sql(true),
+        SOURCE,
+        &["customer_id".to_string()],
+        "changed_at",
+        None,
+        "is_deleted",
+        MaintenanceDialect::DuckDb,
+    );
+    batch_group(&conn, &group);
+
+    assert!(
+        multiset_equal(
+            &conn,
+            "SELECT customer_id, changed_at, tier, valid_to FROM main.customer_history",
+            &oracle_sql(true),
+        ),
+        "the full rebuild must match the model SQL's own full-refresh oracle"
+    );
+    assert!(
+        multiset_equal(
+            &conn,
+            &format!("SELECT customer_id, changed_at FROM {TOMBSTONES}"),
+            &format!("SELECT customer_id, changed_at FROM {SOURCE} WHERE is_deleted"),
+        ),
+        "the rebuilt ledger must equal the delete-flagged rows of the whole source"
+    );
+}

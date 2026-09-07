@@ -47,6 +47,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BASELINE_FILE="$REPO_ROOT/.claude/large-file-baseline.txt"
 DEFAULT_CAP_LINES=1500
+# Files below this size are never worth tracking individually — freezing a
+# 20-line file's count is pure ratchet noise (see the incident that prompted
+# this constant: nearly half the baseline was files under 200 lines, so
+# routine edits to small files were failing as "regressions"). Only files at
+# or above this line count get a baseline entry at all; everything smaller
+# is left unconstrained until it grows past DEFAULT_CAP_LINES, at which
+# point it becomes a "new oversized file" and earns a baseline entry.
+BASELINE_MIN_LINES=1000
 UPDATE_MODE=false
 [[ "${1:-}" == "--update" ]] && UPDATE_MODE=true
 
@@ -68,9 +76,12 @@ if $UPDATE_MODE; then
         echo "# One-sided: a tracked file may shrink freely; it may not grow"
         echo "# past this number without a reviewer sign-off note. A file with"
         echo "# no entry here is capped at ${DEFAULT_CAP_LINES} lines instead."
+        echo "# Only files >= ${BASELINE_MIN_LINES} lines at update time get an entry —"
+        echo "# smaller files are left unconstrained (see BASELINE_MIN_LINES in the script)."
         echo "# Regenerate with: .claude/scripts/large-file-check.sh --update"
         echo "#"
         for key in $(printf '%s\n' "${!CURRENT[@]}" | sort); do
+            [[ "${CURRENT[$key]}" -lt "$BASELINE_MIN_LINES" ]] && continue
             echo "$key ${CURRENT[$key]}"
         done
     } > "$BASELINE_FILE"

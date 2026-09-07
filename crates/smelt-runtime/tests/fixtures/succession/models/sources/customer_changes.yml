@@ -1,0 +1,15 @@
+description: customer change events, arrival-partitioned
+mutation_profile: append_only
+timeseries:
+  event_time_column: changed_at
+  partition_column: arrival_date
+  granularity: day
+columns:
+- name: customer_id
+  type: INTEGER
+- name: changed_at
+  type: TIMESTAMP
+- name: arrival_date
+  type: DATE
+- name: tier
+  type: VARCHAR

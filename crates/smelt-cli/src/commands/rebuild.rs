@@ -36,6 +36,42 @@ fn to_upstream_closure(selector: &str) -> String {
     }
 }
 
+/// Build the `ExecuteRequest` for `smelt rebuild`. `rebuild: true` signals
+/// the succession dispatch (`crates/smelt-runtime/src/execute/project/mod.rs`)
+/// to take its full-ledger rebuild path rather than the window-forward patch
+/// loop; `full_refresh: false` is unchanged — the upstream-closure selector
+/// rebuilds upstream table models as full-refreshes (their default) while
+/// keyed models receive the per-partition merge loop.
+fn build_rebuild_request(
+    args: &RebuildArgs,
+    upstream_selectors: Vec<String>,
+    ephemeral_seed_ctes: Vec<(String, String, String)>,
+) -> ExecuteRequest {
+    ExecuteRequest {
+        target: args.target.clone(),
+        select: upstream_selectors,
+        exclude: vec![],
+        start: Some(args.start.clone()),
+        end: Some(args.end.clone()),
+        batch_size_days: args.batch_size,
+        per_partition: args.per_partition,
+        full_refresh: false,
+        rebuild: true,
+        dry_run: args.dry_run,
+        enforce_safety: !args.allow_downgrade,
+        allow_column_removal: false,
+        allow_full_refresh: false,
+        ephemeral_seed_ctes,
+        run_checks: false,
+        checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
+    }
+}
+
 pub async fn rebuild(args: RebuildArgs, scope: Option<&str>) -> Result<()> {
     // 1. Resolve project root + config.
     let project_dir = smelt_cli::find_project_root(&args.project_dir)
@@ -140,31 +176,7 @@ pub async fn rebuild(args: RebuildArgs, scope: Option<&str>) -> Result<()> {
         &args.target,
     )?;
 
-    // rebuild always passes full_refresh: false — the upstream-closure
-    // selector rebuilds upstream table models as full-refreshes (their default)
-    // while keyed models receive the per-partition merge loop.
-    let request = ExecuteRequest {
-        target: args.target.clone(),
-        select: upstream_selectors,
-        exclude: vec![],
-        start: Some(args.start.clone()),
-        end: Some(args.end.clone()),
-        batch_size_days: args.batch_size,
-        per_partition: args.per_partition,
-        full_refresh: false,
-        dry_run: args.dry_run,
-        enforce_safety: !args.allow_downgrade,
-        allow_column_removal: false,
-        allow_full_refresh: false,
-        ephemeral_seed_ctes,
-        run_checks: false,
-        checks: vec![],
-        jobs: None,
-        retry_max: None,
-        retry_backoff_ms: None,
-        resume: false,
-        technique_overrides: vec![],
-    };
+    let request = build_rebuild_request(&args, upstream_selectors, ephemeral_seed_ctes);
 
     let run_id = generate_run_id();
     let config_arc = Arc::new(config);
@@ -217,4 +229,39 @@ pub async fn rebuild(args: RebuildArgs, scope: Option<&str>) -> Result<()> {
     info!("{}", "=".repeat(60));
     info!("Executed {} models successfully", outcome.models.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_args() -> RebuildArgs {
+        RebuildArgs {
+            selector: "my_model".to_string(),
+            start: "2026-01-01".to_string(),
+            end: "2026-01-02".to_string(),
+            project_dir: ".".into(),
+            database: None,
+            target: "dev".to_string(),
+            show_results: false,
+            verbose: false,
+            dry_run: false,
+            batch_size: None,
+            per_partition: false,
+            allow_downgrade: false,
+        }
+    }
+
+    #[test]
+    fn rebuild_request_sets_the_rebuild_signal() {
+        let args = test_args();
+        let request = build_rebuild_request(&args, vec!["+my_model".to_string()], vec![]);
+
+        assert!(request.rebuild, "smelt rebuild must set rebuild: true");
+        assert!(
+            !request.full_refresh,
+            "rebuild is a distinct signal from full_refresh"
+        );
+        assert_eq!(request.select, vec!["+my_model".to_string()]);
+    }
 }

@@ -125,7 +125,7 @@ next_step() {
     /^\|/ {
       n=$2; t=$3; s=$4
       gsub(/^[ ]+|[ ]+$/, "", n); gsub(/^[ ]+|[ ]+$/, "", t); gsub(/^[ `]+|[ `]+$/, "", s)
-      if (n !~ /^[0-9]+[a-z]?$/) next
+      if (n !~ /^[0-9]+[a-z0-9]*$/) next
       if (s == "pending")  { print "plan " n " " t; exit }
       if (s == "planned")  { print "implement " n " " t; exit }
     }' "${dir}/outcome.md"

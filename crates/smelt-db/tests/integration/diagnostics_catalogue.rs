@@ -8,7 +8,7 @@
 #[test]
 fn every_diagnostic_code_is_catalogued() {
     // ── 1. Parse variant names from the enum source ──────────────────────
-    let source_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/diagnostics_types.rs");
+    let source_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/diagnostics_types/mod.rs");
     let source =
         std::fs::read_to_string(source_path).expect("should be able to read diagnostics_types.rs");
 

@@ -222,6 +222,7 @@ The spread `...smelt.functions.coalesce_numeric(smelt.orders)` materialises the 
 
 ---
 
+<a id="columnsofrequirestableexpr"></a>
 !!! warning "ColumnsOfRequiresTableExpr"
     **When it fires:** `smelt.columns_of(x)` is called and `x` synthesises to a type that is not assignable to `TableExpr`.
 
@@ -239,6 +240,7 @@ The spread `...smelt.functions.coalesce_numeric(smelt.orders)` materialises the 
 
 ---
 
+<a id="columnsofnamedargument"></a>
 !!! warning "ColumnsOfNamedArgument"
     **When it fires:** `smelt.columns_of` is called with a named argument instead of a positional argument.
 
@@ -256,6 +258,7 @@ The spread `...smelt.functions.coalesce_numeric(smelt.orders)` materialises the 
 
 ---
 
+<a id="columnsofunresolvableschema"></a>
 !!! warning "ColumnsOfUnresolvableSchema"
     **When it fires:** At expansion time, `smelt.columns_of(t)` is evaluated but the schema for `t` cannot be statically determined (for example because an upstream model has an unknown schema).
 
@@ -267,6 +270,7 @@ The spread `...smelt.functions.coalesce_numeric(smelt.orders)` materialises the 
 
 ---
 
+<a id="columnreffieldunknown"></a>
 !!! warning "ColumnRefFieldUnknown"
     **When it fires:** Field access on a `ColumnRef`-typed value uses an identifier that is not one of the three declared fields.
 
@@ -398,6 +402,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
+<a id="withtagrequirestext"></a>
 !!! warning "WithTagRequiresText"
     **When it fires:** `smelt.models.with_tag(x)` or `smelt.sources.with_tag(x)` is called and `x` is not a compile-time Text literal (for example an integer, a function call, or a runtime expression).
 
@@ -415,6 +420,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
+<a id="withtagnamedargument"></a>
 !!! warning "WithTagNamedArgument"
     **When it fires:** `with_tag` is called with a named argument instead of a positional argument.
 
@@ -432,6 +438,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
+<a id="widereflectionunknownaccessor"></a>
 !!! warning "WideReflectionUnknownAccessor"
     **When it fires:** `smelt.models.<name>` or `smelt.sources.<name>` uses an accessor name outside the closed set `{with_tag, all}`.
 
@@ -449,6 +456,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
+<a id="widereflectionunexpectedargument"></a>
 !!! warning "WideReflectionUnexpectedArgument"
     **When it fires:** `smelt.models.all` or `smelt.sources.all` is called with one or more arguments.
 
@@ -466,6 +474,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
+<a id="modelreffieldunknown"></a>
 !!! warning "ModelRefFieldUnknown"
     **When it fires:** Field access on a `ModelRef`-typed value uses an identifier that is not one of the four declared fields.
 
@@ -483,6 +492,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
+<a id="sourcereffieldunknown"></a>
 !!! warning "SourceRefFieldUnknown"
     **When it fires:** Field access on a `SourceRef`-typed value uses an identifier that is not one of the four declared fields.
 

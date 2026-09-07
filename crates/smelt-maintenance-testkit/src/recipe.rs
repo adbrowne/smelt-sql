@@ -334,6 +334,14 @@ pub struct SourceRecipe {
     /// built before Phase A6 (route 3's own declared-recurrence composed
     /// pool is the only consumer).
     pub key_recurrence: Option<KeyRecurrenceDecl>,
+    /// Declared `timeseries.partition_column`, when distinct from
+    /// `clock_column` (arrival-partitioned succession sources,
+    /// `recipe::succession`). `None` keeps every prior caller's rendering
+    /// byte-identical.
+    pub partition_column: Option<String>,
+    /// A declared `NOT NULL` delete-flag column (succession's `is_deleted`).
+    /// `None` for every source with no such column.
+    pub delete_flag_column: Option<String>,
 }
 
 /// A declared `key_recurrence` bound (`sources.md` §"`mutation_profile` —
@@ -363,6 +371,8 @@ impl SourceRecipe {
             key_shape,
             posture: SourcePosture::AppendOnly,
             key_recurrence: None,
+            partition_column: None,
+            delete_flag_column: None,
         }
     }
 
@@ -401,6 +411,8 @@ impl SourceRecipe {
             key_shape: KeyShape::Single,
             posture: SourcePosture::MutableSnapshot,
             key_recurrence: None,
+            partition_column: None,
+            delete_flag_column: None,
         }
     }
 
@@ -2016,6 +2028,9 @@ impl RepairRecipe {
         self.combiner.agg_and_alias().1
     }
 }
+
+mod succession;
+pub use succession::SuccessionRecipe;
 
 #[cfg(test)]
 mod tests {

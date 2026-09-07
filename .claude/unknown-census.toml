@@ -254,112 +254,112 @@ discriminant = "unresolved"
 
 # ── smelt-db / type_inference/function_call ───────────────────────────────────
 
-["crates/smelt-db/src/type_inference/function_call.rs:67"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:56"]
 classification = "legitimate"
 reason = "smelt.ref()-style path (models/sources prefix) — whole model reference, no scalar DataType"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:84"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:73"]
 classification = "legitimate"
 reason = "smelt.define return type: Ordered constraint has no SQL scalar — Unknown is the correct stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:87"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:76"]
 classification = "legitimate"
 reason = "smelt.define return type: Any constraint — Unknown is the correct stand-in (no constraint)"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:93"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:82"]
 classification = "legitimate"
 reason = "smelt.define return type: TableExpr — not a scalar return; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:96"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:85"]
 classification = "legitimate"
 reason = "smelt.define return type: SelectItems — not a scalar return; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:110"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:99"]
 classification = "legitimate"
 reason = "smelt.define return type: meta-language List/Unknown — compile-time only, no SQL DataType"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:113"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:102"]
 classification = "legitimate"
 reason = "smelt.define return type: Lambda — meta-only; not a valid SQL return type"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:115"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:104"]
 classification = "legitimate"
 reason = "smelt.define return type: ColumnRef — meta-only; not a SQL DataType"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:118"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:107"]
 classification = "legitimate"
 reason = "smelt.define return type: ModelRef/SourceRef — meta-only; not SQL DataTypes"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:123"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:112"]
 classification = "legitimate"
 reason = "smelt.define return type: Record/Map — meta-only; not SQL DataTypes"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:126"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:115"]
 classification = "legitimate"
 reason = "smelt.define return type: ModelDef — meta-only; not a SQL DataType"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:127"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:116"]
 classification = "legitimate"
 reason = "smelt.define return type: Err case — parse error already surfaced upstream; avoiding cascade"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:128"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:117"]
 classification = "legitimate"
 reason = "smelt.define return type: None — no return type annotation; deliberate polymorphism"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:170"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:159"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: no struct param in signature — can't resolve return type; conservative"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:195"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:184"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: no arg expression for struct param — can't resolve return type"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:201"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:190"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: empty qualifier — struct arg can't be resolved to columns"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:209"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:198"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: qualifier has no columns — struct return type unresolvable"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:215"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:204"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: can't extract struct param fields — conservative fallback"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:234"]
+["crates/smelt-db/src/type_inference/function_call/smelt_path.rs:223"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: row-var name mismatch between param and return — unresolvable"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:796"]
+["crates/smelt-db/src/type_inference/function_call/legacy.rs:135"]
 classification = "legitimate"
 reason = "Coalesce: all args Unknown/Null — result type genuinely unknown; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:813"]
+["crates/smelt-db/src/type_inference/function_call/legacy.rs:152"]
 classification = "legitimate"
 reason = "Ifnull: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:1091"]
+["crates/smelt-db/src/type_inference/function_call/legacy.rs:430"]
 classification = "legitimate"
 reason = "Greatest/Least: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 discriminant = "dynamic"

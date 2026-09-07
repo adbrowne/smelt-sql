@@ -64,6 +64,7 @@ fn case_count() -> usize {
 fn keyed_full_refresh_request(target: &str) -> ExecuteRequest {
     ExecuteRequest {
         full_refresh: true,
+        rebuild: false,
         ..base_request(target)
     }
 }

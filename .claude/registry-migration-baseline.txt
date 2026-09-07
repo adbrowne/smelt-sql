@@ -1,7 +1,8 @@
 # Function-registry migration ratchet baseline (shrink-only).
 #
 # Upper bound on the number of recognised SQL functions still typed by the
-# hand-written `match` in crates/smelt-db/src/type_inference/function_call.rs
+# hand-written `match` in
+# crates/smelt-db/src/type_inference/function_call/legacy.rs
 # (i.e. NOT registry-first via `try_registry_inference`). The
 # `legacy_match_ratchet` gate (crates/smelt-db/tests/integration/
 # registry_consistency.rs) asserts the live count is <= this number.

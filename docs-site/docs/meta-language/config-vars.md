@@ -101,6 +101,7 @@ WHERE revenue > CAST(smelt.config.var('min_revenue') AS DECIMAL)
 
 ---
 
+<a id="configvarnotfound"></a>
 !!! warning "ConfigVarNotFound"
     **When it fires:** `smelt.config.var('name')` is called but `name` is not present in the `vars:` block of `smelt.yml`.
 
@@ -123,6 +124,7 @@ WHERE revenue > CAST(smelt.config.var('min_revenue') AS DECIMAL)
 
 ---
 
+<a id="configvarnamenotliteral"></a>
 !!! warning "ConfigVarNameNotLiteral"
     **When it fires:** The argument to `smelt.config.var` is not a string literal.
 
@@ -140,6 +142,7 @@ WHERE revenue > CAST(smelt.config.var('min_revenue') AS DECIMAL)
 
 ---
 
+<a id="configvarnullcoercion-warning"></a>
 !!! note "ConfigVarNullCoercion (warning)"
     **When it fires:** A `vars:` entry has a YAML `null` value (`~` or `null`), which is coerced to an empty string `''`.
 

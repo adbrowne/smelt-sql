@@ -542,6 +542,13 @@ async fn architecture_domain_layout() {
     assert_example_workspace_clean("architecture_domain_layout").await;
 }
 
+/// The succession grain's worked example, real-LSP leg (catches the
+/// asymmetric-discovery bugs the Salsa-direct test misses).
+#[tokio::test]
+async fn scd2_succession_workspace_clean() {
+    assert_example_workspace_clean("scd2_succession").await;
+}
+
 // ---------------------------------------------------------------------------
 // Emission-body diagnostics: broken fixture LSP tests.
 // These mirror the CLI broken-fixture tests to satisfy the Workspace-Loading-

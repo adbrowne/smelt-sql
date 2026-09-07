@@ -63,6 +63,8 @@ impl KeyedEnrichedRecipe {
                 key_shape: KeyShape::Single,
                 posture: SourcePosture::AppendOnly,
                 key_recurrence: None,
+                partition_column: None,
+                delete_flag_column: None,
             },
             dimension: SourceRecipe::mutable_dimension("keyed_enrich_dim"),
         }
