@@ -38,16 +38,50 @@ not: 64,313 rows, 64,313 distinct ids. If the DuckDB leg loads the fixture once 
 the dedup is a no-op that would pass every gate while being completely untested — and it
 would keep passing right up until the live BigQuery leg replayed a window in phase 6.
 
-So the DuckDB leg reproduces the loader's redelivery **by construction**, in the shape the
-real loader will have: the loader re-runs over a day range that overlaps the previous
-run's, so events near a boundary land twice. `setup_sources.sql` therefore loads day `D`
-as `[D - overlap, D + 1 day)` rather than `[D, D + 1 day)`, with `overlap` a named
-constant, and the duplicate count is asserted non-zero before the models run. A test that
-finds zero duplicates is a failing test, not a lucky one.
+So the loader **deliberately redelivers**: each day's load re-appends a fixed slice of the
+*previous* day's rows (human decision of 2026-09-07). The black box is declared
+at-least-once, the upstream feed supplies no redelivery of its own, so the black box
+supplies it — honestly and by declaration, rather than by hoping for an incidental
+duplicate that the measurements say does not exist.
 
-The overlap must be a **declared** number that the phase-4 loader then matches, for the
-same reason `sample.sql` is pinned: if the two legs redeliver differently they are no
-longer comparable.
+**Why the previous day rather than an overlapping window.** An earlier draft of this plan
+had the loader re-run over a range overlapping the previous run's, so events near a
+boundary landed twice. That shape has an escape hatch: both copies arrive in the same load
+and the same day partition, so a partition-local `QUALIFY ROW_NUMBER()` removes them with
+**zero lookback**, and the dedup is exercised only in its most trivial case. Redelivering
+*yesterday's* rows closes it. The redelivered row's `created_at` sits outside the current
+window, so `silver.events_deduped` sees both copies only if it carries a real lookback in
+its SQL that the planner derives a widened read from — and a lookback wrong in either
+direction leaves duplicates alive.
+
+Note what does **not** do this work: `mutation_profile.lateness` is orchestration-only
+(`sources.md` §Semantics — "never widens a scan, never gates a probe, never changes
+emitted SQL"), and lookback is derived from the model's SQL, never declared in frontmatter
+(`incremental_shapes.md` §"Derive lookback from the model's SQL"). The lateness
+declaration in task 3 is a true statement about the feed; it is not the mechanism.
+
+Three properties the redelivery rule must have:
+
+- **Deterministic, not sampled.** Both legs must redeliver the *same* rows or criterion
+  6's parity check diffs noise instead of behaviour. So no `RAND()`, and no
+  `FARM_FINGERPRINT` (which DuckDB has no equivalent of). Event ids are numeric strings,
+  so `MOD(CAST(id AS BIGINT), 50) = 0` evaluates identically on DuckDB and GoogleSQL. The
+  rule joins `sample.sql` as pinned contract — phase 4's loader reproduces it verbatim.
+- **2%, not 0.1%.** The fixture averages ~2,144 rows/day, so 0.1% is ~2 redelivered rows
+  per day and ~64 across the run — thin enough that a lookback wrong by one day could pass
+  on luck. 2% is ~43/day and ~1,290 total, and matches the ~2% duplicate rate
+  `examples/web_analytics/` carries, so the two examples stay comparable. A deliberate
+  duplicate rate is a test knob, not a property of a real failure mode, so there is no
+  realism to trade away.
+- **Exactly the previous day, not the last N days.** The required lookback is then exactly
+  two days and an error in *either* direction fails. A spread over several days lets a
+  too-wide lookback pass.
+
+A consequence to state rather than let someone rediscover: `raw.github_events` now
+permanently contains synthetic duplicates, and `bronze.events`, being a passthrough,
+carries them. That is correct — it is what makes the bronze→silver boundary mean anything
+— but it goes in the README beside the bot-repo skew note so it is never diagnosed as a
+bug.
 
 ## The four models
 
@@ -86,13 +120,17 @@ cheapest things for a reviewer to overrule:
    `timeseries:` on `created_at`, `mutation_profile: {kind: append_only, lateness: <task
    2>, redelivery: at_least_once}`, `unique_key: [id]`, `retention:` matching the loader's
    N-day trim.
-4. `setup_sources.sql` + a day-by-day replay driver modelled on
-   `examples/web_analytics/run_incremental.py`, implementing the overlapping load above.
-5. The four models.
-6. Assert the fixture and the models: duplicates exist after replay and are gone after
-   `silver.events_deduped`; sessions do not span the gap; a session that crosses midnight
-   stays one session.
-7. Wire the example into per-PR CI beside `web_analytics`.
+4. Pin the redelivery rule beside `sample.sql` — `MOD(CAST(id AS BIGINT), 50) = 0` over the
+   previous day — as contract, not as a detail of the driver.
+5. `setup_sources.sql` + a day-by-day replay driver modelled on
+   `examples/web_analytics/run_incremental.py`, loading day `D` as day `D` plus the
+   redelivered slice of `D - 1`.
+6. The four models. `silver.events_deduped` carries its two-day lookback **in its SQL**,
+   since that is the only thing that widens the read.
+7. Assert the fixture and the models: the redelivered rows are present and counted before
+   dedup, and `silver.events_deduped` emits exactly `count(DISTINCT id)`; sessions do not
+   span the gap; a session that crosses midnight stays one session.
+8. Wire the example into per-PR CI beside `web_analytics`.
 
 ## Tests (red first)
 
@@ -100,9 +138,13 @@ cheapest things for a reviewer to overrule:
   workspace. Red before the models exist.
 - `cargo test -p smelt-lsp --test example_workspaces` — the same via the real LSP backend,
   which catches the asymmetric-discovery bugs the Salsa-direct test misses.
-- A replay test that asserts **non-zero duplicates land** and that
-  `silver.events_deduped` emits exactly `count(DISTINCT id)` rows. This is the test that
-  fails if the overlap is ever quietly dropped.
+- A replay test that asserts the redelivered rows **land and are counted** before dedup,
+  and that `silver.events_deduped` emits exactly `count(DISTINCT id)` rows. This is the
+  test that fails if the redelivery rule is ever quietly dropped, and — because the
+  duplicates are a day old — the one that fails if the derived lookback is wrong.
+- A lookback-boundary test: narrow `silver.events_deduped`'s lookback to one day and
+  confirm duplicates **survive**. A dedup test that cannot be made to fail on demand is
+  not evidence that the lookback is doing anything.
 - A sessionization test over a hand-picked actor spanning midnight: one session, not two.
 - Full-refresh equivalence over the replayed days (`verify_incremental_equivalence.py` is
   the precedent). This is criterion 7's DuckDB half, banked early because it costs nothing
@@ -114,7 +156,7 @@ cheapest things for a reviewer to overrule:
 - `smelt build` and `smelt test` clean in `examples/github_activity/` from a wiped target.
 - The replay driver runs the full 30 days and the equivalence check passes at every step.
 - The duplicate assertion is observed non-zero — reported as a number in the summary, not
-  as "passed".
+  as "passed" — and the deliberately-narrowed-lookback case is observed to fail.
 
 ## Commit message
 

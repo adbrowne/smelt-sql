@@ -202,6 +202,22 @@ live run surfaces are written down as a punch-list rather than fixed here.
   the *loader's* overlapping windows, not to GitHub Archive. Criterion 4 is amended: the
   DuckDB leg has to replay overlapping windows on purpose or `silver.events_deduped` is
   never exercised.
+- 2026-09-07 (human): **the loader redelivers on purpose.** Since the upstream feed carries
+  no duplicates of its own, the black box supplies the at-least-once behaviour it is
+  declared to have: each day's load re-appends a deterministic slice of the **previous**
+  day's rows. This replaces an earlier overlapping-window shape, which had an escape hatch
+  — both copies landing in one load and one partition, removable by a partition-local
+  `QUALIFY` with zero lookback, exercising dedup only in its most trivial case. A day-old
+  duplicate is outside the current window, so only a real SQL-derived lookback catches it.
+  Constraints this puts on phase 4: the rule is **deterministic** (`MOD(CAST(id AS
+  BIGINT), 50) = 0`, which evaluates identically on DuckDB and GoogleSQL — not `RAND()`,
+  not `FARM_FINGERPRINT`), it is **2%** rather than 0.1% (0.1% is ~2 rows/day here, thin
+  enough for a wrong lookback to pass on luck; 2% matches `examples/web_analytics/` so the
+  two examples compare), it draws from **exactly** the previous day so the required
+  lookback is exactly two days and an error either way fails, and it is pinned contract
+  the loader reproduces verbatim — like `sample.sql`, two legs redelivering differently
+  are not comparable. Note that `mutation_profile.lateness` is *not* the mechanism: it is
+  orchestration-only and never widens a scan.
 - 2026-09-07: **the sample is skewed, and that is a finding rather than a defect.** 92% of
   events are `PushEvent`, the median repo has one event, and one bot repo has 527.
   `MOD(repo.id, 1000)` is uniform over repo *ids*, and recent ids are dominated by bulk
