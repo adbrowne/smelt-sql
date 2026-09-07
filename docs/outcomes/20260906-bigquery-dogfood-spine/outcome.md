@@ -116,7 +116,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | blocked |
-| 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
+| 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
 | 8 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
 | 9 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
 | 10 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
@@ -478,6 +478,38 @@ exists — so the live run is a test of the *backend*, not of the models.
   centrepiece per-window sweep is blocked on this finding.
 
 ## Blocked
+
+- 2026-09-08 — **phase 7 (provision the dogfood project), attempted, blocked immediately.**
+  Per this file's own header ("phases 7–13 are human-gated ... phase 7 must emit
+  `<<PHASE_BLOCKED>>` rather than attempt it") and `phases/07-plan.md`'s task split, tasks
+  1–5 (create the GCP project, link billing, enable APIs, create the no-expiry dataset,
+  create the budget alert, create the `smelt-dogfood@` service account and grant it, run
+  the impersonating ADC login) are human-executed — they spend real money and mint real
+  cloud identities, which a headless implement step cannot do. Checked before touching
+  anything: `gcloud` is present at `~/google-cloud-sdk/bin/gcloud` (SDK already installed,
+  matching D3's premise) but has **no active account** (`gcloud projects list` →
+  "You do not currently have an active account selected"), so none of tasks 1–5 have
+  happened yet. `.claude/settings.json` in this worktree does **not** currently carry the
+  four `Bash(gcloud*)`/`Bash(bq*)` deny entries the plan describes removing — only the
+  `scripts/bigquery-*.sh` self-target denials and the `gcloud-smelt-bq` config-dir `Read`
+  deny are present — so that removal is either already done elsewhere or was never needed
+  in this worktree; either way it is moot until the human side exists to protect.
+  Tasks 6/7/9 (mise `setup-gcloud` task, the settings edit, recording the decision log)
+  were deliberately **not** done standalone: doing them ahead of an actual provisioned
+  project would produce an untestable, unverifiable partial phase (the plan's verification
+  gate requires reading back the live dataset's `defaultTableExpirationMs` and confirming
+  the impersonated identity is real — neither is checkable without a project). No repo
+  changes were made this iteration.
+
+  **What a human needs to do before this phase can proceed:** `phases/07-plan.md` tasks
+  1–5 — create the project, link billing, enable `bigquery.googleapis.com` and
+  `billingbudgets.googleapis.com`, create the no-expiry dataset, create the budget alert,
+  create `smelt-dogfood@<PROJECT>.iam.gserviceaccount.com` with `bigquery.jobUser` +
+  dataset `WRITER`, grant `roles/iam.serviceAccountTokenCreator` on it to the human
+  account, then run the impersonating `gcloud auth application-default login
+  --impersonate-service-account=...` and set the default/quota project. Once that's done,
+  re-run this phase — tasks 6/7/9 and the full verification gate become executable in one
+  pass.
 
 - 2026-09-08 — **phase 6 (per-window full-refresh oracle), centrepiece test only.**
   `crates/smelt-cli/tests/github_activity_oracle.rs` was built per the phase 6 plan: relation
