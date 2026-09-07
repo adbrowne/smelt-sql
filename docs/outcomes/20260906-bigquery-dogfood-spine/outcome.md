@@ -115,7 +115,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | done |
 | 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
-| 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
+| 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | planned |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
 | 8 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
 | 9 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
@@ -125,6 +125,23 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 13 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 6 plan): **no reshape; the phase is sharpened rather than moved.**
+  Phase 4's summary surfaced one finding (`RepairKeysNotDiscoverable` for
+  `gold.repo_dim`'s mutation sensitivity) and it is already owned — criterion 8's handoff,
+  banked by phase 13 — so no row is added, split or dropped. Two things the plan pins that
+  the phase title left open: (a) criterion 7 says *after each* window, and today's check
+  (`full_refresh_matches_incremental_replay`) compares only **at the end** and only by
+  **row count**, so the phase's real content is a per-window, row-for-row oracle over every
+  materialised relation, discovered rather than hardcoded; (b) the two succession
+  divergences stop being hardcoded 139/145 deltas and become bounded registry entries —
+  after folding both sides on `(key, clock)` the multisets must be *equal* — which is the
+  honest statement of phase 3's finding and the same registry shape criterion 6 (phase 11,
+  dual-target) will need. Measured while planning: the existing 30-day replay + one full
+  refresh runs in 36s, so ~30 additional growing-input full refreshes are affordable
+  per-PR; the plan sets a 5-minute budget with an explicit, recorded fallback rather than
+  letting windows be dropped quietly. The harness is extracted to a shared test module
+  because `github_activity_replay.rs` is 951 lines against the 1000-line default cap.
 
 - 2026-09-08 (phase 4 implement): **measured, not assumed: NO maintenance cell is derived
   for `gold.repo_dim`'s mutation sensitivity at all — a stronger gap than "wrong
