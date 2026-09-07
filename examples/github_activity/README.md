@@ -147,3 +147,27 @@ The typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_even
 `payload`, which needs a `sample.sql` re-pin and a human-minted BigQuery token — it is a
 separate, currently blocked phase (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`
 phase 5), not an oversight.
+
+## Trusting the numbers
+
+`crates/smelt-cli/tests/github_activity_oracle.rs` compares every materialised relation
+between the incremental replay and a full-refresh oracle over the identical loaded rows —
+row-for-row, not by row count, and via a comparator that discovers the relation set from
+the databases themselves rather than a hardcoded model list. A difference is either zero or
+matches a bounded `DIVERGENCE_REGISTRY` entry: `silver.repo_naming` and `silver.actor_naming`
+are registered exactly as described above (a redelivered duplicate or same-second tie folds
+to one presented row on the incremental leg, but survives on the full-refresh leg), and each
+entry's bound is checked, not merely asserted — the incremental relation must have zero rows
+the oracle lacks, and the oracle must fold to precisely one row per `(key, clock)` group.
+
+The comparator, discovery, and registry-liveness machinery are exercised and green
+(`oracle_comparison_covers_every_materialised_relation`, `an_unregistered_divergence_fails`,
+`succession_divergence_is_exactly_tied_row_multiplicity`, `registry_entries_are_all_live`).
+The centrepiece test, `every_window_matches_the_full_refresh_oracle` — checking after
+*every* incremental window, not just once at the end of the 30-day replay — is currently
+`#[ignore]`d: it surfaced a real, previously-hidden divergence in `gold.events_enriched`
+(an early fact row can carry a stale `current_repo_name` for one window after a same-window
+rename, before self-healing on a later run — see this file's "genuine derivation gap" note
+above) that the two-entry registry does not cover and that has not yet been characterised
+with a checkable bound. Tracked in `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`
+"## Blocked" (phase 6).

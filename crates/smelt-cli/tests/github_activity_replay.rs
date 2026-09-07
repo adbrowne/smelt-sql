@@ -24,134 +24,15 @@
 //! the entire 30-day fixture since that is what the outcome's criterion 7
 //! (DuckDB half) actually promises.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
-fn smelt_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_smelt"))
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates dir")
-        .parent()
-        .expect("repo root")
-        .to_owned()
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) {
-    fs::create_dir_all(dst).unwrap_or_else(|e| panic!("mkdir {dst:?}: {e}"));
-    for entry in fs::read_dir(src).unwrap_or_else(|e| panic!("readdir {src:?}: {e}")) {
-        let entry = entry.expect("dir entry");
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            if from.file_name().and_then(|n| n.to_str()) == Some("target") {
-                continue;
-            }
-            copy_dir_all(&from, &to);
-        } else {
-            fs::copy(&from, &to).unwrap_or_else(|e| panic!("copy {from:?} -> {to:?}: {e}"));
-        }
-    }
-}
-
-/// Stage a fresh copy of `examples/github_activity/` under `tmp`, returning
-/// (workspace_dir, db_path, sample_parquet_path).
-fn stage_workspace(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    let src = repo_root().join("examples/github_activity");
-    let workspace = tmp.join("github_activity");
-    copy_dir_all(&src, &workspace);
-    let db = workspace.join("target/dev.duckdb");
-    fs::create_dir_all(workspace.join("target")).expect("mkdir target");
-    let sample = workspace.join("seeds/github_events_sample.parquet");
-    (workspace, db, sample)
-}
-
-fn duckdb_exec(db: &Path, sql: &str) {
-    let conn = duckdb::Connection::open(db).unwrap_or_else(|e| panic!("open {db:?}: {e}"));
-    conn.execute_batch(sql)
-        .unwrap_or_else(|e| panic!("exec failed: {e}\nSQL:\n{sql}"));
-}
-
-fn duckdb_scalar_i64(db: &Path, sql: &str) -> i64 {
-    let conn = duckdb::Connection::open(db).unwrap_or_else(|e| panic!("open {db:?}: {e}"));
-    conn.query_row(sql, [], |row| row.get(0))
-        .unwrap_or_else(|e| panic!("query failed: {e}\nSQL:\n{sql}"))
-}
-
-fn create_empty_raw_table(db: &Path, sample: &Path) {
-    duckdb_exec(
-        db,
-        &format!(
-            "CREATE OR REPLACE TABLE main.sources_raw_github_events AS \
-             SELECT * FROM read_parquet('{}') WHERE 1 = 0; \
-             CREATE OR REPLACE TABLE main.sources_raw_github_events_arrival AS \
-             SELECT *, CAST(NULL AS DATE) AS ingested_date \
-             FROM read_parquet('{}') WHERE 1 = 0;",
-            sample.display(),
-            sample.display()
-        ),
-    );
-}
-
-/// Append day `day`'s real rows, plus (unless `first_day`) a 2% redelivered
-/// slice of `day - 1`'s rows, into both the event-time and
-/// arrival-partitioned relations — mirrors `run_incremental.py::load_day`.
-fn load_day(db: &Path, sample: &Path, day: &str, prev: Option<&str>) {
-    let redelivery = match prev {
-        Some(p) => format!(
-            "UNION ALL SELECT * FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{p}' \
-             AND MOD(CAST(id AS BIGINT), 50) = 0",
-            sample.display()
-        ),
-        None => String::new(),
-    };
-    let redelivery_arrival = match prev {
-        Some(p) => format!(
-            "UNION ALL SELECT *, DATE '{day}' AS ingested_date FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{p}' \
-             AND MOD(CAST(id AS BIGINT), 50) = 0",
-            sample.display()
-        ),
-        None => String::new(),
-    };
-    duckdb_exec(
-        db,
-        &format!(
-            "INSERT INTO main.sources_raw_github_events \
-             SELECT * FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{day}' {redelivery}; \
-             INSERT INTO main.sources_raw_github_events_arrival \
-             SELECT *, DATE '{day}' AS ingested_date FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{day}' {redelivery_arrival};",
-            sample.display(),
-            sample.display()
-        ),
-    );
-}
-
-fn smelt_run(workspace: &Path, start: &str, end: &str, extra_args: &[&str]) {
-    let out = Command::new(smelt_bin())
-        .args(["run", "--event-time-start", start, "--event-time-end", end])
-        .args(extra_args)
-        .current_dir(workspace)
-        .env("RUST_LOG", "warn")
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn smelt run: {e}"));
-    if !out.status.success() {
-        panic!(
-            "smelt run [{start} .. {end}) failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-    }
-}
+mod github_activity_support;
+use github_activity_support::{
+    create_empty_raw_table, duckdb_exec, duckdb_scalar_i64, load_day, replay_days, smelt_bin,
+    smelt_run, stage_workspace, FIXTURE_DAYS,
+};
 
 fn smelt_run_expect_failure(workspace: &Path, start: &str, end: &str) -> String {
     let out = Command::new(smelt_bin())
@@ -170,58 +51,6 @@ fn smelt_run_expect_failure(workspace: &Path, start: &str, end: &str) -> String 
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
-}
-
-/// Day range covered by the pinned fixture (`sample.sql`,
-/// `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`).
-const FIXTURE_DAYS: &[&str] = &[
-    "2026-08-05",
-    "2026-08-06",
-    "2026-08-07",
-    "2026-08-08",
-    "2026-08-09",
-    "2026-08-10",
-    "2026-08-11",
-    "2026-08-12",
-    "2026-08-13",
-    "2026-08-14",
-    "2026-08-15",
-    "2026-08-16",
-    "2026-08-17",
-    "2026-08-18",
-    "2026-08-19",
-    "2026-08-20",
-    "2026-08-21",
-    "2026-08-22",
-    "2026-08-23",
-    "2026-08-24",
-    "2026-08-25",
-    "2026-08-26",
-    "2026-08-27",
-    "2026-08-28",
-    "2026-08-29",
-    "2026-08-30",
-    "2026-08-31",
-    "2026-09-01",
-    "2026-09-02",
-    "2026-09-03",
-];
-
-fn day_after(day: &str) -> String {
-    let d = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").expect("parse day");
-    (d + chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string()
-}
-
-fn replay_days(workspace: &Path, db: &Path, sample: &Path, days: &[&str]) {
-    create_empty_raw_table(db, sample);
-    let mut prev: Option<&str> = None;
-    for day in days {
-        load_day(db, sample, day, prev);
-        smelt_run(workspace, day, &day_after(day), &[]);
-        prev = Some(day);
-    }
 }
 
 /// The loader's redelivery lands physical duplicates, and the keyed dedup
@@ -349,6 +178,14 @@ fn full_refresh_matches_incremental_replay() {
         &["--full-refresh"],
     );
 
+    // Whole-relation row counts at the very end of the replay. Per-window,
+    // row-for-row equivalence (including the `silver.repo_naming`/`silver.
+    // actor_naming` succession divergence, exactly characterised rather than
+    // asserted as a magic row-count delta, and the intermediate-window
+    // `gold.events_enriched` staleness this phase discovered but did not
+    // characterise — see `docs/outcomes/20260906-bigquery-dogfood-spine/
+    // outcome.md` "## Blocked") is `github_activity_oracle.rs`'s job
+    // (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/06-plan.md`).
     for table in [
         "silver_events_deduped",
         "silver_actor_sessions",

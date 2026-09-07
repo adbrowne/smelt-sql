@@ -115,7 +115,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | done |
 | 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
-| 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | planned |
+| 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | blocked |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
 | 8 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
 | 9 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
@@ -469,8 +469,64 @@ exists — so the live run is a test of the *backend*, not of the models.
   this pipeline. Also: `emit_succession_full_rebuild` never runs the clock-tie probe, so a
   content-*disagreeing* tie would silently corrupt a full-refresh today, undetected by
   this fixture (which measured zero disagreeing ties).
+- 2026-09-08 (phase 6 implement): **a second, previously-hidden full-refresh/incremental
+  divergence, in `gold.events_enriched`, found but not characterised** — see "## Blocked"
+  below for the full writeup. Unlike the succession tie divergence above, this one is
+  transient (self-heals within the fixture's replay) rather than persistent, and its root
+  cause (why/when the staleness resolves) is unknown. `github_activity_oracle.rs`'s
+  comparator, discovery, and registry infrastructure landed and is green; only the
+  centrepiece per-window sweep is blocked on this finding.
 
 ## Blocked
+
+- 2026-09-08 — **phase 6 (per-window full-refresh oracle), centrepiece test only.**
+  `crates/smelt-cli/tests/github_activity_oracle.rs` was built per the phase 6 plan: relation
+  discovery (excludes `sources_*`/`_smelt_*`), an `ATTACH`-based `EXCEPT ALL` comparator with
+  sample rows, `DIVERGENCE_REGISTRY` with the two known succession entries (`silver_repo_
+  naming`, `silver_actor_naming`) bounded by fold-equality on `(key, clock)` rather than a
+  magic row count, and 4 of the 5 planned tests are green
+  (`oracle_comparison_covers_every_materialised_relation`, `an_unregistered_divergence_fails`,
+  `succession_divergence_is_exactly_tied_row_multiplicity`, `registry_entries_are_all_live`).
+  The harness extraction into `github_activity_support/mod.rs` (task 1) is done and used by
+  both test binaries.
+
+  The centrepiece test, `every_window_matches_the_full_refresh_oracle`, is `#[ignore]`d: at
+  the `2026-08-06` checkpoint (2 days replayed) it found a genuine, previously-hidden content
+  divergence in `gold_events_enriched` — event id `16854100084` (repo 1183512000, a repo that
+  renamed from `laureanoan0/TrainGame` to `laureanomeyer/TrainGame` at `2026-08-06 19:10:54`)
+  carries `current_repo_name = laureanoan0/TrainGame` on the incremental leg but
+  `laureanomeyer/TrainGame` on the full-refresh oracle, immediately after the rename's window
+  finishes. Confirmed by a manual full 30-day rerun that this specific row (and the whole
+  relation) is byte-identical between incremental and full-refresh by the *final* window — the
+  staleness self-heals within a few subsequent runs, it does not persist. This contradicts, or
+  at least sharpens, this repo's own README note ("no maintenance cell is ever derived for
+  `gold.repo_dim`'s mutation sensitivity... a repo rename does not re-derive... on already-
+  written rows through *any* tracked technique") — some mechanism clearly does eventually fix
+  it, and phase 6 does not have the budget to root-cause which one (a redelivery-driven MERGE
+  re-touching the same `id`? a periodic full-scan catch-up licensed by `gold.repo_dim`'s
+  `allow_full_scan: true`? something else?).
+
+  **Why blocked rather than registered:** the plan's `DIVERGENCE_REGISTRY` shape (a `(key,
+  clock)` fold-equality bound) is specific to the succession-model tie/redelivery root cause
+  and does not fit this one — the root cause here is dimension-mutation propagation lag, not a
+  tie. Inventing a bound (e.g. "resolves within N windows") without root-causing the self-heal
+  mechanism risks asserting a made-up number that happens to pass on this fixture while masking
+  a real latent bug (or an actual unbounded staleness the 30-day fixture is too short to reveal
+  — the oracle only checked days 0-9 and day 29, not every day, so an intermittent recurrence
+  in days 10-28 could exist undetected even in the ignored version).
+
+  **Candidate options for the next planner:**
+  1. Root-cause the self-heal mechanism (add tracing/logging around `gold.repo_dim`'s and
+     `gold.events_enriched`'s per-run maintenance plan; compare the plan issued on the
+     `2026-08-06` run against a later run that has already caught up) and, once understood,
+     either register a correctly-shaped bound or fix the propagation gap outright.
+  2. Extend `every_window_matches_the_full_refresh_oracle` to check *every* day (not just the
+     first 10 + final) to rule out a recurring, non-self-healing pattern — more expensive, but
+     would settle whether the divergence is actually bounded before spending time on a fix.
+  3. Treat this as the criterion-8 `gold.repo_dim` mutation-propagation gap already tracked for
+     `docs/outcomes/20260906-bigquery-correctness` (see this file's decision log and
+     `examples/github_activity/README.md` "genuine derivation gap" note) surfacing earlier than
+     expected, and fold the root-cause work into that outcome instead of this one.
 
 - 2026-09-08 — **phase 5 (`payload` re-pin + typed silver fan-out).** Needs a live
   BigQuery credential: `bash scripts/bigquery-auth.sh`, which prompts a human for the
