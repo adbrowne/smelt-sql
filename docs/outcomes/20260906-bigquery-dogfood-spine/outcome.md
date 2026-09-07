@@ -1,7 +1,7 @@
 # Outcome: The GitHub-activity pipeline runs on BigQuery and DuckDB, and the numbers agree
 
 **Created:** 2026-09-06
-**Status:** queued
+**Status:** in progress
 **Driver:** human-gated (interactive sessions) — **not** in `.claude/outcome-backlog`
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/multi_backend.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/smelt_yml.md`; `docs/specs/run_state.md`; `docs/specs/state.md`
@@ -34,16 +34,22 @@ live run surfaces are written down as a punch-list rather than fixed here.
    isolation is untouched: the `scripts/bigquery-*.sh` denials and
    `Read(//home/andrew/.config/gcloud-smelt-bq/**)` stay.
 3. **Loader.** One scheduled query (or `bq query` step) populates `raw.github_events` from
-   `githubarchive.day.*`: day-partitioned on `created_at`, projecting only the columns the
-   spine consumes (`payload` pruned or narrowed), filtered to `MOD(repo.id, 1000) = 0`,
-   bounded to a declared day range, and trimming partitions older than N days. It is
-   at-least-once by construction and documented as **external to smelt** — smelt's source
-   declaration is the contract. Its cost per run is measured and recorded.
+   `githubarchive.day.2026*`, reproducing `examples/github_activity/sample.sql`
+   **verbatim** — same projection, same `MOD(repo.id, 1000) = 0` filter, same
+   `_TABLE_SUFFIX` range — landed day-partitioned on `created_at` and trimming partitions
+   older than N days. Reproducing that one query is what makes criterion 6 meaningful: two
+   targets over different populations are not comparable. It is at-least-once by
+   construction and documented as **external to smelt** — smelt's source declaration is
+   the contract. Its cost per run is measured and recorded.
 4. **DuckDB leg, in CI.** A deterministic Parquet export of the same sample is committed
-   or reproducibly generated, and `examples/github_activity/` runs end-to-end against
+   *and* reproducibly regenerable, and `examples/github_activity/` runs end-to-end against
    DuckDB with **no live warehouse**: `cargo test -p smelt-cli --test example_diagnostics`
    and `cargo test -p smelt-lsp --test example_workspaces` see zero diagnostics, and the
-   four models build. This leg is the cheap oracle; it runs per-PR.
+   four models build. This leg is the cheap oracle; it runs per-PR. Because the upstream
+   feed carries **no duplicate event ids** (measured — see decision log), the DuckDB leg
+   must reproduce the loader's at-least-once behaviour deliberately, by replaying
+   overlapping windows; otherwise `silver.events_deduped` ships with its whole reason for
+   existing untested.
 5. **BigQuery leg, live.** The same four models compile and run against the dogfood
    project — a full refresh, then **at least three consecutive incremental windows** —
    with the run report from W2 captured for each.
@@ -88,10 +94,10 @@ live run surfaces are written down as a punch-list rather than fixed here.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and narrow `.claude/settings.json`'s `bq`/`gcloud` deny so it scopes to the dogfood project while leaving the test project's isolation intact — with a rationale note in the commit | planned |
-| 2 | Confirm the public dataset's real schema and partitioning, then build the loader: sampled on `MOD(repo.id, 1000)`, column-pruned, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
-| 3 | Export the identical sample to Parquet, reproducibly, as the DuckDB leg's input | pending |
-| 4 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | pending |
+| 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
+| 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | pending |
+| 3 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
+| 4 | Build the loader in the dogfood project: `sample.sql` reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
 | 5 | First live BigQuery run: full refresh of the same four models against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
 | 6 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 7 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
@@ -149,6 +155,65 @@ live run surfaces are written down as a punch-list rather than fixed here.
   assumed to expose `repo.id` (INT64), `repo.name`, `actor.id`, `created_at` (TIMESTAMP),
   `id`, `type` and a large `payload` STRING. Phase 2 confirms against the live schema
   before the loader is written; no session could query BigQuery at scaffold time.
+  **Resolved 2026-09-07** — see the schema entry below.
+- 2026-09-07 (human): **DuckDB leg first; provisioning moves behind it.** The phase order
+  is inverted so the sample and the example project land before any cloud resource is
+  created. Reading the public `githubarchive` dataset needs only an existing billing
+  project, so the schema and the fixture were obtainable immediately, while provisioning
+  is the slowest and least reversible step in the programme. Ordering it after the DuckDB
+  leg means the loader is written against a query already proven to produce usable rows,
+  and `examples/github_activity/` earns its per-PR CI coverage whether or not the cloud
+  half ever lands. Old phases 1→3 and 2→4, with 2's schema half promoted into the new
+  phase 1; `phases/01-plan.md` moved to `phases/03-plan.md` unchanged.
+- 2026-09-07: **the four blanket `gcloud`/`bq` denies were removed ahead of phase 3**, not
+  as part of it — nothing could be probed without them. Everything phase 3's plan says
+  about the change still holds, including that the `scripts/bigquery-*.sh` denials and the
+  `Read(//home/andrew/.config/gcloud-smelt-bq/**)` deny stay. `bq version` answers D2:
+  BigQuery CLI 2.1.36 runs fine on this box, so the pyOpenSSL failure the older scripts
+  work around is not present — but the dogfood path still speaks REST over `curl`, one way
+  of talking to BigQuery, as `scripts/bq-dogfood-query.sh`.
+- 2026-09-07 (human): **the exploration bills `smelt-bq-test-20260816`.** Interim only, and
+  read-only against a public dataset — it creates nothing in the test project. Phase 3
+  replaces it with the dogfood project's own credential. The token is the existing
+  short-lived one from `scripts/bigquery-auth.sh`; `scripts/bq-dogfood-query.sh` and
+  `scripts/bq_dogfood_export.py` consume it from the environment and never print it.
+- 2026-09-07: **the real schema of `githubarchive.day`.** Confirmed against
+  `day.20260901`. The scaffold's guess was right about `repo.id`/`actor.id` (INTEGER inside
+  `repo`/`actor` RECORDs), `repo.name`, `created_at` (TIMESTAMP) and `payload` (STRING),
+  and wrong in three ways that change the loader:
+  - **`id` is STRING, not an integer.** The dedup key is textual.
+  - **The table is neither partitioned nor clustered.** `day` is a set of daily-*sharded*
+    tables. Pruning is `_TABLE_SUFFIX`, not partition elimination — so the loader's own
+    `raw.github_events` is where day-partitioning first exists.
+  - **A bare `day.*` wildcard fails outright**: the dataset also holds views (`yesterday`,
+    …) and BigQuery refuses `Views cannot be queried through prefix`. The prefix must be
+    `day.2026*`, which excludes them.
+  Two further columns exist and are worth having: `public` (BOOL) and `org` (RECORD).
+  Volume: ~637k rows / ~421 MB per day.
+- 2026-09-07 (human): **the sample is 30 days at `MOD(repo.id, 1000) = 0`.** Widening the
+  modulus was measured and rejected: over one week, MOD 1000 yields 3 renamed repos and
+  MOD 100 yields 7 — renames run about one per thousand repo-weeks, so a *longer window*
+  buys the rename stream that a *wider sample* does not. 30 days at MOD 1000 gives 64,313
+  rows / 4,491 actors / 5,016 repos / **34 renamed repos** in 1.1 MB of Parquet, for 6.3 GB
+  scanned (~US$0.03). Pinned as `examples/github_activity/sample.sql`; regenerate with
+  `examples/github_activity/refresh_sample.sh`.
+- 2026-09-07: **the upstream feed has no duplicate event ids** — 64,313 rows, 64,313
+  distinct `id`s. The at-least-once property the spine dedups against belongs entirely to
+  the *loader's* overlapping windows, not to GitHub Archive. Criterion 4 is amended: the
+  DuckDB leg has to replay overlapping windows on purpose or `silver.events_deduped` is
+  never exercised.
+- 2026-09-07: **the sample is skewed, and that is a finding rather than a defect.** 92% of
+  events are `PushEvent`, the median repo has one event, and one bot repo has 527.
+  `MOD(repo.id, 1000)` is uniform over repo *ids*, and recent ids are dominated by bulk
+  repo creation. Sessionization and dedup are unaffected; any mart reading like a
+  leaderboard will look strange, and should be read as a property of the sample.
+  Recorded now so a later reader does not diagnose it as a pipeline bug.
+- 2026-09-07: **an early tension-1 datum, ahead of criterion 9.** Of the renames visible in
+  the 7-day probe, one is not a rename at all in the usual sense:
+  `mikiKG45/noob-devops-project` → `guslariR45/noob-devops-project` — same `repo.id`, same
+  trailing name, different *owner*. Keyed succession over `repo.id` sees an ordinary
+  attribute change; a grammar keyed on the owner/name pair sees a discontinuity. Phase 9
+  should probe this case specifically, not only plain renames.
 
 ## Blocked
 
