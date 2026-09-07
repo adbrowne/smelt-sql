@@ -178,88 +178,16 @@ fn full_refresh_matches_incremental_replay() {
         &["--full-refresh"],
     );
 
-    // Whole-relation row counts at the very end of the replay. Per-window,
-    // row-for-row equivalence (including the `silver.repo_naming`/`silver.
-    // actor_naming` succession divergence, exactly characterised rather than
-    // asserted as a magic row-count delta, and the intermediate-window
-    // `gold.events_enriched` staleness this phase discovered but did not
-    // characterise — see `docs/outcomes/20260906-bigquery-dogfood-spine/
-    // outcome.md` "## Blocked") is `github_activity_oracle.rs`'s job
-    // (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/06-plan.md`).
-    for table in [
-        "silver_events_deduped",
-        "silver_actor_sessions",
-        "marts_daily_active_contributors",
-    ] {
-        let incr_count = duckdb_scalar_i64(&incr_db, &format!("SELECT count(*) FROM main.{table}"));
-        let full_count = duckdb_scalar_i64(&full_db, &format!("SELECT count(*) FROM main.{table}"));
-        assert_eq!(
-            incr_count, full_count,
-            "row count mismatch for {table}: incremental={incr_count} full_refresh={full_count}"
-        );
-    }
-    // `silver.repo_naming`/`silver.actor_naming` do NOT satisfy criterion 7's
-    // full-refresh equivalence at the raw row-count level — a genuine
-    // divergence discovered by this phase, not fixed here
-    // (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` decision
-    // log). The incremental window-forward patch loop addresses the
-    // presented table by `(key, clock)` (its `MERGE ... ON` condition), so a
-    // redelivered duplicate or a genuine same-second tie whose payload
-    // agrees converges to one presented row; `--full-refresh` re-runs the
-    // model's raw compiled `SELECT` (`LEAD`/`LAG` over every physical row)
-    // with no such addressing, so it keeps every tied row. The gap matches
-    // exactly the fixture's own measured tie counts — 139 extra
-    // `(repo_id, created_at)` rows, 145 extra `(actor_id, created_at)` rows
-    // (`same_second_events_fold_once_within_a_key`) — so this is a
-    // regression-checkable, understood divergence, not slop.
-    let repo_naming_incr =
-        duckdb_scalar_i64(&incr_db, "SELECT count(*) FROM main.silver_repo_naming");
-    let repo_naming_full =
-        duckdb_scalar_i64(&full_db, "SELECT count(*) FROM main.silver_repo_naming");
-    assert_eq!(
-        repo_naming_incr, 64_174,
-        "silver_repo_naming incremental row count regressed"
-    );
-    assert_eq!(
-        repo_naming_full - repo_naming_incr,
-        139,
-        "expected the full-refresh oracle to retain exactly the 139 known tied rows \
-         silver_repo_naming's incremental replay folds away (incr={repo_naming_incr}, \
-         full={repo_naming_full})"
-    );
-
-    let actor_naming_incr =
-        duckdb_scalar_i64(&incr_db, "SELECT count(*) FROM main.silver_actor_naming");
-    let actor_naming_full =
-        duckdb_scalar_i64(&full_db, "SELECT count(*) FROM main.silver_actor_naming");
-    assert_eq!(
-        actor_naming_incr, 64_168,
-        "silver_actor_naming incremental row count regressed"
-    );
-    assert_eq!(
-        actor_naming_full - actor_naming_incr,
-        145,
-        "expected the full-refresh oracle to retain exactly the 145 known tied rows \
-         silver_actor_naming's incremental replay folds away (incr={actor_naming_incr}, \
-         full={actor_naming_full})"
-    );
-
-    // `marts.naming_history` is unaffected: it derives renames via `LAG`
-    // comparing *consecutive distinct* names, and a tie's duplicated row
-    // never differs from its neighbour on the projected name, so the
-    // `prior_name != name` filter drops the duplicate on both legs alike.
-    // The business-meaningful output agrees even though the raw per-event
-    // silver tables do not.
-    let naming_history_incr =
-        duckdb_scalar_i64(&incr_db, "SELECT count(*) FROM main.marts_naming_history");
-    let naming_history_full =
-        duckdb_scalar_i64(&full_db, "SELECT count(*) FROM main.marts_naming_history");
-    assert_eq!(
-        naming_history_incr, naming_history_full,
-        "marts_naming_history row count mismatch: incremental={naming_history_incr} \
-         full_refresh={naming_history_full}"
-    );
-
+    // Per-window, row-for-row equivalence over every materialised relation
+    // (including the `silver.repo_naming`/`silver.actor_naming` succession
+    // ties, the `gold.events_enriched` enrichment staleness, and the
+    // `silver.actor_sessions`/`marts.daily_active_contributors` oracle
+    // windowing gap — each characterised by a bounded registry entry rather
+    // than a magic row-count delta) is `github_activity_oracle.rs`'s job
+    // (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/06-plan.md`,
+    // `phases/08-plan.md`); its `every_window_matches_the_full_refresh_
+    // oracle` supersedes every row-count assertion this test used to make
+    // per-table, so they are retired here rather than duplicated.
     let incr_deduped = duckdb_scalar_i64(
         &incr_db,
         "SELECT count(DISTINCT id) FROM main.silver_events_deduped",
@@ -274,26 +202,6 @@ fn full_refresh_matches_incremental_replay() {
         "expected the full fixture to dedup to the measured 64,313 distinct ids \
          (docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md)"
     );
-
-    // The payload-independent widening (`docs/outcomes/
-    // 20260906-bigquery-dogfood-spine/phases/04-plan.md`): all four new
-    // models agree between the incremental replay and the full-refresh
-    // oracle, measured with no divergence (unlike the succession models
-    // above).
-    for table in [
-        "gold_repo_dim",
-        "gold_events_enriched",
-        "gold_repo_activity_daily",
-        "marts_repo_leaderboard",
-        "marts_star_growth",
-    ] {
-        let incr_count = duckdb_scalar_i64(&incr_db, &format!("SELECT count(*) FROM main.{table}"));
-        let full_count = duckdb_scalar_i64(&full_db, &format!("SELECT count(*) FROM main.{table}"));
-        assert_eq!(
-            incr_count, full_count,
-            "row count mismatch for {table}: incremental={incr_count} full_refresh={full_count}"
-        );
-    }
 }
 
 /// Run `smelt explain <model> --project-dir <workspace>` against a staged (not

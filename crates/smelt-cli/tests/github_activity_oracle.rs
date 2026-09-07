@@ -1,6 +1,7 @@
 #![cfg(feature = "duckdb")]
 //! Per-window full-refresh oracle for `examples/github_activity/`
-//! (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/06-plan.md`).
+//! (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/06-plan.md`,
+//! `phases/08-plan.md`).
 //!
 //! Turns the end-of-replay, row-count-only equivalence check in
 //! `github_activity_replay.rs::full_refresh_matches_incremental_replay` into
@@ -15,12 +16,12 @@
 //! legitimately differs between an incremental run and a `--full-refresh`
 //! run of the same data, not model state).
 //!
-//! The 30-day fixture makes a full-refresh oracle expensive (it recompiles
-//! and reruns every model from scratch), so `every_window_matches_the_full_
-//! refresh_oracle` checks after every window for the first 10 days and after
-//! the final (30th) window only, per the plan's runtime-bounding note. The
-//! full 30-day full-refresh oracle itself is built at most once per test
-//! binary run ([`full_replay_pair`]), shared between the tests that need it.
+//! `every_window_matches_the_full_refresh_oracle` checks after **every** one
+//! of the 30 windows (phase 8 measured this at 108s wall time, well under a
+//! 5-minute per-PR budget, so the phase 6 plan's first-10-plus-final sampling
+//! was dropped rather than kept). The full 30-day full-refresh oracle itself
+//! is built at most once per test binary run ([`full_replay_pair`]), shared
+//! between the tests that need it.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -132,81 +133,525 @@ fn compare_databases(incr_db: &Path, full_db: &Path) -> Result<Vec<RelationDiff>
     Ok(all.iter().map(|rel| relation_diff(&conn, rel)).collect())
 }
 
+/// A registry entry's bound: three shapes have been measured so far
+/// (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/08-plan.md`), none
+/// of them a magic row count.
+enum Bound {
+    /// The `(key, clock)` tuple the presented table's `MERGE ... ON`
+    /// addresses by: the incremental relation has zero rows the oracle
+    /// lacks, and the oracle folds to exactly one row per `key_columns`
+    /// group.
+    FoldEquality {
+        key_columns: &'static [&'static str],
+    },
+    /// A value column that can go stale but is never fabricated: every row
+    /// present in both legs matches on every column except `stale_column`,
+    /// and every stale value that does appear is some value
+    /// `history_value_col` genuinely held for the row's own `value_key_col`
+    /// (a foreign key, not necessarily `key_col` itself) at some point in
+    /// `history_relation` — a real prior state, not invented data.
+    StaleButHistoricallyValid {
+        key_col: &'static str,
+        stale_column: &'static str,
+        other_columns: &'static [&'static str],
+        value_key_col: &'static str,
+        history_relation: &'static str,
+        history_key_col: &'static str,
+        history_value_col: &'static str,
+    },
+    /// One side of the pair is always at or ahead of the other on
+    /// `monotone_columns` (`behind_side` names which side is never allowed
+    /// to lead), and every row present in both legs matches exactly on
+    /// every column in `exact_columns`.
+    MonotoneDivergence {
+        key_col: &'static str,
+        exact_columns: &'static [&'static str],
+        monotone_columns: &'static [&'static str],
+        behind_side: Side,
+    },
+}
+
+/// Which side of a [`Bound::MonotoneDivergence`] is never allowed to lead.
+#[derive(PartialEq, Eq)]
+enum Side {
+    Incremental,
+    Oracle,
+}
+
 /// A composition-relevant divergence between the incremental replay and the
-/// full-refresh oracle, bounded by a checkable predicate rather than a magic
-/// row count. `key_columns` is the `(key, clock)` tuple the presented
-/// table's `MERGE ... ON` addresses by.
+/// full-refresh oracle, bounded by a checkable predicate.
 struct DivergenceEntry {
     relation: &'static str,
     reason: &'static str,
-    key_columns: &'static [&'static str],
+    bound: Bound,
 }
 
-/// Both entries trace to the same root cause: the incremental window-forward
-/// patch loop addresses the presented table by `(key, clock)`, so a
-/// redelivered duplicate or a genuine same-second tie whose payload agrees
-/// converges to one presented row; `--full-refresh` re-runs the model's raw
-/// compiled `SELECT` (`LEAD`/`LAG` over every physical row) with no such
-/// addressing, so it keeps every tied row
+/// Enrichment column names for `gold_events_enriched`'s `StaleButHistoricallyValid`
+/// entry (excludes `id`, the key, and `current_repo_name`, the stale column).
+const ENRICHED_OTHER_COLUMNS: &[&str] = &[
+    "type",
+    "actor_id",
+    "actor_login",
+    "repo_id",
+    "repo_name",
+    "org_id",
+    "public",
+    "created_at",
+    "event_date",
+];
+
+/// The two succession entries trace to the same root cause: the incremental
+/// window-forward patch loop addresses the presented table by `(key,
+/// clock)`, so a redelivered duplicate or a genuine same-second tie whose
+/// payload agrees converges to one presented row; `--full-refresh` re-runs
+/// the model's raw compiled `SELECT` (`LEAD`/`LAG` over every physical row)
+/// with no such addressing, so it keeps every tied row
 /// (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` decision log,
 /// `github_activity_replay.rs::same_second_events_fold_once_within_a_key`).
 /// Owner of a fix, if one is ever wanted: `docs/outcomes/
 /// 20260906-scd2-keyed-succession`.
+///
+/// `gold_events_enriched`'s entry traces to a different, measured root cause
+/// (phase 8): no `UpstreamMutation(gold.repo_dim)` maintenance cell is ever
+/// derived for this model (`RepairKeysNotDiscoverable`, `crates/
+/// smelt-logical/src/maintenance/derive/model_edge.rs`), so once an event
+/// `id` is MERGEd into this table its `current_repo_name` is frozen forever
+/// — nothing ever revisits it just because `gold.repo_dim` later changes.
+/// Measured over the full 30-day fixture (`every_window_deep_sweep`): this
+/// does **not** self-heal or converge — the stale-row count is monotonically
+/// non-decreasing (1, 1, 2, 5, 5, 8, 13, ... 39 by the final window), which
+/// corrects an earlier, wrong claim in this outcome's decision log that the
+/// staleness "self-heals within a few subsequent runs" (that claim came from
+/// a row-count-only manual check; a genuine content-level check shows it
+/// never does, for any of the 39 affected rows, within this fixture). A
+/// stale value is always some name the repo genuinely held at an earlier
+/// point (frozen at MERGE time from `gold.repo_dim`'s then-current value),
+/// never a fabricated one — that is the bound this phase can actually stand
+/// behind. Owner of a fix: `docs/outcomes/20260906-bigquery-correctness`.
+///
+/// `silver_actor_sessions`'s entry traces to a third, unrelated root cause,
+/// also measured this phase and *not* anticipated by the phase's own plan
+/// (which asked "is any relation other than gold_events_enriched involved"
+/// without assuming the answer): here the **oracle itself under-computes**.
+/// `silver.actor_sessions` is a "Form B" partition-column model
+/// (`docs/specs/incremental_shapes.md` — the partition column is a
+/// *computed*, forward-reaching value, not the raw event-time column) whose
+/// sessionization window function has a declared backward-only lookback
+/// (`RANGE BETWEEN INTERVAL '2 days' PRECEDING`). `compute_calendar_windows`
+/// (`crates/smelt-runtime/src/windowing.rs`) applies the Form-B forward-reach
+/// rebase only to the two *outer* edges of a single invocation's whole
+/// requested range, never to an interior chunk boundary — confirmed by
+/// reading the function directly, not inferred. A single `--full-refresh`
+/// spanning many days is exactly such an invocation, so an interior chunk's
+/// write sees no forward tail and truncates any session that continues past
+/// its own day at that day's 23:59:59, undercounting `event_count` and
+/// `session_end`. The **incremental replay is correct** here — it
+/// re-triggers the edge rebase on every separate day's own narrow-window
+/// invocation, and matches a from-scratch raw-SQL recomputation of the same
+/// window-function logic. This is the one class in this registry where the
+/// full-refresh oracle, not the incremental leg, is the side to fix — owner:
+/// `docs/outcomes/20260906-bigquery-correctness`. Scope, from reading the
+/// windowing code: any Form-B model materialized by a single invocation
+/// spanning more than one partition chunk is affected, not just
+/// `--full-refresh` specifically.
+///
+/// `marts_daily_active_contributors`'s entry is a **fourth** root cause,
+/// direction reversed from `silver_actor_sessions`'s — measured, not
+/// assumed, after the first attempt at registering it (as "downstream of the
+/// sessions undercount") failed `succession_divergence_is_exactly_tied_row_
+/// multiplicity` with the incremental leg BEHIND, the opposite direction.
+/// This mart is Form A relative to `silver.actor_sessions` (its own
+/// `partition_column` is `session_start_date`, the exact column it reads,
+/// no skew), so it has no rebase of its own and (by design) never revisits
+/// an already-written partition. But `actor_sessions`'s *own* Form-B rebase
+/// legitimately rewrites an earlier day's partition once forward data
+/// arrives (that rebase is what makes `silver_actor_sessions`'s own
+/// incremental leg correct) — and nothing propagates that upstream rewrite
+/// to this downstream aggregate: a missing-repair-edge gap, the same shape
+/// as `gold_events_enriched`'s, but triggered by a Form-B model's ordinary
+/// self-rebase rather than a renamed dimension. So this mart's incremental
+/// `total_events` for a partition is frozen at whatever `actor_sessions`
+/// looked like on the day it was first written — a **subset** of the
+/// oracle's fully-formed session data, confined to `total_events` (measured:
+/// `total_sessions`/`distinct_actors` always match exactly). Owner:
+/// `docs/outcomes/20260906-bigquery-correctness`.
 const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[
     DivergenceEntry {
         relation: "silver_repo_naming",
         reason: "same-second (repo_id, created_at) ties: incremental folds them to one \
                   presented row, --full-refresh keeps every tied physical row",
-        key_columns: &["repo_id", "created_at"],
+        bound: Bound::FoldEquality {
+            key_columns: &["repo_id", "created_at"],
+        },
     },
     DivergenceEntry {
         relation: "silver_actor_naming",
         reason: "same-second (actor_id, created_at) ties: incremental folds them to one \
                   presented row, --full-refresh keeps every tied physical row",
-        key_columns: &["actor_id", "created_at"],
+        bound: Bound::FoldEquality {
+            key_columns: &["actor_id", "created_at"],
+        },
+    },
+    DivergenceEntry {
+        relation: "gold_events_enriched",
+        reason: "no UpstreamMutation(gold.repo_dim) maintenance cell exists, so a written \
+                  row's current_repo_name is frozen forever; never fabricated, but never \
+                  repaired either — see this const's doc comment",
+        bound: Bound::StaleButHistoricallyValid {
+            key_col: "id",
+            stale_column: "current_repo_name",
+            other_columns: ENRICHED_OTHER_COLUMNS,
+            value_key_col: "repo_id",
+            history_relation: "silver_repo_naming",
+            history_key_col: "repo_id",
+            history_value_col: "repo_name",
+        },
+    },
+    DivergenceEntry {
+        relation: "silver_actor_sessions",
+        reason: "the full-refresh ORACLE undercounts a cross-midnight (Form-B) session's \
+                  reach inside a multi-day invocation — see this const's doc comment",
+        bound: Bound::MonotoneDivergence {
+            key_col: "session_id",
+            exact_columns: &["actor_id", "session_start_ts", "session_start_date"],
+            monotone_columns: &["session_end", "event_count"],
+            behind_side: Side::Oracle,
+        },
+    },
+    DivergenceEntry {
+        relation: "marts_daily_active_contributors",
+        reason: "no repair edge from silver_actor_sessions's own Form-B rebase to this Form-A \
+                  downstream aggregate: total_events is frozen at first-write time, a subset \
+                  of the oracle's fully-formed session data — see this const's doc comment",
+        bound: Bound::MonotoneDivergence {
+            key_col: "session_start_date",
+            exact_columns: &["total_sessions", "distinct_actors"],
+            monotone_columns: &["total_events"],
+            behind_side: Side::Incremental,
+        },
     },
 ];
 
-/// A registry entry's bound: the incremental relation has zero rows the
-/// oracle lacks, and the oracle folds to exactly one row per `key_columns`
-/// group — the multiset-equality-after-folding property, not a row count.
+/// A registry entry's bound, dispatched on [`Bound`]'s shape.
 fn check_bound(incr_db: &Path, full_db: &Path, entry: &DivergenceEntry) -> Result<(), String> {
     let conn = attached_conn(incr_db, full_db);
-    let incr_only = scalar_on(
-        &conn,
-        &format!(
-            "SELECT count(*) FROM (SELECT * FROM incr_db.main.{r} EXCEPT ALL \
-             SELECT * FROM full_db.main.{r})",
-            r = entry.relation
-        ),
-    );
-    if incr_only != 0 {
-        return Err(format!(
-            "{incr_only} row(s) present in the incremental relation but absent from the \
-             oracle (expected 0 — the incremental side must never hold rows the oracle lacks)"
-        ));
-    }
+    match &entry.bound {
+        Bound::FoldEquality { key_columns } => {
+            let incr_only = scalar_on(
+                &conn,
+                &format!(
+                    "SELECT count(*) FROM (SELECT * FROM incr_db.main.{r} EXCEPT ALL \
+                     SELECT * FROM full_db.main.{r})",
+                    r = entry.relation
+                ),
+            );
+            if incr_only != 0 {
+                return Err(format!(
+                    "{incr_only} row(s) present in the incremental relation but absent from \
+                     the oracle (expected 0 — the incremental side must never hold rows the \
+                     oracle lacks)"
+                ));
+            }
 
-    let key_list = entry.key_columns.join(", ");
-    let distinct_full = scalar_on(
-        &conn,
+            let key_list = key_columns.join(", ");
+            let distinct_full = scalar_on(
+                &conn,
+                &format!(
+                    "SELECT count(*) FROM (SELECT DISTINCT {key_list} FROM full_db.main.{r})",
+                    r = entry.relation
+                ),
+            );
+            let incr_count = scalar_on(
+                &conn,
+                &format!("SELECT count(*) FROM incr_db.main.{r}", r = entry.relation),
+            );
+            if distinct_full != incr_count {
+                return Err(format!(
+                    "fold mismatch: the oracle has {distinct_full} distinct ({key_list}) \
+                     groups but the incremental relation has {incr_count} rows — every \
+                     oracle-extra row must be a duplicate within a shared ({key_list}) \
+                     group, not a novel row"
+                ));
+            }
+            Ok(())
+        }
+        Bound::StaleButHistoricallyValid {
+            key_col,
+            stale_column,
+            other_columns,
+            value_key_col,
+            history_relation,
+            history_key_col,
+            history_value_col,
+        } => {
+            check_key_sets_equal(&conn, entry.relation, key_col)?;
+            check_columns_match_exactly(&conn, entry.relation, key_col, other_columns)?;
+
+            let fabricated = scalar_on(
+                &conn,
+                &format!(
+                    "SELECT count(*) FROM ( \
+                       SELECT i.{value_key_col} AS vk, i.{stale_column} AS stale_val \
+                       FROM incr_db.main.{r} i JOIN full_db.main.{r} f USING ({key_col}) \
+                       WHERE i.{stale_column} IS DISTINCT FROM f.{stale_column} \
+                     ) stale \
+                     WHERE NOT EXISTS ( \
+                       SELECT 1 FROM full_db.main.{history_relation} h \
+                       WHERE h.{history_key_col} = stale.vk \
+                         AND h.{history_value_col} = stale.stale_val \
+                     )",
+                    r = entry.relation,
+                ),
+            );
+            if fabricated != 0 {
+                return Err(format!(
+                    "{fabricated} stale `{stale_column}` value(s) are not any value the key \
+                     ever genuinely held in `{history_relation}` — a fabricated value, not a \
+                     stale-but-valid one"
+                ));
+            }
+            Ok(())
+        }
+        Bound::MonotoneDivergence {
+            key_col,
+            exact_columns,
+            monotone_columns,
+            behind_side,
+        } => {
+            check_key_sets_equal(&conn, entry.relation, key_col)?;
+            check_columns_match_exactly(&conn, entry.relation, key_col, exact_columns)?;
+
+            let (op, leader, follower) = match behind_side {
+                Side::Oracle => ("<", "oracle", "incremental"),
+                Side::Incremental => (">", "incremental", "oracle"),
+            };
+            for col in *monotone_columns {
+                let behind = scalar_on(
+                    &conn,
+                    &format!(
+                        "SELECT count(*) FROM incr_db.main.{r} i \
+                         JOIN full_db.main.{r} f USING ({key_col}) \
+                         WHERE i.{col} {op} f.{col}",
+                        r = entry.relation
+                    ),
+                );
+                if behind != 0 {
+                    return Err(format!(
+                        "{behind} row(s) have the {leader} leg's `{col}` ahead of the \
+                         {follower} leg's — expected {follower} to never lead on a monotone \
+                         column"
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Every row keyed by `key_col` exists on both sides — a divergence bound
+/// never licenses a missing or extra row, only a differing value.
+fn check_key_sets_equal(
+    conn: &duckdb::Connection,
+    relation: &str,
+    key_col: &str,
+) -> Result<(), String> {
+    let key_only_incr = scalar_on(
+        conn,
         &format!(
-            "SELECT count(*) FROM (SELECT DISTINCT {key_list} FROM full_db.main.{r})",
-            r = entry.relation
+            "SELECT count(*) FROM incr_db.main.{relation} i WHERE NOT EXISTS \
+             (SELECT 1 FROM full_db.main.{relation} f WHERE f.{key_col} = i.{key_col})"
         ),
     );
-    let incr_count = scalar_on(
-        &conn,
-        &format!("SELECT count(*) FROM incr_db.main.{r}", r = entry.relation),
+    let key_only_full = scalar_on(
+        conn,
+        &format!(
+            "SELECT count(*) FROM full_db.main.{relation} f WHERE NOT EXISTS \
+             (SELECT 1 FROM incr_db.main.{relation} i WHERE i.{key_col} = f.{key_col})"
+        ),
     );
-    if distinct_full != incr_count {
+    if key_only_incr != 0 || key_only_full != 0 {
         return Err(format!(
-            "fold mismatch: the oracle has {distinct_full} distinct ({key_list}) groups but \
-             the incremental relation has {incr_count} rows — every oracle-extra row must be a \
-             duplicate within a shared ({key_list}) group, not a novel row"
+            "row-key-set mismatch on `{key_col}`: {key_only_incr} incremental-only, \
+             {key_only_full} oracle-only — a divergence bound never licenses a missing or \
+             extra row"
         ));
     }
     Ok(())
+}
+
+/// Every column in `columns` matches exactly between rows sharing `key_col`
+/// — the bound licenses divergence only in the columns named explicitly by
+/// its own shape, never elsewhere.
+fn check_columns_match_exactly(
+    conn: &duckdb::Connection,
+    relation: &str,
+    key_col: &str,
+    columns: &[&str],
+) -> Result<(), String> {
+    for col in columns {
+        let n = scalar_on(
+            conn,
+            &format!(
+                "SELECT count(*) FROM incr_db.main.{relation} i \
+                 JOIN full_db.main.{relation} f USING ({key_col}) \
+                 WHERE i.{col} IS DISTINCT FROM f.{col}"
+            ),
+        );
+        if n != 0 {
+            return Err(format!(
+                "{n} row(s) differ on `{col}`, which this bound does not license to diverge"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Column-by-column diff for two relations sharing key column `key_col`,
+/// restricted to `columns` (excluding the key itself). Used only for
+/// measurement (`every_window_deep_sweep`) — the per-PR gate compares whole
+/// rows via [`relation_diff`], not per-column.
+struct ColumnDiff {
+    key_only_incr: i64,
+    key_only_full: i64,
+    differing: Vec<(String, i64)>,
+}
+
+fn column_level_diff(
+    conn: &duckdb::Connection,
+    relation: &str,
+    key_col: &str,
+    columns: &[&str],
+) -> ColumnDiff {
+    let mut differing = Vec::new();
+    for col in columns {
+        if *col == key_col {
+            continue;
+        }
+        let n = scalar_on(
+            conn,
+            &format!(
+                "SELECT count(*) FROM incr_db.main.{relation} i \
+                 JOIN full_db.main.{relation} f USING ({key_col}) \
+                 WHERE i.{col} IS DISTINCT FROM f.{col}"
+            ),
+        );
+        if n > 0 {
+            differing.push((col.to_string(), n));
+        }
+    }
+    let key_only_incr = scalar_on(
+        conn,
+        &format!(
+            "SELECT count(*) FROM incr_db.main.{relation} i WHERE NOT EXISTS \
+             (SELECT 1 FROM full_db.main.{relation} f WHERE f.{key_col} = i.{key_col})"
+        ),
+    );
+    let key_only_full = scalar_on(
+        conn,
+        &format!(
+            "SELECT count(*) FROM full_db.main.{relation} f WHERE NOT EXISTS \
+             (SELECT 1 FROM incr_db.main.{relation} i WHERE i.{key_col} = f.{key_col})"
+        ),
+    );
+    ColumnDiff {
+        key_only_incr,
+        key_only_full,
+        differing,
+    }
+}
+
+/// The `id`s where `gold_events_enriched`'s `current_repo_name` differs
+/// between the two databases, paired with the affected `repo_id` — measurement
+/// support for tracking whether a specific stale row heals across later
+/// windows.
+fn stale_enrichment_ids(conn: &duckdb::Connection) -> Vec<(i64, i64)> {
+    let sql = "SELECT i.id, i.repo_id FROM incr_db.main.gold_events_enriched i \
+               JOIN full_db.main.gold_events_enriched f USING (id) \
+               WHERE i.current_repo_name IS DISTINCT FROM f.current_repo_name \
+               ORDER BY 1";
+    let mut stmt = conn.prepare(sql).expect("prepare stale_enrichment_ids");
+    stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .expect("query stale_enrichment_ids")
+        .collect::<Result<_, _>>()
+        .expect("collect stale_enrichment_ids")
+}
+
+/// Measurement-only sweep (`docs/outcomes/20260906-bigquery-dogfood-spine/
+/// phases/08-plan.md` task 1): build a growing full-refresh oracle after
+/// **every** one of the 30 windows (not just the first 10 + final, unlike the
+/// per-PR centrepiece) and record, per day, which relations diverge and on
+/// which columns — plus the exact `gold_events_enriched` ids that stay stale,
+/// so a later run can tell which ones healed and which never did.
+///
+/// `#[ignore]`d by design: this is measurement, not a gate. Run with
+/// `cargo test -p smelt-cli --test github_activity_oracle every_window_deep_sweep \
+///  -- --ignored --nocapture`. Its output is transcribed into the phase 8
+/// summary and `examples/github_activity/README.md`, not asserted here.
+#[test]
+#[ignore = "measurement-only sweep, not a gate — see doc comment"]
+fn every_window_deep_sweep() {
+    const ENRICHED_COLUMNS: &[&str] = &[
+        "type",
+        "actor_id",
+        "actor_login",
+        "repo_id",
+        "repo_name",
+        "org_id",
+        "public",
+        "created_at",
+        "event_date",
+        "current_repo_name",
+    ];
+
+    let tmp = TempDir::new().expect("tempdir");
+    let (incr_workspace, incr_db, incr_sample) = stage_workspace(&tmp.path().join("incremental"));
+    create_empty_raw_table(&incr_db, &incr_sample);
+
+    let mut prev: Option<&str> = None;
+    for (idx, day) in FIXTURE_DAYS.iter().enumerate() {
+        load_day(&incr_db, &incr_sample, day, prev);
+        smelt_run(&incr_workspace, day, &day_after(day), &[]);
+        prev = Some(day);
+
+        let (oracle_workspace, oracle_db, oracle_sample) =
+            stage_workspace(&tmp.path().join(format!("oracle-{idx}")));
+        create_empty_raw_table(&oracle_db, &oracle_sample);
+        let mut oracle_prev: Option<&str> = None;
+        for d in &FIXTURE_DAYS[0..=idx] {
+            load_day(&oracle_db, &oracle_sample, d, oracle_prev);
+            oracle_prev = Some(d);
+        }
+        smelt_run(
+            &oracle_workspace,
+            FIXTURE_DAYS[0],
+            &day_after(day),
+            &["--full-refresh"],
+        );
+
+        let diffs = compare_databases(&incr_db, &oracle_db)
+            .unwrap_or_else(|e| panic!("day {day}: coverage failure: {e}"));
+        let conn = attached_conn(&incr_db, &oracle_db);
+        for diff in &diffs {
+            if diff.incr_only == 0 && diff.full_only == 0 {
+                continue;
+            }
+            if diff.relation == "gold_events_enriched" {
+                let cd = column_level_diff(&conn, "gold_events_enriched", "id", ENRICHED_COLUMNS);
+                let stale = stale_enrichment_ids(&conn);
+                eprintln!(
+                    "DEEPSWEEP day={day} idx={idx} relation=gold_events_enriched \
+                     key_only_incr={} key_only_full={} differing_columns={:?} \
+                     stale_ids={:?}",
+                    cd.key_only_incr, cd.key_only_full, cd.differing, stale
+                );
+            } else {
+                eprintln!(
+                    "DEEPSWEEP day={day} idx={idx} relation={} incr_only={} full_only={}",
+                    diff.relation, diff.incr_only, diff.full_only
+                );
+            }
+        }
+    }
 }
 
 fn full_only_count(incr_db: &Path, full_db: &Path, relation: &str) -> i64 {
@@ -296,22 +741,27 @@ fn full_replay_pair() -> &'static FullReplayPair {
 }
 
 /// Test 1: the phase's centrepiece. Replay the 30-day fixture day by day;
-/// after each of the first 10 days, and after the final (30th) day, stage a
-/// fresh full-refresh oracle over the identical rows seen so far and compare
-/// every materialised relation row-for-row.
+/// after **every** day (not sampled — see below), stage a fresh full-refresh
+/// oracle over the identical rows seen so far and compare every materialised
+/// relation row-for-row, against the 5-entry [`DIVERGENCE_REGISTRY`].
 ///
-/// **Ignored** — running this today fails at the `2026-08-06` checkpoint on
-/// `gold_events_enriched`: an early fact row carries a stale
-/// `current_repo_name` after a same-window rename, self-healing by a later
-/// run (confirmed zero-diff at the full 30-day window). This is a real
-/// divergence class the plan's two-entry registry does not cover and this
-/// phase did not characterise a bound for — see `docs/outcomes/
-/// 20260906-bigquery-dogfood-spine/outcome.md` "## Blocked" (phase 6). Left
-/// in place, not deleted, so the next attempt starts from working
-/// infrastructure (the comparator, discovery, and registry machinery below
-/// are all exercised and green via tests 2-5).
+/// Was `#[ignore]`d (`docs/outcomes/20260906-bigquery-dogfood-spine/
+/// outcome.md` "## Blocked", phase 6) on an uncharacterised `gold_events_
+/// enriched` divergence, at the time believed to self-heal. Phase 8's
+/// `every_window_deep_sweep` measured the real shape (it does not self-heal;
+/// see `DIVERGENCE_REGISTRY`'s doc comment) and phase 8 also found two
+/// further, previously-unknown divergent relations
+/// (`silver_actor_sessions`/`marts_daily_active_contributors`, a genuine
+/// full-refresh-oracle bug — same doc comment). All three are now registered
+/// bounds, so this runs unignored.
+///
+/// Checks **every** day, not the first-10-plus-final sampling the phase 6
+/// plan allowed for runtime: phase 8 task 9 measured the every-day sweep
+/// (`every_window_deep_sweep`) at 108s wall time for the full 30 days, well
+/// under the plan's 5-minute budget, so the cheaper sampling was never
+/// needed and would have hidden the sessions divergence (which only starts
+/// at day 12) had it stayed in place.
 #[test]
-#[ignore = "gold_events_enriched intermediate-window staleness is unbounded/uncharacterised — see outcome.md Blocked, phase 6"]
 fn every_window_matches_the_full_refresh_oracle() {
     let tmp = TempDir::new().expect("tempdir");
     let (incr_workspace, incr_db, incr_sample) = stage_workspace(&tmp.path().join("incremental"));
@@ -324,10 +774,6 @@ fn every_window_matches_the_full_refresh_oracle() {
         prev = Some(day);
 
         let is_final = idx == FIXTURE_DAYS.len() - 1;
-        if idx >= 10 && !is_final {
-            continue;
-        }
-
         if is_final {
             // The full-fixture oracle: reuse the shared pair rather than
             // building a third full-refresh over all 30 days (test 3 and
@@ -409,8 +855,9 @@ fn oracle_comparison_covers_every_materialised_relation() {
     );
 }
 
-/// Test 3: the registry's two entries are bounded, not blanket — over the
-/// full 30-day fixture, both hold their fold-equality bound.
+/// Test 3: every registry entry is bounded, not blanket — over the full
+/// 30-day fixture, all five hold their declared bound (two `FoldEquality`,
+/// one `StaleButHistoricallyValid`, two `MonotoneDivergence`).
 #[test]
 fn succession_divergence_is_exactly_tied_row_multiplicity() {
     let pair = full_replay_pair();
@@ -418,6 +865,64 @@ fn succession_divergence_is_exactly_tied_row_multiplicity() {
         check_bound(&pair.incr_db, &pair.full_db, entry)
             .unwrap_or_else(|e| panic!("{}: {e}", entry.relation));
     }
+}
+
+/// Test: on the full 30-day fixture, `gold_events_enriched`'s divergence is
+/// confined exactly the way its registry entry claims — no row is missing or
+/// extra (the key set matches exactly) and no column other than
+/// `current_repo_name` ever differs. Distinguishes "stale value" from
+/// "wrong/missing rows" (`docs/outcomes/20260906-bigquery-dogfood-spine/
+/// phases/08-plan.md` task/test 2).
+#[test]
+fn enrichment_staleness_is_confined_to_the_enriched_column() {
+    let pair = full_replay_pair();
+    let conn = attached_conn(&pair.incr_db, &pair.full_db);
+
+    check_key_sets_equal(&conn, "gold_events_enriched", "id")
+        .expect("gold_events_enriched must have identical id key sets on both legs");
+    check_columns_match_exactly(&conn, "gold_events_enriched", "id", ENRICHED_OTHER_COLUMNS)
+        .expect("only current_repo_name may differ on gold_events_enriched");
+
+    let cd = column_level_diff(&conn, "gold_events_enriched", "id", &{
+        let mut cols: Vec<&str> = ENRICHED_OTHER_COLUMNS.to_vec();
+        cols.push("current_repo_name");
+        cols
+    });
+    assert_eq!(
+        cd.differing
+            .iter()
+            .map(|(c, _)| c.as_str())
+            .collect::<Vec<_>>(),
+        vec!["current_repo_name"],
+        "expected exactly one differing column (current_repo_name): {:?}",
+        cd.differing
+    );
+    assert!(
+        !cd.differing.is_empty(),
+        "expected the fixture to still reproduce the enrichment divergence — if this is now \
+         empty, the registry entry for gold_events_enriched is dead and should be deleted"
+    );
+}
+
+/// Test: the plan's original task 3 asked whether the staleness "converges
+/// within N windows" — measured (`every_window_deep_sweep`) and found not to:
+/// the stale-row count is monotonically non-decreasing across the full
+/// 30-day fixture, never returning to zero. So the honest, checkable
+/// invariant is not convergence but non-fabrication: every stale
+/// `current_repo_name` this fixture ever produces is some name the repo
+/// genuinely held at an earlier point in `silver_repo_naming`'s history,
+/// never an invented string. This is exactly `check_bound`'s
+/// `StaleButHistoricallyValid` predicate, asserted directly here rather than
+/// only indirectly via `succession_divergence_is_exactly_tied_row_
+/// multiplicity`'s generic loop, so a reader sees the invariant's own name.
+#[test]
+fn enrichment_staleness_is_never_a_fabricated_value() {
+    let pair = full_replay_pair();
+    let entry = DIVERGENCE_REGISTRY
+        .iter()
+        .find(|e| e.relation == "gold_events_enriched")
+        .expect("gold_events_enriched registry entry must exist");
+    check_bound(&pair.incr_db, &pair.full_db, entry).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Test 4: negative control on the comparator itself. Perturb one row of an

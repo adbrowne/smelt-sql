@@ -117,7 +117,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | blocked |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
-| 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | planned |
+| 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
 | 9 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
 | 10 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
 | 11 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
@@ -126,6 +126,35 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 14 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 8 implement): **criterion 7's DuckDB half is settled — the phase 6
+  "self-heals" claim was wrong, and two more previously-unknown divergences surfaced.**
+  `every_window_deep_sweep` (new, `#[ignore]`d measurement test in `github_activity_oracle.rs`)
+  checked all 30 windows and found the `gold_events_enriched` stale-row count strictly
+  non-decreasing (1 → 39 across the fixture) — it never heals, contradicting phase 6's
+  "manual rerun" claim, which turns out to have been a row-count check, not a content check.
+  The registered bound is therefore non-fabrication (every stale `current_repo_name` is a
+  name the repo genuinely held earlier, per `StaleButHistoricallyValid`), not convergence —
+  there is no N to converge within. The same sweep also found `silver_actor_sessions` and
+  `marts_daily_active_contributors` diverging, unregistered, from two further distinct root
+  causes: (a) `compute_calendar_windows` (`crates/smelt-runtime/src/windowing.rs`) applies
+  the Form-B forward-reach rebase only at a multi-day invocation's outer edges, never an
+  interior chunk boundary, so **the full-refresh oracle itself under-counts** a cross-midnight
+  session inside a wide `--full-refresh` (the incremental leg is correct, confirmed against a
+  from-scratch raw-SQL recomputation) — not specific to `--full-refresh`, any wide
+  single-invocation Form-B materialization is affected; (b) the downstream mart has no
+  rebase of its own and never revisits an already-written partition, so it never learns when
+  `actor_sessions`'s own correct rebase rewrites an earlier partition — a third instance of
+  the same missing-repair-edge shape as `gold_events_enriched`'s finding, triggered by an
+  ordinary self-rebase rather than a renamed dimension. `DivergenceEntry`/`check_bound`
+  generalised to a 3-shape `Bound` enum (`FoldEquality`, `StaleButHistoricallyValid`,
+  `MonotoneDivergence` with a `behind_side` since the two new entries diverge in *opposite*
+  directions) to cover all five entries. `every_window_matches_the_full_refresh_oracle`
+  un-ignored and promoted to check every one of the 30 windows (measured 108s, under the
+  5-minute budget, so the first-10-plus-final sampling was dropped). All four measured root
+  causes (two succession-tie folds, the enrichment freeze, the oracle windowing gap, the mart
+  repair gap) are handed to `bigquery-correctness` as criterion-8 findings — none fixed here.
+  Full write-up: `phases/08-summary.md`.
 
 - 2026-09-08 (phase 8 plan): **reshape — a new loop-grindable phase 8 is inserted ahead of
   every cloud phase; old 8–13 become 9–14.** Phase 7 blocked on human provisioning and
@@ -531,6 +560,12 @@ exists — so the live run is a test of the *backend*, not of the models.
   pass.
 
 - 2026-09-08 — **phase 6 (per-window full-refresh oracle), centrepiece test only.**
+  **Resolved by phase 8** (see the decision log entry above) — the centrepiece test is now
+  unignored and green, on a corrected understanding: the staleness does not self-heal (that
+  claim was wrong), the registered bound is non-fabrication rather than convergence, and two
+  further divergences this entry's own candidate options did not anticipate were found and
+  registered alongside it. Left below for the historical record of how the finding was first
+  made.
   `crates/smelt-cli/tests/github_activity_oracle.rs` was built per the phase 6 plan: relation
   discovery (excludes `sources_*`/`_smelt_*`), an `ATTACH`-based `EXCEPT ALL` comparator with
   sample rows, `DIVERGENCE_REGISTRY` with the two known succession entries (`silver_repo_

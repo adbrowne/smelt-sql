@@ -154,20 +154,41 @@ phase 5), not an oversight.
 between the incremental replay and a full-refresh oracle over the identical loaded rows —
 row-for-row, not by row count, and via a comparator that discovers the relation set from
 the databases themselves rather than a hardcoded model list. A difference is either zero or
-matches a bounded `DIVERGENCE_REGISTRY` entry: `silver.repo_naming` and `silver.actor_naming`
-are registered exactly as described above (a redelivered duplicate or same-second tie folds
-to one presented row on the incremental leg, but survives on the full-refresh leg), and each
-entry's bound is checked, not merely asserted — the incremental relation must have zero rows
-the oracle lacks, and the oracle must fold to precisely one row per `(key, clock)` group.
+matches one of five bounded `DIVERGENCE_REGISTRY` entries, each checked, not merely
+asserted:
+
+- `silver.repo_naming` / `silver.actor_naming` — a redelivered duplicate or same-second tie
+  folds to one presented row on the incremental leg but survives on the full-refresh leg
+  (`FoldEquality`: the incremental relation has zero rows the oracle lacks, and the oracle
+  folds to precisely one row per `(key, clock)` group).
+- `gold.events_enriched` — the "genuine derivation gap" above means a written row's
+  `current_repo_name` is frozen forever once `id` is MERGEd in; measured over the full
+  30-day fixture, this does **not** self-heal (an earlier note in this file claiming it did
+  was wrong — see the outcome's decision log) — the stale-row count only grows. The checked
+  bound (`StaleButHistoricallyValid`) is non-fabrication, not convergence: every stale value
+  is some name the repo genuinely held at an earlier point, never an invented one, and no
+  other column or row ever differs.
+- `silver.actor_sessions` / `marts.daily_active_contributors` — a fourth and fifth
+  divergence class, found by this phase's `every_window_deep_sweep` and not anticipated by
+  the plan that wrote the first three: `compute_calendar_windows`
+  (`crates/smelt-runtime/src/windowing.rs`) rebases a Form-B partition column's forward
+  reach only at the two outer edges of a single multi-day invocation, never at an interior
+  chunk boundary, so **the full-refresh oracle itself under-counts** a cross-midnight
+  session inside a wide `--full-refresh` — the incremental leg is correct here
+  (`MonotoneDivergence`, oracle side). The downstream mart inherits a *different* gap on top
+  of that: it has no rebase of its own and never revisits an already-written partition, so
+  its `total_events` is frozen at first-write time and is a strict subset of what the
+  (eventually-correct) upstream session data would give — `MonotoneDivergence`, incremental
+  side this time, the one entry in the registry where the two legs disagree on which side is
+  "ahead" for the opposite reason.
 
 The comparator, discovery, and registry-liveness machinery are exercised and green
 (`oracle_comparison_covers_every_materialised_relation`, `an_unregistered_divergence_fails`,
-`succession_divergence_is_exactly_tied_row_multiplicity`, `registry_entries_are_all_live`).
-The centrepiece test, `every_window_matches_the_full_refresh_oracle` — checking after
-*every* incremental window, not just once at the end of the 30-day replay — is currently
-`#[ignore]`d: it surfaced a real, previously-hidden divergence in `gold.events_enriched`
-(an early fact row can carry a stale `current_repo_name` for one window after a same-window
-rename, before self-healing on a later run — see this file's "genuine derivation gap" note
-above) that the two-entry registry does not cover and that has not yet been characterised
-with a checkable bound. Tracked in `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`
-"## Blocked" (phase 6).
+`succession_divergence_is_exactly_tied_row_multiplicity`, `registry_entries_are_all_live`,
+`enrichment_staleness_is_confined_to_the_enriched_column`,
+`enrichment_staleness_is_never_a_fabricated_value`). The centrepiece test,
+`every_window_matches_the_full_refresh_oracle`, checks after **every** one of the 30
+incremental windows (measured at 108s for the full sweep, well under the 5-minute budget)
+and is green. All four measured root causes are handed to
+`docs/outcomes/20260906-bigquery-correctness` as criterion-8 findings — this pipeline
+characterises and bounds them, it does not fix them.
