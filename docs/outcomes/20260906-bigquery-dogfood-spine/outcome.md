@@ -2,22 +2,30 @@
 
 **Created:** 2026-09-06
 **Status:** in progress
-**Driver:** human-gated (interactive sessions) — **not** in `.claude/outcome-backlog`
+**Driver:** split. Phases 2–5 are loop-grindable (no warehouse, no credentials) and this
+outcome sits in `.claude/outcome-backlog` for them. Phases 6–12 are **human-gated** —
+they provision cloud resources and run live BigQuery, which a headless loop cannot do, so
+phase 6 must emit `<<PHASE_BLOCKED>>` rather than attempt it.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/multi_backend.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/smelt_yml.md`; `docs/specs/run_state.md`; `docs/specs/state.md`
 
 ## The outcome
 
 A dedicated, budget-capped GCP project holds `raw.github_events`: a day-partitioned,
-column-pruned, retention-trimmed copy of a **stable 0.1% sample** of GitHub Archive,
-produced by a scheduled BigQuery query that smelt orders but does not author. Four
-models — `bronze.events`, `silver.events_deduped`, `silver.actor_sessions` and one mart
-that makes their output visible — live in `examples/github_activity/` and run to
-completion **on both targets**: incrementally against BigQuery over successive windows,
-and against DuckDB in ordinary CI over a Parquet export of the identical sample. The two
-targets produce the same answers, every incremental state matches a full-refresh oracle,
-and every divergence between them is registered rather than tolerated. The defects the
-live run surfaces are written down as a punch-list rather than fixed here.
+retention-trimmed copy of a **stable 0.1% sample** of GitHub Archive, produced by a
+scheduled BigQuery query that smelt orders but does not author. A bronze→silver→gold→mart
+pipeline lives in `examples/github_activity/` — dedup over an at-least-once feed,
+gap-based sessionization, keyed succession over the real rename stream, typed payload
+extraction, and the marts that make all of it visible — and runs to completion **on both
+targets**: incrementally against BigQuery over successive windows, and against DuckDB in
+ordinary CI over a Parquet export of the identical sample. The two targets produce the same
+answers, every incremental state matches a full-refresh oracle, and every divergence
+between them is registered rather than tolerated. The defects the live run surfaces are
+written down as a punch-list rather than fixed here.
+
+The DuckDB half is built and trusted **first**, in full. Every model, and the equivalence
+invariant over all of them, is green with no warehouse before a single cloud resource
+exists — so the live run is a test of the *backend*, not of the models.
 
 ## Success criteria (checkable)
 
@@ -41,16 +49,17 @@ live run surfaces are written down as a punch-list rather than fixed here.
    targets over different populations are not comparable. It is at-least-once by
    construction and documented as **external to smelt** — smelt's source declaration is
    the contract. Its cost per run is measured and recorded.
-4. **DuckDB leg, in CI.** A deterministic Parquet export of the same sample is committed
-   *and* reproducibly regenerable, and `examples/github_activity/` runs end-to-end against
-   DuckDB with **no live warehouse**: `cargo test -p smelt-cli --test example_diagnostics`
-   and `cargo test -p smelt-lsp --test example_workspaces` see zero diagnostics, and the
-   four models build. This leg is the cheap oracle; it runs per-PR. Because the upstream
-   feed carries **no duplicate event ids** (measured — see decision log), the DuckDB leg
-   must reproduce the loader's at-least-once behaviour deliberately, by replaying
-   overlapping windows; otherwise `silver.events_deduped` ships with its whole reason for
-   existing untested.
-5. **BigQuery leg, live.** The same four models compile and run against the dogfood
+4. **DuckDB leg, in CI — the whole pipeline, not a spine.** A deterministic Parquet export
+   of the same sample is committed *and* reproducibly regenerable, and
+   `examples/github_activity/` runs end-to-end against DuckDB with **no live warehouse**:
+   `cargo test -p smelt-cli --test example_diagnostics` and
+   `cargo test -p smelt-lsp --test example_workspaces` see zero diagnostics, and every
+   model builds — bronze, the dedup, sessionization, both succession models, the typed
+   fan-out, gold and the marts. This leg is the cheap oracle; it runs per-PR. Because the
+   upstream feed carries **no duplicate event ids** (measured — see decision log), the
+   loader redelivers a deterministic 2% slice of the previous day on purpose; otherwise
+   `silver.events_deduped` ships with its whole reason for existing untested.
+5. **BigQuery leg, live.** The same models compile and run against the dogfood
    project — a full refresh, then **at least three consecutive incremental windows** —
    with the run report from W2 captured for each.
 6. **The two targets agree.** A dual-target parity check compares each model's output
@@ -65,21 +74,27 @@ live run surfaces are written down as a punch-list rather than fixed here.
    surfaced, each with the model and statement that provoked it. This document is the
    input to `docs/outcomes/20260906-bigquery-correctness`, and the requirements it names
    are the input to the `external-dag-steps` and `trimmed-history-sources` outcomes.
-9. **Tension 1 probed, not solved.** The real `(repo.id, repo.name)` rename stream is run
-   against the keyed-succession grammar as specced and the exact refusal (or acceptance)
-   is recorded in `docs/outcomes/20260906-scd2-keyed-succession`'s decision log. No
-   grammar change is made here.
+9. **Succession exercised on the real rename stream.** `silver.repo_naming` is recognised
+   as the succession grain from its SQL shape alone and maintained over the fixture's 34
+   renamed repos — including the two repo *names* reused across different `repo_id`s and
+   the owner-change case where id and trailing name both survive. `silver.actor_naming` is
+   a second instance on a different key and clock. **Both** partition postures are covered:
+   the source is event-time-partitioned, so the deliberate previous-day redelivery lands in
+   a *closed* partition and drives the append-only probe's late-arrival classification,
+   while a loader-stamped `ingested_date` makes the arrival-partitioned posture reachable
+   from the same pipeline. `SuccessionClockTie`'s "identical rows are a redelivery and fold
+   once" leg is exercised by that same redelivery. Every refusal or acceptance that
+   surprises is recorded in `docs/outcomes/20260906-scd2-keyed-succession`'s decision log;
+   no grammar change is made here.
 10. **Gates green.** `bash .claude/scripts/verify-phase.sh` passes; no ratchet lowered.
 
 ## Out of scope
 
-- **SCD2 in the first pass.** `silver.repo_naming` and `marts.naming_history` are not
-  built here (human decision of 2026-09-06 — see decision log). Criterion 9 keeps the
-  tension probed without building the grain.
-- The full sketch in the research doc: the silver fan-out (`push_events`, `pr_events`,
-  `issue_events`, `star_events`), `manual.repo_watchlist` and the `ColumnScopedMerge`
-  shape it reaches, `silver.actor_naming`, the gold and mart layers beyond the one mart.
-  These arrive once the spine is trustworthy; widening the sample is the same gesture.
+- **`manual.repo_watchlist`.** The research doc wanted it because `Technique::
+  ColumnScopedMerge` had no reachable shipped shape; `docs/TODO.md` records that gap
+  **resolved 2026-08-09**, so the model's original motivation is gone. `gold.events_enriched`
+  is built instead, and is a real-pipeline instance of the same `LEFT JOIN`-against-a
+  `unique_key`-declaring-dimension shape.
 - **Fixing** anything the live run surfaces, beyond what is needed to make a run complete
   at all. Fixes belong to `20260906-bigquery-correctness`.
 - Unattended scheduling — `20260906-bigquery-unattended` owns Cloud Run Job, Scheduler,
@@ -96,14 +111,16 @@ live run surfaces are written down as a punch-list rather than fixed here.
 |---|-------|--------|
 | 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
 | 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | pending |
-| 3 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
-| 4 | Build the loader in the dogfood project: `sample.sql` reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
-| 5 | First live BigQuery run: full refresh of the same four models against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
-| 6 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
-| 7 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
-| 8 | Trust the numbers: full-refresh oracle vs incremental state after each window, on both targets | pending |
-| 9 | Probe tension 1: run the real rename stream against the keyed-succession grammar and record the verdict in the scd2 outcome's decision log | pending |
-| 10 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
+| 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | pending |
+| 4 | The wider model set: re-pin `sample.sql` with `payload`, then the silver fan-out, `gold.events_enriched`, `gold.repo_activity_daily` and the remaining marts | pending |
+| 5 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
+| 6 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
+| 7 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
+| 8 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
+| 9 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 10 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
+| 11 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
+| 12 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
 
 ## Decision log
 
@@ -116,6 +133,54 @@ live run surfaces are written down as a punch-list rather than fixed here.
   grammar evidence earlier, and correctness should be dealt with cheaply before breadth.
   The tension is not dropped — criterion 9 probes it once the pipeline is live, and its
   finding still reaches `scd2-keyed-succession` before that outcome's classifier phase.
+  **Superseded 2026-09-08** — see the reshape entry below.
+- 2026-09-08 (human): **the whole DuckDB pipeline first; all of GCP last.** The premise of
+  the 2026-09-06 decision was that succession would have to be *built* to be probed. It no
+  longer does: `20260906-scd2-keyed-succession` shipped the grain to `main` in the interim
+  (example workspace, twelve refusal cases in `examples/broken/`, the append-only posture
+  probe, `smelt explain` rendering, spec divergences closed), so `silver.repo_naming` is
+  now a shape that either works or refuses loudly. Building it is cheaper than probing it
+  was, and it aims the newest, least-exercised code in the tree at real data — which is
+  what this pipeline is for. So SCD2 and the wider model set move ahead of provisioning,
+  and every GCP phase moves behind them. Phases 3–5 are new; old 3/4 become 6/7 and the
+  live phases follow; `phases/03-plan.md` moved to `phases/06-plan.md` unchanged.
+  The trade, stated so it is not rediscovered as a surprise: the programme's original
+  argument for BigQuery-early was **reach** — "it runs unattended against a real dataset
+  and I trust the numbers" — and this delays that, and makes the first live run likelier to
+  fail on several fronts at once. Accepted, because the research doc's own sequencing rule
+  is "let the real models generate the punch-list", and a wider model set generates more of
+  it per live run. What the reorder buys unconditionally: when the live leg finally runs,
+  every model and the equivalence invariant over all of them are already green offline, so
+  a failure there is a **backend** failure and nothing else.
+- 2026-09-08: **what the fixture can actually support**, measured before the phases were
+  written rather than assumed: 34 renamed repos, **2 repo names reused across different
+  `repo_id`s** (an adversarial case for anything keyed on name), and only **4** renamed
+  actors. `silver.actor_naming` is built anyway (human): the value is exercising the
+  grammar a second time on a different key and clock, not statistical weight.
+- 2026-09-08: **both succession partition postures are reachable from one pipeline**, which
+  was not obvious. `incremental_shapes.md` §"The succession grain" admits event-time
+  partitioning alongside arrival partitioning, and our source is event-time-partitioned —
+  so the deliberate previous-day redelivery lands in a **closed** partition and drives the
+  append-only probe's late-arrival classification (a row-count increase in a closed
+  partition is a late arrival, never `SourceMutationProfileViolated`). That is the costlier
+  and less-exercised of the two postures, and we get it by construction. The arrival
+  posture is then one column away: `ingested_date` is the **loader's own stamp**, not
+  anything GitHub Archive supplies, so the replay driver and the phase-7 loader can both
+  add it without touching `sample.sql`.
+- 2026-09-08 (human): **the fan-out earns a `payload` re-pin.** Phase 4 re-pins `sample.sql`
+  to project `payload` and regenerates the fixture (roughly double the scan — ~12 GB,
+  ~US$0.06 estimated). Narrowing the payload to typed fields inside the sample query was
+  rejected: the fan-out's whole point is typed extraction *from JSON*, and a pre-extracted
+  column set removes the shape being tested. If 64k raw payloads make the committed fixture
+  unreasonably large, phase 4 shortens the day range rather than narrowing the payload —
+  fewer rows of the real shape beat more rows of the wrong one.
+- 2026-09-08: **`manual.repo_watchlist` loses its motivation.** The research doc wanted it
+  because `Technique::ColumnScopedMerge` had no reachable shipped shape; `docs/TODO.md`
+  records that gap resolved 2026-08-09 by `20260809-sensitivity-precision.md`, with
+  `ValueEnrichedRecipe` staging the shape and a conformance test proving it end to end.
+  `gold.events_enriched` is built instead and is the same shape occurring on a real
+  pipeline rather than in a testkit recipe — a weaker reason than the original, and an
+  honest one.
 - 2026-09-06 (human): **a small subset first, widened later.** The human asked for a cheap
   slice. Sampling is `MOD(repo.id, 1000) = 0` rather than a `repo.name` prefix: a name
   prefix is unstable under rename, so a renamed repo would silently leave the sample —

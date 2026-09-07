@@ -13,10 +13,11 @@ The four spine models exist, compile, and run to completion against DuckDB over 
 committed Parquet sample, with zero LSP diagnostics, wired into per-PR CI. Nothing about
 this phase touches BigQuery.
 
-The point is not that four models exist. It is that by the end of the phase the model set
-is **frozen**, so phases 5–8 compare two targets over a fixed thing rather than a moving
-one — and that the DuckDB leg genuinely exercises dedup, which needs deliberate work
-(§"Redelivery is not free").
+The point is not that four models exist. It is that the workspace, the source contract and
+the replay driver are in place, so phases 3 and 4 add models to a pipeline that already
+runs rather than to a design — and that the DuckDB leg genuinely exercises dedup, which
+needs deliberate work (§"Redelivery is not free"). The model set is not frozen here;
+phase 5 freezes it, once succession and the fan-out have landed.
 
 ## What the sample forces
 
