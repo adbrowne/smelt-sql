@@ -326,6 +326,7 @@ Reserved names: `comma_sep`, `and_all`, `or_any`, `union_all`, `intersect_all`, 
 
 ---
 
+<a id="reducerinputtypemismatch"></a>
 !!! warning "ReducerInputTypeMismatch"
     **When it fires:** `reduce` is called with a list whose element type is incompatible with the reducer's declared input.
 
@@ -344,6 +345,7 @@ Reserved names: `comma_sep`, `and_all`, `or_any`, `union_all`, `intersect_all`, 
 
 ---
 
+<a id="reduceremptynoidentity"></a>
 !!! warning "ReducerEmptyNoIdentity"
     **When it fires:** `reduce` is called with an empty list using `union_all` or `intersect_all`, which have no identity element for an empty list.
 
@@ -361,6 +363,7 @@ Reserved names: `comma_sep`, `and_all`, `or_any`, `union_all`, `intersect_all`, 
 
 ---
 
+<a id="reducernameshadowed"></a>
 !!! warning "ReducerNameShadowed"
     **When it fires:** A `smelt.define` function is declared with a name that matches one of the seven reserved reducer names.
 

@@ -73,7 +73,7 @@ Only one technique per cell is ever marked Admitted. A technique preview — of 
 display-only: selecting it does not run anything, and it has no effect on which technique a
 real run will actually use. To change what a real run does, use the model's
 `maintenance:` frontmatter, as described in
-[Incremental Models](incremental-models.md#steering-prefer--technique).
+[Incremental Models](incremental-models.md#steering-prefer-technique).
 
 ## Comment folding
 

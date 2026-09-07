@@ -121,6 +121,7 @@ Lambdas capture the compile-time meta-world. Runtime SQL columns do not exist at
 
 ---
 
+<a id="lambdainforbiddenposition"></a>
 !!! warning "LambdaInForbiddenPosition"
     **When it fires:** A `fn x => body` lambda appears outside a HOF positional argument position.
 
@@ -193,6 +194,7 @@ Lambdas capture the compile-time meta-world. Runtime SQL columns do not exist at
 
 ---
 
+<a id="lambdaresulttypemismatch"></a>
 !!! warning "LambdaResultTypeMismatch"
     **When it fires:** The lambda body's synthesised type is incompatible with what the surrounding HOF requires.
 

@@ -157,5 +157,5 @@ demoted to another grain. Each names the offending clause and a fix.
 | `SuccessionClockTie` (runtime) | Two non-identical events (or a delete and a non-delete) landed at the same `(k, t)` — the run rolls back; resolve the upstream duplicate/collision. |
 
 See the [diagnostics reference](../reference/diagnostics.md#succession-grain) for full
-descriptions, and [`docs/specs/incremental_shapes.md` §"The succession grain"](../../../docs/specs/incremental_shapes.md)
+descriptions, and [`docs/specs/incremental_shapes.md` §"The succession grain"](https://github.com/adbrowne/smelt-sql/blob/main/docs/specs/incremental_shapes.md)
 for the normative spec.
