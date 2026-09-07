@@ -2,11 +2,11 @@
 
 **Created:** 2026-09-06
 **Status:** in progress
-**Driver:** split. Phases 2–4 and 6 are loop-grindable (no warehouse, no credentials) and
-this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
-BigQuery token for one fixture regeneration (see "## Blocked"); phases 7–13 are
+**Driver:** split. Phases 2–4, 6 and 8 are loop-grindable (no warehouse, no credentials)
+and this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
+BigQuery token for one fixture regeneration (see "## Blocked"); phases 7 and 9–14 are
 **human-gated** — they provision cloud resources and run live BigQuery, which a headless
-loop cannot do, so phase 7 must emit `<<PHASE_BLOCKED>>` rather than attempt it.
+loop cannot do, so those phases must emit `<<PHASE_BLOCKED>>` rather than attempt it.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/multi_backend.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/smelt_yml.md`; `docs/specs/run_state.md`; `docs/specs/state.md`
 
@@ -117,14 +117,33 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | blocked |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
-| 8 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
-| 9 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
-| 10 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
-| 11 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
-| 12 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
-| 13 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
+| 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | planned |
+| 9 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
+| 10 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
+| 11 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 12 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
+| 13 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
+| 14 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 8 plan): **reshape — a new loop-grindable phase 8 is inserted ahead of
+  every cloud phase; old 8–13 become 9–14.** Phase 7 blocked on human provisioning and
+  nothing downstream of it (the loader, the live runs, the parity check, the evidence bank)
+  is executable without a GCP identity — verified this iteration, `gcloud auth list` still
+  reports "No credentialed accounts". Declaring the whole outcome blocked there would defer
+  work that **is** runnable and **does** serve a success criterion: criterion 7's DuckDB
+  half is not met, because phase 6's centrepiece
+  (`every_window_matches_the_full_refresh_oracle`) is `#[ignore]`d on an uncharacterised
+  `gold.events_enriched` divergence. Per this process's own rule — work serving the success
+  criteria is never deferred out — that becomes phase 8 rather than leaving the outcome. It
+  takes option 2 then option 1 of phase 6's blocked entry, in that order: widen the sweep to
+  every day first (cheap, and it settles whether the staleness is bounded or recurring)
+  *before* spending effort root-causing, so the bound that gets registered is measured rather
+  than invented. Explicitly **not** in the phase: fixing smelt's derivation gap — this
+  outcome's "## Out of scope" assigns fixes to `20260906-bigquery-correctness`, so phase 8
+  characterises, bounds, registers and hands off. Phase 6 stays `blocked` (its own budget is
+  spent and its infrastructure landed); phase 8 is the row that finishes its subject.
 
 - 2026-09-08 (phase 6 plan): **no reshape; the phase is sharpened rather than moved.**
   Phase 4's summary surfaced one finding (`RepairKeysNotDiscoverable` for
