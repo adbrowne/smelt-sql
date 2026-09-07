@@ -64,6 +64,7 @@ A non-call right-hand side (`x |> y`, `x |> 3 + 4`) emits `PipeRhsNotCall` at th
 
 ---
 
+<a id="piperhsnotcall"></a>
 !!! warning "PipeRhsNotCall"
     **When it fires:** The right-hand side of `|>` is not a function call expression.
 
@@ -81,6 +82,7 @@ A non-call right-hand side (`x |> y`, `x |> 3 + 4`) emits `PipeRhsNotCall` at th
 
 ---
 
+<a id="pipeindataposition"></a>
 !!! warning "PipeInDataPosition"
     **When it fires:** A pipe expression (`LHS |> f(...)`) appears in a Data-World grammar position — for example, inside a `WHERE` predicate or as the right-hand side of a SQL binary operator.
 

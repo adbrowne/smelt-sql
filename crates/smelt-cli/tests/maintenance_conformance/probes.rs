@@ -11,6 +11,11 @@ use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 
 use smelt_logical::maintenance::{Technique, Trigger};
+use smelt_maintenance_testkit::gate_succession::stage_succession_recipe_for;
+use smelt_maintenance_testkit::gate_succession::{
+    drive_succession_window_and_assert_for, drive_succession_window_expect_probe_failure,
+    mutate_row_payload_in_place_succession, SuccessionEventRow,
+};
 use smelt_maintenance_testkit::link_c_harness::base_request;
 use smelt_maintenance_testkit::probes::{
     compiled_sql_matches_derived_clamp,
@@ -19,10 +24,11 @@ use smelt_maintenance_testkit::probes::{
     ReachabilityReport,
 };
 use smelt_maintenance_testkit::recipe::{
-    arb_recipe, ConstructKind, KeyedCombiner, KeyedRecipe, MutableEnrichedRecipe, RecipePool,
+    arb_recipe, ConformanceTarget, ConstructKind, KeyedCombiner, KeyedRecipe,
+    MutableEnrichedRecipe, RecipePool, SourceRecipe, SuccessionRecipe,
 };
 use smelt_maintenance_testkit::schedule_gen::{
-    arb_schedule_for, is_permutable, reorder_windows, GenRow,
+    arb_schedule_for, is_permutable, reorder_windows, ConformanceStep, GenRow,
 };
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
 use smelt_state::reconciliation::Region;
@@ -659,4 +665,235 @@ fn probe_skips_are_counted_never_silent() {
             "probe {probe:?} never recorded a Checked outcome across the sample: {report:#?}"
         );
     }
+}
+
+/// `late_append_schedule_holds_with_probes_on` (phase 6 TDD list;
+/// `docs/specs/model_properties.md` §Constraints "Declared lateness is
+/// orchestration-only"): a schedule containing a genuine `AppendLateRow`
+/// step plus its catch-up rerun — now driven with the harness's declared-
+/// fact probe cadence ON (`render::render_smelt_yml_for` flipped from
+/// `cadence: off` in this same phase) — converges to the full-refresh
+/// oracle with no probe failure. Before this phase, the append-only
+/// posture probe could not distinguish a late append into a closed
+/// partition from an in-place mutation and would have failed this exact
+/// schedule; `drive_and_assert`'s S-restricted equivalence check would
+/// surface that failure as an `Err`, so a passing case here is direct
+/// evidence the two-verdict split holds under a real run.
+#[test]
+fn late_append_schedule_holds_with_probes_on() {
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let mut checked = 0;
+    for i in 0..10 {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+
+        // Draw schedules until one carrying a genuine AppendLateRow step
+        // turns up — a bounded retry loop, never unbounded (design §7:
+        // "skipped explicitly, never silently vacuous").
+        let mut schedule = None;
+        for _ in 0..20 {
+            let candidate = arb_schedule_for(&recipe)
+                .new_tree(&mut runner)
+                .unwrap()
+                .current();
+            if candidate
+                .0
+                .iter()
+                .any(|s| matches!(s, ConformanceStep::AppendLateRow(_)))
+            {
+                schedule = Some(candidate);
+                break;
+            }
+        }
+        let Some(schedule) = schedule else {
+            eprintln!(
+                "SKIP case {i}: no AppendLateRow-bearing schedule drawn in 20 attempts for \
+                 recipe {recipe:?} — probe structurally does not apply this case"
+            );
+            continue;
+        };
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+        let verdict = classify(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+        if !matches!(verdict, Verdict::Admitted(_)) {
+            continue;
+        }
+
+        rt.block_on(drive_and_assert(&project, &recipe, &schedule))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "case {i}: recipe {recipe:?} schedule {schedule:?} — a late append into a \
+                     closed partition must never fail the run under probes-on equivalence: {e}"
+                )
+            });
+        checked += 1;
+    }
+
+    assert!(
+        checked > 0,
+        "no AppendLateRow-bearing admitted case reached across the deterministic sample — \
+         generator/derivation regression"
+    );
+}
+
+/// Phase 6 leg 1: `succession_late_append_into_a_closed_event_time_partition_re_presents`
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/06c-plan.md`) — over
+/// an event-time-partitioned succession source (no separate arrival column;
+/// a run's window scans `changed_at` itself), two windows close the first
+/// event-time partition's baseline, then a late event lands in that closed
+/// partition and its covering window is re-driven: the run holds (the
+/// append-only posture probe tolerates the append) and
+/// `assert_succession_equivalence_for` still passes.
+#[tokio::test]
+async fn succession_late_append_into_a_closed_event_time_partition_re_presents() {
+    let mut recipe = SuccessionRecipe::new_lead()
+        .with_source(SourceRecipe::succession_events_event_time_partitioned());
+    recipe.model_name = "customer_history_probe_append".to_string();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+        .expect("stage event-time-partitioned succession recipe");
+
+    // Window 1 closes 2026-01-01's baseline once window 2's 2026-01-02
+    // event is also recorded (the baseline snapshot scans the whole
+    // source table, so both partitions land in one probe dispatch).
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "probe-append-w1",
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        &[SuccessionEventRow::new(
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "gold",
+        )],
+    )
+    .await
+    .expect("window 1 must succeed and establish the baseline");
+
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "probe-append-w2",
+        NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        &[SuccessionEventRow::new(
+            2,
+            NaiveDate::from_ymd_opt(2026, 1, 2)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "silver",
+        )],
+    )
+    .await
+    .expect("window 2 must succeed and close 2026-01-01's baseline");
+
+    // A genuine late APPEND into the now-closed 2026-01-01 partition, and
+    // its covering window re-driven — must hold, not violate.
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "probe-append-late",
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        &[SuccessionEventRow::new(
+            3,
+            NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+            "bronze",
+        )],
+    )
+    .await
+    .expect("a late append into a closed event-time partition must be tolerated, not violated");
+}
+
+/// Phase 6 leg 2: `succession_in_place_mutation_fails_with_source_mutation_profile_violated`
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/06c-plan.md`) —
+/// mutating an existing row's payload in an already-baselined (closed)
+/// partition fails the run with `SourceMutationProfileViolated`, never
+/// `SuccessionClockTie` (the append-only posture probe must fire before the
+/// fold, not incidentally through the clock-tie probe).
+#[tokio::test]
+async fn succession_in_place_mutation_fails_with_source_mutation_profile_violated() {
+    let mut recipe = SuccessionRecipe::new_lead();
+    recipe.model_name = "customer_history_probe_mutation".to_string();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+        .expect("stage succession recipe");
+
+    // One run whose baseline snapshot scans the whole source table, so
+    // 2026-01-01 lands strictly below the recorded maximum (2026-01-02)
+    // and is CLOSED.
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "probe-mutation-seed",
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        &[
+            SuccessionEventRow::new(
+                1,
+                NaiveDate::from_ymd_opt(2026, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(8, 0, 0)
+                    .unwrap(),
+                "gold",
+            ),
+            SuccessionEventRow::new(
+                2,
+                NaiveDate::from_ymd_opt(2026, 1, 2)
+                    .unwrap()
+                    .and_hms_opt(8, 0, 0)
+                    .unwrap(),
+                "silver",
+            ),
+        ],
+    )
+    .await
+    .expect("seed run must succeed and establish the baseline");
+
+    mutate_row_payload_in_place_succession(
+        &project,
+        &recipe,
+        1,
+        NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap(),
+        "platinum",
+    )
+    .expect("mutate the closed partition's row in place");
+
+    let message = drive_succession_window_expect_probe_failure(
+        &project,
+        &recipe,
+        "probe-mutation-fails",
+        NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        &[],
+    )
+    .await
+    .expect("the mutated run must fail loud and leave both tables unchanged");
+
+    assert!(
+        message.contains("SourceMutationProfileViolated"),
+        "expected SourceMutationProfileViolated, got: {message}"
+    );
+    assert!(
+        !message.contains("SuccessionClockTie"),
+        "the append-only posture probe must fire before the fold, not incidentally through the \
+         clock-tie probe: {message}"
+    );
 }

@@ -28,13 +28,11 @@ use async_trait::async_trait;
 /// single-owner emitters key their dialect-specific variants on. The region
 /// `DELETE`+`INSERT` family is dialect-invariant; the whole-row `MERGE`
 /// families are not — GoogleSQL accepts neither `UPDATE SET *` nor
-/// `INSERT *`, so `BigQuery` selects the spelled-out arms. `PostgreSQL` has no
-/// `smelt-backend-*` implementation, so it shares the `Spark` branch until
-/// one exists.
+/// `INSERT *`, so `BigQuery` selects the spelled-out arms.
 pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
     match dialect {
         SqlDialect::DuckDB => MaintenanceDialect::DuckDb,
-        SqlDialect::SparkSQL | SqlDialect::PostgreSQL => MaintenanceDialect::Spark,
+        SqlDialect::SparkSQL => MaintenanceDialect::Spark,
         SqlDialect::BigQuery => MaintenanceDialect::BigQuery,
     }
 }

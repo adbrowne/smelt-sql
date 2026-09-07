@@ -27,7 +27,7 @@ owners: [andrew]
 
 - **Backends.** A target's `type:` selects a backend (`duckdb` | `spark` | `bigquery`; see
   `smelt_yml.md` §"Target shape"). Each backend declares a `SqlDialect` (`DuckDB` | `SparkSQL` |
-  `PostgreSQL` | `BigQuery`) and a `BackendCapabilities` value. A `bigquery` target names a
+  `BigQuery`) and a `BackendCapabilities` value. A `bigquery` target names a
   `project`, `dataset`, and `location` in place of DuckDB's `database` or Spark's `connect_url`.
 - **Capability matrix.** `BackendCapabilities` is the single declared description of what a
   backend's SQL surface supports. Backends differ **only** in (a) their capability flags and
@@ -181,7 +181,7 @@ Every production path that splices a small literal row set into generated SQL �
 seed's CTE, a repair's affected-key list, an append-only baseline probe's recorded partitions, a
 `smelt.test` mock dataset — renders it through a single dialect-aware owner
 (`smelt_core::build_row_set_table` / `row_set_body`, `crates/smelt-core/src/sql/row_set.rs`)
-rather than formatting `VALUES (…)` itself. DuckDB, Spark, and PostgreSQL accept a `VALUES (…),
+rather than formatting `VALUES (…)` itself. DuckDB and Spark accept a `VALUES (…),
 (…)` table-value constructor directly, unchanged. GoogleSQL has none: `FROM (VALUES (1), (2))`
 is a syntax error. The owner renders BigQuery's row set as the portable chained `SELECT … UNION
 ALL SELECT …` instead — column names come from the first branch's aliased projections, since
@@ -191,8 +191,8 @@ per-caller business decision, not a row-set construction detail — the owner re
 row and callers handle the empty case themselves before reaching it.
 
 ### Exact-median lowering
-`MEDIAN(x)` is an exact, interpolating median on every backend that executes it. DuckDB, Spark,
-and PostgreSQL are emitted unchanged; GoogleSQL has no `MEDIAN` built-in, so the dialect printer
+`MEDIAN(x)` is an exact, interpolating median on every backend that executes it. DuckDB and Spark
+are emitted unchanged; GoogleSQL has no `MEDIAN` built-in, so the dialect printer
 lowers it, and both lowerings are exact because an approximate substitute would make the
 equivalence oracle report divergences that are artefacts of the substitution — or hide real ones.
 In window position (`MEDIAN(x) OVER w`) the lowering is `PERCENTILE_CONT(x, 0.5) OVER w`, which
@@ -222,7 +222,7 @@ printer, never emitted verbatim and left to the engine. Emission ownership for e
 data in `BuiltinRegistry` — the printer reads the `Emission` verdict for the active dialect and
 dispatches on it; no name-matched dialect arm lives in `printer.rs`.
 
-`^` is the critical case. In smelt's grammar, and in DuckDB and PostgreSQL, `^` means power —
+`^` is the critical case. In smelt's grammar, and in DuckDB, `^` means power —
 a synonym for `**`. But **both GoogleSQL and Spark SQL** define infix `^` as **bitwise XOR**, so
 emitting `^` verbatim against either backend silently returns a different number from what smelt's
 semantics say. Both GoogleSQL and Spark therefore lower `^` (and `**`) to `POWER(a, b)`.
@@ -320,7 +320,9 @@ carry arbitrary literal text around them. Every argument the call supplies must 
 least once; a template that would silently drop an argument is malformed. Templates are static
 registry data and are validated when the registry is built — every placeholder index within the
 entry's declared arity, balanced parentheses, and no argument unreferenced — so a malformed
-template is a build-time failure, never a runtime one.
+template is a build-time failure, never a runtime one. A template used as an operand-conditional
+arm's verdict (§"Operand-conditional verdicts") is validated by these same rules, at the same
+registry-construction time, against the entry's own signature.
 
 **Substitution preserves precedence.** A placeholder is replaced by the argument's *printed* text —
 lowered for the same dialect, recursively, so nested calls and operators inside an argument receive
@@ -374,10 +376,12 @@ otherwise recognise.
 **Operand classes.** An argument's class is a pure, total function of its inferred `DataType`,
 single-owned beside the registry: `Integral` (the integer widths), `Decimal`, `Floating` (`Float`,
 `Double`), `String`, `Boolean`, `Temporal` (`Date`, `Time`, and the timestamps), `Interval`,
-`Composite` (`Array`, `Struct`, `Map`), `Json`, and `Unresolved` for an argument whose type
-inference reports `Unknown`. A guard names classes, never concrete types, because the engine
-behaviours this axis exists for split along exactly these lines and a finer key would multiply
-arms without buying a different answer.
+`Composite` (`Array`, `Struct`, `Map`), `Binary` (`Blob`), and `Unresolved` for an argument whose
+type inference reports `Unknown`. `Null` also classifies as `Unresolved` — a NULL literal
+discriminates nothing, and sending it to `otherwise` is the fail-safe direction this axis's cost
+rule already demands. A guard names classes, never concrete types, because the engine behaviours
+this axis exists for split along exactly these lines and a finer key would multiply arms without
+buying a different answer.
 
 **Resolution happens on the compile path, never in the printer.** Arity is read from the source
 CST. Operand class is read from the same type inference that derives the model's projection
@@ -401,10 +405,13 @@ unresolved type can cost a diagnostic or a loud engine error, never a quiet wron
 
 **The audit probes every arm.** The fixture carries one typed column per class, so an arm guarded
 on a class is probed with that class's column, an arm guarded on an arity with a call of that
-arity, and the `otherwise` arm with whichever class no earlier arm names. Coverage totality counts
-arms, not entries: an arm no probe reaches is named by the gate, never skipped. The ledger keys a row
-on the arm it describes, and the coverage table renders a conditional cell as the set of its arms'
-verdicts, as it already does for a cell whose positions differ.
+arity, and the `otherwise` arm with whichever class no earlier arm names. No typed fixture column
+can classify as `Unresolved` — a NULL-bearing column still has a declared type — so an arm guarded
+on that class is probed with a bare `NULL` literal instead, which is what the class means at a call
+site. Coverage totality counts arms, not entries: an arm no probe reaches is named by the gate,
+never skipped. The ledger keys a row on the arm it describes, and the coverage table renders a
+conditional cell as the set of its arms' verdicts, as it already does for a cell whose positions
+differ.
 
 ### Statement-level lowering
 Some built-ins cannot be lowered by substituting one expression for another, because the backend
@@ -504,7 +511,7 @@ Four details are load-bearing:
 - **The join is null-safe.** `GROUP BY g` places NULL keys in their own group, but `ON b.g = w.g`
   never matches NULL, so a plain equi-join silently drops every row whose partition key is NULL —
   measured on BigQuery as 3 rows kept out of 5. The null-safe comparison is spelled
-  `IS NOT DISTINCT FROM` on DuckDB, PostgreSQL and GoogleSQL and `<=>` on Spark SQL; the difference
+  `IS NOT DISTINCT FROM` on DuckDB and GoogleSQL and `<=>` on Spark SQL; the difference
   is a `BackendCapabilities` spelling, never a dialect arm in the printer.
 - **The join is total, so it is an inner join.** `__smelt_w0` is `__smelt_base` grouped on the same
   keys, so every base row has exactly one match by construction. Floating-point keys do not break
@@ -612,7 +619,7 @@ outer `SELECT CAST(col AS <inferred>) AS col, …` over the model body
 `smelt-runtime/src/compile.rs`). A model therefore writes the **same schema to every warehouse**,
 regardless of engine. This is the multi-backend instance of the canonical-return-type rule in
 `functions.md` §"Canonical return types are CAST-enforced"; the backend namespace
-(`spark.ceil(...)`, `postgres.sum(...)`) is the explicit per-call opt-out that inherits the
+(`spark.ceil(...)`, `bigquery.sum(...)`) is the explicit per-call opt-out that inherits the
 engine-native type and marks the model non-portable.
 
 The column names and inferred types the cast wrap uses are derived from the model's **source**
@@ -954,23 +961,12 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **No template verdict exists yet; the fixed-shape rewrites live as `RewriteId` variants.** The
-  registry's `Emission` has `Native`, `Rename`, `Rewrite`, `Restructure`, and `Unsupported` only.
-  `%` → `MOD(a, b)` and `^`/`**` → `POWER(a, b)` are hand-written printer functions behind
-  `RewriteId::ModuloCall` and `RewriteId::PowerCall`; under §"Template emission" both are templates
-  and the variants retire. The audit's coverage table has no `template` column. Tracked by the plan
-  derived from this spec diff (the tracking issues for the outstanding lowerings are #177, #178,
-  #179).
-- **No operand-conditional verdict exists; the lookup key is `(dialect, position)` alone.** In
-  consequence `%` on BigQuery lowers to `MOD` for every operand and fails at the warehouse on a
-  floating-point one (#173); `//` is refused wholesale on Spark, PostgreSQL and BigQuery rather than
-  lowered per operand class; `LOG` is registered at one arity only, so the two-argument form is not
-  recognised and its per-engine base and argument order (#174) are unaddressed; Spark's `TRUNC` and
-  `TO_JSON` carry no class-scoped arm (#178). The compile path today runs the refusal pre-pass
-  over the bare CST with no type context threaded in, so the resolution step §"Operand-conditional
-  verdicts" describes does not yet exist.
-- **`DAYOFWEEK` differs by one on Spark SQL (#174).** Spark numbers the week from Sunday = 1, DuckDB
-  from Sunday = 0. This is a template (`DAYOFWEEK({0}) - 1`), and lands with the template verdict.
+- **`%` on BigQuery still lowers to `MOD` for every operand (#173).** GoogleSQL's `MOD` accepts only
+  `INT64`/`NUMERIC` and fails at the warehouse on a floating-point operand; `Emission::Conditional`
+  exists and is populated for `//`, `LOG`, `TRUNC` and `TO_JSON` on Spark, but `%` on BigQuery has
+  not yet been given the same operand-conditional treatment. `//`'s own per-class arms are stated
+  and verified live (`docs/outcomes/20260904-dialect-emission-vocabulary` phase 7); BigQuery's
+  remains open, tracked in the same outcome.
 
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,

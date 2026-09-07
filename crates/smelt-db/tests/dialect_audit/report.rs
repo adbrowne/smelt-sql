@@ -8,7 +8,10 @@
 //! verification-tier section says which dialects a live leg actually visits.
 
 use smelt_types::signatures::{Position, Signature};
-use smelt_types::{BuiltinRegistry, DialectId, Emission, ExprKind, SyntaxForm};
+use smelt_types::{
+    BuiltinRegistry, ConditionalArm, DialectId, Emission, ExprKind, OperandClass, SettledEmission,
+    SyntaxForm,
+};
 
 use crate::ledger::{self, Verdict};
 
@@ -40,13 +43,66 @@ fn position_label(position: Position) -> &'static str {
     }
 }
 
+/// The class name an arm guard names, in the coverage table's own
+/// lowercase vocabulary — a rendering concern separate from the `Debug`
+/// derive `OperandClass` otherwise uses.
+fn operand_class_label(class: OperandClass) -> &'static str {
+    match class {
+        OperandClass::Integral => "integral",
+        OperandClass::Decimal => "decimal",
+        OperandClass::Floating => "floating",
+        OperandClass::String => "string",
+        OperandClass::Boolean => "boolean",
+        OperandClass::Temporal => "temporal",
+        OperandClass::Interval => "interval",
+        OperandClass::Composite => "composite",
+        OperandClass::Binary => "binary",
+        OperandClass::Unresolved => "unresolved",
+    }
+}
+
+fn settled_label(verdict: SettledEmission) -> String {
+    match verdict {
+        SettledEmission::Native => "native".to_string(),
+        SettledEmission::Rename(to) => format!("rename:{to}"),
+        SettledEmission::Template(t) => format!("template:{t}"),
+        SettledEmission::Rewrite(id) => format!("rewrite:{id:?}"),
+        SettledEmission::Restructure(id) => format!("restructure:{id:?}"),
+        SettledEmission::Unsupported { .. } => "unsupported".to_string(),
+    }
+}
+
+/// One arm's guard and verdict, rendered `a0:class,a1:class→verdict` or
+/// `otherwise→verdict` for the mandatory trailing arm.
+fn arm_label(arm: &ConditionalArm) -> String {
+    if arm.arity.is_none() && arm.classes.is_empty() {
+        return format!("otherwise→{}", settled_label(arm.verdict));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(arity) = arm.arity {
+        parts.push(format!("arity={arity}"));
+    }
+    for (idx, class) in arm.classes {
+        parts.push(format!("a{idx}:{}", operand_class_label(*class)));
+    }
+    format!("{}→{}", parts.join(","), settled_label(arm.verdict))
+}
+
 fn emission_label(emission: Emission) -> String {
     match emission {
         Emission::Native => "native".to_string(),
         Emission::Rename(to) => format!("rename:{to}"),
         Emission::Rewrite(id) => format!("rewrite:{id:?}"),
+        Emission::Template(t) => format!("template:{t}"),
         Emission::Restructure(id) => format!("restructure:{id:?}"),
         Emission::Unsupported { .. } => "unsupported".to_string(),
+        // Test 11: a conditional cell renders its arm set, not a bare
+        // "conditional" placeholder — the audit now probes every arm
+        // (phase 6), so the table can say which arms exist.
+        Emission::Conditional(arms) => {
+            let rendered: Vec<String> = arms.iter().map(arm_label).collect();
+            format!("conditional({})", rendered.join(" | "))
+        }
     }
 }
 
@@ -137,13 +193,19 @@ pub fn render() -> String {
     out.push_str(
         "How every built-in smelt recognises is spelled on each backend. Each cell is the\n\
          `Emission` verdict the registry carries for that `(entry, dialect)` pair\n\
-         (`crates/smelt-types/src/signatures.rs`), which is the single place the printer\n\
-         reads — there is no name-matched dialect arm in `printer.rs`.\n\n",
+         (`crates/smelt-types/src/signatures/`), which is the single place the printer\n\
+         reads — there is no name-matched dialect arm in the printer.\n\n",
     );
     out.push_str("Cell vocabulary:\n\n");
     out.push_str(
         "- `native` — same spelling, same semantics; smelt emits the name unchanged.\n\
          - `rename:X` — same call shape, emitted as `X`.\n\
+         - `template:X` — the target spells this built-in as a fixed shape `X` over the\n\
+         \x20 call's own positional arguments (`{n}` placeholders), interpreted by one generic\n\
+         \x20 printer routine that holds no function names; a call carrying a modifier a\n\
+         \x20 placeholder cannot express (`DISTINCT`, `FILTER`, `WITHIN GROUP`, an argument-list\n\
+         \x20 `ORDER BY`, `IGNORE`/`RESPECT NULLS`, a named argument, or `*`) is refused at\n\
+         \x20 compile time rather than silently dropping it.\n\
          - `rewrite:Id` — structurally rewritten by the printer's `RewriteId::Id` arm.\n\
          - `restructure:Id` — the enclosing query block is restructured around a\n\
          \x20 synthesised CTE by the planner's `RestructureId::Id` shape, because the\n\
@@ -151,6 +213,12 @@ pub fn render() -> String {
          \x20 author wrote.\n\
          - `unsupported` — the compiler refuses the model (`UnsupportedOnBackend`) rather\n\
          \x20 than emitting SQL the engine would reject or misread.\n\
+         - `conditional(guard→verdict | ... | otherwise→verdict)` — the verdict depends on\n\
+         \x20 the call's own arity and/or operand types; the first arm whose guard the call\n\
+         \x20 satisfies wins, and `otherwise` always matches last. Settled once per call on\n\
+         \x20 the compile path by `Signature::settle_at`; the printer only ever sees the\n\
+         \x20 settled verdict. Every arm is probed by the audit — never claimed from\n\
+         \x20 documentation.\n\
          - `(gap #N)` — a live sweep found this pair does not work as claimed, tracked by\n\
          \x20 issue #N. The count ratchets down only\n\
          \x20 (`.claude/dialect-gaps-baseline.txt`).\n\
@@ -166,18 +234,17 @@ pub fn render() -> String {
          the exact reverse.\n\n",
     );
 
-    out.push_str("| Entry | Form | DuckDB | Spark SQL | PostgreSQL | BigQuery |\n");
-    out.push_str("|---|---|---|---|---|---|\n");
+    out.push_str("| Entry | Form | DuckDB | Spark SQL | BigQuery |\n");
+    out.push_str("|---|---|---|---|---|\n");
     for name in &names {
         let Some(sig) = BuiltinRegistry::resolve(name) else {
             continue;
         };
         out.push_str(&format!(
-            "| `{name}` | {} | {} | {} | {} | {} |\n",
+            "| `{name}` | {} | {} | {} | {} |\n",
             form_label(sig.syntax_form),
             cell(name, DialectId::DuckDb),
             cell(name, DialectId::SparkSql),
-            cell(name, DialectId::PostgreSql),
             cell(name, DialectId::BigQuery),
         ));
     }
@@ -212,13 +279,38 @@ pub fn render() -> String {
          the value leg executes rather than dry-runs, so it bills |\n",
     );
     out.push_str(
-        "| PostgreSQL | none | **unverified** — a `SqlDialect` variant with no backend crate \
-         and no oracle, so nothing exercises its verdicts |\n",
-    );
-    out.push_str(
         "\nAn untested `native` is reported as *unverified*, never as *passing*: the value leg\n\
          exists to test the claim, and a default-passing assumption would recreate exactly the\n\
          silent hole this audit was built to close.\n",
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test 11: a conditional cell renders its arm set, not a bare
+    /// "conditional" placeholder.
+    #[test]
+    fn a_conditional_cell_renders_its_arm_set() {
+        const ARMS: &[ConditionalArm] = &[
+            ConditionalArm {
+                arity: None,
+                classes: &[(0, OperandClass::Integral), (1, OperandClass::Integral)],
+                verdict: SettledEmission::Native,
+            },
+            ConditionalArm {
+                arity: None,
+                classes: &[],
+                verdict: SettledEmission::Unsupported {
+                    reason: "otherwise",
+                },
+            },
+        ];
+        assert_eq!(
+            emission_label(Emission::Conditional(ARMS)),
+            "conditional(a0:integral,a1:integral→native | otherwise→unsupported)"
+        );
+    }
 }

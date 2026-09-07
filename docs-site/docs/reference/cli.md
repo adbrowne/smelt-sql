@@ -197,11 +197,11 @@ smelt run [OPTIONS]
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
 | `--full-refresh` | | bool | `false` | Drop and rebuild every selected incremental model rather than applying batches. Not a fold, so it is never refused by the definition-delta gate below — it runs under the model's current definition regardless of any pending migration. |
 | `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
-| `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
+| `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with-since-upstream). |
 | `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
-| `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with---jobs). |
-| `--resume` | | bool | `false` | Resume a previously partially-failed run: skip any model that succeeded last time with an unchanged definition, and rerun everything else. See [`--resume` — continue after a partial failure](#--resume--continue-after-a-partial-failure). |
+| `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with-jobs). |
+| `--resume` | | bool | `false` | Resume a previously partially-failed run: skip any model that succeeded last time with an unchanged definition, and rerun everything else. See [`--resume` — continue after a partial failure](#-resume-continue-after-a-partial-failure). |
 
 A maintained (incremental) model whose stored table already exists refuses to fold a data delta
 over a pending, non-eclipsed, unapproved definition delta — a redefined column or added field
@@ -384,7 +384,7 @@ smelt rebuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 | `--target` | | string | `dev` | Target environment from smelt.yml |
 | `--show-results` | | bool | `false` | Display query results after execution |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
-| `--dry-run` | | bool | `false` | Print the maintenance statements that would run, with per-chunk boundaries — without executing ([details](#dry-run-inspect-the-maintenance-statements-before-they-run)) |
+| `--dry-run` | | bool | `false` | Print the maintenance statements that would run, with per-chunk boundaries — without executing ([details](#-dry-run-inspect-the-maintenance-statements-before-they-run)) |
 | `--batch-size` | | integer | | Override batch size in days for backfill chunking |
 | `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
 | `--allow-downgrade` | | bool | `false` | Allow incremental models that fail bound derivation to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
@@ -460,7 +460,7 @@ smelt build [OPTIONS]
 | `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
 | `--select` | `-s` | string[] | | Select models to run (repeatable). Same syntax as `smelt run`. |
 | `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
-| `--period` | | string | | Backward resolution: the target output period, `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Requires `--include-upstreams` and a positional target model. See [Backward resolution with `--include-upstreams`](#backward-resolution-with---include-upstreams). |
+| `--period` | | string | | Backward resolution: the target output period, `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Requires `--include-upstreams` and a positional target model. See [Backward resolution with `--include-upstreams`](#backward-resolution-with-include-upstreams). |
 | `--include-upstreams` | | bool | `false` | Resolve and build the target model's required upstream slices for `--period` instead of the ordinary seed+run-everything build. Requires `--period`. |
 | `--full-refresh` | | bool | `false` | Drop and recreate every selected model's target from scratch instead of maintaining it incrementally. Required to build a window-forward keyed model (`grain: key` over a clocked source) with no `--event-time-start`/`--event-time-end` window. |
 | `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
@@ -1301,12 +1301,12 @@ a backend connection, so it reports what a cell's technique *would* record and h
 Every cell also prints an `admissible write patterns:` line — the physical addressing patterns
 (`region`, `keyed`, `column`, `update`, `full_rebuild`, and any backend-contributed pattern) the
 cell's own declared facts and target backend admit — and a `write pin:` line showing the
-[`maintenance.cells[].write` pin](smelt-yml.md#cellswrite--the-physical-addressing-pin), if one is
+[`maintenance.cells[].write` pin](smelt-yml.md#cellswrite-the-physical-addressing-pin), if one is
 set (`(none)` otherwise). A `ColumnScopedMerge`/`KeyedFold` cell additionally prints a
 `write variant:` line naming whether that cell's matched arm resolves suppressed or unconditional
 and why — `preference` (the structural steady-state-vs-first-build default), `first-build posture`,
 or a `technique:`/`prefer:` pin's own name — see [Steering: prefer /
-technique](../guide/incremental-models.md#steering-prefer--technique).
+technique](../guide/incremental-models.md#steering-prefer-technique).
 
 An inbound edge is either a declared source (`sources.*`) or an upstream maintained model —
 both render through the identical `clock:` / `identity:` / `derived grain:` rows, labelled
@@ -1443,6 +1443,7 @@ Inbound edges: sources.raw.events
       clock:    (none)
       identity: event_id
       derived grain: key
+      orchestration-only fact: lateness = 2 hours (never a plan input)
       delta type: general (degraded by: source 'raw.events' is append_only but declares no clock/axis column)
 
 Probes (0):

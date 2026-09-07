@@ -1,0 +1,77 @@
+You are running as a side-quest step inside the outcome loop (docs/outcome_loop.md), inserted
+between two regular plan/implement steps because the large-file ratchet
+(.claude/scripts/large-file-check.sh) just failed. This step does NOT advance or modify the
+active outcome's phase row in its outcome.md — that bookkeeping belongs to the plan/implement
+steps only. Your job is narrowly to fix the ratchet violation(s) below and commit, then stop.
+
+Env setup needed before any cargo/test command (system DuckDB, not bundled):
+```
+for d in /usr/local/lib "$HOME/.local/lib/duckdb"; do [ -e "$d/libduckdb.so" ] && export DUCKDB_LIB_DIR="$d" && break; done
+export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR:$LD_LIBRARY_PATH"
+```
+
+Ratchet violation(s) to fix (verbatim output of `.claude/scripts/large-file-check.sh`):
+
+{{VIOLATIONS}}
+
+For each file named above, split it into cohesive submodules under a new sibling directory
+(`foo.rs` -> `foo/mod.rs` + `foo/<part>.rs`, or for a crate root `lib.rs` that can't itself
+become a directory, extract most of its content into new sibling modules that `lib.rs` then
+declares and re-exports from). This is a pure code-motion refactor — zero behavior change, no
+logic fixes, no public-API changes except mechanical visibility bumps strictly needed to cross
+the new module boundary.
+
+Before splitting each file, `grep -n "<filename>" CLAUDE.md` at the repo root and read any
+architectural-invariant paragraph that names it. Pay particular attention to:
+- anything that reads the file's source by path (`include_str!` or similar) to enumerate an
+  enum's variants or scan for a forbidden pattern — such a site must be updated to read every
+  file under the new directory instead of the single old path, or it will silently narrow to
+  covering only whatever ends up in the first file
+- any invariant about there being exactly ONE construction point / ONE table for some piece of
+  data — splitting the *data* across files that all still feed one construction point is fine;
+  splitting into two independent constructions is not
+- any invariant about visibility ceilings (e.g. "these items are pub(crate), a consumer can only
+  reach them through function X") — crossing the new internal module boundary may require
+  raising a private item to `pub(crate)`, but never to `pub`, when the invariant caps it there
+
+If splitting a named file would genuinely require violating an invariant you find, or the file
+turns out to be a single function/closure that code motion cannot split further (this has
+happened before — a ~4750-line function in smelt-runtime/src/execute/project.rs), STOP on that
+file specifically and report why instead of forcing it or leaving the ratchet red without
+explanation. In the "can't split further" case, that file's current line count is its legitimate
+baseline — note this in your report so a human can decide whether to raise the baseline
+explicitly, rather than leaving the loop stuck retrying it every iteration.
+
+Group submodules by what the code is actually about, not by mechanical line-count halves. Keep
+the external API working — check other crates' usages with `rg` before assuming nothing depends
+on an item's exact path.
+
+When each file's split is done:
+1. Run `bash .claude/scripts/verify-phase.sh 2>&1 | tail -150` (fmt-check + clippy + full test
+   suite + example_diagnostics). Fix anything it flags — this is the real correctness bar.
+   Known pre-existing flakes under parallel test execution (not yours to fix, confirm same
+   signature, don't let them block you): tests under a `python::tests` or `combined_loop` module
+   failing with a non-atomic file-write race in a generated fixture, or "git archive failed" —
+   all pass in isolation / with `--test-threads=1`. Any other failure is real.
+2. Run `bash .claude/scripts/large-file-check.sh` and confirm the specific violation(s) you were
+   asked to fix are gone. Do not leave a file you touched still over its limit.
+3. Check whether your change affects any other ratchet baseline named in CLAUDE.md's "Fail-loud
+   discipline" section (`.claude/hardening-baseline.txt`, `.claude/unknown-census.toml`,
+   `.claude/registry-migration-baseline.txt`, `.claude/dialect-gaps-baseline.txt`). Pure code
+   motion shouldn't change unwrap/expect/println counts, but moving a `DataType::Unknown`
+   construction site to a new file changes its address in `.claude/unknown-census.toml` — update
+   the address (not the classification) if so.
+4. Update `.claude/large-file-baseline.txt` for the files you touched:
+   `bash .claude/scripts/large-file-check.sh --update`, then confirm the diff only touches paths
+   you actually split (a wider diff means something else changed size — investigate before
+   committing it).
+5. Commit as one commit per file split (or one combined commit if you fixed multiple small
+   violations together — use judgment): `refactor(<crate>): split <file> into N submodules`,
+   body listing the submodules and rationale, ending with:
+```
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+   Do NOT push. Do NOT touch outcome.md, any phases/*.md file, or the outcome-backlog.
+
+Report back concisely: which violations you fixed and how, which (if any) you could not fix and
+why, the verify-phase.sh result, and the large-file-check.sh result after your changes.

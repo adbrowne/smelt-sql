@@ -82,6 +82,7 @@ pub mod bigquery_session;
 pub mod dag;
 pub mod families;
 pub mod feed;
+pub mod gate_succession;
 pub mod link_c_harness;
 pub mod migrate_step;
 pub mod oracle;

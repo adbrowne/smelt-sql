@@ -33,6 +33,7 @@ fn lower_to_duckdb(sql: &str) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }

@@ -14,12 +14,22 @@
 //! `(order_id, customer_id, amount, order_date)` mutable/clocked source) is
 //! distinct from every existing pool's shape.
 
+use chrono::NaiveDate;
 use smelt_backend::StatementGroup;
 use smelt_logical::analysis::source_bounds::Seconds;
+use smelt_logical::maintenance::emit::{
+    emit_succession_ledger_rebuild_select, tombstone_table_name,
+};
 use smelt_logical::maintenance::{MaintenancePlan, RowIdentity, Technique};
+use smelt_maintenance_testkit::gate_succession::{
+    assert_succession_equivalence_for, drive_succession_window_and_assert_for,
+    stage_succession_recipe_for, SuccessionEventRow,
+};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
 use smelt_maintenance_testkit::oracle::multiset_equal_via_backend;
-use smelt_maintenance_testkit::recipe::{KeyedCombiner, RepairRecipe, RepairWriteMode};
+use smelt_maintenance_testkit::recipe::{
+    ConformanceTarget, KeyedCombiner, RepairRecipe, RepairWriteMode, SuccessionRecipe,
+};
 use smelt_maintenance_testkit::render;
 
 use crate::gate::snapshot_table_rows;
@@ -594,5 +604,145 @@ async fn diff_patch_run_is_labelled_and_emitted() {
     assert!(
         delete_leg_present,
         "expected a DELETE leg restricted to the affected-key slice among {groups:?}"
+    );
+}
+
+/// `succession_full_refresh_repairs_a_perturbed_ledger_and_presented_table`
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/07d-plan.md` test
+/// 5): drive two windows (including a delete) through the real succession
+/// patch, then deliberately corrupt BOTH the presented table (delete a row)
+/// and the tombstone ledger (delete a tombstone) — a perturbation neither
+/// `refold_after_a_full_refresh_ledger_rebuild_is_clean`
+/// (`succession.rs`, phase 7c) nor any other existing leg exercises, since
+/// that leg only proves a CLEAN rebuild-then-refold is idempotent, never
+/// that `--full-refresh` actually repairs a corrupted state. Assert the
+/// oracle now fails (non-vacuity: the corruption is real), run
+/// `--full-refresh`, then assert both relations are restored: the presented
+/// table matches the model's own full-refresh oracle, and the ledger
+/// matches `emit_succession_ledger_rebuild_select`'s own result over the
+/// whole source — never a hand-written comparandum.
+#[tokio::test]
+async fn succession_full_refresh_repairs_a_perturbed_ledger_and_presented_table() {
+    let mut recipe = SuccessionRecipe::new_lead().with_delete_filter();
+    recipe.model_name = "customer_history_repair_leg".to_string();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+        .expect("stage succession recipe");
+
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "succession-repair-1",
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        &[
+            SuccessionEventRow::new(
+                1,
+                NaiveDate::from_ymd_opt(2026, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(8, 0, 0)
+                    .unwrap(),
+                "bronze",
+            ),
+            SuccessionEventRow::new(
+                2,
+                NaiveDate::from_ymd_opt(2026, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap(),
+                "silver",
+            ),
+        ],
+    )
+    .await
+    .expect("window 1 must succeed and match the oracle");
+
+    drive_succession_window_and_assert_for(
+        &project,
+        &recipe,
+        "succession-repair-2",
+        NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        &[SuccessionEventRow::deleted(
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 2)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            "bronze",
+        )],
+    )
+    .await
+    .expect("window 2 (the delete) must succeed and match the oracle");
+
+    // Deliberately corrupt BOTH relations: delete key 2's presented row, and
+    // delete key 1's tombstone from the ledger. A fresh backend handle is
+    // taken for every step below rather than reused across the
+    // `run_quiet` calls — `LinkCProject::backend()` is the harness's own
+    // "current connection" seam, and holding one handle across a real
+    // pipeline run (which opens its own connection) risks reading a
+    // pre-run snapshot instead of the post-run committed state.
+    let tombstone_relation = format!("main.{}", tombstone_table_name(&recipe.model_name));
+    {
+        let backend = project.backend().await.expect("backend");
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!(
+                "DELETE FROM main.{} WHERE customer_id = 2",
+                recipe.model_name
+            ),
+        )
+        .await
+        .expect("corrupt the presented table");
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("DELETE FROM {tombstone_relation} WHERE customer_id = 1"),
+        )
+        .await
+        .expect("corrupt the tombstone ledger");
+    }
+
+    // Non-vacuity: the corruption must be real — the oracle now fails.
+    let corrupted_result = assert_succession_equivalence_for(&project, &recipe).await;
+    assert!(
+        corrupted_result.is_err(),
+        "expected the deliberately corrupted state to violate the oracle, got Ok"
+    );
+
+    let mut rebuild_request = base_request("dev");
+    rebuild_request.full_refresh = true;
+    project
+        .run_quiet("succession-repair-rebuild", rebuild_request)
+        .await
+        .expect("--full-refresh must rebuild the presented table and the tombstone ledger");
+
+    assert_succession_equivalence_for(&project, &recipe)
+        .await
+        .expect("the presented table must match the oracle after --full-refresh");
+
+    let source_ref = format!("main.sources_{}", recipe.source.name);
+    let expected_ledger = emit_succession_ledger_rebuild_select(
+        &source_ref,
+        &[recipe.source.key_column.clone()],
+        &recipe.source.clock_column,
+        None,
+        recipe
+            .source
+            .delete_flag_column
+            .as_deref()
+            .expect("with_delete_filter requires a declared delete_flag_column"),
+        None,
+    );
+    let ledger_select_sql = format!("SELECT * FROM {tombstone_relation}");
+    let backend = project.backend().await.expect("backend");
+    let ledger_matches =
+        multiset_equal_via_backend(backend.as_ref(), &ledger_select_sql, &expected_ledger.sql)
+            .await
+            .expect("multiset comparison must run");
+    assert!(
+        ledger_matches,
+        "the rebuilt tombstone ledger must match emit_succession_ledger_rebuild_select's own \
+         result over the whole source:\n  ledger: {ledger_select_sql}\n  expected: {}",
+        expected_ledger.sql
     );
 }

@@ -124,6 +124,7 @@ Both forms are semantically identical. Pipe is purely syntactic sugar; the type 
 
 ---
 
+<a id="hofexpectslambda"></a>
 !!! warning "HofExpectsLambda"
     **When it fires:** The second argument to `map` or `filter` is not a lambda.
 
@@ -141,6 +142,7 @@ Both forms are semantically identical. Pipe is purely syntactic sugar; the type 
 
 ---
 
+<a id="hofexpectsreducer"></a>
 !!! warning "HofExpectsReducer"
     **When it fires:** The second argument to `reduce` is not a bare reducer identifier from the closed registry.
 
@@ -158,6 +160,7 @@ Both forms are semantically identical. Pipe is purely syntactic sugar; the type 
 
 ---
 
+<a id="hofnameshadowed"></a>
 !!! warning "HofNameShadowed"
     **When it fires:** A `smelt.define` function is declared with the name `map`, `filter`, or `reduce`.
 

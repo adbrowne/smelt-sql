@@ -37,6 +37,23 @@
 
 set -uo pipefail
 
+# Ensure DUCKDB_LIB_DIR/LD_LIBRARY_PATH are set once here rather than letting
+# every spawned `claude --print` step rediscover them via the CLAUDE.md
+# fallback snippet in its own Bash tool calls (docs/research/20260906-outcome-
+# hygiene-token-usage.md finding 3: that snippet was observed ~95 times in a
+# single 24h window).
+if [ -z "${DUCKDB_LIB_DIR:-}" ]; then
+  eval "$(mise env 2>/dev/null)" || true
+fi
+if [ -z "${DUCKDB_LIB_DIR:-}" ]; then
+  for d in /usr/local/lib "${HOME}/.local/lib/duckdb"; do
+    [ -e "${d}/libduckdb.so" ] && export DUCKDB_LIB_DIR="${d}" && break
+  done
+fi
+if [ -n "${DUCKDB_LIB_DIR:-}" ]; then
+  export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -108,7 +125,7 @@ next_step() {
     /^\|/ {
       n=$2; t=$3; s=$4
       gsub(/^[ ]+|[ ]+$/, "", n); gsub(/^[ ]+|[ ]+$/, "", t); gsub(/^[ `]+|[ `]+$/, "", s)
-      if (n !~ /^[0-9]+[a-z]?$/) next
+      if (n !~ /^[0-9]+[a-z0-9]*$/) next
       if (s == "pending")  { print "plan " n " " t; exit }
       if (s == "planned")  { print "implement " n " " t; exit }
     }' "${dir}/outcome.md"
@@ -151,6 +168,69 @@ fi
   && echo "Iter mem scope:  MemoryMax=${ITER_MEMORY_MAX} MemoryHigh=${ITER_MEMORY_HIGH}" \
   || echo "Iter mem scope:  <systemd-run unavailable — uncapped>"
 echo
+
+# Large-file ratchet check + shrink step (docs/research/20260906-outcome-
+# hygiene-token-usage.md). Run once per iteration, after the regular
+# plan/implement step finishes successfully and before the sentinel dispatch
+# decides what's next. On a violation, this dispatches ONE bounded
+# claude --print step with .claude/outcome-shrink-prompt.txt to fix it,
+# tagged with its own usage-log event ("outcome-shrink") and its own log
+# file — it never touches the active outcome's phase row, so the regular
+# plan/implement bookkeeping is unaffected either way. A shrink-step failure
+# is logged as a warning, never stop-the-line: the ratchet gets another
+# chance next iteration rather than blocking outcome progress.
+run_large_file_shrink_if_needed() {
+  local check_output check_rc shrink_log shrink_prompt_file shrink_rc
+  local shrink_ts shrink_final_result
+
+  check_output="$(bash "${SCRIPT_DIR}/large-file-check.sh" 2>&1)"
+  check_rc=$?
+  [ "${check_rc}" -eq 0 ] && return 0
+
+  echo "===== large-file ratchet violation — dispatching a shrink step ====="
+  echo "${check_output}"
+
+  shrink_ts="$(date +%Y%m%dT%H%M%S)"
+  shrink_log="${LOG_DIR}/iter-${shrink_ts}-$(printf '%02d' "${iteration}")-shrink.log"
+  shrink_prompt_file="$(mktemp)"
+  awk -v violations="${check_output}" '{
+    if (index($0, "{{VIOLATIONS}}") > 0) { print violations; next }
+    print
+  }' "${SCRIPT_DIR}/../outcome-shrink-prompt.txt" > "${shrink_prompt_file}"
+
+  "${iter_scope[@]}" claude --print \
+    --permission-mode "${PERMISSION_MODE}" \
+    --disallowedTools "ScheduleWakeup,Monitor" \
+    --no-session-persistence \
+    --model "${MODEL_IMPL}" \
+    --output-format stream-json \
+    --verbose \
+    "$(cat "${shrink_prompt_file}")" 2>&1 | tee "${shrink_log}" | "${formatter[@]}"
+  shrink_rc="${PIPESTATUS[0]}"
+  rm -f "${shrink_prompt_file}"
+
+  jq -c --arg ts "${shrink_ts}" --argjson iter "${iteration}" --argjson rc "${shrink_rc}" \
+    'select(.type == "result") |
+     {ts:$ts, event:"outcome-shrink", iter:$iter, rc:$rc, session:.session_id,
+      total_cost_usd:.total_cost_usd, duration_ms:.duration_ms, num_turns:.num_turns,
+      input:.usage.input_tokens, output:.usage.output_tokens,
+      cache_create:.usage.cache_creation_input_tokens, cache_read:.usage.cache_read_input_tokens}' \
+    "${shrink_log}" >> "${USAGE_LOG}" 2>/dev/null || \
+    echo "{\"ts\":\"${shrink_ts}\",\"event\":\"outcome-shrink\",\"iter\":${iteration},\"rc\":${shrink_rc},\"note\":\"unparseable-log\"}" >> "${USAGE_LOG}"
+
+  shrink_final_result="$(jq -Rr 'fromjson? | select(.type == "result") | .result // empty' "${shrink_log}" 2>/dev/null)"
+  if [ "${shrink_rc}" -ne 0 ] || [ -z "${shrink_final_result}" ]; then
+    echo "===== WARNING: shrink step did not complete cleanly (rc=${shrink_rc}) — see ${shrink_log}; ratchet stays red, will retry next iteration ====="
+    return 0
+  fi
+
+  if bash "${SCRIPT_DIR}/large-file-check.sh" >/dev/null 2>&1; then
+    echo "===== shrink step resolved the ratchet violation ====="
+  else
+    echo "===== WARNING: shrink step ran but ratchet is still red — see ${shrink_log}; will retry next iteration ====="
+  fi
+  return 0
+}
 
 iteration=0
 exit_reason="unknown"
@@ -274,6 +354,8 @@ ${hint}" 2>&1 | tee "${log}" | "${formatter[@]}"
     exit_reason="no_result_envelope"
     break
   fi
+
+  run_large_file_shrink_if_needed
 
   if printf '%s' "${final_result}" | grep -qF "${S_OUTCOME_COMPLETE}"; then
     echo "===== ${S_OUTCOME_COMPLETE} — outcome achieved; advancing to next backlog entry ====="

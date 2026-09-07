@@ -5,6 +5,7 @@
 | Directory | Description | Models |
 |-----------|-------------|--------|
 | `timeseries/` | User/event analytics pipeline with incremental materialization | 12 SQL |
+| `scd2_succession/` | Keyed-history (SCD2) worked example over an arrival-partitioned change stream, recognised as the succession grain with no `unique_key:`/`timeseries:` declared on the model | 1 SQL |
 | `retail_analytics/` | TPC-DS-based retail pipeline (staging/intermediate/marts) | 25 SQL |
 | `web_analytics/` | Bronze→silver→gold pipeline over JSON events with three parallel identity-resolution algorithms compared side-by-side | 10 SQL models + 2 functions + 5 tests |
 | `broken/` | Intentionally broken models for testing error handling | 5 SQL |

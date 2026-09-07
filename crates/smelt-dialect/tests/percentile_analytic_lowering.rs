@@ -27,6 +27,7 @@ fn bigquery(sql: &str) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -80,7 +81,6 @@ fn other_dialects_keep_within_group_verbatim() {
     for (dialect, caps) in [
         (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         (SqlDialect::SparkSQL, BackendCapabilities::spark()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
     ] {
         let sql = "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g) \
                    AS m FROM t";
@@ -96,6 +96,7 @@ fn other_dialects_keep_within_group_verbatim() {
             smelt_path_ref: None,
             smelt_path_call: None,
             restructure_plans: &[],
+            settled_emissions: &[],
         };
         let out = print(&parsed.syntax(), &ctx);
         assert_eq!(

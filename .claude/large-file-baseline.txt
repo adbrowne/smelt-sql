@@ -1,0 +1,127 @@
+# Large-file ratchet baseline
+# Updated: 2026-09-07 — bumped crates/smelt-cli/src/{commands/explain.rs,
+# explain.rs} for the succession-grain `smelt explain` rendering (phase 8,
+# docs/outcomes/20260906-scd2-keyed-succession); the succession-specific
+# struct/render/JSON logic was already split into a new
+# crates/smelt-cli/src/explain/succession.rs (200 lines, under the tracked
+# threshold), and the residual growth in the two report-builder entry points
+# is thin single-owner wiring (a plan-derived `SuccessionExplainView`
+# threaded through `delta_signature_headline`/`build_maintenance_plan_report`/
+# `build_maintenance_plan_json`) that would fragment those functions'
+# single ownership if pushed out further.
+# Updated: 2026-09-07 — bumped crates/smelt-lsp/tests/example_workspaces.rs
+# (1473 -> 1480) for one new `#[tokio::test]` covering the succession-grain
+# worked example (phase 9, docs/outcomes/20260906-scd2-keyed-succession);
+# mechanical one-test addition following the file's existing per-example
+# pattern, not new structure.
+# Format: <path relative to repo root> <line count>
+# One-sided: a tracked file may shrink freely; it may not grow
+# past this number without a reviewer sign-off note. A file with
+# no entry here is capped at 1500 lines instead.
+# Only files >= 1000 lines at update time get an entry —
+# smaller files are left unconstrained (see BASELINE_MIN_LINES in the script).
+# Regenerate with: .claude/scripts/large-file-check.sh --update
+#
+crates/smelt-backend-duckdb/src/lib.rs 1902
+crates/smelt-cli/src/commands/explain.rs 1163
+crates/smelt-cli/src/explain.rs 2519
+crates/smelt-cli/src/test_compiler.rs 1908
+crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1439
+crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
+crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
+crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
+crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
+crates/smelt-cli/tests/resume.rs 1057
+crates/smelt-cli/tests/since_upstream.rs 1274
+crates/smelt-core/src/config.rs 3909
+crates/smelt-core/src/discovery.rs 1090
+crates/smelt-core/src/graph.rs 1333
+crates/smelt-core/src/metadata.rs 3652
+crates/smelt-core/src/sources.rs 1297
+crates/smelt-datagen/src/config.rs 1354
+crates/smelt-datagen/src/generic_parquet.rs 2305
+crates/smelt-datagen/src/generic.rs 1506
+crates/smelt-datagen/tests/example_web_analytics.rs 2946
+crates/smelt-db/src/diagnostics_types/mod.rs 1191
+crates/smelt-db/src/file_check.rs 1333
+crates/smelt-db/src/function_body_check.rs 4470
+crates/smelt-db/src/loader.rs 1869
+crates/smelt-db/src/queries/check_types.rs 1171
+crates/smelt-db/src/queries/function_diagnostics.rs 2595
+crates/smelt-db/src/queries/loader.rs 1082
+crates/smelt-db/src/queries/maintenance/tests.rs 1090
+crates/smelt-db/src/queries/project.rs 4072
+crates/smelt-db/src/queries/schema.rs 2124
+crates/smelt-db/src/tests.rs 6071
+crates/smelt-db/src/type_inference/binary.rs 1246
+crates/smelt-db/src/type_inference/dispatch.rs 1123
+crates/smelt-db/src/type_inference/hof.rs 2632
+crates/smelt-db/src/type_inference/loader_and_reflection.rs 1446
+crates/smelt-db/src/type_inference/multi_model.rs 1297
+crates/smelt-db/src/type_inference/pipe.rs 1080
+crates/smelt-db/src/type_inference/record.rs 1137
+crates/smelt-db/src/type_inference/tests.rs 7305
+crates/smelt-db/tests/dialect_audit/main.rs 1343
+crates/smelt-db/tests/integration/tableexpr_body_check.rs 1107
+crates/smelt-db/tests/nullability_property_tests.rs 1684
+crates/smelt-db/tests/prop_helpers/generators.rs 3188
+crates/smelt-db/tests/type_property_tests.rs 1744
+crates/smelt-logical/src/analysis/diff_stories.rs 1698
+crates/smelt-logical/src/analysis/diff/tests.rs 1338
+crates/smelt-logical/src/analysis/monotonicity.rs 1877
+crates/smelt-logical/src/analysis/output_delta.rs 1630
+crates/smelt-logical/src/analysis/source_bounds.rs 3367
+crates/smelt-logical/src/analysis/walk/tree.rs 1183
+crates/smelt-logical/src/backbuild/classify.rs 4637
+crates/smelt-logical/src/maintenance/choice/mod.rs 1231
+crates/smelt-logical/src/maintenance/grouping.rs 1099
+crates/smelt-logical/src/maintenance/locality.rs 2089
+crates/smelt-logical/src/maintenance/propagate.rs 2113
+crates/smelt-logical/src/rules/cumulative.rs 2674
+crates/smelt-logical/src/rules/incremental.rs 3430
+crates/smelt-logical/src/rules/rule_diagnostics.rs 1587
+crates/smelt-logical/tests/backbuild_conformance.rs 3294
+crates/smelt-logical/tests/backbuild_options.rs 2249
+crates/smelt-logical/tests/backbuild_property.rs 1063
+crates/smelt-logical/tests/emit_statements.rs 1710
+crates/smelt-logical/tests/keyed_families.rs 1309
+crates/smelt-logical/tests/maintenance_grouping.rs 1072
+crates/smelt-lsp/src/backend/hover_impl.rs 1072
+crates/smelt-lsp/src/backend/mod.rs 1292
+crates/smelt-lsp/src/backend/rename_impl.rs 1173
+crates/smelt-lsp/src/hover.rs 3032
+crates/smelt-lsp/src/tests.rs 2828
+crates/smelt-lsp/tests/e2e.rs 1406
+crates/smelt-lsp/tests/example_workspaces.rs 1480
+crates/smelt-lsp/tests/integration.rs 4810
+crates/smelt-maintenance-testkit/src/link_c_harness.rs 1025
+crates/smelt-maintenance-testkit/src/recipe.rs 2316
+crates/smelt-maintenance-testkit/src/render.rs 1376
+crates/smelt-maintenance-testkit/src/s_tracker.rs 1148
+crates/smelt-parser/src/ast.rs 5328
+crates/smelt-parser/src/lexer.rs 1144
+crates/smelt-parser/src/parser/expr.rs 2450
+crates/smelt-parser/src/parser/select.rs 1455
+crates/smelt-parser/src/parser/smelt_ext.rs 1798
+crates/smelt-parser/src/parser/tests.rs 10461
+crates/smelt-parser/src/parser/types.rs 1086
+crates/smelt-parser/src/printer.rs 1156
+crates/smelt-runtime/src/compile.rs 4015
+crates/smelt-runtime/src/cumulative.rs 2179
+crates/smelt-runtime/src/execute/project/mod.rs 4689
+crates/smelt-runtime/src/maintenance_driver/tests.rs 1079
+crates/smelt-runtime/src/meta_eval.rs 2180
+crates/smelt-runtime/src/transformer.rs 1174
+crates/smelt-runtime/src/windowing.rs 1173
+crates/smelt-runtime/tests/fingerprint_sidecar.rs 1688
+crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1145
+crates/smelt-runtime/tests/observed_delta.rs 1331
+crates/smelt-runtime/tests/repair_lowering.rs 1545
+crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
+crates/smelt-runtime/tests/technique_lowering/basic.rs 1120
+crates/smelt-runtime/tests/windowing_parity.rs 1150
+crates/smelt-state/src/ddl_duckdb.rs 1883
+crates/smelt-state/src/ddl_spark.rs 1708
+crates/smelt-state/src/file_store.rs 1690
+crates/smelt-state/src/schema_tracking.rs 4611
+crates/smelt-types/src/signatures/tests.rs 2467

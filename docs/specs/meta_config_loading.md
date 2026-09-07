@@ -218,7 +218,7 @@ A `smelt.record SourceEntry = {…}` declaration is visible from every loader ca
 ## References
 
 - **Code**:
-  - `crates/smelt-db/src/lib.rs` and `crates/smelt-db/src/queries/loader.rs` — Salsa-tracked `LoaderFileInput` (raw text + exists bit, registered via `set_loader_file`); `loader_resolved_value_with_overlay(call_site)` for the validated meta-world value with per-target overlay resolution.
+  - `crates/smelt-db/src/salsa_inputs.rs` and `crates/smelt-db/src/queries/loader.rs` — Salsa-tracked `LoaderFileInput` (raw text + exists bit, registered via `set_loader_file`); `loader_resolved_value_with_overlay(call_site)` for the validated meta-world value with per-target overlay resolution.
   - `crates/smelt-db/src/type_inference/loader_and_reflection.rs` — `smelt.config.load_yaml` / `smelt.config.load_json` dispatch (schema admissibility check, return-type synthesis via `infer_loader_call_smelt_type`, validation invocation); literal-only `path` argument validation.
   - `crates/smelt-db/src/loader.rs` — per-format parsers (YAML via `marked_yaml`, JSON via `serde_json`), schema validation with source-span retention, per-target overlay resolution and merge.
   - `crates/smelt-db/src/diagnostics_types.rs::DiagnosticCode` — every diagnostic code listed under §Validation diagnostics.

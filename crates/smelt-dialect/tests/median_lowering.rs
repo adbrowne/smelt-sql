@@ -29,6 +29,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> St
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -132,7 +133,6 @@ fn other_dialects_keep_median_verbatim() {
     for (dialect, caps) in [
         (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         (SqlDialect::SparkSQL, BackendCapabilities::spark()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
     ] {
         let sql = "SELECT d, MEDIAN(val) AS med_val FROM events GROUP BY d";
         let out = print_with(sql, &dialect, &caps);

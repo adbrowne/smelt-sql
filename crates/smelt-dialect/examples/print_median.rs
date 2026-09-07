@@ -17,6 +17,7 @@ fn main() {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     let out = print(&smelt_parser::parse(sql).syntax(), &ctx);
     if std::env::args().any(|a| a == "--roundtrip") {

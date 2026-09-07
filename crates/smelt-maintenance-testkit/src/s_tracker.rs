@@ -533,7 +533,7 @@ impl STracker {
 /// Print an S-restricted oracle body through smelt's dialect-aware CST
 /// printer ([`smelt_dialect::print`]) — the single owner of every
 /// backend-specific rewrite (e.g. GoogleSQL's exact-`MEDIAN` lowering,
-/// `crates/smelt-dialect/src/printer.rs::print_bigquery_median`,
+/// `crates/smelt-dialect/src/printer/registry_emit.rs::print_bigquery_median`,
 /// `docs/specs/multi_backend.md` §"Exact-median lowering") — rather than
 /// this testkit re-deriving the lowering by hand a second time. The body
 /// has already had its one `smelt.sources.<name>` reference substituted for
@@ -560,6 +560,7 @@ fn print_body_for_dialect(sql: &str, backend_type: BackendType) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -578,6 +579,8 @@ mod tests {
             key_shape: KeyShape::Single,
             posture: SourcePosture::AppendOnly,
             key_recurrence: None,
+            partition_column: None,
+            delete_flag_column: None,
         }
     }
 
@@ -1000,7 +1003,7 @@ mod tests {
     /// [`STracker::s_restricted_oracle_sql_over_for_dialect`] routes the
     /// same body through `smelt_dialect::print`, which lowers `MEDIAN` to
     /// GoogleSQL's exact `CASE … ARRAY_AGG …` expression
-    /// (`crates/smelt-dialect/src/printer.rs::print_bigquery_median`) — no
+    /// (`crates/smelt-dialect/src/printer/registry_emit.rs::print_bigquery_median`) — no
     /// bare `MEDIAN(` survives under the BigQuery dialect.
     #[test]
     fn s_restricted_oracle_sql_over_for_dialect_lowers_median_on_bigquery() {

@@ -24,6 +24,29 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+/// Concatenates every source file of the maintenance emitter module
+/// (`crates/smelt-logical/src/maintenance/emit/`), whose emitters are split
+/// across per-family submodules, so a signature check is against the module
+/// as a whole rather than any one file within it.
+fn read_maintenance_emit_sources() -> String {
+    let dir = repo_root().join("crates/smelt-logical/src/maintenance/emit");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| {
+            fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Extracts the body of the `### Probe obligation` section: everything
 /// between its heading and the next `###`/`##` heading.
 fn probe_obligation_section(model_properties: &str) -> &str {
@@ -140,7 +163,7 @@ fn probe_registry_built_rows_name_a_real_emitter() {
     let model_properties = read("docs/specs/model_properties.md");
     let section = probe_obligation_section(&model_properties);
     let rows = registry_rows(section);
-    let emit_source = read("crates/smelt-logical/src/maintenance/emit.rs");
+    let emit_source = read_maintenance_emit_sources();
 
     let mut checked_any = false;
     for row in &rows {
@@ -158,7 +181,7 @@ fn probe_registry_built_rows_name_a_real_emitter() {
                 assert!(
                     emit_source.contains(&decl),
                     "registry row (declaration `{}`) has Status `{}` and names `{}`, \
-                     but no `{}` exists in crates/smelt-logical/src/maintenance/emit.rs",
+                     but no `{}` exists in crates/smelt-logical/src/maintenance/emit/",
                     row.first().cloned().unwrap_or_default(),
                     status,
                     token,
@@ -193,7 +216,7 @@ fn all_four_declared_fact_probe_rows_are_built() {
     let model_properties = read("docs/specs/model_properties.md");
     let section = probe_obligation_section(&model_properties);
     let rows = registry_rows(section);
-    let emit_source = read("crates/smelt-logical/src/maintenance/emit.rs");
+    let emit_source = read_maintenance_emit_sources();
 
     let expected: &[(&str, &str, &str)] = &[
         (
@@ -228,7 +251,7 @@ fn all_four_declared_fact_probe_rows_are_built() {
         let decl_sig = format!("pub fn {emitter}(");
         assert!(
             emit_source.contains(&decl_sig),
-            "expected `{decl_sig}` in crates/smelt-logical/src/maintenance/emit.rs for \
+            "expected `{decl_sig}` in crates/smelt-logical/src/maintenance/emit/ for \
              declaration `{decl}`"
         );
     }
@@ -251,7 +274,7 @@ fn referential_integrity_row_status_is_built() {
     let model_properties = read("docs/specs/model_properties.md");
     let section = probe_obligation_section(&model_properties);
     let rows = registry_rows(section);
-    let emit_source = read("crates/smelt-logical/src/maintenance/emit.rs");
+    let emit_source = read_maintenance_emit_sources();
 
     let row = rows
         .iter()
@@ -274,7 +297,7 @@ fn referential_integrity_row_status_is_built() {
     assert!(
         emit_source.contains("pub fn emit_count_preservation_probe_from_body("),
         "expected `emit_count_preservation_probe_from_body` in \
-         crates/smelt-logical/src/maintenance/emit.rs"
+         crates/smelt-logical/src/maintenance/emit/"
     );
 }
 

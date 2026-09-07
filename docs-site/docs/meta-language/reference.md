@@ -1018,7 +1018,7 @@ Alphabetical across the whole meta-language surface.
 
 **Fix:** use `c.name` (Text), `c.type` (DataType), or `c.is_numeric` (Boolean). Any other field requires a spec extension.
 
-See [Reflection — `ColumnRefFieldUnknown`](reflection.md#columnrefieldunknown).
+See [Reflection — `ColumnRefFieldUnknown`](reflection.md#columnreffieldunknown).
 
 ---
 
@@ -1042,7 +1042,7 @@ See [Reflection — `ColumnsOfNamedArgument`](reflection.md#columnsofnamedargume
 
 **Fix:** pass a `smelt.<path>` reference to a model, source, or seed, or a `TableExpr` parameter of the enclosing `smelt.define` function.
 
-See [Reflection — `ColumnsOfRequiresTableExpr`](reflection.md#columnsofRequirestableexpr).
+See [Reflection — `ColumnsOfRequiresTableExpr`](reflection.md#columnsofrequirestableexpr).
 
 ---
 
@@ -1102,7 +1102,7 @@ See [Config Loaders — `ConfigLoaderNullCoercion`](config-loaders.md#configload
 
 **Fix:** fix the syntax error at the reported line and column in the config file.
 
-See [Config Loaders — `ConfigLoaderParseError`](config-loaders.md#configloaderparseError).
+See [Config Loaders — `ConfigLoaderParseError`](config-loaders.md#configloaderparseerror).
 
 ---
 
@@ -1138,7 +1138,7 @@ See [Config Loaders — `ConfigLoaderPathEscapesWorkspace`](config-loaders.md#co
 
 **Fix:** replace the argument with a string literal: `'configs/data.yaml'`.
 
-See [Config Loaders — `ConfigLoaderPathNotLiteral`](config-loaders.md#configloaderpathnot-literal).
+See [Config Loaders — `ConfigLoaderPathNotLiteral`](config-loaders.md#configloaderpathnotliteral).
 
 ---
 

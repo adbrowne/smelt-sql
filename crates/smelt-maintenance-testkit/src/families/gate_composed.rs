@@ -11,9 +11,11 @@
 //! BOTH grade `Grade::Additive`, which fails loud with
 //! `BackendError::unsupported` on any non-DuckDB dialect (MP12's ledger DDL
 //! has no such dialect yet — the same gap that already excludes
-//! `KeyedCombiner::Additive` from `gate_keyed`). Admission (classification
-//! only, never execution) is unaffected by that gap, so the admission-rate
-//! family below still samples all three routes.
+//! `KeyedCombiner::Additive` from `gate_keyed`). `ComposedRoute::KeyDerived`
+//! (route 2's derived sub-route, also a `SUM` combiner) has the identical
+//! gap and is excluded from the equivalence drive for the same reason.
+//! Admission (classification only, never execution) is unaffected by that
+//! gap, so the admission-rate family below still samples all four routes.
 
 use anyhow::Result;
 use proptest::strategy::{Strategy, ValueTree};
@@ -127,6 +129,7 @@ pub fn assert_composed_admitted_with_expected_route(
     match (recipe.route, &key_locality.slice) {
         (ComposedRoute::KeyEmbedded, LocalitySlice::Window { .. }) => Ok(()),
         (ComposedRoute::KeyDetermined, LocalitySlice::DeltaValues { .. }) => Ok(()),
+        (ComposedRoute::KeyDerived, LocalitySlice::DeltaValues { .. }) => Ok(()),
         (ComposedRoute::RecurrenceBounded, LocalitySlice::RecurrenceBounded { .. }) => Ok(()),
         (route, slice) => {
             anyhow::bail!(

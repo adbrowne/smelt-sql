@@ -9,8 +9,6 @@ pub enum SqlDialect {
     DuckDB,
     /// Apache Spark SQL dialect
     SparkSQL,
-    /// PostgreSQL dialect
-    PostgreSQL,
     /// Google BigQuery (GoogleSQL) dialect
     BigQuery,
 }
@@ -21,7 +19,6 @@ impl SqlDialect {
         match self {
             SqlDialect::DuckDB => "DuckDB",
             SqlDialect::SparkSQL => "Spark SQL",
-            SqlDialect::PostgreSQL => "PostgreSQL",
             SqlDialect::BigQuery => "BigQuery",
         }
     }
@@ -34,7 +31,6 @@ impl SqlDialect {
         match self {
             SqlDialect::DuckDB => DialectId::DuckDb,
             SqlDialect::SparkSQL => DialectId::SparkSql,
-            SqlDialect::PostgreSQL => DialectId::PostgreSql,
             SqlDialect::BigQuery => DialectId::BigQuery,
         }
     }
@@ -51,7 +47,7 @@ impl SqlDialect {
 /// printer (`docs/specs/multi_backend.md` §"Statement-level lowering").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NullSafeEqualitySpelling {
-    /// `a IS NOT DISTINCT FROM b` — DuckDB, PostgreSQL, GoogleSQL.
+    /// `a IS NOT DISTINCT FROM b` — DuckDB, GoogleSQL.
     IsNotDistinctFrom,
     /// `a <=> b` — Spark SQL's null-safe equality operator.
     Spaceship,
@@ -358,40 +354,6 @@ impl BackendCapabilities {
             supports_fingerprint_sidecar: false,
         }
     }
-
-    /// Capabilities for PostgreSQL
-    pub fn postgresql() -> Self {
-        Self {
-            supports_qualify: false,
-            supports_create_or_replace_table: false,
-            supports_create_or_replace_view: true,
-            supports_merge: true,
-            supports_pivot: false,
-            supports_date_literal: true,
-            supports_concat_operator: true,
-            supports_array_literal: false,
-            supports_transactional_ddl: true,
-            supports_double_colon_cast: true,
-            supports_trailing_commas: false,
-            supports_insert_overwrite: false,
-            // No backend advertises native IVM today (`multi_backend.md` §IVM).
-            supports_native_ivm: false,
-            supports_retraction: false,
-            // Schema evolution: PostgreSQL has limited struct support
-            supports_struct_field_ddl: false,
-            supports_alter_column_using: true,
-            supports_nested_array_ddl: false,
-            supports_merge_schema_write: false,
-            supports_column_mapping: false,
-            supports_pipe_syntax: false,
-            requires_schema_init: true,
-            supports_column_scoped_merge: false,
-            dialect: SqlDialect::PostgreSQL,
-            supports_pipe_set_drop_rename: false,
-            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
-            supports_fingerprint_sidecar: false,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -446,21 +408,10 @@ mod tests {
     }
 
     #[test]
-    fn test_postgresql_schema_evolution_capabilities() {
-        let caps = BackendCapabilities::postgresql();
-        assert!(!caps.supports_struct_field_ddl);
-        assert!(caps.supports_alter_column_using);
-        assert!(!caps.supports_nested_array_ddl);
-        assert!(!caps.supports_merge_schema_write);
-        assert!(!caps.supports_column_mapping);
-    }
-
-    #[test]
     fn every_sql_dialect_maps_to_a_distinct_dialect_id() {
         let dialects = [
             SqlDialect::DuckDB,
             SqlDialect::SparkSQL,
-            SqlDialect::PostgreSQL,
             SqlDialect::BigQuery,
         ];
         let ids: Vec<_> = dialects.iter().map(|d| d.id()).collect();

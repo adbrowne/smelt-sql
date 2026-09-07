@@ -1268,10 +1268,11 @@ fn append_only_posture_probe_flags_shrunk_partition_and_changed_fingerprint() {
     assert!(
         stmt.sql.contains(
             "WHERE __current.current_count < __baseline.recorded_count OR \
-                        (__baseline.check_fingerprint AND __current.current_fingerprint IS \
+                        (__baseline.check_fingerprint AND __current.current_count = \
+                        __baseline.recorded_count AND __current.current_fingerprint IS \
                         DISTINCT FROM __baseline.recorded_fingerprint)"
         ),
-        "expected the shrunk-or-changed predicate in: {}",
+        "expected the shrunk-or-changed-at-unchanged-count predicate in: {}",
         stmt.sql
     );
     assert!(

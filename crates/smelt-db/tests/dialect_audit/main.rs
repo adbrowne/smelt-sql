@@ -28,7 +28,7 @@ use smelt_oracle_testkit::{
     classify_oracle_error, compare_cells, compare_types, BigQueryOracle, Cell, DuckDbOracle,
     OracleErrorKind, SparkOracle, TypeMatch, TypeOracle, ValueMatch, ValueOracle,
 };
-use smelt_types::{BuiltinRegistry, DialectId};
+use smelt_types::{BuiltinRegistry, CallFacts, DialectId, SettledEmission};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -44,6 +44,13 @@ fn every_registry_entry_yields_a_probe_or_a_recorded_reason() {
             Err(probe::NotProbed::Underivable { detail }) => {
                 underivable.push(format!("  {name}: {detail}"));
             }
+            // `probe_or_reason` never derives a conditional arm — that is
+            // `conditional_arm_probes`'s own reason type, kept in the same
+            // enum so an unreachable arm and an underivable entry share one
+            // reporting vocabulary.
+            Err(probe::NotProbed::UnreachableArm { .. }) => unreachable!(
+                "probe_or_reason never returns UnreachableArm; that is conditional_arm_probes's own finding"
+            ),
         }
     }
     underivable.sort();
@@ -310,6 +317,36 @@ fn baseline(metric: &str) -> usize {
         .unwrap_or_else(|| panic!("`{metric}` not found in .claude/dialect-gaps-baseline.txt"))
 }
 
+const BASELINE_SRC: &str = include_str!("../../../../.claude/dialect-gaps-baseline.txt");
+
+/// Two-sided: every `dialect_gaps_*` metric in the baseline corresponds to a
+/// `DialectId::ALL` slug, and every slug has a metric. Catches the retired-
+/// dialect class directly — a stale `dialect_gaps_postgres` line would
+/// otherwise sit unread forever, since `baseline()` only looks up metrics by
+/// name and never notices an entry nobody asks for.
+#[test]
+fn baseline_names_exactly_the_audited_dialects() {
+    let baseline_metrics: HashSet<String> = BASELINE_SRC
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .filter_map(|l| l.trim().split_once(' ').map(|(k, _)| k.to_string()))
+        .collect();
+    let expected: HashSet<String> = DialectId::ALL
+        .iter()
+        .map(|d| format!("dialect_gaps_{}", d.slug()))
+        .collect();
+    let stale: Vec<_> = baseline_metrics.difference(&expected).collect();
+    assert!(
+        stale.is_empty(),
+        "baseline names a metric for no audited dialect: {stale:?}"
+    );
+    let missing: Vec<_> = expected.difference(&baseline_metrics).collect();
+    assert!(
+        missing.is_empty(),
+        "baseline is missing a metric for an audited dialect: {missing:?}"
+    );
+}
+
 #[test]
 fn gap_count_ratchet() {
     for d in DialectId::ALL {
@@ -338,9 +375,15 @@ fn gap_count_ratchet() {
 #[test]
 fn every_ledger_row_names_a_real_registry_entry_and_a_probed_pair() {
     // The unreachable-row direction: a row naming an entry the registry no
-    // longer has, or a pair the harness never probes, can never fire — and
-    // reads as coverage while covering nothing.
-    let probed: HashSet<&str> = probe::derive_probes().iter().map(|p| p.name).collect();
+    // longer has, a pair the harness never probes, or (test 9) an arm the
+    // entry does not have, can never fire — and reads as coverage while
+    // covering nothing.
+    let probes = probe::derive_probes();
+    let probed: HashSet<&str> = probes.iter().map(|p| p.name).collect();
+    let probed_arms: HashSet<(&str, usize)> = probes
+        .iter()
+        .filter_map(|p| p.arm.map(|a| (p.name, a)))
+        .collect();
     let mut orphans = Vec::new();
     for row in ledger::dialect_divergences() {
         if BuiltinRegistry::resolve(row.name).is_none() {
@@ -355,6 +398,15 @@ fn every_ledger_row_names_a_real_registry_entry_and_a_probed_pair() {
                 row.name,
                 row.dialect.slug()
             ));
+        } else if let Some(arm) = row.arm {
+            if !probed_arms.contains(&(row.name, arm)) {
+                orphans.push(format!(
+                    "  {} ({}) arm {}: entry has no such probed arm",
+                    row.name,
+                    row.dialect.slug(),
+                    arm
+                ));
+            }
         }
     }
     assert!(
@@ -364,22 +416,105 @@ fn every_ledger_row_names_a_real_registry_entry_and_a_probed_pair() {
     );
 }
 
-/// One row per `(entry, dialect, position, leg)`. The key includes the leg
-/// because a pair can legitimately be registered on more than one: `DATE_ADD`
-/// on BigQuery both infers the wrong type and returns a different value.
+/// One row per `(entry, dialect, position, arm, leg)`. The key includes the
+/// leg because a pair can legitimately be registered on more than one:
+/// `DATE_ADD` on BigQuery both infers the wrong type and returns a different
+/// value. It includes the arm because two arm-scoped rows for the same
+/// entry are legitimately different rows.
 #[test]
 fn a_pair_has_at_most_one_ledger_row() {
     let mut seen = HashSet::new();
     for row in ledger::dialect_divergences() {
         assert!(
-            seen.insert((row.name, row.dialect, row.position, row.leg)),
-            "duplicate ledger row for {} on {} ({:?}, {:?})",
+            seen.insert((row.name, row.dialect, row.position, row.arm, row.leg)),
+            "duplicate ledger row for {} on {} ({:?}, arm {:?}, {:?})",
             row.name,
             row.dialect.slug(),
             row.position,
+            row.arm,
             row.leg
         );
     }
+}
+
+/// Test 6: every arm of every `Emission::Conditional` entry in the real
+/// registry is covered by a derived probe. No production entry is
+/// `Conditional` yet (phase 7 populates the first ones), so this is
+/// green-but-vacuous by construction until then — the gate must exist
+/// before the rows, or an arm could land unprobed the day one is added.
+#[test]
+fn every_conditional_arm_is_covered_by_a_probe() {
+    let mut missing = Vec::new();
+    for name in BuiltinRegistry::names() {
+        let Some(sig) = BuiltinRegistry::resolve(name) else {
+            continue;
+        };
+        let (_, unreachable) = probe::conditional_arm_probes(name, sig);
+        for reason in unreachable {
+            if let probe::NotProbed::UnreachableArm { index, detail } = reason {
+                missing.push(format!("{name} arm {index}: {detail}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "conditional arms with no covering probe:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// Test 10: the declared-unsupported exemption settles per the probe's own
+/// facts — an arm-specific `Unsupported` verdict exempts that arm and no
+/// other.
+#[test]
+fn the_declared_unsupported_exemption_settles_the_probes_arm() {
+    use smelt_types::{
+        ConditionalArm, OperandClass, SigParam, Signature, TypeConstraint, TypeExpr,
+    };
+
+    const ARMS: &[ConditionalArm] = &[
+        ConditionalArm {
+            arity: None,
+            classes: &[(0, OperandClass::Integral)],
+            verdict: SettledEmission::Native,
+        },
+        ConditionalArm {
+            arity: None,
+            classes: &[],
+            verdict: SettledEmission::Unsupported {
+                reason: "otherwise",
+            },
+        },
+    ];
+    let sig = Signature::new(
+        "TEST_DECLARED_UNSUPPORTED",
+        vec![],
+        vec![SigParam::Concrete(TypeConstraint::Concrete(
+            smelt_types::DataType::Integer,
+        ))],
+        TypeExpr::Concrete(TypeConstraint::Concrete(smelt_types::DataType::Integer)),
+    )
+    .with_emission(&[(
+        DialectId::DuckDb,
+        Position::Scalar,
+        smelt_types::Emission::Conditional(ARMS),
+    )]);
+
+    let native_facts = CallFacts::new(vec![OperandClass::Integral]);
+    assert!(!settles_unsupported(
+        &sig,
+        DialectId::DuckDb,
+        Position::Scalar,
+        &native_facts
+    ));
+
+    let otherwise_facts = CallFacts::new(vec![OperandClass::String]);
+    assert!(settles_unsupported(
+        &sig,
+        DialectId::DuckDb,
+        Position::Scalar,
+        &otherwise_facts
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -419,39 +554,81 @@ impl LegOutcome {
     }
 }
 
-/// A probe the ledger already accounts for on this dialect, position and leg.
-fn is_registered(name: &str, dialect: DialectId, position: Position, leg: ledger::Leg) -> bool {
-    ledger::find(name, dialect, position, leg).is_some()
+/// A probe the ledger already accounts for on this dialect, position, arm and
+/// leg. `arm` narrows a row scoped to one `Emission::Conditional` arm; a row
+/// with no `arm` of its own still exempts every arm (`ledger::find`'s own
+/// None-means-every convention).
+fn is_registered(
+    name: &str,
+    dialect: DialectId,
+    position: Position,
+    arm: Option<usize>,
+    leg: ledger::Leg,
+) -> bool {
+    ledger::find(name, dialect, position, arm, leg).is_some()
+}
+
+/// Whether `sig` settles to `Unsupported` for `facts` at `dialect`/`position` —
+/// the pure decision [`is_declared_unsupported`] wraps with a registry
+/// lookup, pulled out so it can be exercised against a synthetic
+/// `Emission::Conditional` signature directly, the same separation
+/// [`classify_accepted`] uses.
+///
+/// Settled through [`smelt_types::Signature::settle_at`], not looked up via
+/// `emission_at`: an arm-specific `Unsupported` verdict must exempt only the
+/// arm whose facts resolve to it, never every call to the entry
+/// (`docs/specs/multi_backend.md` §"Operand-conditional verdicts").
+fn settles_unsupported(
+    sig: &smelt_types::Signature,
+    dialect: DialectId,
+    position: Position,
+    facts: &CallFacts,
+) -> bool {
+    matches!(
+        sig.settle_at(dialect, position, facts),
+        SettledEmission::Unsupported { .. }
+    )
 }
 
 /// Whether the registry itself declares this entry unsupported on `dialect`
-/// at `position`.
+/// at `position`, for `facts` (a conditional entry's declared-unsupported
+/// verdict may hold only for some arms — see [`settles_unsupported`]).
 ///
 /// The printer emits such a construct verbatim by design — the compile path
 /// refuses the model before printing (`UnsupportedOnBackend`) — so the engine
 /// rejecting it here is the *declared* outcome, not a finding. Acceptance would
 /// be: it would mean the verdict is wrong.
 ///
-/// Position-scoped, not position-blind: `emission_at` is looked up at the
+/// Position-scoped, not position-blind: `settle_at` is looked up at the
 /// probe's own position (falling back to `Position::Any` internally, never
 /// between two concrete positions — `docs/specs/multi_backend.md` §"Emission
 /// is scoped to call position"). A helper that always asked about
 /// `Position::Any` would never see a verdict declared only at
 /// `Position::Window`, and would silently stop exempting — or start wrongly
 /// exempting — the exact pairs the position axis exists to distinguish.
-fn is_declared_unsupported(name: &str, dialect: DialectId, position: Position) -> bool {
-    BuiltinRegistry::resolve(name).is_some_and(|sig| {
-        matches!(
-            sig.emission_at(dialect, position),
-            smelt_types::Emission::Unsupported { .. }
-        )
-    })
+fn is_declared_unsupported(
+    name: &str,
+    dialect: DialectId,
+    position: Position,
+    facts: &CallFacts,
+) -> bool {
+    BuiltinRegistry::resolve(name)
+        .is_some_and(|sig| settles_unsupported(sig, dialect, position, facts))
 }
 
 /// A pair the legs must not treat as a plain pass/fail: either the registry
-/// declares it unsupported at this position, or the ledger accepts it.
-fn is_exempt(name: &str, dialect: DialectId, position: Position, leg: ledger::Leg) -> bool {
-    is_declared_unsupported(name, dialect, position) || is_registered(name, dialect, position, leg)
+/// declares it unsupported at this position (for these facts), or the ledger
+/// accepts it (at this arm, if any).
+fn is_exempt(
+    name: &str,
+    dialect: DialectId,
+    position: Position,
+    arm: Option<usize>,
+    facts: &CallFacts,
+    leg: ledger::Leg,
+) -> bool {
+    is_declared_unsupported(name, dialect, position, facts)
+        || is_registered(name, dialect, position, arm, leg)
 }
 
 /// One batched query per (position, group of probes), so a sweep is a few
@@ -514,9 +691,16 @@ fn run_schema_leg(dialect: DialectId, oracle: &dyn TypeOracle) -> LegOutcome {
     let mut outcome = LegOutcome::default();
 
     for (position, group) in by_position(&probes) {
-        let (expected_pass, known): (Vec<&Probe>, Vec<&Probe>) = group
-            .iter()
-            .partition(|p| !is_exempt(p.name, dialect, position, ledger::Leg::Schema));
+        let (expected_pass, known): (Vec<&Probe>, Vec<&Probe>) = group.iter().partition(|p| {
+            !is_exempt(
+                p.name,
+                dialect,
+                position,
+                p.arm,
+                &p.facts,
+                ledger::Leg::Schema,
+            )
+        });
 
         // Fast path: one query for everything expected to work.
         if !expected_pass.is_empty() {
@@ -568,6 +752,32 @@ fn run_schema_leg(dialect: DialectId, oracle: &dyn TypeOracle) -> LegOutcome {
     outcome
 }
 
+/// What an accepted probe means, decided purely from the two lookups —
+/// separated from `probe_schema_once` so the decision (see
+/// `a_ledger_row_the_engine_now_accepts_is_reported_stale`) can be proven
+/// without an oracle and without depending on which real ledger rows happen
+/// to be live at the time: both go to zero for DuckDB once every DuckDB
+/// Schema-leg gap is closed, which phase 4 of
+/// `docs/outcomes/20260904-dialect-emission-vocabulary` did.
+enum AcceptedVerdict {
+    /// Compare the engine's reported type against smelt's inference.
+    CheckType,
+    /// The registry declares this refused, but the engine just accepted it.
+    UnsupportedButAccepted,
+    /// The ledger still lists this as a gap, but the engine just accepted it.
+    StaleLedgerRow,
+}
+
+fn classify_accepted(is_declared_unsupported: bool, is_known_gap: bool) -> AcceptedVerdict {
+    if is_declared_unsupported {
+        AcceptedVerdict::UnsupportedButAccepted
+    } else if is_known_gap {
+        AcceptedVerdict::StaleLedgerRow
+    } else {
+        AcceptedVerdict::CheckType
+    }
+}
+
 fn probe_schema_once(
     dialect: DialectId,
     oracle: &dyn TypeOracle,
@@ -577,35 +787,50 @@ fn probe_schema_once(
     let sql = probe::print_for(dialect, &p.statement());
     match oracle.query_types(&sql) {
         Ok(cols) => {
-            if is_declared_unsupported(p.name, dialect, p.position) {
-                outcome.failures.push(format!(
-                    "  {} [{:?}] on {}: the registry declares this Unsupported, but the \
-                     engine accepts it. Either the verdict is wrong or the printer is \
-                     lowering it after all.",
-                    p.name,
-                    p.position,
-                    dialect.slug()
-                ));
-            } else if is_registered(p.name, dialect, p.position, ledger::Leg::Schema) {
-                outcome.failures.push(format!(
-                    "  {} [{:?}] on {}: STALE LEDGER ROW — the engine now accepts this. \
-                     Delete the row and tighten .claude/dialect-gaps-baseline.txt.",
-                    p.name,
-                    p.position,
-                    dialect.slug()
-                ));
-            } else {
-                outcome.probes_compared += 1;
-                if let Some((_, engine_type)) =
-                    cols.iter().find(|(n, _)| n.eq_ignore_ascii_case(&p.alias))
-                {
-                    check_inferred_type(dialect, p, engine_type, outcome);
+            let verdict = classify_accepted(
+                is_declared_unsupported(p.name, dialect, p.position, &p.facts),
+                is_registered(p.name, dialect, p.position, p.arm, ledger::Leg::Schema),
+            );
+            match verdict {
+                AcceptedVerdict::UnsupportedButAccepted => {
+                    outcome.failures.push(format!(
+                        "  {} [{:?}] on {}: the registry declares this Unsupported, but the \
+                         engine accepts it. Either the verdict is wrong or the printer is \
+                         lowering it after all.",
+                        p.name,
+                        p.position,
+                        dialect.slug()
+                    ));
+                }
+                AcceptedVerdict::StaleLedgerRow => {
+                    outcome.failures.push(format!(
+                        "  {} [{:?}] on {}: STALE LEDGER ROW — the engine now accepts this. \
+                         Delete the row and tighten .claude/dialect-gaps-baseline.txt.",
+                        p.name,
+                        p.position,
+                        dialect.slug()
+                    ));
+                }
+                AcceptedVerdict::CheckType => {
+                    outcome.probes_compared += 1;
+                    if let Some((_, engine_type)) =
+                        cols.iter().find(|(n, _)| n.eq_ignore_ascii_case(&p.alias))
+                    {
+                        check_inferred_type(dialect, p, engine_type, outcome);
+                    }
                 }
             }
         }
         Err(e) => match classify_oracle_error(&e) {
             OracleErrorKind::QueryRefusal
-                if is_exempt(p.name, dialect, p.position, ledger::Leg::Schema) =>
+                if is_exempt(
+                    p.name,
+                    dialect,
+                    p.position,
+                    p.arm,
+                    &p.facts,
+                    ledger::Leg::Schema,
+                ) =>
             {
                 outcome
                     .registered
@@ -664,7 +889,7 @@ fn check_inferred_type(
         // Inference produced no column for this alias at all. That is an
         // inference finding like any other — it goes through the same ledger,
         // rather than being an unregistrable hard failure.
-        if is_registered(p.name, dialect, p.position, ledger::Leg::Type) {
+        if is_registered(p.name, dialect, p.position, p.arm, ledger::Leg::Type) {
             outcome.registered.push(format!(
                 "{} [{:?}] (no inferred column)",
                 p.name, p.position
@@ -698,7 +923,7 @@ fn check_inferred_type(
                 outcome
                     .registered
                     .push(format!("{} [{:?}] (type: {})", p.name, p.position, d.id));
-            } else if is_registered(p.name, dialect, p.position, ledger::Leg::Type) {
+            } else if is_registered(p.name, dialect, p.position, p.arm, ledger::Leg::Type) {
                 outcome
                     .registered
                     .push(format!("{} [{:?}] (type)", p.name, p.position));
@@ -742,9 +967,21 @@ fn run_value_leg(
                 .push(format!("{} [{:?}]: {reason}", p.name, p.position));
             continue;
         }
-        if is_exempt(p.name, dialect, p.position, ledger::Leg::Value)
-            || is_exempt(p.name, DialectId::DuckDb, p.position, ledger::Leg::Value)
-        {
+        if is_exempt(
+            p.name,
+            dialect,
+            p.position,
+            p.arm,
+            &p.facts,
+            ledger::Leg::Value,
+        ) || is_exempt(
+            p.name,
+            DialectId::DuckDb,
+            p.position,
+            p.arm,
+            &p.facts,
+            ledger::Leg::Value,
+        ) {
             outcome
                 .registered
                 .push(format!("{} [{:?}]", p.name, p.position));
@@ -884,31 +1121,41 @@ fn the_value_leg_reports_a_planted_divergence() {
 
 /// A ledger row that the engine has started accepting is reported as stale
 /// rather than left standing — the same two-sidedness the hardening baseline
-/// has. Proven by pointing the check at a pair with a live row and a query the
-/// engine does accept.
+/// has. Proven directly against `classify_accepted` (the pure decision
+/// `probe_schema_once` delegates to) rather than through a live ledger row +
+/// oracle pair: no real DuckDB Schema-leg gap survives phase 4 of
+/// `docs/outcomes/20260904-dialect-emission-vocabulary` to borrow for this,
+/// and mixing dialects (printing for one, querying with another's oracle)
+/// produces a real syntax mismatch rather than the scenario under test.
 #[test]
 fn a_ledger_row_the_engine_now_accepts_is_reported_stale() {
-    let oracle = DuckDbOracle::new();
-    let mut outcome = LegOutcome::default();
-    let accepted = Probe {
-        // A registered DuckDB gap…
-        name: "INITCAP",
-        position: Position::Scalar,
-        // …but an expression DuckDB accepts, standing in for the day the
-        // lowering lands.
-        expr: "n_bigint".to_string(),
-        alias: "p_initcap_scalar".to_string(),
-        schema_only: None,
-    };
-    probe_schema_once(DialectId::DuckDb, &oracle, &accepted, &mut outcome);
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|f| f.contains("STALE LEDGER ROW")),
-        "{}",
-        outcome.report()
-    );
+    assert!(matches!(
+        classify_accepted(false, true),
+        AcceptedVerdict::StaleLedgerRow
+    ));
+}
+
+#[test]
+fn an_unsupported_verdict_the_engine_now_accepts_is_reported() {
+    assert!(matches!(
+        classify_accepted(true, false),
+        AcceptedVerdict::UnsupportedButAccepted
+    ));
+    // Unsupported takes priority: a pair that is somehow both a declared
+    // Unsupported verdict and a ledger row still reports the Unsupported
+    // finding, never silently prefers the other.
+    assert!(matches!(
+        classify_accepted(true, true),
+        AcceptedVerdict::UnsupportedButAccepted
+    ));
+}
+
+#[test]
+fn a_pair_the_engine_accepts_with_no_gap_is_type_checked() {
+    assert!(matches!(
+        classify_accepted(false, false),
+        AcceptedVerdict::CheckType
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1087,7 +1334,7 @@ fn every_entry_and_dialect_appears_in_the_table() {
     }
     // Every dialect has a verification-tier row: the table's honesty depends
     // on saying which cells a live leg actually visits.
-    for label in ["DuckDB", "Spark SQL", "PostgreSQL", "BigQuery"] {
+    for label in ["DuckDB", "Spark SQL", "BigQuery"] {
         assert!(
             rendered.contains(&format!("| {label} |")),
             "{label} has no verification-tier row"

@@ -593,13 +593,15 @@ fn extract_interval_days_from_combined(text: &str, n: u32) -> Option<u32> {
 
 /// The effective window to apply during incremental execution.
 ///
-/// Combines AST-inferred temporal dependencies with upstream data latency
-/// to determine the actual filter range and partition range for execution.
+/// Derived from AST-inferred temporal dependencies alone — declared lateness
+/// is orchestration-only and plays no part in plan derivation
+/// (`docs/specs/model_properties.md` §Constraints "Declared lateness is
+/// orchestration-only").
 #[derive(Debug, Clone, Serialize)]
 pub struct EffectiveWindow {
-    /// Total lookback in days (max of temporal dependency and data latency).
+    /// Total lookback in days (the AST-inferred computation reach).
     pub lookback_days: u32,
-    /// Total lookahead in days (from temporal dependency only; latency doesn't affect lookahead).
+    /// Total lookahead in days (from temporal dependency only).
     pub lookahead_days: u32,
     /// Whether the lookback is unbounded (requires full refresh or explicit override).
     pub is_unbounded: bool,
@@ -607,17 +609,16 @@ pub struct EffectiveWindow {
     pub explanation: String,
 }
 
-/// Compute the effective window from temporal dependencies and data latency.
+/// Compute the effective window from temporal dependencies.
 ///
 /// The formula is:
-///   effective_lookback  = max(ast_inferred_lookback, data_latency)
-///   effective_lookahead = ast_inferred_lookahead  (data_latency doesn't affect lookahead)
+///   effective_lookback  = ast_inferred_lookback
+///   effective_lookahead = ast_inferred_lookahead
 ///
 /// `period_days` is the number of days per partition period (1 for Day, 7 for Week, etc.)
 /// and is used to convert period-based offsets to days.
 pub fn compute_effective_window(
     temporal: &TemporalDependency,
-    data_latency_days: u32,
     period_days: u32,
 ) -> EffectiveWindow {
     let ast_lookback_days = temporal.lookback.to_days(period_days);
@@ -625,26 +626,10 @@ pub fn compute_effective_window(
 
     let is_unbounded = temporal.lookback.is_unbounded() || temporal.lookahead.is_unbounded();
 
-    // Lateness and computation-reach are independently-sourced quantities
-    // (`model_properties.md` §"Unified bound / reach derivation"): a row
-    // arriving `data_latency` late still needs the full AST-derived reach of
-    // history behind it, so the scan widens by their SUM — max would silently
-    // truncate the frame for the latest-arriving rows.
-    let lookback_days = if let Some(ast_days) = ast_lookback_days {
-        ast_days.saturating_add(data_latency_days)
-    } else {
-        0 // Unbounded — lookback_days is meaningless
-    };
-
+    let lookback_days = ast_lookback_days.unwrap_or(0); // Unbounded — lookback_days is meaningless
     let lookahead_days = ast_lookahead_days.unwrap_or(0);
 
-    let explanation = format_explanation(
-        temporal,
-        data_latency_days,
-        lookback_days,
-        lookahead_days,
-        is_unbounded,
-    );
+    let explanation = format_explanation(temporal, lookback_days, lookahead_days, is_unbounded);
 
     EffectiveWindow {
         lookback_days,
@@ -656,7 +641,6 @@ pub fn compute_effective_window(
 
 fn format_explanation(
     temporal: &TemporalDependency,
-    data_latency_days: u32,
     lookback_days: u32,
     lookahead_days: u32,
     is_unbounded: bool,
@@ -701,17 +685,10 @@ fn format_explanation(
         parts.join(", ")
     };
 
-    if data_latency_days > 0 {
-        format!(
-            "lookback={} days, lookahead={} days (AST: {}, data latency: {} days)",
-            lookback_days, lookahead_days, ast_part, data_latency_days
-        )
-    } else {
-        format!(
-            "lookback={} days, lookahead={} days (AST: {})",
-            lookback_days, lookahead_days, ast_part
-        )
-    }
+    format!(
+        "lookback={} days, lookahead={} days (AST: {})",
+        lookback_days, lookahead_days, ast_part
+    )
 }
 
 /// Returns the number of days per period for a given granularity.
@@ -895,65 +872,27 @@ mod tests {
 
     #[test]
     fn test_effective_window_partition_local() {
-        // Simple GROUP BY — no temporal dependency, no latency
+        // Simple GROUP BY — no temporal dependency
         let dep = TemporalDependency::default();
-        let window = compute_effective_window(&dep, 0, 1);
+        let window = compute_effective_window(&dep, 1);
         assert_eq!(window.lookback_days, 0);
         assert_eq!(window.lookahead_days, 0);
         assert!(!window.is_unbounded);
     }
 
     #[test]
-    fn test_effective_window_latency_only() {
-        // No temporal dependency, but 3-day data latency
-        let dep = TemporalDependency::default();
-        let window = compute_effective_window(&dep, 3, 1);
-        assert_eq!(window.lookback_days, 3);
-        assert_eq!(window.lookahead_days, 0);
-    }
-
-    #[test]
-    fn effective_window_sums_lateness_and_reach() {
-        // A 7-day frame plus 3 days of declared lateness: a row arriving 3
-        // days late still needs the full 7 days of history BEHIND it to fold
-        // correctly, so the scan widens by the SUM of the two independently-
-        // sourced quantities (10), never their max (7) — max silently
-        // truncates the frame for the latest-arriving rows.
+    fn effective_window_is_reach_only() {
+        // A 7-day frame: the effective window is exactly the AST-derived
+        // reach. Declared lateness plays no part in plan derivation
+        // (`docs/specs/model_properties.md` §Constraints "Declared lateness
+        // is orchestration-only") — `compute_effective_window` takes no
+        // latency input at all.
         let dep = TemporalDependency {
             lookback: TemporalOffset::Periods(7),
             lookahead: TemporalOffset::Zero,
             sources: vec![],
         };
-        let window = compute_effective_window(&dep, 3, 1);
-        assert_eq!(
-            window.lookback_days, 10,
-            "lateness and computation-reach are independent; the scan widens by their sum"
-        );
-    }
-
-    #[test]
-    fn test_effective_window_ast_plus_latency() {
-        // 6-day temporal dependency from window function, 3-day latency:
-        // independent quantities sum (a max here encoded the truncated-frame
-        // bug — catalog cell SC-5).
-        let dep = TemporalDependency {
-            lookback: TemporalOffset::Periods(6),
-            lookahead: TemporalOffset::Zero,
-            sources: vec![],
-        };
-        let window = compute_effective_window(&dep, 3, 1);
-        assert_eq!(window.lookback_days, 9);
-    }
-
-    #[test]
-    fn test_effective_window_latency_plus_ast() {
-        // 2-day temporal dependency, 5-day latency — sums from either side.
-        let dep = TemporalDependency {
-            lookback: TemporalOffset::Days(2),
-            lookahead: TemporalOffset::Zero,
-            sources: vec![],
-        };
-        let window = compute_effective_window(&dep, 5, 1);
+        let window = compute_effective_window(&dep, 1);
         assert_eq!(window.lookback_days, 7);
     }
 
@@ -965,7 +904,7 @@ mod tests {
             lookahead: TemporalOffset::Periods(2),
             sources: vec![],
         };
-        let window = compute_effective_window(&dep, 0, 1);
+        let window = compute_effective_window(&dep, 1);
         assert_eq!(window.lookback_days, 0);
         assert_eq!(window.lookahead_days, 2);
     }
@@ -979,7 +918,7 @@ mod tests {
             lookahead: TemporalOffset::Zero,
             sources: vec![],
         };
-        let window = compute_effective_window(&dep, 3, 1);
+        let window = compute_effective_window(&dep, 1);
         assert!(window.is_unbounded);
     }
 
@@ -1005,7 +944,7 @@ mod tests {
             lookahead: TemporalOffset::Zero,
             sources: vec![],
         };
-        let window = compute_effective_window(&dep, 0, 7);
+        let window = compute_effective_window(&dep, 7);
         assert_eq!(window.lookback_days, 14);
     }
 

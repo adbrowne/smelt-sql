@@ -1,5 +1,5 @@
 # Production code debt baseline
-# Updated: 2026-09-05
+# Updated: 2026-09-06
 # Format: <crate> <pattern> <count>
 # Patterns: unwrap  expect  println
 # Regenerate with: .claude/scripts/hardening-budget.sh --update
@@ -40,7 +40,7 @@ smelt-datagen println 12
 smelt-datagen unwrap 10
 smelt-db expect 4
 smelt-db println 0
-smelt-db unwrap 19
+smelt-db unwrap 6
 smelt-dialect expect 1
 smelt-dialect println 0
 smelt-dialect unwrap 0

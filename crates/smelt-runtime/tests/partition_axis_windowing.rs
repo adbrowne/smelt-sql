@@ -73,7 +73,6 @@ fn integer_axis_chunks_by_unit_steps() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Integer,
         None,
@@ -111,7 +110,6 @@ fn integer_axis_batch_size_counts_units() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Integer,
         Some(2),
@@ -187,35 +185,15 @@ fn calendar_axis_refuses_integer_bounds() {
 fn integer_axis_refuses_day_typed_widening() {
     let ts = make_ts("event_ts", "batch_id", Granularity::Day);
     let inc = make_inc();
-    let sql = "SELECT batch_id, id FROM events";
     let range = make_range("1", "4");
 
-    // Nonzero data_latency_days.
-    let err = compute_incremental_windows(
-        &ts,
-        &inc,
-        sql,
-        &no_dep_timeseries(),
-        3,
-        &range,
-        PartitionAxis::Integer,
-        None,
-        true,
-    )
-    .expect_err("nonzero data_latency_days must be refused on an integer axis, never coerced");
-    assert!(
-        err.contains("data_latency"),
-        "error must name the offending input, got: {err}"
-    );
-
-    // Separately: a nonzero seconds/day-domain SQL-inferred lookback.
+    // A nonzero seconds/day-domain SQL-inferred lookback.
     let lag_sql = "SELECT batch_id, LAG(amount, 3) OVER (ORDER BY batch_id) as prev FROM events";
     let err = compute_incremental_windows(
         &ts,
         &inc,
         lag_sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Integer,
         None,

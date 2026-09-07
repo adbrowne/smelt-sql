@@ -142,6 +142,11 @@ static OVERRIDES: &[Override] = &[
     args("TRANSLATE", &["s_text", "'a'", "'z'"]),
     args("JSON_CONTAINS", &["j_json", "'1'"]),
     args("JSON_OBJECT", &["'k'", "n_bigint"]),
+    // A JSON function wants a JSON-shaped argument; `Variadic(Any)` derives a
+    // number, which Spark refuses outright (unlike DuckDB, which the
+    // pre-override probe made look like a schema gap it wasn't).
+    args("JSON_ARRAY_LENGTH", &["j_json"]),
+    args("JSON_OBJECT_KEYS", &["j_json"]),
     args("LISTAGG", &["s_text", "','"]),
     // A string aggregate wants strings; `Variadic(Any)` derives a number.
     args("GROUP_CONCAT", &["s_text"]),

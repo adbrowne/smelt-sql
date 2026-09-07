@@ -85,6 +85,7 @@ fn translate_for_backend(sql: &str, backend: &str) -> String {
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }

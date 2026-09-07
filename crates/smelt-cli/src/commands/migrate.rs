@@ -291,6 +291,7 @@ async fn apply_plan(
     if json {
         render_json(model_name, plan, hash, true);
     } else {
+        // stdout: confirmation of a completed --apply, read by the human who ran the command
         println!(
             "smelt migrate {model_name}: applied {} statement{} — the definition delta is \
              cleared.",
@@ -304,21 +305,25 @@ async fn apply_plan(
 
 fn render_plan(model_name: &str, plan: &MigrationPlan, hash: &str) {
     if plan.groups.is_empty() {
+        // stdout: human-facing plan rendering — the empty-plan case
         println!("definition delta for {model_name}: eclipsed — nothing to do");
         return;
     }
 
+    // stdout: human-facing plan rendering — the header line for the affected groups
     println!(
         "definition delta for {model_name} ({} column group{} affected):",
         plan.groups.len(),
         if plan.groups.len() == 1 { "" } else { "s" }
     );
+    // stdout: spacer separating the header from the per-group detail lines
     println!();
 
     for group in &plan.groups {
         render_group(group);
     }
 
+    // stdout: human-facing plan rendering — the trailer with the apply instructions
     println!("plan hash: {hash}   approve and execute with: smelt migrate {model_name} --apply");
 }
 
@@ -337,6 +342,7 @@ fn render_group(group: &ColumnGroupPlan) {
     };
 
     if let Some(option) = group.options.first() {
+        // stdout: human-facing plan rendering — the chosen technique for one column group
         println!(
             "  {label:<18}{verdict_label:<20} {:?} ({} statement{})",
             option.technique,
@@ -348,12 +354,15 @@ fn render_group(group: &ColumnGroupPlan) {
             }
         );
     } else {
+        // stdout: human-facing plan rendering — no technique admissible for this group
         println!("  {label:<18}{verdict_label:<20} no admissible technique");
     }
 
     for refusal in &group.refusals {
+        // stdout: human-facing plan rendering — why a technique was refused for this group
         println!("                    refused: {}", refusal.reason);
     }
+    // stdout: spacer separating this group's block from the next
     println!();
 }
 
@@ -398,6 +407,9 @@ fn render_json(model_name: &str, plan: &MigrationPlan, hash: &str, approved: boo
         "statements": plan.statements,
     });
 
+    // stdout: --json structured dump for script/CI consumers
+    // invariant: `output` is built only from String/bool/Vec/integer fields (json! above) —
+    // no non-string map key and no NaN/Infinity float, so serde_json::to_string_pretty cannot fail
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("JSON serialization should not fail")

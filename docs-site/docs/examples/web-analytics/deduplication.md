@@ -215,6 +215,7 @@ Inbound edges: sources.raw.events
       clock:    event_time_column=event_date partition_column=event_date granularity=Day
       identity: (none)
       derived grain: partition
+      orchestration-only fact: lateness = 3 days (never a plan input)
       delta type: append-only within window
 
 Probes (2):

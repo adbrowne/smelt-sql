@@ -127,7 +127,7 @@ pub fn ddl_backend_for_dialect(
     catalog: Option<&str>,
 ) -> DdlBackend {
     match dialect {
-        SqlDialect::DuckDB | SqlDialect::PostgreSQL => DdlBackend::DuckDb,
+        SqlDialect::DuckDB => DdlBackend::DuckDb,
         SqlDialect::BigQuery => DdlBackend::BigQuery,
         SqlDialect::SparkSQL => {
             let format = match table_format {
@@ -543,13 +543,6 @@ mod tests {
     fn test_ddl_backend_duckdb_ignores_format() {
         // DuckDB ignores table format
         let backend = ddl_backend_for_dialect(SqlDialect::DuckDB, Some(TableFormat::Delta), None);
-        assert!(matches!(backend, DdlBackend::DuckDb));
-    }
-
-    #[test]
-    fn test_ddl_backend_postgresql_uses_duckdb() {
-        // PostgreSQL uses DuckDB DDL generator (same SQL dialect)
-        let backend = ddl_backend_for_dialect(SqlDialect::PostgreSQL, None, None);
         assert!(matches!(backend, DdlBackend::DuckDb));
     }
 

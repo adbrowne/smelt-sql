@@ -474,6 +474,7 @@ fn run_request(start: Option<&str>, end: Option<&str>) -> ExecuteRequest {
         batch_size_days: None,
         per_partition: false,
         full_refresh: false,
+        rebuild: false,
         dry_run: false,
         enforce_safety: false,
         allow_column_removal: false,
@@ -743,4 +744,63 @@ async fn merged_window_ledger_upsert_matches_the_state_builder() {
              `generate_ledger_upsert_sql`: {expected_upsert}\nrecorded: {sql_log:?}"
         );
     }
+}
+
+/// Phase 6a test: `rebuild_signal_does_not_change_the_keyed_grain_path` —
+/// `ExecuteRequest::rebuild` is consumed only by the succession dispatch
+/// (`docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+/// state)" — Lifecycle); a `grain: key` model run with `rebuild: true`
+/// records the identical resolved strategy and time range as the same run
+/// with `rebuild: false`.
+#[tokio::test]
+async fn rebuild_signal_does_not_change_the_keyed_grain_path() {
+    async fn run_and_capture(rebuild: bool) -> smelt_state::ModelRunRecord {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().to_path_buf();
+        let db_path = project_dir.join("dev.duckdb");
+
+        stage_idempotent_project(&project_dir, &db_path);
+        seed_events(&db_path).expect("seed events");
+
+        let config = Arc::new(Config::load(&project_dir).expect("load config"));
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+        let request = ExecuteRequest {
+            rebuild,
+            ..run_request(Some("2026-01-01"), Some("2026-01-03"))
+        };
+        let outcome = execute_project(
+            format!("keyed-rebuild-signal-{rebuild}"),
+            request,
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &PlainDuckDbFactory {
+                db_path: db_path.clone(),
+            },
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("two-day run over an idempotent keyed model succeeds");
+
+        outcome
+            .models
+            .get("device_daily")
+            .cloned()
+            .expect("device_daily ran")
+    }
+
+    let with_rebuild = run_and_capture(true).await;
+    let without_rebuild = run_and_capture(false).await;
+
+    assert_eq!(
+        with_rebuild.strategy, without_rebuild.strategy,
+        "the rebuild signal must not change the keyed grain's resolved strategy"
+    );
+    assert_eq!(
+        with_rebuild.time_range, without_rebuild.time_range,
+        "the rebuild signal must not change the keyed grain's recorded time range"
+    );
 }

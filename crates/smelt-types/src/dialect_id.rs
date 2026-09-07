@@ -7,19 +7,14 @@
 pub enum DialectId {
     DuckDb,
     SparkSql,
-    PostgreSql,
     BigQuery,
 }
 
 impl DialectId {
     /// Every dialect, in report order. Exhaustive by construction: adding a
     /// variant without adding it here fails `all_is_exhaustive`.
-    pub const ALL: &'static [DialectId] = &[
-        DialectId::DuckDb,
-        DialectId::SparkSql,
-        DialectId::PostgreSql,
-        DialectId::BigQuery,
-    ];
+    pub const ALL: &'static [DialectId] =
+        &[DialectId::DuckDb, DialectId::SparkSql, DialectId::BigQuery];
 
     /// The lowercase key already used by `smelt-runtime`'s as-struct emitter and
     /// the type-divergence ledger. There must not be a second spelling.
@@ -27,7 +22,6 @@ impl DialectId {
         match self {
             DialectId::DuckDb => "duckdb",
             DialectId::SparkSql => "spark",
-            DialectId::PostgreSql => "postgres",
             DialectId::BigQuery => "bigquery",
         }
     }
@@ -47,13 +41,10 @@ mod tests {
         // exhaustive, so every variant must be produced by the iteration.
         for d in DialectId::ALL {
             match d {
-                DialectId::DuckDb
-                | DialectId::SparkSql
-                | DialectId::PostgreSql
-                | DialectId::BigQuery => {}
+                DialectId::DuckDb | DialectId::SparkSql | DialectId::BigQuery => {}
             }
         }
-        assert_eq!(DialectId::ALL.len(), 4);
+        assert_eq!(DialectId::ALL.len(), 3);
     }
 
     #[test]
@@ -61,12 +52,12 @@ mod tests {
         for d in DialectId::ALL {
             assert_eq!(DialectId::from_slug(d.slug()), Some(*d));
         }
-        // These four strings are load-bearing: smelt-runtime's as-struct emitter
+        // These strings are load-bearing: smelt-runtime's as-struct emitter
         // and the type-divergence ledger already key on them.
         assert_eq!(DialectId::DuckDb.slug(), "duckdb");
         assert_eq!(DialectId::SparkSql.slug(), "spark");
-        assert_eq!(DialectId::PostgreSql.slug(), "postgres");
         assert_eq!(DialectId::BigQuery.slug(), "bigquery");
+        assert_eq!(DialectId::from_slug("postgres"), None);
     }
 
     #[test]

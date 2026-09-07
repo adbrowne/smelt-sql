@@ -92,6 +92,7 @@ nav:
     - Sources: guide/sources.md
     - Materializations: guide/materializations.md
     - Incremental Models: guide/incremental-models.md
+    - SCD2 Succession: guide/scd2-succession.md
     - Schema Evolution: guide/schema-evolution.md
     - Migrations: guide/migrations.md
     - Seeds: guide/seeds.md

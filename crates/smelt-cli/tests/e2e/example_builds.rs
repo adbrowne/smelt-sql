@@ -229,6 +229,14 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          crates/smelt-logical/src/analysis/input_delta.rs unit tests)",
     ),
     (
+        "scd2_succession",
+        "Catalog Error: Table with name sources_customer_changes does not exist \
+         (succession grain worked example: `customer_changes` is a declared-only source, \
+         no seed data, in the standalone build env — covered by \
+         crates/smelt-cli/tests/explain_maintenance/succession.rs and \
+         crates/smelt-cli/tests/maintenance_conformance/succession.rs)",
+    ),
+    (
         "fn_struct_spread_cte",
         "Catalog Error: Table with name sources_gps_readings does not exist \
          (D2 probe fixture: struct spread inside CTE body schema propagation; \

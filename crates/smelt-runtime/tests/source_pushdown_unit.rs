@@ -186,7 +186,6 @@ fn skewed_batch_scan_sized_from_output_window() {
         &inc,
         sql,
         &HashMap::new(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,

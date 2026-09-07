@@ -2812,3 +2812,17 @@ fn grain_assertion_mismatch_maps_to_stable_code_string() {
         "grain-assertion-mismatch"
     );
 }
+
+/// `KeyedRecurrenceDeclarationMismatch` (key-grain rule 16,
+/// `docs/outcomes/20260904-decision-residue/outcome.md` phase 4) maps onto
+/// its own stable wire-visible code string, so CLI and LSP consumers agree
+/// on the code without a run.
+#[test]
+fn keyed_recurrence_declaration_mismatch_maps_to_stable_code_string() {
+    assert_eq!(
+        crate::backend::diagnostic_code_str(
+            smelt_db::DiagnosticCode::KeyedRecurrenceDeclarationMismatch
+        ),
+        "keyed-recurrence-declaration-mismatch"
+    );
+}

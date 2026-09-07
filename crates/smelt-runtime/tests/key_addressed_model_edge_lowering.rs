@@ -523,6 +523,7 @@ mod chain {
             // definition-delta gate (unexercised by this file), never by the
             // key-addressed model-edge dispatch this file's tests pin.
             full_refresh: true,
+            rebuild: false,
             dry_run: false,
             enforce_safety: false,
             allow_column_removal: false,

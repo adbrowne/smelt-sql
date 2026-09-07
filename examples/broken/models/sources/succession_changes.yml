@@ -1,0 +1,11 @@
+description: Customer changes, append-only, clocked on changed_at — the driving source for the succession-grain diagnostic fixtures.
+mutation_profile: append_only
+timeseries:
+  event_time_column: changed_at
+  partition_column: changed_at
+  granularity: day
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: changed_at, type: TIMESTAMP, nullable: false }
+  - { name: is_deleted, type: BOOLEAN, nullable: false }
+  - { name: name, type: VARCHAR, nullable: true }

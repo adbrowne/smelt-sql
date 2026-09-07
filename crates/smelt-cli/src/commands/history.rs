@@ -34,6 +34,7 @@ pub async fn history(args: HistoryArgs, scope: Option<&str>) -> Result<()> {
 
     if manifests.is_empty() {
         if config.state.mode == smelt_core::config::StateMode::Stateless {
+            // stdout: explains to the human why `smelt history` has nothing to show
             println!(
                 "No run history: target '{}' is running with state.mode: stateless, which \
                  writes no run history. Set state.mode to intervals or environments to enable \

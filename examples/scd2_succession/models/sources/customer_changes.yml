@@ -1,0 +1,28 @@
+description: >
+  Customer change-event stream: one row per attribute change (or delete),
+  arriving with a landing date (`ingested_date`) distinct from the event's
+  own business clock (`effective_ts`). Append-only, so `customer_history`
+  below is recognised as the succession grain — no `unique_key:` or
+  `timeseries:` is declared on the model itself.
+mutation_profile: append_only
+timeseries:
+  event_time_column: effective_ts
+  partition_column: ingested_date
+  granularity: day
+columns:
+  - name: customer_id
+    type: INTEGER
+    nullable: false
+  - name: effective_ts
+    type: TIMESTAMP
+    nullable: false
+  - name: tier
+    type: VARCHAR
+  - name: region
+    type: VARCHAR
+  - name: is_deleted
+    type: BOOLEAN
+    nullable: false
+  - name: ingested_date
+    type: DATE
+    nullable: false

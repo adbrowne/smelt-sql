@@ -36,6 +36,7 @@ Inbound edges: sources.raw.events
       clock:    (none)
       identity: event_id
       derived grain: key
+      orchestration-only fact: lateness = 2 hours (never a plan input)
       delta type: general (degraded by: source 'raw.events' is append_only but declares no clock/axis column)
 
 Probes (0):

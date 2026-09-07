@@ -25,6 +25,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities, schem
         smelt_path_ref: None,
         smelt_path_call: None,
         restructure_plans: &[],
+        settled_emissions: &[],
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -347,7 +348,6 @@ fn no_pipe_token_reaches_backend() {
     let backends = [
         (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         (SqlDialect::SparkSQL, BackendCapabilities::spark_delta()),
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
     ];
 
     for (dialect, caps) in &backends {

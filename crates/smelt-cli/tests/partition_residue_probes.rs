@@ -421,8 +421,9 @@ fn probe_partition_column_rename_refusal() {
 /// partition-grain Known Divergences bullets (phases 2-7; two folded into phase 2), and the
 /// 2026-09-04 decision track (`3e9c1a4a`) closed two more — non-deterministic row-set membership
 /// became a permanent refusal, and per-column `data_latency` was retired in favour of
-/// orchestration-only lateness — and phase 1 of `docs/outcomes/20260904-decision-residue` closed
-/// the `PartitionGrainForbidsMetrics`-is-unimplemented bullet by implementing the refusal.
+/// orchestration-only lateness — and phases 1-2 of `docs/outcomes/20260904-decision-residue` closed
+/// two more (the `PartitionGrainForbidsMetrics`-is-unimplemented bullet by implementing the
+/// refusal, and the `key_recurrence` declaration-mismatch refusal).
 /// This test pins the bullet set the spec's §"The partition grain"
 /// Known Divergences is allowed to carry going forward, so a future edit cannot quietly
 /// reintroduce a closed residue without the change being visible here. The count ratchets DOWN
@@ -451,16 +452,16 @@ fn partition_grain_residues_stay_closed() {
 
     let expected_leads = [
         "Schema evolution on the partition grain is largely a definition delta now",
-        "The sub-`g_part` rejection does not yet name the coarsened window",
         "`NOW()`/`CURRENT_*` are still compile-time-pinned",
     ];
 
     assert_eq!(
         bullets.len(),
         expected_leads.len(),
-        "expected exactly {} partition-grain Known Divergences bullets (the three this outcome \
+        "expected exactly {} partition-grain Known Divergences bullets (the two this outcome \
          does not own — phase 1 of `docs/outcomes/20260904-decision-residue` closed the \
-         `PartitionGrainForbidsMetrics`-is-unimplemented bullet, and the decision track \
+         `PartitionGrainForbidsMetrics`-is-unimplemented bullet, phase 2 closed the \
+         sub-`g_part`-does-not-name-the-coarsened-window bullet, and the decision track \
          retired `data_latency` and the row-set-membership bullet separately), found {}:\n{}",
         expected_leads.len(),
         bullets.len(),

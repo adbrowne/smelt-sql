@@ -8,7 +8,8 @@ use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 use smelt_runtime::windowing::{
     compute_incremental_windows, compute_incremental_windows_ordered,
-    validate_run_window_alignment, PartitionAxis,
+    validate_run_window_against_partition_grid, validate_run_window_alignment, PartitionAxis,
+    PartitionPoint,
 };
 use smelt_runtime::TimeRange;
 use std::collections::HashMap;
@@ -47,11 +48,13 @@ fn no_dep_timeseries() -> HashMap<String, (Vec<String>, String)> {
 
 #[test]
 fn test_multi_source_bound_aware_windows() {
-    // A model with a LAG dependency (3-period lookback) and additional data
-    // latency produces correct (partition_start, partition_end, filter_start, filter_end)
-    // shapes. Lateness and computation-reach are independent quantities, so
-    // the filter widens by their SUM (a max here encoded the truncated-frame
-    // bug — catalog cell SC-5).
+    // A model with a LAG dependency (3-period lookback) produces correct
+    // (partition_start, partition_end, filter_start, filter_end) shapes. The
+    // filter widens by the SQL-inferred reach alone — declared lateness is
+    // orchestration-only and plays no part in plan derivation
+    // (`docs/specs/model_properties.md` §Constraints "Declared lateness is
+    // orchestration-only"); `compute_incremental_windows` takes no latency
+    // input at all.
     let sql = "SELECT date_trunc('day', event_time) as d, \
                LAG(amount, 3) OVER (ORDER BY d) as prev \
                FROM events";
@@ -59,13 +62,11 @@ fn test_multi_source_bound_aware_windows() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    // data_latency_days=2; SQL has 3-period lookback; sum=5
     let windows = compute_incremental_windows(
         &ts,
         &inc,
         sql,
         &no_dep_timeseries(),
-        2,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -73,13 +74,13 @@ fn test_multi_source_bound_aware_windows() {
     )
     .unwrap();
 
-    // FullyBatchSafe batch (bounded 3-day context → ~9–90 day chunks → one batch for 2-day range)
+    // FullyBatchSafe batch (bounded 3-day context -> ~9-90 day chunks -> one batch for 2-day range)
     assert!(!windows.batches.is_empty(), "expected at least one batch");
     let b = &windows.batches[0];
     assert_eq!(b.partition_start.to_string(), "2026-03-20");
     assert_eq!(b.partition_end.to_string(), "2026-03-22");
-    // 3 + 2 = 5 days lookback → filter_start = 2026-03-15
-    assert_eq!(b.filter_start.to_string(), "2026-03-15");
+    // 3 days lookback -> filter_start = 2026-03-17
+    assert_eq!(b.filter_start.to_string(), "2026-03-17");
     assert_eq!(b.filter_end.to_string(), "2026-03-22");
 }
 
@@ -87,10 +88,11 @@ fn test_multi_source_bound_aware_windows() {
 
 #[test]
 fn test_lookback_widens_filter_window() {
-    // A data_latency_days=3 source widens filter_start by 3 days while
+    // A 3-period LAG dependency widens filter_start by 3 days while
     // partition_start stays at the partition boundary.
-    let sql = "SELECT date_trunc('day', event_time) as d, SUM(amount) \
-               FROM events GROUP BY 1";
+    let sql = "SELECT date_trunc('day', event_time) as d, \
+               LAG(amount, 3) OVER (ORDER BY d) as prev \
+               FROM events";
     let ts = make_ts("event_time", "d", Granularity::Day);
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
@@ -100,7 +102,6 @@ fn test_lookback_widens_filter_window() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        3,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -138,7 +139,6 @@ fn test_per_partition_override() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -173,7 +173,6 @@ fn test_batch_size_days_override() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         Some(2),
@@ -236,6 +235,97 @@ fn test_validate_run_window_alignment_weekly() {
         .contains("not aligned to weekly granularity"));
 }
 
+/// A misaligned monthly window names the exact coarsened pair that would be
+/// accepted (`docs/specs/incremental_shapes.md` §"Run window vs partition
+/// granularity", success criterion 2) — not just "the 1st of a month".
+#[test]
+fn misaligned_run_window_names_the_coarsened_pair() {
+    use chrono::NaiveDate;
+    let start = NaiveDate::from_ymd_opt(2024, 12, 5).unwrap();
+    let end = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
+
+    let result = validate_run_window_alignment(start, end, &Granularity::Month);
+    let msg = result.expect_err("2024-12-05 is not the 1st of a month");
+    assert!(
+        msg.contains("--event-time-start 2024-12-01"),
+        "expected the coarsened start in: {msg}"
+    );
+    assert!(
+        msg.contains("--event-time-end 2025-01-01"),
+        "expected the coarsened end in: {msg}"
+    );
+}
+
+// ── validate_run_window_against_partition_grid ────────────────────────────────
+
+const WEEKLY_PARTITION_SQL: &str = "SELECT DATE_TRUNC('week', event_ts) AS revenue_week, \
+     user_id, SUM(amount) AS amt FROM t GROUP BY 1, 2";
+
+const DAILY_PARTITION_SQL: &str = "SELECT DATE_TRUNC('day', event_ts) AS revenue_date, \
+     user_id, SUM(amount) AS amt FROM t GROUP BY 1, 2";
+
+/// `g_run = month` over a `g_part = week` grid: `g_run >= g_part` holds, but
+/// the window's own bounds (`2024-12-01`, a Sunday) are not on the weekly
+/// grid — the residue the `g_run >= g_part` comparison alone lets through.
+/// Refused naming `week` and the week-coarsened pair.
+#[test]
+fn window_off_the_partition_grid_is_refused_with_the_pair() {
+    use chrono::NaiveDate;
+    let ts = make_ts("event_ts", "revenue_week", Granularity::Month);
+    let start = NaiveDate::from_ymd_opt(2024, 12, 1).unwrap();
+    let end = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+
+    let result = validate_run_window_against_partition_grid(
+        WEEKLY_PARTITION_SQL,
+        &ts,
+        PartitionPoint::Date(start),
+        PartitionPoint::Date(end),
+    );
+    let msg = result.expect_err("a month window is not guaranteed week-aligned");
+    assert!(msg.contains("week"), "expected 'week' named in: {msg}");
+    assert!(
+        msg.contains("--event-time-start 2024-11-25"),
+        "expected the week-coarsened start in: {msg}"
+    );
+    assert!(
+        msg.contains("--event-time-end 2025-01-06"),
+        "expected the week-coarsened end in: {msg}"
+    );
+}
+
+/// `g_run = hour` (`timeseries.granularity`) is finer than `g_part = day` —
+/// no run window fixes this, only a `timeseries.granularity` edit does. The
+/// message names the required granularity and, as context only, the
+/// covering window at that granularity — but must not claim re-running with
+/// it will make the run pass.
+#[test]
+fn sub_g_part_config_refusal_names_the_required_granularity() {
+    use chrono::NaiveDate;
+    let ts = make_ts("event_ts", "revenue_date", Granularity::Hour);
+    let start = NaiveDate::from_ymd_opt(2024, 12, 25).unwrap();
+    let end = NaiveDate::from_ymd_opt(2024, 12, 27).unwrap();
+
+    let result = validate_run_window_against_partition_grid(
+        DAILY_PARTITION_SQL,
+        &ts,
+        PartitionPoint::Date(start),
+        PartitionPoint::Date(end),
+    );
+    let msg = result.expect_err("hour granularity is finer than a day-derived partition grid");
+    assert!(
+        msg.contains("timeseries.granularity: day"),
+        "expected the required granularity fix in: {msg}"
+    );
+    assert!(
+        msg.contains("--event-time-start 2024-12-25 --event-time-end 2024-12-27"),
+        "expected the covering window as context in: {msg}"
+    );
+    assert!(
+        msg.contains("will not make the run pass"),
+        "expected the message to disclaim that the window alone fixes this, got: {msg}"
+    );
+}
+
 // ── Calendar-aligned per-partition tiling (Month/Quarter/Year) ───────────────
 
 #[test]
@@ -255,7 +345,6 @@ fn test_per_partition_monthly_calendar_aligned() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -337,7 +426,6 @@ fn test_per_partition_monthly_feb_boundary() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -401,7 +489,6 @@ fn test_per_partition_quarterly_calendar_aligned() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -465,7 +552,6 @@ fn test_per_partition_yearly_calendar_aligned() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -523,7 +609,6 @@ fn test_per_partition_daily_and_weekly_unchanged() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -540,7 +625,6 @@ fn test_per_partition_daily_and_weekly_unchanged() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range_w,
         PartitionAxis::Calendar,
         None,
@@ -567,7 +651,6 @@ fn test_wide_single_batch_warns() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -606,7 +689,6 @@ fn test_narrow_single_batch_no_warn() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -634,7 +716,6 @@ fn test_per_partition_no_wide_batch_warn() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -662,7 +743,6 @@ fn test_batch_size_override_no_wide_batch_warn() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         Some(30),
@@ -692,7 +772,6 @@ fn test_no_lookback_no_widening() {
         &inc,
         sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -746,7 +825,6 @@ fn test_fully_batch_safe_single_pair_for_60_day_range() {
         &inc,
         sql,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -781,7 +859,6 @@ fn test_bounded_safe_yields_subranges_clamped_to_its_own_max_chunk_days() {
         &inc,
         sql,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -827,7 +904,6 @@ fn test_per_partition_only_yields_one_partition_per_iteration() {
         &inc,
         sql,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -866,7 +942,6 @@ fn test_not_derivable_source_bound_is_a_hard_refusal_not_an_approximate_chunk() 
         &inc,
         sql,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -904,7 +979,6 @@ fn test_not_derivable_is_not_masked_by_per_partition_or_batch_size_override() {
         &inc,
         sql,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -947,7 +1021,6 @@ fn test_no_self_edge_is_unaffected_keeps_batch_safety_auto_chunking() {
         &inc,
         sql,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -986,7 +1059,6 @@ fn test_convergent_self_edge_is_ordered_forces_strictly_sequential_single_partit
         &inc,
         RUNNING_BALANCE_SQL,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         None,
@@ -1030,7 +1102,6 @@ fn test_ordered_forces_single_partition_even_with_explicit_batch_size_override()
         &inc,
         RUNNING_BALANCE_SQL,
         &deps,
-        0,
         &range,
         PartitionAxis::Calendar,
         Some(5), // explicit override asking for the whole range in one batch
@@ -1065,7 +1136,6 @@ fn test_non_convergent_self_edge_refuses_fail_closed_naming_the_model() {
         &inc,
         forward_sql,
         &no_dep_timeseries(),
-        0,
         &range,
         PartitionAxis::Calendar,
         None,

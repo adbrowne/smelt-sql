@@ -1,0 +1,30 @@
+# Phase 2 summary — Keyed-succession classifier leaf
+
+**Shipped:**
+- `crates/smelt-logical/src/analysis/succession.rs`: `classify_keyed_succession(node: &SelectNode, ctx: &SuccessionContext) -> SuccessionVerdict`, a pure leaf implementing `model_properties.md` §"Keyed-succession classification" rules 1, 1a, 1b, 2–6.
+- `SuccessionVerdict::{Recognized{source, pre_filter, key_cols, clock_col, lead_cols, lag_cols, delete_flag, advisories}, NotSuccession{reason}}`; `NotSuccessionReason` (ten variants, 1:1 with the ten admission-changing analysis-time codes); `SuccessionAdvisory::PreFilterNegatesFlag` carries the eleventh (`SuccessionPreFilterNegatesFlag`) as a non-admission-changing advisory on `Recognized`.
+- `SuccessionContext{source_name, mutation_profile, event_time_column, not_null_columns}` — the driving-source world-facts the leaf reads.
+- `crates/smelt-logical/src/analysis/walk.rs::model_keyed_succession(tree, ctx)` — the sole call site, dispatching `QueryNode::Select` to the classifier and refusing `SetOp`/`Unsupported` outright (`rg` confirms `classify_keyed_succession` has no other call site outside `succession.rs`'s own tests).
+- 39 new unit tests: one per named refusal reason (grouped by rule, several SQL shapes per reason bucket), the 6 recognition cases (minimal LEAD, LAG, scalar-wrapped LEAD, QUALIFY delete flag, pre-filter clamp, bare-negated-flag advisory-with-unchanged-admission pairing), and 2 walk-wiring tests.
+
+**Decisions:**
+- Reused `monotonicity::trace_event_time` against a synthetic single-entry `BoundContext` (`source_name → event_time_column`) for the clock-strictness/identity proof, rather than reimplementing tracing — `resolve_against_ctx`'s exact-match-on-one-source semantics already give "traces to `event_time_column`, not merely some column" for free.
+- The clock column must be a bare (possibly-qualified) `ORDER BY` column reference; a non-bare clock expression (e.g. `CAST(t AS DATE)`) refuses via `OrderNotMonotoneClock` before ever reaching `trace_event_time`. This is a narrower gate than the spec's general trace (which could in principle certify some non-bare chains), but every non-bare chain the spec's own examples name (truncation, casts) is non-strict anyway, so no admissible SQL is lost by the shortcut — flagged as a simplification for the next planner.
+- Window-call detection matches on "a node whose direct children include both a `FUNCTION_CALL` and a `WINDOW_SPEC`" rather than gating on `SyntaxKind::EXPRESSION`: the parser's checkpoint-based `IS NULL`/binary wrapping reparents a bare window call's `FUNCTION_CALL`+`WINDOW_SPEC` directly under the new `BINARY_EXPR`, with no intermediate `EXPRESSION` node — confirmed via a throwaway CST dump. The wrapper-operand recursion (`validate_wrapper_operands`) anchors its "we've reached the window call, stop" check on `func.syntax().text_range()` specifically (not the enclosing node), since `BinaryExpr::left()`/`case` arms yield the bare `FUNCTION_CALL` node when recursing down to it.
+- `SuccessionPreFilterNegatesFlag` is carried as a `Vec<SuccessionAdvisory>` field on `Recognized`, not a separate return channel — matches the plan's phase-2 reshape note and keeps `NotSuccessionReason` a clean refusal-only enum for phase 3's diagnostic mapping.
+- Dropped one planned test (`refuses_where_over_window_derived_column`): the classifier has no schema of the source's real columns beyond `not_null_columns`, so a `WHERE` clause referencing a name that happens to collide with a window-derived alias is structurally indistinguishable from an ordinary row-local predicate — the spec's example presumes real-column knowledge this leaf doesn't have. Noted as a known gap, not silently dropped.
+
+**For the next planner:**
+- Phase 2a (already scheduled next) fixes the pre-existing `smelt-core` baseline-test flake (`checkout_scratch_is_deleted_when_materialization_fails`) that makes the full `cargo test` leg of `verify-phase.sh` red independent of this phase; confirmed unrelated again this phase (`--test-threads=1` passes standalone). `cargo fmt --check`, `cargo clippy` (both feature sets), `cargo test -p smelt-logical` (all 39 new + existing tests), `cargo test -p smelt-logical --test walk_coverage`, and `example_diagnostics`/`example_workspaces` are all green.
+- Follow-up gap for a later phase (not a success criterion here, but worth a look before phase 3 locks in diagnostic messages): the `WHERE`-over-window-derived-column shape above is unenforced. If a fixture in phase 9 exercises this, phase 3's `SuccessionPreFilterNotRowLocal`/`SuccessionDeleteFilterMisplaced` diagnostics may need a schema-aware widening this leaf doesn't attempt.
+- `SuccessionContext` is currently hand-constructed by call sites (only test code today); phase 3's `derive_model_maintenance_plan` wiring is the first real producer and will need to build it from `SourceInfo` (mirroring `input_delta::SourceShape::from_source_info`'s pattern) — not built here since phase 2's scope is the classifier alone.
+- `Vec<NotSuccessionReason>` variant payloads are plain `String` reasons (not the structured field lists `model_properties.md` sometimes implies, e.g. naming the specific clause). Phase 3 should check whether `DiagnosticCode` needs structured fields beyond a message string before finalizing the mapping.
+
+**Gates:**
+- `cargo fmt --all -- --check` — PASS (after `cargo fmt --all`).
+- `cargo clippy -p smelt-logical --all-targets` — PASS, zero warnings.
+- `cargo test -p smelt-logical --lib succession` — PASS, 39/39.
+- `cargo test -p smelt-logical --test walk_coverage` — PASS, 8/8.
+- `rg -n 'classify_keyed_succession' crates/ --glob '!*/tests/*'` — only `succession.rs` and `walk.rs`.
+- `bash .claude/scripts/verify-phase.sh` — fmt PASS, clippy PASS, `cargo test` (workspace) FAIL on the pre-existing unrelated `smelt-core` flake above (confirmed via isolated `--test-threads=1` rerun = PASS), `example_diagnostics` PASS.
+- `cargo test -p smelt-lsp --test example_workspaces` — PASS, 35/35.

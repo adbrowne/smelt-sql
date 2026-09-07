@@ -229,8 +229,8 @@ fn every_flag_matches_matrix() {
     cell!(bigquery, supports_column_scoped_merge, true, "BigQuery");
 
     // null_safe_equality — the synthesised join spelling a statement-level
-    // restructure uses. `IS NOT DISTINCT FROM` on DuckDB, PostgreSQL and
-    // BigQuery; Spark SQL spells the same comparison `<=>`.
+    // restructure uses. `IS NOT DISTINCT FROM` on DuckDB and BigQuery; Spark
+    // SQL spells the same comparison `<=>`.
     assert_eq!(
         duckdb.null_safe_equality,
         NullSafeEqualitySpelling::IsNotDistinctFrom,

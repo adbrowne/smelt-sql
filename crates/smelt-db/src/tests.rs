@@ -5,6 +5,7 @@ use super::*;
 use crate::test_harness::TestDb;
 use line_index::LineIndex;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[test]
 fn test_schema_extraction_simple_columns() {
@@ -5989,4 +5990,82 @@ fn debug_repro_ref_resolution2() {
 
     let diags = db.file_diagnostics(sessions_path);
     println!("DIAGS2: {:?}", diags);
+}
+
+// These tests poison a registry's `RwLock` directly (cloning just the `Arc`,
+// not `Database`/`Storage`) — cloning the whole `Database` stands up a Salsa
+// snapshot, and mutating through the original handle while a snapshot exists
+// blocks on Salsa's cancellation machinery, which is not what these tests
+// are exercising.
+
+#[test]
+fn poisoned_files_registry_does_not_panic() {
+    let mut test_db = TestDb::default();
+    let path = PathBuf::from("model.sql");
+    test_db.set_file_text(path.clone(), Arc::new("SELECT 1".to_string()));
+
+    let lock = Arc::clone(&test_db.db.files);
+    let _ = std::thread::spawn(move || {
+        let _guard = lock.write().unwrap();
+        panic!("poisoning files registry for test");
+    })
+    .join();
+
+    let result = test_db.db.source_file(&path);
+    assert!(
+        result.is_some(),
+        "source_file must recover from a poisoned lock rather than panicking"
+    );
+}
+
+#[test]
+fn poisoned_deployed_schemas_registry_does_not_panic() {
+    let mut test_db = TestDb::default();
+    let root = PathBuf::from(".");
+    test_db.db.set_deployed_schema(
+        Arc::from("my_model"),
+        root.clone(),
+        vec![Arc::from("id")],
+        None,
+        None,
+    );
+
+    let lock = Arc::clone(&test_db.db.deployed_schemas);
+    let _ = std::thread::spawn(move || {
+        let _guard = lock.write().unwrap();
+        panic!("poisoning deployed_schemas registry for test");
+    })
+    .join();
+
+    let result = test_db.db.deployed_schema(&root, "my_model");
+    assert!(
+        result.is_some(),
+        "deployed_schema must recover from a poisoned lock rather than panicking"
+    );
+}
+
+#[test]
+fn set_source_file_still_upserts_after_poisoning() {
+    let mut test_db = TestDb::default();
+    let path = PathBuf::from("model.sql");
+    test_db.set_file_text(path.clone(), Arc::new("SELECT 1".to_string()));
+
+    let lock = Arc::clone(&test_db.db.files);
+    let _ = std::thread::spawn(move || {
+        let _guard = lock.write().unwrap();
+        panic!("poisoning files registry for test");
+    })
+    .join();
+
+    let updated =
+        test_db
+            .db
+            .set_source_file(path.clone(), "SELECT 2".to_string(), PathBuf::from("."));
+
+    assert_eq!(
+        read_registry(&test_db.db.files).len(),
+        1,
+        "re-registering an existing path must update it in place, not duplicate the entry"
+    );
+    assert_eq!(updated.text(&test_db.db), "SELECT 2");
 }

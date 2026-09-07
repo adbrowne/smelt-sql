@@ -36,16 +36,21 @@ consumes delta signatures; wire backbuild behind `smelt migrate`; lattice v2; pr
 
 **Parallel track (2026-07-18):** the **quality-grind programme** ([master plan](plans/20260718-quality-grind.md)) works the small root-caused deferred items (parser ledger categories, VALUES arity, UTF-8 positions, registry gaps, doc gaps) and the well-understood larger ones (generator deferred coverage, smelt-planner↔smelt-logical consolidation, the cold-Salsa benchmark regression) via a second autonomy loop on `worktree-roadmap_todo`; decision-gated items are queued in the master's "Tier 3 — decision queue".
 
-**Parallel track (2026-09-04) — dialect emission vocabulary.** The BigQuery work showed the
-per-dialect lowering model runs out of vocabulary, not structure: closing the 81 open gaps
-(#177/#178/#179) with today's `Emission` enum would mean one hand-written printer function per
-built-in. [`multi_backend.md`](specs/multi_backend.md) §"Template emission" and
-§"Operand-conditional verdicts" add a declarative `Template` verdict (registry data, one generic
-interpreter) and arity/operand-class–guarded arms settled on the compile path. Queued as
-[`docs/outcomes/20260904-dialect-emission-vocabulary`](outcomes/20260904-dialect-emission-vocabulary/outcome.md)
-at the end of the outcome backlog; pays the DuckDB and Spark gap ratchets down to the
-type-inference rows and retires the unverified PostgreSQL emission column (#181, closed
-2026-09-04). BigQuery's rows need a human-run sweep afterwards.
+✅ **Dialect emission vocabulary (September 6, 2026).** The BigQuery work showed the per-dialect
+lowering model ran out of vocabulary, not structure: closing the 81 open gaps (#177/#178/#179)
+with the old `Emission` enum would have meant one hand-written printer function per built-in.
+[`multi_backend.md`](specs/multi_backend.md) §"Template emission" and §"Operand-conditional
+verdicts" added a declarative `Template` verdict (registry data, one generic printer interpreter
+that knows no function names) and arity/operand-class–guarded `Conditional` arms settled on the
+compile path, worked through
+[`docs/outcomes/20260904-dialect-emission-vocabulary`](outcomes/20260904-dialect-emission-vocabulary/outcome.md).
+Measured outcome: `dialect_gaps_duckdb` 12 → 4, `dialect_gaps_spark` 27 → 4, the unverified
+PostgreSQL emission column retired (#181, closed 2026-09-04); #177 and #178 closed with no
+remaining DuckDB/Spark emission verdict missing. What remains: BigQuery's 42 rows (#179, plus the
+BigQuery arms of #173/#174) await the human-run `scripts/bigquery-dialect-audit.sh` sweep — its
+value leg executes against a live warehouse and bills, so it is never run speculatively — and four
+`#175`/`#176` type-inference rows per dialect (DuckDB and Spark) that are inference bugs, not
+missing lowerings.
 
 **Decision track (2026-09-04) — incremental programme product calls.** The eight open product
 calls the closure report left were decided in one session
@@ -202,6 +207,38 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 ---
 
 ## Recently Completed
+
+### ~~SCD2 — the keyed-succession grain, maintained~~ ✅ (September 7, 2026)
+
+A `refresh: incremental` model with no declared grain whose SQL is the keyed-succession shape —
+row-local columns plus `LEAD(t)`/`LAG(t) OVER (PARTITION BY k ORDER BY t)` over one
+`append_only`, clocked source, with an optional pre-window lateness clamp and an optional
+`QUALIFY NOT <flag>` delete filter — is now recognised and maintained end to end.
+
+- **Classifier**: `classify_keyed_succession` (`crates/smelt-logical/src/analysis/succession/`)
+  is a pure leaf the composition walk invokes; eleven `Succession*` diagnostic codes fire on
+  every refused shape, with `SuccessionPreFilterNegatesFlag` as an admission-neutral warning.
+- **Plan and emitters**: `Grain::Succession` + `Technique::SuccessionPatch`
+  (`crates/smelt-logical/src/maintenance/succession.rs`, `emit/succession.rs`) derive the
+  event-delta `SELECT`, the succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and
+  the clock-tie probe; a target with no ledger builder (Spark, BigQuery,
+  `state.warehouse_tables: none`) downgrades to full refresh (`MaintenanceStateDowngraded`)
+  rather than a ledger-less patch.
+- **Runtime**: the window-forward driver (`crates/smelt-runtime/src/maintenance_driver/succession/`)
+  writes the ledger and the presented `MERGE` transactionally, dispatches the append-only posture
+  probe, records the maintained frontier for `contract.deferral`, and rolls back with
+  `SuccessionClockTie` on a real `(k, t)` collision; `--full-refresh`/`smelt repair` and
+  `smelt rebuild <model>` rebuild the ledger from the same pure rebuild `SELECT`.
+- **Conformance**: `cargo test -p smelt-cli --test maintenance_conformance` proves
+  `incremental_state(S) == full_refresh(inputs ∈ S)` for a generative succession recipe family
+  covering splices, deletes, delete-then-late-insert, delete-only keys, `LAG` projections,
+  out-of-order/repeated windows, the pre-window clamp, and the contract-lattice `deferral` point.
+- **Docs**: `examples/scd2_succession/` (zero diagnostics), a `docs-site/docs/guide/scd2-succession.md`
+  guide, `smelt explain` text/`--json` rendering, and the six anchored specs
+  (`incremental_shapes.md`, `model_properties.md`, `model_transforms.md`, `diagnostics.md`,
+  `sources.md`, `state.md`) updated from "not yet built" to shipped behaviour.
+
+Driven end-to-end from `docs/outcomes/20260906-scd2-keyed-succession/outcome.md` (10 phases).
 
 ### ~~Property diff — "explain the diff" for model edits~~ ✅ (September 6, 2026)
 

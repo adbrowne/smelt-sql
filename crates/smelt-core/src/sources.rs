@@ -974,14 +974,24 @@ pub struct SourceTableDef {
     pub columns: Vec<SourceColumnDef>,
 }
 
+/// Fix-it text for a retired per-column `data_latency:` key, shared between
+/// the model-frontmatter (`ColumnMetadata`) and legacy source-column
+/// (`SourceColumnDef`) retirements — both declare it once on the source as
+/// `mutation_profile.lateness` instead
+/// (`docs/specs/sources.md` §Diagnostics `MalformedSource`).
+pub(crate) fn column_data_latency_retired_message(column: &str) -> String {
+    format!(
+        "the per-column `data_latency:` key has been removed — declare lateness once on the \
+         source as `mutation_profile.lateness` instead (offending column(s): {column})"
+    )
+}
+
 /// Column definition within a source table
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceColumnDef {
     pub name: String,
     pub data_type: Option<DataType>,
     pub description: Option<String>,
-    /// How late data can arrive for this column (e.g., "3 days" for mobile events).
-    pub data_latency: Option<DataLatency>,
 }
 
 impl<'de> Deserialize<'de> for SourceColumnDef {
@@ -996,11 +1006,18 @@ impl<'de> Deserialize<'de> for SourceColumnDef {
             type_str: Option<String>,
             #[serde(default)]
             description: Option<String>,
+            /// Presence of this key alone is a hard error — see
+            /// [`column_data_latency_retired_message`].
             #[serde(default)]
-            data_latency: Option<DataLatency>,
+            data_latency: Option<serde_yaml::Value>,
         }
 
         let raw = RawColumn2::deserialize(deserializer)?;
+        if raw.data_latency.is_some() {
+            return Err(serde::de::Error::custom(
+                column_data_latency_retired_message(&raw.name),
+            ));
+        }
 
         // Parse type string into DataType if present
         let data_type = raw.type_str.as_ref().and_then(|s| parse_type(s).ok());
@@ -1009,7 +1026,6 @@ impl<'de> Deserialize<'de> for SourceColumnDef {
             name: raw.name,
             data_type,
             description: raw.description,
-            data_latency: raw.data_latency,
         })
     }
 }
@@ -1109,7 +1125,7 @@ timseries:
     }
 
     #[test]
-    fn test_sources_with_data_latency() {
+    fn test_source_column_data_latency_is_malformed_source() {
         let yaml = r#"
 sources:
   raw:
@@ -1119,32 +1135,19 @@ sources:
           - name: event_time
             type: TIMESTAMP
             data_latency: "3 days"
-          - name: ingestion_time
-            type: TIMESTAMP
-            data_latency: "0 hours"
           - name: amount
             type: DECIMAL
 "#;
-        let config: SourcesConfig = serde_yaml::from_str(yaml).unwrap();
-        let source = config.find_source("raw").unwrap();
-        let table = source.find_table("transactions").unwrap();
-
-        let event_time = table
-            .columns
-            .iter()
-            .find(|c| c.name == "event_time")
-            .unwrap();
-        assert_eq!(event_time.data_latency.as_ref().unwrap().to_days(), 3);
-
-        let ingestion_time = table
-            .columns
-            .iter()
-            .find(|c| c.name == "ingestion_time")
-            .unwrap();
-        assert_eq!(ingestion_time.data_latency.as_ref().unwrap().to_days(), 0);
-
-        let amount = table.columns.iter().find(|c| c.name == "amount").unwrap();
-        assert!(amount.data_latency.is_none());
+        let err = serde_yaml::from_str::<SourcesConfig>(yaml).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("mutation_profile.lateness"),
+            "expected fix-it naming `mutation_profile.lateness`, got: {message}"
+        );
+        assert!(
+            message.contains("event_time"),
+            "expected fix-it naming the offending column, got: {message}"
+        );
     }
 
     /// A standalone .yml in `billing/raw/events.yml` (not in `paths: ["models"]`)

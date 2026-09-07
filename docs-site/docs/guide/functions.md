@@ -468,7 +468,7 @@ The emitted SQL uses backend-specific struct literal syntax:
 - **Postgres**: row constructor syntax
 
 !!! warning
-    `smelt.as_struct` requires a backend that supports struct literals. Declare the function's `backends:` frontmatter to restrict it to compatible backends (see [Backends frontmatter](#backends-frontmatter) below), or ensure your `smelt.yml` only targets backends that support struct literals.
+    `smelt.as_struct` requires a backend that supports struct literals. Declare the function's `backends:` frontmatter to restrict it to compatible backends (see [Backends frontmatter](#backends) below), or ensure your `smelt.yml` only targets backends that support struct literals.
 
 ## Frontmatter for functions
 

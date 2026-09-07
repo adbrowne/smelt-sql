@@ -509,3 +509,22 @@ spec's subject matter. Likely a false positive — the touching commit doesn't c
 residency — but a `/smelt:spec state` pass should confirm and bump `last_reviewed` rather than
 leaving the mismatch standing. Not fixed here: `docs/outcomes/20260904-programme-hygiene` is
 docs-only and scoped to specific stale citations, not general spec-review.
+
+## Deferred: split `execute.rs` / `maintenance_driver.rs` (flagged 2026-09-06, ratchet-paydown phase 4)
+
+`crates/smelt-runtime/src/execute.rs` (~6,650 lines) and
+`crates/smelt-runtime/src/maintenance_driver.rs` (~6,160 lines) are both well past a size where a
+single file is easy to navigate or review. `docs/outcomes/20260904-ratchet-paydown` declined to
+split them: the split itself is move-only (no behaviour change), but deciding where the seams go —
+which functions become their own module, what stays `pub(crate)` vs private, how the run-pipeline
+parity invariant (`docs/specs/architecture.md` §"Run pipeline parity rule (CLI ↔ UI)") reads across
+the new module boundaries — is judgment-heavy in a way that doesn't fit the outcome loop's
+just-in-time phase planning. It belongs to a fork-level implementer with room to iterate on the
+seam layout interactively.
+
+The safety net that makes the move tractable already exists and does not need to be rebuilt first:
+`cargo test -p smelt-runtime --test execute_parity`, `cargo test -p smelt-runtime --test
+statement_parity`, and `cargo test -p smelt-cli --test maintenance_conformance` together pin both
+files' externally observable behaviour (compile+execute parity, per-family statement emission, and
+the incremental/full-refresh equivalence invariant), so a split that keeps all three green is safe
+by construction.

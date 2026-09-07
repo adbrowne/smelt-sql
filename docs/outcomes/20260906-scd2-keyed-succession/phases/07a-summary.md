@@ -1,0 +1,29 @@
+# Phase 7a summary — Testkit scaffolding for the succession family
+
+**Shipped:**
+- `SourceRecipe` widened with `partition_column`/`delete_flag_column` (both `Option`, default `None` — every pre-existing caller unchanged) plus `SourceRecipe::succession_events()` — the arrival-partitioned, delete-flagged `customer_changes` shape (`crates/smelt-maintenance-testkit/src/recipe/succession.rs`).
+- `SuccessionRecipe` (row-local projection, `lead_cols`/`lag_cols`, optional clamp, optional delete filter) with `new_lead()`/`new_lag()` constructors — same file.
+- Renderer: `render_succession_model_body/_file`, `render_succession_source_file`, `render_succession_oracle_body_over`, `stage_succession_for_target` (DuckDB-only, refuses non-DuckDB) — `crates/smelt-maintenance-testkit/src/render/succession.rs`.
+- Family quartet `stage_succession_recipe_for` / `insert_row_succession_for` / `assert_succession_equivalence_for` / `drive_succession_window_and_assert_for` — `crates/smelt-maintenance-testkit/src/gate_succession.rs`.
+- Two smoke tests green end-to-end via real `execute_project`: `smoke_two_window_splice_matches_oracle` (late-arriving event splices between two already-folded events of one key) and `smoke_lag_projection_matches_oracle` — `crates/smelt-cli/tests/maintenance_conformance/succession.rs`.
+- Bug fix: `smelt_db::maintenance_plan_report` (the `smelt explain`/CLI report path) early-returned `None` whenever `resolved_grain().is_none()`, silently hiding every succession-grain plan from `smelt explain` — the salsa-tracked `maintenance_plan` sibling already carried the correct (no early-return) behaviour and doc comment. Fixed to match; this was blocking my own test 4 and is a real pre-existing gap in the CLI surface (`crates/smelt-db/src/maintenance_refs/plan.rs`).
+
+**Decisions:**
+- 2026-09-07: Placed the family quartet at `crates/smelt-maintenance-testkit/src/gate_succession.rs` (a new top-level, ungated module), **not** `families/gate_succession.rs` as the plan's task 4 literally named. `families/mod.rs` is `#![cfg(any(feature = "spark", feature = "bigquery"))]` file-wide — off by default — so a quartet living there is unreachable from `smelt-cli`'s default-feature `maintenance_conformance` suite, which is exactly what tests 6/7 need to call. Kept the plan's function names/shapes and the "target arm refuses non-DuckDB" behaviour; only the file location and the internal idiom (plain `project.connect()`/`project.backend()`, matching `gate/keyed_support.rs`+`keyed_oracle.rs`'s DuckDB-direct style, not `families::gate_keyed`'s `dyn Backend`/`ConformanceBackend` abstraction) changed.
+- 2026-09-07: No `STracker` extension for the succession family. The succession-patch technique's equivalence invariant is against a full-refresh oracle over every event landed so far (not an S-restricted window subset) — confirmed by `crates/smelt-runtime/tests/statement_parity/succession.rs`'s existing `succession_patch_result_equals_full_refresh` leg. `assert_succession_equivalence_for` compares the maintained table directly against `render_succession_oracle_body_over` over the live physical source table, reusing the `oracle_relation` seam per plan task 5 rather than introducing a second comparator.
+- 2026-09-07: `recipe.rs`/`render.rs` crossed the large-file baseline (plan task 8 anticipated this) — split all succession-specific material into `recipe/succession.rs` and `render/succession.rs` (Rust's sibling-directory submodule form; `recipe.rs`/`render.rs` stayed as flat files, no `mod.rs` rename needed). `render.rs`'s baseline dropped 1486→1376 (net shrink after extraction). `recipe.rs`'s two new `SourceRecipe` struct fields are irreducible (field declarations can't move to another file) — baseline bumped 2301→2316 (+15, doc comments already trimmed). `s_tracker.rs` bumped 1146→1148 (+2): an existing test-fixture `SourceRecipe { .. }` literal needed the two new fields. Recorded here as the sign-off note the gate's own header requires.
+
+**For the next planner:**
+- Phase 7b's leg matrix can build directly on `gate_succession.rs`'s quartet and `SuccessionRecipe`/`SourceRecipe::succession_events()` — no proptest strategy exists yet for either (deliberately deferred to 7b per the plan).
+- The `maintenance_plan_report` fix (see Shipped) means `smelt explain <succession-model>` should now actually work — worth a quick manual/CLI-surface sanity check in phase 8 (Explain surface) rather than assuming it was already covered.
+- `SuccessionEventRow::late(...)` in `gate_succession.rs` is the vocabulary for a late-arrival/splice row (distinct `arrival` vs `event_time`); 7b's "late splice" and "late insert before a folded delete" legs should reuse it rather than re-deriving arrival/event-time bookkeeping.
+- Not investigated: whether `families::gate_keyed`'s target-generalized quartet pattern should eventually be extended to succession once Spark/BigQuery support lands for this grain — out of scope per outcome §Out of scope, flagging only so the eventual widening phase knows `gate_succession.rs` (not `families/`) is where today's DuckDB-only quartet lives and would need reconciling.
+
+**Gates:**
+- `cargo test -p smelt-maintenance-testkit --quiet` — 61 passed.
+- `cargo test -p smelt-cli --test maintenance_conformance succession --quiet` — 2 passed.
+- `cargo test -p smelt-cli --test maintenance_conformance --quiet` — 83 passed (full seeded sample, no regression from the `SourceRecipe` widening).
+- `cargo test -p smelt-db --quiet` — all green (post `maintenance_plan_report` fix).
+- `bash .claude/scripts/hardening-budget.sh` — OK, no baseline change.
+- `bash .claude/scripts/large-file-check.sh` — OK after the split + documented baseline bump above.
+- `bash .claude/scripts/verify-phase.sh` — `VERIFY: ALL GREEN` (fmt, clippy both feature sets, full workspace `cargo test`, `example_diagnostics`).

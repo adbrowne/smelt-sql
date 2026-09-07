@@ -14,7 +14,7 @@ use smelt_parser::syntax_kind::{SyntaxKind, SyntaxNode};
 use smelt_parser::FunctionCall;
 use smelt_parser::{TextRange, TextSize};
 use smelt_types::signatures::{Position, RewriteId};
-use smelt_types::{BuiltinRegistry, DialectId, Emission};
+use smelt_types::{BuiltinRegistry, CallFacts, DialectId, SettledEmission};
 
 use crate::position::classify as classify_position;
 use crate::restructure::within_group_sort_key;
@@ -48,12 +48,126 @@ fn trimmed_range(node: &SyntaxNode) -> TextRange {
     TextRange::new(range.start(), range.end() - TextSize::from(trailing as u32))
 }
 
+/// A modifier a template's `{n}` placeholder cannot name — dropping any of
+/// these would change the answer (a dropped `DISTINCT` counts duplicates; a
+/// dropped `FILTER` aggregates excluded rows), so refusal is the only safe
+/// outcome. `docs/specs/multi_backend.md` §"Template emission": "A template
+/// applies to a plain positional call, and refuses everything else."
+const TEMPLATE_MODIFIER_DISTINCT: &str =
+    "this built-in's target spelling is a fixed template over positional arguments; DISTINCT \
+     cannot be expressed by a template (a dropped DISTINCT would count duplicates the author \
+     excluded) and is refused rather than silently dropped";
+const TEMPLATE_MODIFIER_FILTER: &str =
+    "this built-in's target spelling is a fixed template over positional arguments; a FILTER \
+     (WHERE …) clause cannot be expressed by a template (a dropped FILTER would aggregate rows \
+     the author excluded) and is refused rather than silently dropped";
+const TEMPLATE_MODIFIER_WITHIN_GROUP: &str =
+    "this built-in's target spelling is a fixed template over positional arguments; a WITHIN \
+     GROUP (ORDER BY …) clause cannot be expressed by a template and is refused rather than \
+     silently dropped";
+const TEMPLATE_MODIFIER_ORDER_BY: &str =
+    "this built-in's target spelling is a fixed template over positional arguments; an ORDER BY \
+     inside the argument list cannot be expressed by a template (a dropped ORDER BY would change \
+     which value the aggregate sees first) and is refused rather than silently dropped";
+const TEMPLATE_MODIFIER_NULL_TREATMENT: &str =
+    "this built-in's target spelling is a fixed template over positional arguments; an IGNORE \
+     NULLS/RESPECT NULLS modifier cannot be expressed by a template and is refused rather than \
+     silently dropped";
+const TEMPLATE_MODIFIER_NAMED_PARAM: &str =
+    "this built-in's target spelling is a fixed template over positional arguments; a named \
+     (`=>`) argument cannot be expressed by a template, which only substitutes by position, and \
+     is refused rather than silently dropped";
+const TEMPLATE_MODIFIER_STAR: &str =
+    "this built-in's target spelling is a fixed template over positional arguments; a `*` \
+     argument cannot be expressed by a template and is refused rather than silently dropped";
+
+/// Is `expr` (an `EXPRESSION` node) wrapping exactly a `STAR` token (`COUNT(*)`'s
+/// argument) rather than some other single-token expression?
+///
+/// The parser wraps a bare `*` argument in a nested `EXPRESSION` (one node
+/// per layer of `parse_expression`'s recursive descent, verified empirically
+/// against the real parser: `COUNT(*)`'s argument is `EXPRESSION(EXPRESSION(STAR))`,
+/// not a single layer), so this peels `EXPRESSION` wrappers down to whatever
+/// they ultimately hold rather than checking only one level.
+fn is_star_expression(expr: &SyntaxNode) -> bool {
+    let mut inner = expr.clone();
+    loop {
+        let mut children = inner.children_with_tokens();
+        let (Some(only), None) = (children.next(), children.next()) else {
+            return false;
+        };
+        if let Some(token) = only.as_token() {
+            return token.kind() == SyntaxKind::STAR;
+        }
+        match only.into_node() {
+            Some(n) if n.kind() == SyntaxKind::EXPRESSION => inner = n,
+            _ => return false,
+        }
+    }
+}
+
+/// A modifier `node` (a `FUNCTION_CALL`) carries that a template's `{n}`
+/// placeholder cannot express, if any.
+///
+/// Inspects only `node`'s own children and its own `ARG_LIST`'s direct
+/// children — never `descendants()` — so a modifier on a *nested* call (e.g.
+/// `MOD(COUNT(DISTINCT x), 2)`) is not mistaken for a modifier on `node`
+/// itself. `WITHIN GROUP`/`FILTER` are direct children of `FUNCTION_CALL`
+/// (siblings of `ARG_LIST`); `DISTINCT`, `IGNORE`/`RESPECT NULLS`, the
+/// argument list's own `ORDER BY`, a named parameter, and a `*` argument are
+/// direct children of `ARG_LIST`.
+fn template_unsupported_modifier(node: &SyntaxNode) -> Option<&'static str> {
+    if node
+        .children()
+        .any(|n| n.kind() == SyntaxKind::WITHIN_GROUP_CLAUSE)
+    {
+        return Some(TEMPLATE_MODIFIER_WITHIN_GROUP);
+    }
+    if node
+        .children()
+        .any(|n| n.kind() == SyntaxKind::FILTER_CLAUSE)
+    {
+        return Some(TEMPLATE_MODIFIER_FILTER);
+    }
+    let arg_list = node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST)?;
+    for child in arg_list.children_with_tokens() {
+        if let Some(token) = child.as_token() {
+            if token.kind() == SyntaxKind::DISTINCT_KW {
+                return Some(TEMPLATE_MODIFIER_DISTINCT);
+            }
+        } else if let Some(n) = child.as_node() {
+            match n.kind() {
+                SyntaxKind::NULL_TREATMENT_CLAUSE => return Some(TEMPLATE_MODIFIER_NULL_TREATMENT),
+                SyntaxKind::ORDER_BY_CLAUSE => return Some(TEMPLATE_MODIFIER_ORDER_BY),
+                SyntaxKind::NAMED_PARAM => return Some(TEMPLATE_MODIFIER_NAMED_PARAM),
+                SyntaxKind::EXPRESSION if is_star_expression(n) => {
+                    return Some(TEMPLATE_MODIFIER_STAR)
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// Walk `root` for constructs the registry declares unsupported on `dialect`.
 ///
-/// Pure: no I/O, no printing. A name absent from the registry is *not* reported
-/// here — unrecognised functions are `UnrecognizedFunction`'s business, so the
-/// two diagnostics cannot double-fire on one construct.
-pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<UnsupportedEmission> {
+/// Pure given `type_of` — no I/O, no printing. A name absent from the registry
+/// is *not* reported here — unrecognised functions are `UnrecognizedFunction`'s
+/// business, so the two diagnostics cannot double-fire on one construct.
+///
+/// `type_of` resolves a `Conditional` entry's class-guarded arms exactly like
+/// [`crate::emission_settle::settle_emissions`] — the same operand-type
+/// lookup, so a class a real type resolves away is not misreported as
+/// unsupported here just because this pass runs first. A caller with no type
+/// context (`|_| None`) falls back to arity alone, landing class-guarded arms
+/// on their `otherwise`, the same fail-safe direction the printer's own
+/// lookup-miss takes.
+pub fn unsupported_emissions(
+    root: &SyntaxNode,
+    dialect: SqlDialect,
+    type_of: impl Fn(&SyntaxNode) -> Option<smelt_types::DataType>,
+) -> Vec<UnsupportedEmission> {
     let id = dialect.id();
     root.descendants()
         .filter_map(|node| {
@@ -70,13 +184,30 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
                 _ => return None,
             };
             let sig = BuiltinRegistry::resolve(&name)?;
-            match sig.emission_at(id, position) {
-                Emission::Unsupported { reason } => Some(UnsupportedEmission {
+            let facts = match crate::emission_settle::call_argument_nodes(&node) {
+                Some(args) => crate::emission_settle::call_facts(&args, &type_of),
+                None => CallFacts::unresolved(0),
+            };
+            match sig.settle_at(id, position, &facts) {
+                SettledEmission::Unsupported { reason } => Some(UnsupportedEmission {
                     name: sig.name.as_str(),
                     dialect: id,
                     reason,
                     range: trimmed_range(&node),
                 }),
+                // A template applies to a plain positional call only — a
+                // call carrying a modifier a `{n}` placeholder cannot name is
+                // refused here, before the printer ever runs. An operator
+                // `BINARY_EXPR` can carry none of these modifiers, so this
+                // only ever fires for a `FUNCTION_CALL`.
+                SettledEmission::Template(_) if node.kind() == SyntaxKind::FUNCTION_CALL => {
+                    template_unsupported_modifier(&node).map(|reason| UnsupportedEmission {
+                        name: sig.name.as_str(),
+                        dialect: id,
+                        reason,
+                        range: trimmed_range(&node),
+                    })
+                }
                 // `WithinGroupToAnalytic` rewrites a call whose own `OVER`
                 // clause already covers the whole partition — the position
                 // check above already admits it — but the source's own
@@ -85,7 +216,7 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
                 // analytic form cannot express is refused here, before the
                 // printer ever runs, rather than reaching
                 // `print_within_group_to_analytic`'s verbatim fallback.
-                Emission::Rewrite(RewriteId::WithinGroupToAnalytic) => {
+                SettledEmission::Rewrite(RewriteId::WithinGroupToAnalytic) => {
                     match within_group_sort_key(&node) {
                         Ok(_) => None,
                         Err(reason) => Some(UnsupportedEmission {
@@ -100,4 +231,104 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn only_function_call(sql: &str) -> SyntaxNode {
+        smelt_parser::parse(sql)
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::FUNCTION_CALL)
+            .expect("expected a FUNCTION_CALL in the fixture")
+    }
+
+    #[test]
+    fn distinct_argument_is_refused() {
+        let call = only_function_call("SELECT COUNT(DISTINCT x) FROM t");
+        assert_eq!(
+            template_unsupported_modifier(&call),
+            Some(TEMPLATE_MODIFIER_DISTINCT)
+        );
+    }
+
+    #[test]
+    fn filter_clause_is_refused() {
+        let call = only_function_call("SELECT COUNT(x) FILTER (WHERE y > 0) FROM t");
+        assert_eq!(
+            template_unsupported_modifier(&call),
+            Some(TEMPLATE_MODIFIER_FILTER)
+        );
+    }
+
+    #[test]
+    fn within_group_is_refused() {
+        let call =
+            only_function_call("SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) FROM t");
+        assert_eq!(
+            template_unsupported_modifier(&call),
+            Some(TEMPLATE_MODIFIER_WITHIN_GROUP)
+        );
+    }
+
+    #[test]
+    fn argument_list_order_by_is_refused() {
+        let call = only_function_call("SELECT STRING_AGG(x, ',' ORDER BY x) FROM t");
+        assert_eq!(
+            template_unsupported_modifier(&call),
+            Some(TEMPLATE_MODIFIER_ORDER_BY)
+        );
+    }
+
+    #[test]
+    fn null_treatment_is_refused() {
+        let call = only_function_call("SELECT LAST_VALUE(x IGNORE NULLS) FROM t");
+        assert_eq!(
+            template_unsupported_modifier(&call),
+            Some(TEMPLATE_MODIFIER_NULL_TREATMENT)
+        );
+    }
+
+    #[test]
+    fn named_argument_is_refused() {
+        let call = only_function_call("SELECT f(a => 1) FROM t");
+        assert_eq!(
+            template_unsupported_modifier(&call),
+            Some(TEMPLATE_MODIFIER_NAMED_PARAM)
+        );
+    }
+
+    #[test]
+    fn star_argument_is_refused() {
+        let call = only_function_call("SELECT COUNT(*) FROM t");
+        assert_eq!(
+            template_unsupported_modifier(&call),
+            Some(TEMPLATE_MODIFIER_STAR)
+        );
+    }
+
+    #[test]
+    fn a_plain_positional_call_is_admitted() {
+        let call = only_function_call("SELECT MOD(a, b + 1) FROM t");
+        assert_eq!(template_unsupported_modifier(&call), None);
+    }
+
+    #[test]
+    fn a_modifier_on_a_nested_call_does_not_refuse_the_outer_call() {
+        // `descendants()` is what `FunctionCall::named_params` uses, which
+        // would misattribute the nested COUNT's DISTINCT to the outer MOD
+        // call. `only_function_call` returns the first FUNCTION_CALL in
+        // preorder — the outer `MOD` call — so this exercises exactly that
+        // trap.
+        let call = only_function_call("SELECT MOD(COUNT(DISTINCT x), 2) FROM t");
+        assert_eq!(template_unsupported_modifier(&call), None);
+    }
+
+    #[test]
+    fn an_over_clause_is_not_a_modifier() {
+        let call = only_function_call("SELECT SUM(x) OVER (PARTITION BY g) FROM t");
+        assert_eq!(template_unsupported_modifier(&call), None);
+    }
 }

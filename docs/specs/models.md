@@ -1,7 +1,7 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-07-23
+last_reviewed: 2026-09-06
 owners: [andrew]
 ---
 
@@ -170,7 +170,7 @@ Both a **source** and a **model output** are *a relation a downstream consumer r
 | **completeness / settle** | `watermark:` / settle bound | declared | **derived** from the plan |
 | **replay bound** | replayability | `retention:` | always replayable (rebuildable) |
 | *source-only* | external-name `name:` routing | declared | — |
-| *model-only* | per-column `contract:`, `data_latency`, the definition-change trigger | — | declared / derived |
+| *model-only* | per-column `contract:`, the definition-change trigger | — | declared / derived |
 
 The **fill-modes** the table names:
 
@@ -307,7 +307,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 **The declaration law: declared, derived, implied.** Every fact about a model is sorted by *who fixes it*:
 
-- **Declared** — the `refresh:` trichotomy value and the **shape facts** (`timeseries:`, `unique_key:`) — the selectors of shape and ownership — plus a bounded set of *assertions* that constrain or widen what the machinery may do without ever picking a strategy or an addressing: the check-only `grain:` label, per-column `contract`, `data_latency`, a bounded-domain budget, `horizon_ceiling`, `maintenance.scan_bounds`, the per-cell `maintenance.cells[].write` addressing pin, `safety_overrides`, the declared-monotonicity escape hatch, and (where smelt cannot derive it) source world-facts, declared on the source (`sources.md`).
+- **Declared** — the `refresh:` trichotomy value and the **shape facts** (`timeseries:`, `unique_key:`) — the selectors of shape and ownership — plus a bounded set of *assertions* that constrain or widen what the machinery may do without ever picking a strategy or an addressing: the check-only `grain:` label, per-column `contract`, a bounded-domain budget, `horizon_ceiling`, `maintenance.scan_bounds`, the per-cell `maintenance.cells[].write` addressing pin, `safety_overrides`, the declared-monotonicity escape hatch, and (where smelt cannot derive it) source world-facts, declared on the source (`sources.md`).
 - **Derived** — read off the model's SQL, its sources, and the DAG, never declared per model: the maintenance plan itself (cells, techniques, **physical write addressing**, scan clamps, partition-locality), the `grain` label, the algebraic rung, lookback/horizon, ordering, input-delta discovery, cross-model dirty-set propagation, and monotonicity where statically decidable.
 - **Implied by the refresh value** — the freshness owner, and nothing else.
 
@@ -344,7 +344,6 @@ Modelling any of the derived rows as a declared selector was rejected for one sh
 
 ## Known Divergences / Open Questions
 
-- **The retired per-column `data_latency` key still parses and still widens the run window.** `execute.rs` reads it from the event-time column and passes it into `compute_effective_window`; the decision that lateness is orchestration-only (2026-09-04, `docs/research/20260904-decision-track.md`) makes this the one live place a declared lateness changes what a run scans. It must become the hard error §Surface names. Scheduled: `docs/outcomes/20260904-decision-residue/outcome.md`.
 - **The refresh trichotomy is parsed and enforced; the demotion of `grain:` to a derived label has landed for the top-level surface.** `RefreshStrategy` is the `full`/`incremental`/`materialized_view` trichotomy; `batched`/`keyed`/`cumulative`/`versioned` as `refresh:` values are hard errors with a fix-it. Top-level `unique_key:` (list or single-string sugar) now parses in `.sql` frontmatter and as a `smelt.yml` model override (frontmatter wins); `refresh: incremental` is admitted on the two shape-defining facts alone — `timeseries:` (clock) and/or top-level `unique_key:` (identity) — with no `grain:` required, and neither fact declared (with no `grain:` to fall back on) is the hard error this spec names (§"Constraint violations"). `grain:`, when written, is a check-only assertion validated against `derive_grain(clock?, identity?, partition_column ∈ key?)` whenever a top-level `unique_key:` is declared; it errors on mismatch, naming both labels. A `grain: key` model that declares no top-level `unique_key:` (deriving its identity from the SQL body's own `GROUP BY` instead — the pre-existing surface) is checked at frontmatter level too: an empty GROUP-BY-derived key is the "no derivable identity" hard error above (§"Constraint violations"), reached by `file_diagnostics()` (CLI + LSP parity) and `smelt explain` without a run. `maintenance:` and `columns.<c>.contract` are parsed frontmatter keys (`crates/smelt-core/src/metadata.rs`). Top-level `safety_overrides:` parses (frontmatter and `smelt.yml` model override; dual-declaration with the retired sub-block spelling refuses). Top-level `merge_key:` — the MERGE-dedup-only write key a column-scoped MERGE technique writes on, never identity-conferring — parses identically (frontmatter and `smelt.yml` model override, frontmatter wins). The `batched:` sub-block is retired outright on both surfaces — `.sql` frontmatter and the `smelt.yml` model override — a hard error naming each declared sub-key's top-level replacement and the caller's own value (`unique_key` → top-level `merge_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`; §"Batched sub-block retirement"). Still missing: the per-cell `maintenance.cells[].write` addressing pin and a top-level `backfill:` block do not yet exist as frontmatter keys; the derived `key_per_partition` grain (declaring it is refused at config parse) has no dedicated execution path yet, refused fail-loud at plan derivation. `smelt migrate` (`definition_deltas.md`) migrates a model's *stored table* after a definition
 change; it does not rewrite a retired `refresh:` value in frontmatter — that hard cut has no
 assist, only the fix-it text above. Migration ordering: `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8; `docs/research/20260716-relation-contract-and-per-cell-addressing.md`; `docs/plans/20260719-prod-w8-composed-axes-followups.md`.

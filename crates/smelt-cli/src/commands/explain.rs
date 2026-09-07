@@ -601,6 +601,14 @@ async fn explain_maintenance_plan(
     )
     .with_context(|| format!("Failed to build property profile for `{}`", canonical))?;
 
+    let succession_view = result.succession_recipe.as_ref().map(|recipe| {
+        smelt_cli::explain::build_succession_explain_view(
+            recipe,
+            &source_infos,
+            &model.db_name_owned(),
+        )
+    });
+
     let report = build_maintenance_plan_report(
         &canonical,
         &result,
@@ -616,6 +624,7 @@ async fn explain_maintenance_plan(
         pending_definition_delta.as_ref(),
         own_output_delta.as_ref(),
         &profile,
+        succession_view.as_ref(),
     )
     .with_context(|| {
         format!(
@@ -817,6 +826,7 @@ async fn explain_maintenance_plan(
             pending_definition_delta.as_ref(),
             own_output_delta.as_ref(),
             result.plan.key_locality.as_ref(),
+            succession_view.as_ref(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
@@ -863,7 +873,7 @@ fn resolve_default_target(config: &Config) -> String {
 
 /// `BackendType` has only two variants today (`DuckDB`, `Spark`) —
 /// `smelt_backend::maintenance_dialect` and availability resolution both
-/// take the richer `SqlDialect` (which also has `PostgreSQL`); this is the
+/// take the richer `SqlDialect` (which also has `BigQuery`); this is the
 /// narrow bridge from a target's declared backend to it.
 fn backend_type_to_sql_dialect(
     backend_type: smelt_core::config::BackendType,
@@ -913,12 +923,6 @@ fn build_derived_window(
         return Ok(None);
     };
 
-    let data_latency_days = metadata
-        .and_then(|m| m.columns.get(&ts.event_time_column))
-        .and_then(|c| c.data_latency.as_ref())
-        .map(|l| l.to_days())
-        .unwrap_or(0);
-
     // Own `smelt.ref()` list, restricted to sources this model actually
     // depends on — mirrors `execute.rs::build_model_plans`'s `dep_ts`
     // construction exactly (`source_timeseries` also carries this model's
@@ -963,7 +967,6 @@ fn build_derived_window(
         &inc,
         &expanded_sql,
         &dep_ts,
-        data_latency_days,
         &full_range,
         axis,
         None,

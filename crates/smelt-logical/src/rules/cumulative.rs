@@ -392,6 +392,13 @@ pub fn classify_once_write(
     let fallback_expr = (remaining == 1).then(|| &args[candidates.len()]);
 
     for (_, column) in &candidates {
+        // Route 1's argument extended to a wrapped reference: a candidate
+        // that is itself a `unique_key` column is a per-key constant by
+        // construction — no declared functional dependency is needed, and
+        // (like route 1) this consults no `PropertyVector`.
+        if crate::analysis::not_null::column_provably_not_null(unique_key, column) {
+            continue;
+        }
         // The `determines` column is the coalesced value's SOURCE payload
         // column — never the projection's output alias (see this
         // function's doc comment: `unique_key -> alias` is true by
@@ -2620,17 +2627,48 @@ GROUP BY id"#;
         ));
     }
 
-    /// The not-null route never substitutes for the required functional
-    /// dependency proof: the same not-null (`id`) payload with NO declared
-    /// FD stays `Unproven`.
+    /// Human decision (c) (`docs/outcomes/20260904-decided-gap-residue`
+    /// outcome.md Decision log): a candidate that is itself a `unique_key`
+    /// member needs no declared functional dependency at all — route 1's
+    /// argument (a `unique_key` column is a per-key constant by
+    /// construction) extended to a wrapped `MAX`/`MIN` reduction of that
+    /// same column.
     #[test]
-    fn once_write_not_null_route_still_requires_the_functional_dependency() {
+    fn once_write_key_member_candidate_admits_without_a_declared_fd() {
         let sql = r#"SELECT
     id,
     COALESCE(MAX(id), 0) AS first_id
 FROM smelt.silver.events_parsed
 GROUP BY id"#;
         let admission = once_write_admission_for(sql, &["id".to_string()], &[], "first_id");
+        assert_eq!(admission, OnceWriteAdmission::Admitted { state: None });
+    }
+
+    /// The FD-free skip lives in the candidate loop, so it covers every
+    /// route-2 spelling — including a bare single reduction with no
+    /// trailing fallback — not just the fallback-bearing one.
+    #[test]
+    fn once_write_bare_key_reduction_admits_without_a_declared_fd() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(id)) AS first_id
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let admission = once_write_admission_for(sql, &["id".to_string()], &[], "first_id");
+        assert_eq!(admission, OnceWriteAdmission::Admitted { state: None });
+    }
+
+    /// Regression guard: a candidate that is NOT a `unique_key` member
+    /// still requires its declared functional dependency — the skip is
+    /// scoped to key membership, not extended to every candidate.
+    #[test]
+    fn once_write_non_key_candidate_still_requires_the_fd() {
+        let sql = r#"SELECT
+    id,
+    COALESCE(MAX(val), 0) AS first_val
+FROM smelt.silver.events_parsed
+GROUP BY id"#;
+        let admission = once_write_admission_for(sql, &["id".to_string()], &[], "first_val");
         assert!(matches!(admission, OnceWriteAdmission::Unproven { .. }));
     }
 }

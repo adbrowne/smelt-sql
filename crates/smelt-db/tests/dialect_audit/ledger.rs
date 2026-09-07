@@ -66,6 +66,13 @@ pub struct LedgerRow {
     /// function, and a whole-entry exemption would have stopped covering the
     /// position that works.
     pub position: Option<Position>,
+    /// The `Emission::Conditional` arm this row scopes to. `None` means
+    /// every arm — the right default for a non-conditional entry, and for a
+    /// conditional one whose gap really does affect every arm alike.
+    /// Scoping matters the same way `position` does: an arm-specific
+    /// `Unsupported` must not silently exempt a sibling arm the engine
+    /// actually gets right.
+    pub arm: Option<usize>,
     /// Which leg this row exempts.
     pub leg: Leg,
     pub verdict: Verdict,
@@ -82,6 +89,7 @@ const fn gap(
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Schema,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -99,6 +107,7 @@ const fn type_gap(
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Type,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -117,6 +126,7 @@ const fn value_gap(
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Value,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -134,6 +144,7 @@ const fn gap_at(
         name,
         dialect,
         position: Some(position),
+        arm: None,
         leg: Leg::Schema,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -153,6 +164,7 @@ const fn value_gap_at(
         name,
         dialect,
         position: Some(position),
+        arm: None,
         leg: Leg::Value,
         verdict: Verdict::Gap { issue, detail },
     }
@@ -163,8 +175,18 @@ const fn divergent(name: &'static str, dialect: DialectId, reason: &'static str)
         name,
         dialect,
         position: None,
+        arm: None,
         leg: Leg::Value,
         verdict: Verdict::Divergent { reason },
+    }
+}
+
+/// Scope an existing row to one `Emission::Conditional` arm — every other
+/// field is unaffected; only the arm narrows.
+const fn arm_at(row: LedgerRow, arm: usize) -> LedgerRow {
+    LedgerRow {
+        arm: Some(arm),
+        ..row
     }
 }
 
@@ -173,25 +195,47 @@ pub fn dialect_divergences() -> &'static [LedgerRow] {
     ROWS
 }
 
-/// The row covering `(name, dialect, position)` on `leg`, if one exists.
+/// Whether `r` covers `(name, dialect, position, arm)` on `leg` — the pure
+/// predicate [`find`] applies to the real [`ROWS`], pulled out so it can be
+/// exercised against a synthetic row directly rather than requiring a real
+/// entry to carry an arm before the matching logic can be tested at all (no
+/// production entry is `Conditional` yet).
 ///
 /// A `Schema` row also exempts the type and value legs: a probe the engine
 /// refuses has neither a type nor a value to compare. The reverse is not true.
+///
+/// `arm` mirrors `position`'s own None-means-every convention: a row with no
+/// arm of its own (`r.arm == None`) exempts every arm, including a probe
+/// that names one; a row scoped to arm `k` exempts only a probe naming that
+/// same arm.
+fn row_matches(
+    r: &LedgerRow,
+    name: &str,
+    dialect: DialectId,
+    position: Position,
+    arm: Option<usize>,
+    leg: Leg,
+) -> bool {
+    r.name == name
+        && r.dialect == dialect
+        && r.position.map(|p| p == position).unwrap_or(true)
+        && r.arm.map(|a| Some(a) == arm).unwrap_or(true)
+        // A `Schema` row exempts every downstream leg: a probe the engine
+        // refuses has neither a type nor a value to compare. The reverse
+        // does not hold.
+        && (r.leg == leg || r.leg == Leg::Schema)
+}
+
+/// The row covering `(name, dialect, position, arm)` on `leg`, if one exists.
 pub fn find(
     name: &str,
     dialect: DialectId,
     position: Position,
+    arm: Option<usize>,
     leg: Leg,
 ) -> Option<&'static LedgerRow> {
-    ROWS.iter().find(|r| {
-        r.name == name
-            && r.dialect == dialect
-            && r.position.map(|p| p == position).unwrap_or(true)
-            // A `Schema` row exempts every downstream leg: a probe the engine
-            // refuses has neither a type nor a value to compare. The reverse
-            // does not hold.
-            && (r.leg == leg || r.leg == Leg::Schema)
-    })
+    ROWS.iter()
+        .find(|r| row_matches(r, name, dialect, position, arm, leg))
 }
 
 /// Every accepted `(entry, dialect)` divergence, found by sweeping the derived
@@ -203,40 +247,17 @@ pub fn find(
 /// Closing one means adding an `Emission::Rename`, an `Emission::Rewrite`, or
 /// an `Emission::Unsupported` row to the entry, and deleting its row here.
 static ROWS: &[LedgerRow] = &[
-    // The ordered-set form has no *running*-window form: `PERCENTILE_CONT(f)
-    // WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g ORDER BY rid)` is not a
-    // thing on DuckDB. Scoped to the position that still fails — the
-    // aggregate position was always covered, and a whole-partition window
-    // now restructures around a grouped CTE
-    // (`RestructureId::WindowToCte`), so only the running case remains a
-    // gap.
-    gap_at(
-        "PERCENTILE_CONT",
-        DialectId::DuckDb,
-        Position::Window,
-        "#177",
-        "DuckDB has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
-    ),
-    gap_at(
-        "PERCENTILE_DISC",
-        DialectId::DuckDb,
-        Position::Window,
-        "#177",
-        "DuckDB has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
-    ),
-    //
     // Type-leg gaps: the engine accepts the probe, but smelt's inferred output
     // type disagrees with what the engine reports. These are inference holes,
     // not emission ones — and none of them is reachable by
     // `type_property_tests`, which generates from `core_functions()`, a
     // hand-maintained registry-blind table.
-    type_gap(
-        "DATE_ADD",
-        DialectId::DuckDb,
-        "#176", "`DATE_ADD(date, INTERVAL …)` infers Unknown(Dynamic); DuckDB returns TIMESTAMP",
-    ),
+    //
+    // `DATE_ADD`/`DATE_SUB` on DuckDB: closed in
+    // `docs/outcomes/20260904-dialect-emission-vocabulary` phase 9 — both
+    // gained `SqlFunction` variants and joined `REGISTRY_MIGRATED`, so
+    // `infer_function_type` now reaches the registry's `Concrete(Timestamp)`
+    // return type, matching DuckDB's own reported type.
     type_gap(
         "EXPLODE",
         DialectId::DuckDb,
@@ -274,56 +295,24 @@ static ROWS: &[LedgerRow] = &[
     // semantics. Each is a lowering smelt owes — a `Rename` where Spark spells
     // it differently, a `Rewrite` where the shape differs, or an
     // `Unsupported` verdict where neither is possible.
-    gap("AGE", DialectId::SparkSql, "#178", "no `age`; Spark expresses interval difference as `ts1 - ts2`"),
-    gap("DATE_ADD", DialectId::SparkSql, "#176", "Spark's `date_add(date, days)` takes an integer, not an INTERVAL"),
-    gap("DATE_SUB", DialectId::SparkSql, "#178", "Spark's `date_sub(date, days)` takes an integer, not an INTERVAL"),
-    gap("GLOB", DialectId::SparkSql, "#178", "no `GLOB` operator; Spark has `LIKE` and `RLIKE`"),
-    gap("JSON_ARRAY", DialectId::SparkSql, "#178", "no `json_array`; Spark builds JSON with `to_json(array(...))`"),
-    gap("JSON_ARRAY_LENGTH", DialectId::SparkSql, "#178", "Spark's `json_array_length` wants a JSON string, not a number"),
-    gap("JSON_CONTAINS", DialectId::SparkSql, "#178", "no `json_contains` in Spark"),
-    gap("JSON_OBJECT", DialectId::SparkSql, "#178", "no `json_object`; Spark builds JSON with `to_json(named_struct(...))`"),
-    gap("JSON_OBJECT_KEYS", DialectId::SparkSql, "#178", "Spark reaches object keys through `from_json`, not a scalar function"),
-    gap("MAKE_TIME", DialectId::SparkSql, "#178", "no `make_time` in Spark"),
-    gap("MAKE_TIMESTAMPTZ", DialectId::SparkSql, "#178", "no `make_timestamptz`; Spark has `make_timestamp`"),
-    gap("QUOTE_IDENT", DialectId::SparkSql, "#178", "PostgreSQL-only builtin"),
-    gap("QUOTE_LITERAL", DialectId::SparkSql, "#178", "PostgreSQL-only builtin"),
-    gap("TO_JSON", DialectId::SparkSql, "#178", "Spark's `to_json` takes a struct or array, not a scalar"),
-    gap("TO_SECONDS", DialectId::SparkSql, "#178", "no `to_seconds` in Spark"),
-    gap("TRUNC", DialectId::SparkSql, "#178", "Spark's `trunc(date, fmt)` is temporal; there is no numeric `trunc`"),
-    gap("TRUNCATE", DialectId::SparkSql, "#178", "no `truncate` scalar in Spark"),
-    gap("GROUP_CONCAT", DialectId::SparkSql, "#178", "Spark spells it `concat_ws(sep, collect_list(x))`"),
-    value_gap("LOG", DialectId::SparkSql, "#174", "Spark's `log(x)` is the natural logarithm; DuckDB's is base 10 - a silently wrong number, closable by a rename to `log10`"),
-    value_gap("DAYOFWEEK", DialectId::SparkSql, "#174", "Spark numbers the week from Sunday=1, DuckDB from Sunday=0 - a silently wrong number, closable by a rewrite"),
-    // `MEDIAN` works as an aggregate on Spark, and a whole-partition window
-    // now restructures around a grouped CTE; only the running-window case
-    // remains a gap, so the row is scoped to that position.
-    gap_at(
-        "MEDIAN",
+    // `DATE_ADD`/`DATE_SUB` on Spark: closed in
+    // `docs/outcomes/20260904-dialect-emission-vocabulary` phase 9. Both
+    // gained `SqlFunction` variants (closing the type-leg gap `DATE_SUB`
+    // surfaced in phase 8), and both now carry a Spark
+    // `Emission::Template("CAST({0} ± {1} AS TIMESTAMP)")` verdict — the
+    // bare infix form reports DATE on Spark, not smelt's declared
+    // TIMESTAMP, and the explicit cast makes the engine agree.
+    //
+    // Value-leg divergence: same name, same shape, permanent semantic
+    // difference for a non-array JSON argument. Not a schema gap — see the
+    // `JSON_ARRAY_LENGTH` `Emission::Native` registry comment
+    // (docs/outcomes/20260904-dialect-emission-vocabulary phase 8, verified
+    // live 2026-09-06): DuckDB's `json_array_length('{"k": 1}')` = `0`;
+    // Spark's = `NULL`.
+    divergent(
+        "JSON_ARRAY_LENGTH",
         DialectId::SparkSql,
-        Position::Window,
-        "#178",
-        "Spark has `median` as an aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
-    ),
-    // Spark accepts the ordered-set `WITHIN GROUP` form as an aggregate, and
-    // a whole-partition window now restructures around a grouped CTE; only
-    // the running-window form is missing, so the row is scoped to that
-    // position.
-    gap_at(
-        "PERCENTILE_CONT",
-        DialectId::SparkSql,
-        Position::Window,
-        "#178",
-        "Spark has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
-    ),
-    gap_at(
-        "PERCENTILE_DISC",
-        DialectId::SparkSql,
-        Position::Window,
-        "#178",
-        "Spark has the ordered-set aggregate but no running-window form of it; only a \
-         window covering the whole partition can be restructured around a grouped CTE",
+        "Spark returns NULL for `json_array_length` on a non-array JSON value where DuckDB returns 0.",
     ),
     //
     // Type-leg gaps. The same two inference families DuckDB surfaces, confirmed
@@ -579,27 +568,67 @@ static ROWS: &[LedgerRow] = &[
         DialectId::SparkSql,
         "Spark returns NULL for a degenerate regression where DuckDB returns NaN.",
     ),
-    // ── DuckDB ───────────────────────────────────────────────────────────
-    // Measured against DuckDB 1.5.4 in-process.
-    gap(
-        "INITCAP",
-        DialectId::DuckDb,
-        "#177", "no `initcap` in DuckDB 1.5.4; the closest is a manual UPPER/LOWER split",
+    divergent(
+        "AGE",
+        DialectId::SparkSql,
+        "Spark renders a zero day-time interval as `0 00:00:00.000000000`; DuckDB renders it `0 secs`. Same interval, different textual representation.",
     ),
-    gap(
-        "TO_CHAR",
-        DialectId::DuckDb,
-        "#177", "no `to_char` in DuckDB; `strftime` is the temporal half of it",
+    divergent(
+        "TO_SECONDS",
+        DialectId::SparkSql,
+        "Spark renders `make_interval`'s output as `1.5 seconds`; DuckDB renders the equivalent interval `1.500000000 secs`. Same interval, different textual representation.",
     ),
-    gap("QUOTE_IDENT", DialectId::DuckDb, "#177", "PostgreSQL-only builtin"),
-    gap(
-        "QUOTE_LITERAL",
-        DialectId::DuckDb,
-        "#177", "PostgreSQL-only builtin",
-    ),
-    gap(
-        "DATE_SUB",
-        DialectId::DuckDb,
-        "#177", "no `date_sub` in DuckDB; interval subtraction is infix `-`",
+    divergent(
+        "JSON_OBJECT_KEYS",
+        DialectId::SparkSql,
+        "Spark renders a TEXT[] as JSON array syntax (`[\"k\"]`); DuckDB renders it its own array literal syntax (`[k]`). Same elements, different textual representation.",
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test 8: a row scoped to one arm does not exempt a sibling arm of the
+    /// same entry.
+    #[test]
+    fn a_ledger_row_scoped_to_an_arm_does_not_exempt_another_arm() {
+        let row = arm_at(
+            gap("TEST_ARM_LEDGER", DialectId::SparkSql, "#0", "test row"),
+            0,
+        );
+        assert!(
+            row_matches(
+                &row,
+                "TEST_ARM_LEDGER",
+                DialectId::SparkSql,
+                Position::Scalar,
+                Some(0),
+                Leg::Schema,
+            ),
+            "sanity: the row must match its own arm"
+        );
+        assert!(
+            !row_matches(
+                &row,
+                "TEST_ARM_LEDGER",
+                DialectId::SparkSql,
+                Position::Scalar,
+                Some(1),
+                Leg::Schema,
+            ),
+            "a row scoped to arm 0 must not exempt arm 1"
+        );
+        // An unscoped query (`arm: None`) does not implicitly widen a
+        // scoped row into matching every arm either — only a row with no
+        // arm of its own does that.
+        assert!(!row_matches(
+            &row,
+            "TEST_ARM_LEDGER",
+            DialectId::SparkSql,
+            Position::Scalar,
+            None,
+            Leg::Schema,
+        ));
+    }
+}

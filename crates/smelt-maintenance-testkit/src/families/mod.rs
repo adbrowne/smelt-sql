@@ -622,6 +622,8 @@ mod tests {
             key_shape: KeyShape::Single,
             posture: SourcePosture::AppendOnly,
             key_recurrence: None,
+            partition_column: None,
+            delete_flag_column: None,
         };
         let mut tracker = STracker::new(&source);
         let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
@@ -856,6 +858,8 @@ mod tests {
             key_shape: KeyShape::Single,
             posture: SourcePosture::AppendOnly,
             key_recurrence: None,
+            partition_column: None,
+            delete_flag_column: None,
         };
         let mut tracker = STracker::new(&source);
         let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");

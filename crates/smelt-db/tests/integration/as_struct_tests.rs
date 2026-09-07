@@ -133,15 +133,14 @@ fn as_struct_except_filters_columns() {
     }
 }
 
-// ─── Test 3: backend printer emits DuckDB / Spark / Postgres ──────────────────
+// ─── Test 3: backend printer emits DuckDB / Spark ─────────────────────────────
 
 #[test]
-fn as_struct_backend_printer_emits_duckdb_spark_postgres() {
+fn as_struct_backend_printer_emits_duckdb_spark() {
     // TDD test 3: `as_struct_to_sql` must emit the correct struct literal
-    // syntax for three backends:
+    // syntax for the surviving backends:
     //   DuckDB:   `{'id': t.id, 'name': t.name}`
     //   Spark:    `struct(t.id AS id, t.name AS name)`
-    //   Postgres: `ROW(t.id, t.name)` (loses field names but is valid SQL)
     use smelt_db::function_body_check::as_struct_to_sql;
     use smelt_types::DataType;
 
@@ -176,19 +175,11 @@ fn as_struct_backend_printer_emits_duckdb_spark_postgres() {
         "Spark: expected `t.name AS name`; got `{spark_sql}`"
     );
 
-    // Postgres
-    let pg_sql = as_struct_to_sql("t", &fields, "postgres").expect("postgres must succeed");
+    // The PostgreSQL emission dialect is retired (#181): "postgres" is now an
+    // unrecognised backend name and must fail, not emit SQL.
     assert!(
-        pg_sql.starts_with("ROW("),
-        "Postgres: expected `ROW(...)` form; got `{pg_sql}`"
-    );
-    assert!(
-        pg_sql.contains("t.id"),
-        "Postgres: expected `t.id` in ROW; got `{pg_sql}`"
-    );
-    assert!(
-        pg_sql.contains("t.name"),
-        "Postgres: expected `t.name` in ROW; got `{pg_sql}`"
+        as_struct_to_sql("t", &fields, "postgres").is_err(),
+        "postgres must no longer be a supported as_struct backend"
     );
 }
 

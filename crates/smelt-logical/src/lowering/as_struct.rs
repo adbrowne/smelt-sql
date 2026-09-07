@@ -13,12 +13,12 @@ use smelt_types::DataType;
 
 /// Returns `true` for backends that support struct literal syntax.
 ///
-/// Supported: `duckdb`, `spark`, `databricks`, `postgres`.
+/// Supported: `duckdb`, `spark`, `databricks`.
 /// Any other backend name returns `false`.
 pub fn backend_supports_struct_literal(backend: &str) -> bool {
     matches!(
         backend.to_ascii_lowercase().as_str(),
-        "duckdb" | "spark" | "databricks" | "postgres"
+        "duckdb" | "spark" | "databricks"
     )
 }
 
@@ -28,7 +28,6 @@ pub fn backend_supports_struct_literal(backend: &str) -> bool {
 /// Returns `Ok(sql)` for backends that support struct literals:
 ///   - DuckDB:    `{'col': alias.col, ...}`
 ///   - Spark / Databricks: `struct(alias.col AS col, ...)`
-///   - Postgres:  `ROW(alias.col, ...)` (composite type; field names inferred)
 ///
 /// Returns `Err(backend_name)` for backends without struct-literal support.
 ///
@@ -55,13 +54,6 @@ pub fn as_struct_to_sql(
                 .map(|(name, _)| format!("{alias}.{name} AS {name}"))
                 .collect();
             format!("struct({})", items.join(", "))
-        }
-        "postgres" => {
-            let items: Vec<String> = fields
-                .iter()
-                .map(|(name, _)| format!("{alias}.{name}"))
-                .collect();
-            format!("ROW({})", items.join(", "))
         }
         _ => unreachable!("backend_supports_struct_literal should have returned false"),
     };
@@ -100,13 +92,15 @@ mod tests {
     }
 
     #[test]
-    fn postgres_emits_row_constructor() {
-        let fields = vec![
-            ("id".to_string(), DataType::BigInt),
-            ("name".to_string(), DataType::Text),
-        ];
-        let sql = as_struct_to_sql("t", &fields, "postgres").unwrap();
-        assert_eq!(sql, "ROW(t.id, t.name)");
+    fn postgres_is_no_longer_a_supported_backend() {
+        // The PostgreSQL emission dialect is retired (#181): the "postgres"
+        // backend name is unreachable surface (`Target::backend_type` already
+        // rejects `type: postgres`), so it must resolve like any other
+        // unrecognised name.
+        let fields = vec![("id".to_string(), DataType::BigInt)];
+        assert!(!backend_supports_struct_literal("postgres"));
+        let err = as_struct_to_sql("t", &fields, "postgres").unwrap_err();
+        assert_eq!(err, "postgres");
     }
 
     #[test]
@@ -119,7 +113,7 @@ mod tests {
     #[test]
     fn backend_capability_check_matches_emission() {
         // Every backend name that emits SQL must report capability=true.
-        for backend in ["duckdb", "spark", "databricks", "postgres"] {
+        for backend in ["duckdb", "spark", "databricks"] {
             assert!(
                 backend_supports_struct_literal(backend),
                 "{backend} should report capability"
