@@ -111,7 +111,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 |---|-------|--------|
 | 1 | Confirm the public dataset's real schema and sharding, pin the sample as one committed query (`examples/github_activity/sample.sql`), and export it reproducibly to Parquet as the DuckDB leg's input | done |
 | 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | done |
-| 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | pending |
+| 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | planned |
 | 4 | The wider model set: re-pin `sample.sql` with `payload`, then the silver fan-out, `gold.events_enriched`, `gold.repo_activity_daily` and the remaining marts | pending |
 | 5 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | pending |
 | 6 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | planned |
@@ -326,6 +326,34 @@ exists — so the live run is a test of the *backend*, not of the models.
   Parquet fixture carries no ingestion-time column to measure real shard lag against
   offline. Harmless: lateness is orchestration-only. Revisit once a session has live
   BigQuery access (phase 7+).
+
+- 2026-09-08 (phase 3 plan): **two physical relations, one per succession posture.** The
+  arrival posture needs a loader-stamped `ingested_date`, which the event-time posture must
+  not have as its partition column; declaring two sources over the *same* relation was
+  rejected because it would key two differently-partitioned fingerprint sidecars onto one
+  table — untested, and not the thing this phase exists to test. So
+  `raw.github_events_arrival` is its own relation, same columns plus `ingested_date`, and
+  the replay driver stamps both. Note for phase 7: the live loader therefore writes two
+  tables from one scan.
+- 2026-09-08 (phase 3 plan): **the succession history is per-event, not per-rename.**
+  "Keep only the rows where the name changed" needs `LAG`, and the classifier admits exactly
+  one *row-local* pre-window filter — so `silver.repo_naming` carries one row per
+  `(repo_id, created_at)` with the name in force, and `marts.naming_history` derives the
+  actual renames downstream. Not a compromise: it is what the grammar's row-locality rule
+  forces, and it is worth having written down before someone reads the model and assumes a
+  filter was forgotten.
+- 2026-09-08 (phase 3 plan): **the fixture already contains a second fold-once population,
+  measured before planning.** Beyond the deliberate redelivery there are 139 `(repo_id,
+  created_at)` and 145 `(actor_id, created_at)` ties in the sample — real events at the same
+  second — and **none** of them disagree on the projected name. So they fold once exactly
+  like a redelivery rather than raising `SuccessionClockTie`, and the fold-once leg gets
+  free extra coverage. Had any tie disagreed, `repo_naming` would have been unbuildable
+  without a clock refinement; it does not, so no clock change is made.
+- 2026-09-08 (phase 3 plan): **no delete/tombstone leg in this pipeline.** GitHub's
+  `DeleteEvent` is a branch or tag deletion, not a repo or actor deletion, so a
+  `QUALIFY NOT <flag>` over it would assert something untrue about the entity's history.
+  The tombstone ledger stays covered by `examples/scd2_succession`; this pipeline covers the
+  rename stream and the two postures. Criterion 9 asks for neither.
 
 ## Blocked
 
