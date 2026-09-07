@@ -162,7 +162,7 @@ out-of-order and repeated windows, and the clamp.
 | 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | done |
 | 6b | Deferral frontier for succession (criterion 6 residue from phase 7d): the succession window-forward driver never writes `IntervalStore`, so `contract_probes::resolve_deferral_frontiers` always reads a `None` maintained frontier and `deferral::run_license` can never license a skip for a succession model. Record the driver's maintained arrival frontier after each successful fold (or teach the resolver a succession-aware frontier source), then re-add phase 7d's tests 6–7 as written in `phases/07d-plan.md` (the executed-skip `contract_points.rs` deferral leg) | done |
 | 6c | Append-only probe dispatch for the succession grain (criterion 7; subsumes blocked phase 6): `dispatch_and_record_append_only_postures`/`append_only_posture_probes` are called only from the ordinary `match plan.incremental` sites in `crates/smelt-runtime/src/execute/project/mod.rs`, so a succession model's declared `mutation_profile: append_only` posture is never verified at runtime and its `ModelRunRecord` hardcodes `probes: Vec::new()`. Wire the dispatch into the succession window-forward loop (persisting the refreshed `SourcePostureStore` baseline as the ordinary path does), with unit tests, then land phase 6's two conformance `probes.rs` legs on top: a late append into a closed event-time partition re-presents its covering window, and a genuine in-place mutation fails with `SourceMutationProfileViolated` (not an incidental `SuccessionClockTie`) | done |
-| 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | pending |
+| 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | planned |
 | 9 | Fixture and docs: example workspace `customer_changes`/`customer_history` with zero diagnostics; docs-site guide page and diagnostics reference | pending |
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
@@ -762,6 +762,15 @@ out-of-order and repeated windows, and the clamp.
   same granularity the ordinary `plan.incremental` path relies on, so it inherits
   that path's guarantee rather than needing its own. Recorded here rather than
   given a row. Rows 6c, 8, 9, 10 stand as written.
+- 2026-09-07 (phase 8 planning): no reshape. Two scoping calls recorded rather than
+  given rows. (a) The `keyed_succession` delta-signature headline (`cli.md`
+  §"Delta-signature headline", written by this outcome's phase 1) is rendered from the
+  plan's own succession recipe at the explain layer — no `OutputDelta::KeyedSuccession`
+  variant is added, since derived output facts for a succession model's *consumers* are
+  listed under Out of scope and a new lattice variant would propagate through composition.
+  (b) Phase 6c's suggestion to surface succession probe records in `explain` is declined:
+  the report's `probes` array is the offline declared-fact probe *plan* and is already
+  model-generic, and criterion 8 lists no probe rendering.
 
 ## Blocked
 
