@@ -171,6 +171,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         None,
         None,
         &profile,
+        None,
     )
     .expect("build_maintenance_plan_report");
 

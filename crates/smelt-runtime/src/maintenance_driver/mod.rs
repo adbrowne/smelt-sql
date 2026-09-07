@@ -46,5 +46,5 @@ pub use resolve::*;
 pub use sidecar::*;
 pub use succession::{
     build_succession_source_refs, execute_succession_maintenance, resolve_live_succession_cell,
-    SuccessionCell,
+    resolve_succession_run_axis, SuccessionAxis, SuccessionCell, SuccessionPartitioning,
 };

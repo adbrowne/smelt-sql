@@ -58,6 +58,78 @@ pub(crate) use probes::dispatch_succession_source_probes;
 #[cfg(test)]
 mod tests;
 
+/// Whether a succession model's driving source is arrival-partitioned (its
+/// declared `timeseries.partition_column` differs from `event_time_column` —
+/// the source's own arrival clock, not the event's) or event-time-partitioned
+/// (the two columns coincide, so the run axis and the event clock are the
+/// same column) — `docs/specs/incremental_shapes.md` §"Run shape and late
+/// events".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuccessionPartitioning {
+    Arrival,
+    EventTime,
+}
+
+/// The succession-patch technique's run axis: the driving source's own
+/// declared partition column, its arrival-vs-event-time classification, and
+/// its granularity — everything both [`resolve_live_succession_cell`] and
+/// `smelt explain`'s succession rendering need from the source's
+/// `timeseries:` declaration, resolved by the one shared classifier
+/// ([`resolve_succession_run_axis`]) so the bare-name source matching has a
+/// single owner.
+#[derive(Debug, Clone)]
+pub struct SuccessionAxis {
+    pub column: String,
+    pub partitioning: SuccessionPartitioning,
+    pub granularity: smelt_core::config::Granularity,
+}
+
+/// `recipe.source_table`'s bare comparison spelling (`analysis::succession::
+/// SuccessionContext::source_name`, e.g. `"sources.customer_changes"`) —
+/// strip the one `sources.` segment so it matches `SourceInfo::
+/// address_segments`'s own bare join, exactly as `resolve_live_succession_cell`
+/// and [`resolve_succession_run_axis`] both need to.
+fn find_succession_source<'a>(
+    source_table: &str,
+    source_infos: &'a [SourceInfo],
+) -> Option<&'a SourceInfo> {
+    let bare_source = source_table
+        .strip_prefix("sources.")
+        .unwrap_or(source_table);
+    source_infos.iter().find(|info| {
+        let segs = &info.address_segments;
+        let bare = match segs.split_first() {
+            Some((first, rest)) if first == "sources" => rest.join("."),
+            _ => segs.join("."),
+        };
+        bare == bare_source
+    })
+}
+
+/// Resolve a succession recipe's run axis from the driving source's own
+/// `timeseries:` declaration, or `None` when the source cannot be resolved
+/// (no matching declaration, or a declaration with no `timeseries:` block) —
+/// a pure classifier consumed by both the runtime driver (which bails loud on
+/// `None`, naming which half failed) and `smelt explain`'s succession view
+/// (which simply omits the run-axis lines).
+pub fn resolve_succession_run_axis(
+    recipe: &SuccessionRecipe,
+    source_infos: &[SourceInfo],
+) -> Option<SuccessionAxis> {
+    let info = find_succession_source(&recipe.source_table, source_infos)?;
+    let ts = info.timeseries.as_ref()?;
+    let partitioning = if ts.partition_column == ts.event_time_column {
+        SuccessionPartitioning::EventTime
+    } else {
+        SuccessionPartitioning::Arrival
+    };
+    Some(SuccessionAxis {
+        column: ts.partition_column.clone(),
+        partitioning,
+        granularity: ts.granularity,
+    })
+}
+
 /// A live succession-patch cell: the pure emitter-input recipe
 /// (`SuccessionRecipe::from_verdict`) plus the physically resolved table
 /// names and the driving source's own run axis — everything
@@ -143,21 +215,14 @@ pub fn resolve_live_succession_cell(
         .source_table
         .strip_prefix("sources.")
         .unwrap_or(&recipe.source_table);
-    let Some(info) = source_infos.iter().find(|info| {
-        let segs = &info.address_segments;
-        let bare = match segs.split_first() {
-            Some((first, rest)) if first == "sources" => rest.join("."),
-            _ => segs.join("."),
-        };
-        bare == bare_source
-    }) else {
+    let Some(info) = find_succession_source(&recipe.source_table, source_infos) else {
         bail!(
             "succession-patch cell for model '{table}' names driving source '{bare_source}', \
              but no matching source declaration was found — the physical source table cannot be \
              resolved"
         );
     };
-    let Some(ts) = info.timeseries.as_ref() else {
+    let Some(axis) = resolve_succession_run_axis(&recipe, source_infos) else {
         bail!(
             "succession-patch cell for model '{table}' drives off source '{bare_source}', but \
              that source declares no `timeseries:` block — the window-forward driver cannot \
@@ -171,8 +236,8 @@ pub fn resolve_live_succession_cell(
         recipe,
         presented_table,
         source_table,
-        partition_column: ts.partition_column.clone(),
-        granularity: ts.granularity,
+        partition_column: axis.column,
+        granularity: axis.granularity,
     }))
 }
 

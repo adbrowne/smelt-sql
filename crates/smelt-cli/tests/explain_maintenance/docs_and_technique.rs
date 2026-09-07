@@ -125,6 +125,7 @@ fn text_report_technique_matches_the_profile_technique() {
         None,
         None,
         &profile,
+        None,
     )
     .expect("build_maintenance_plan_report");
 

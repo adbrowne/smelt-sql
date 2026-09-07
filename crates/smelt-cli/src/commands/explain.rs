@@ -601,6 +601,14 @@ async fn explain_maintenance_plan(
     )
     .with_context(|| format!("Failed to build property profile for `{}`", canonical))?;
 
+    let succession_view = result.succession_recipe.as_ref().map(|recipe| {
+        smelt_cli::explain::build_succession_explain_view(
+            recipe,
+            &source_infos,
+            &model.db_name_owned(),
+        )
+    });
+
     let report = build_maintenance_plan_report(
         &canonical,
         &result,
@@ -616,6 +624,7 @@ async fn explain_maintenance_plan(
         pending_definition_delta.as_ref(),
         own_output_delta.as_ref(),
         &profile,
+        succession_view.as_ref(),
     )
     .with_context(|| {
         format!(
@@ -817,6 +826,7 @@ async fn explain_maintenance_plan(
             pending_definition_delta.as_ref(),
             own_output_delta.as_ref(),
             result.plan.key_locality.as_ref(),
+            succession_view.as_ref(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

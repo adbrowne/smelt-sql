@@ -1,5 +1,14 @@
 # Large-file ratchet baseline
-# Updated: 2026-09-07
+# Updated: 2026-09-07 — bumped crates/smelt-cli/src/{commands/explain.rs,
+# explain.rs} for the succession-grain `smelt explain` rendering (phase 8,
+# docs/outcomes/20260906-scd2-keyed-succession); the succession-specific
+# struct/render/JSON logic was already split into a new
+# crates/smelt-cli/src/explain/succession.rs (200 lines, under the tracked
+# threshold), and the residual growth in the two report-builder entry points
+# is thin single-owner wiring (a plan-derived `SuccessionExplainView`
+# threaded through `delta_signature_headline`/`build_maintenance_plan_report`/
+# `build_maintenance_plan_json`) that would fragment those functions'
+# single ownership if pushed out further.
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -9,8 +18,8 @@
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
 crates/smelt-backend-duckdb/src/lib.rs 1902
-crates/smelt-cli/src/commands/explain.rs 1153
-crates/smelt-cli/src/explain.rs 2475
+crates/smelt-cli/src/commands/explain.rs 1163
+crates/smelt-cli/src/explain.rs 2519
 crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1439
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194

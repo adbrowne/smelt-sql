@@ -12,6 +12,28 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::succession::{SuccessionAdvisory, SuccessionVerdict};
 
+/// The succession grain's fixed execution postures — never derived per model,
+/// since every succession cell shares the same run shape by construction of
+/// the grain itself (`docs/specs/incremental_shapes.md` §"The succession
+/// grain" item 5: "The run shape is window-forward only; the grain is
+/// re-run tolerant, order-independent, and serial; reprocessing is
+/// admitted."). `smelt explain` reads this constant rather than restating
+/// the spec's own words (`CLAUDE.md` §"Maintenance-plan purity").
+pub const SUCCESSION_POSTURES: SuccessionPostures = SuccessionPostures {
+    rerun_tolerant: true,
+    order_independent: true,
+    concurrent: false,
+};
+
+/// The succession grain's fixed posture triple, as `smelt explain` and the
+/// `--json` `succession` object both render it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuccessionPostures {
+    pub rerun_tolerant: bool,
+    pub order_independent: bool,
+    pub concurrent: bool,
+}
+
 use super::{
     succession_refused_plan, Corner, Grain, MaintenancePlan, OutputSpec, PartitionLocal, PlanCell,
     RowIdentity, RowIdentityVerdict, Technique, Trigger,

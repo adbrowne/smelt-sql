@@ -100,6 +100,7 @@ fn report_for_with_overrides(
         None,
         None,
         &profile,
+        None,
     )
 }
 

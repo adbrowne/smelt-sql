@@ -145,6 +145,14 @@ pub(crate) fn build_report_for(project_dir: &Path, model_name: &str) -> Option<S
     )
     .expect("build_model_profile");
 
+    let succession_view = result.succession_recipe.as_ref().map(|recipe| {
+        smelt_cli::explain::build_succession_explain_view(
+            recipe,
+            &source_infos,
+            &model.db_name_owned(),
+        )
+    });
+
     Some(
         build_maintenance_plan_report(
             &canonical,
@@ -161,6 +169,7 @@ pub(crate) fn build_report_for(project_dir: &Path, model_name: &str) -> Option<S
             None,
             None,
             &profile,
+            succession_view.as_ref(),
         )
         .expect("build_maintenance_plan_report"),
     )

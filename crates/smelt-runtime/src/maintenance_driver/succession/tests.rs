@@ -20,7 +20,7 @@ use smelt_types::DataType;
 
 use super::{
     execute_succession_maintenance, rebuild_succession_state, resolve_live_succession_cell,
-    SuccessionCell,
+    resolve_succession_run_axis, SuccessionCell, SuccessionPartitioning,
 };
 use crate::maintenance_driver::driving_steps;
 
@@ -919,4 +919,43 @@ fn state_downgraded_cell_is_not_dispatched() {
     assert_eq!(live.recipe.clock_col, "changed_at");
     assert_eq!(live.source_table, "main.sources_customer_changes");
     assert_eq!(live.partition_column, "changed_at");
+}
+
+fn succession_source_info_arrival() -> SourceInfo {
+    let mut info = succession_source_info();
+    info.timeseries = Some(TimeseriesConfig {
+        event_time_column: "changed_at".to_string(),
+        partition_column: "arrival_date".to_string(),
+        granularity: Granularity::Day,
+        week_start: None,
+        assert_monotonic: false,
+    });
+    info
+}
+
+/// Test 13: `run_axis_classifies_arrival_vs_event_time_partitioning` — the
+/// shared axis-resolution helper classifies a source whose
+/// `partition_column` differs from `event_time_column` as `Arrival`, one
+/// where they coincide as `EventTime`, and returns `None` when the recipe's
+/// driving source cannot be resolved at all.
+#[test]
+fn run_axis_classifies_arrival_vs_event_time_partitioning() {
+    let arrival_axis =
+        resolve_succession_run_axis(&recipe(true), &[succession_source_info_arrival()])
+            .expect("arrival-partitioned source resolves");
+    assert_eq!(arrival_axis.column, "arrival_date");
+    assert_eq!(arrival_axis.partitioning, SuccessionPartitioning::Arrival);
+
+    let event_time_axis = resolve_succession_run_axis(&recipe(true), &[succession_source_info()])
+        .expect("event-time-partitioned source resolves");
+    assert_eq!(event_time_axis.column, "changed_at");
+    assert_eq!(
+        event_time_axis.partitioning,
+        SuccessionPartitioning::EventTime
+    );
+
+    assert!(
+        resolve_succession_run_axis(&recipe(true), &[]).is_none(),
+        "an unresolvable driving source must classify as None, not panic or fabricate an axis"
+    );
 }

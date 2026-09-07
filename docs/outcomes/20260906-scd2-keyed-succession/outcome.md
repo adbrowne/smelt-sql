@@ -162,11 +162,25 @@ out-of-order and repeated windows, and the clamp.
 | 6a | Rebuild wiring: thread a rebuild signal through `ExecuteRequest` so `smelt rebuild <model> --event-time-start/-end` takes the succession full-ledger rebuild path (today only `--full-refresh` does), completing criterion 5's rebuild clause and making `incremental_shapes.md`'s Lifecycle paragraph true of the CLI surface | done |
 | 6b | Deferral frontier for succession (criterion 6 residue from phase 7d): the succession window-forward driver never writes `IntervalStore`, so `contract_probes::resolve_deferral_frontiers` always reads a `None` maintained frontier and `deferral::run_license` can never license a skip for a succession model. Record the driver's maintained arrival frontier after each successful fold (or teach the resolver a succession-aware frontier source), then re-add phase 7d's tests 6–7 as written in `phases/07d-plan.md` (the executed-skip `contract_points.rs` deferral leg) | done |
 | 6c | Append-only probe dispatch for the succession grain (criterion 7; subsumes blocked phase 6): `dispatch_and_record_append_only_postures`/`append_only_posture_probes` are called only from the ordinary `match plan.incremental` sites in `crates/smelt-runtime/src/execute/project/mod.rs`, so a succession model's declared `mutation_profile: append_only` posture is never verified at runtime and its `ModelRunRecord` hardcodes `probes: Vec::new()`. Wire the dispatch into the succession window-forward loop (persisting the refreshed `SourcePostureStore` baseline as the ordinary path does), with unit tests, then land phase 6's two conformance `probes.rs` legs on top: a late append into a closed event-time partition re-presents its covering window, and a genuine in-place mutation fails with `SourceMutationProfileViolated` (not an incidental `SuccessionClockTie`) | done |
-| 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | planned |
+| 8 | Explain surface: grain, identity, run axis vs clock and partitioning posture, execution postures, ledger as internal state, text + `--json`; explain tests | done |
 | 9 | Fixture and docs: example workspace `customer_changes`/`customer_history` with zero diagnostics; docs-site guide page and diagnostics reference | pending |
 | 10 | Validate and close: divergences rewritten across the six specs, `/smelt:validate` clean, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-07 (implement phase 8): `smelt explain` renders the succession grain's eight lines
+  (text) and `succession` object (`--json`) from a new `SuccessionExplainView`
+  (`crates/smelt-cli/src/explain/succession.rs`, split into its own module to bound
+  `explain.rs`'s growth), built from the plan's `SuccessionRecipe` plus a new shared
+  `resolve_succession_run_axis` classifier in `smelt-runtime`. The headline's `; grain: …`
+  clause is correctly absent for a succession model declaring no `timeseries:`/`unique_key:`
+  of its own (recognised, not declared) — `derived_grain` is `None` in that common case; this
+  is not a bug. `lead_columns`/`lag_columns` are always serialized (even empty), unlike
+  `pre_window_filter`/`delete_flag`, which the spec explicitly calls out as omittable.
+  Residual thin wiring in `explain.rs`/`commands/explain.rs` pushed both past their large-file
+  baselines by 44/10 lines; baseline bumped with a sign-off note (further splitting would
+  fragment `delta_signature_headline`/`build_maintenance_plan_report`/
+  `build_maintenance_plan_json`'s single ownership).
 
 - 2026-09-07 (implement phase 6c): the append-only posture probe dispatch is lifted verbatim
   into a new `dispatch_succession_source_probes` (`crates/smelt-runtime/src/

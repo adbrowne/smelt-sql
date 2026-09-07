@@ -107,6 +107,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         None,
         None,
         &__profile,
+        None,
     )
     .expect("build_maintenance_plan_report");
 
@@ -241,6 +242,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         None,
         None,
         &__profile,
+        None,
     )
     .expect("build_maintenance_plan_report");
 

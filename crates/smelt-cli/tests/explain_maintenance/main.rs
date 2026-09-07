@@ -17,3 +17,4 @@ mod refusals;
 mod repair;
 mod state_downgrade;
 mod state_section;
+mod succession;

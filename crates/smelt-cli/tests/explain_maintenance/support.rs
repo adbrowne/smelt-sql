@@ -130,6 +130,18 @@ pub(crate) fn build_report_for(project_dir: &Path, model_name: &str) -> Option<S
     )
     .expect("build_model_profile");
 
+    // Mirrors `commands::explain::explain_maintenance_plan`'s own succession
+    // view construction (`docs/outcomes/20260906-scd2-keyed-succession/
+    // phases/08-plan.md`), so a succession-grain model exercises the real
+    // production wiring rather than a stubbed `None`.
+    let succession_view = result.succession_recipe.as_ref().map(|recipe| {
+        smelt_cli::explain::build_succession_explain_view(
+            recipe,
+            &source_infos,
+            &model.db_name_owned(),
+        )
+    });
+
     Some(
         build_maintenance_plan_report(
             &canonical,
@@ -146,6 +158,7 @@ pub(crate) fn build_report_for(project_dir: &Path, model_name: &str) -> Option<S
             None,
             own_output_delta.as_ref(),
             &profile,
+            succession_view.as_ref(),
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -275,3 +288,100 @@ pub(crate) const STATE_COLUMNS_EVENTS_SOURCE: &str = "description: events\n\
     - name: device_id\n  type: INTEGER\n\
     - name: event_date\n  type: DATE\n\
     - name: amount\n  type: DOUBLE\n";
+
+/// Stage a keyed-succession project (`docs/specs/incremental_shapes.md`
+/// §"The succession grain"): an arrival-partitioned `customer_changes`
+/// source (`ingested_date` distinct from the `effective_ts` clock) and a
+/// `customer_history` model recognised as the succession grain — no
+/// declared `grain:`, the grain is recognised, not declared — plus a
+/// sibling `customer_counts` keyed-upsert model over the same source
+/// proving no succession-line leakage (phase 8 test 8). Modelled on
+/// [`stage_delta_type_project`].
+pub(crate) fn stage_succession_project(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    stage_succession_project_inner(tmp, false, false)
+}
+
+/// The same project with a `WHERE effective_ts >= DATE '2026-01-01'`
+/// pre-window filter on `customer_history` (phase 8 test 5's clamped case).
+pub(crate) fn stage_succession_project_clamped(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    stage_succession_project_inner(tmp, true, false)
+}
+
+/// The same project with the driving source's `partition_column` set equal
+/// to its `event_time_column` — event-time-partitioned rather than
+/// arrival-partitioned (phase 8 test 3).
+pub(crate) fn stage_succession_project_event_time_partitioned(
+    tmp: &tempfile::TempDir,
+) -> std::path::PathBuf {
+    stage_succession_project_inner(tmp, false, true)
+}
+
+fn stage_succession_project_inner(
+    tmp: &tempfile::TempDir,
+    clamped: bool,
+    event_time_partitioned: bool,
+) -> std::path::PathBuf {
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(project_dir.join("models/sources")).expect("create dirs");
+
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        "name: succession_fixture\n\
+         version: 1\n\
+         paths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    )
+    .expect("write smelt.yml");
+
+    let partition_column = if event_time_partitioned {
+        "effective_ts"
+    } else {
+        "ingested_date"
+    };
+    let mut columns = "- name: customer_id\n  type: INTEGER\n\
+                        - name: effective_ts\n  type: TIMESTAMP\n\
+                        - name: region\n  type: VARCHAR\n"
+        .to_string();
+    if !event_time_partitioned {
+        columns.push_str("- name: ingested_date\n  type: DATE\n");
+    }
+    std::fs::write(
+        project_dir.join("models/sources/customer_changes.yml"),
+        format!(
+            "description: customer change-event stream.\n\
+             mutation_profile: append_only\n\
+             timeseries:\n  event_time_column: effective_ts\n  partition_column: \
+             {partition_column}\n  granularity: day\n\
+             columns:\n{columns}"
+        ),
+    )
+    .expect("write customer_changes.yml");
+
+    let clamp = if clamped {
+        " WHERE effective_ts >= DATE '2026-01-01'"
+    } else {
+        ""
+    };
+    std::fs::write(
+        project_dir.join("models/customer_history.sql"),
+        format!(
+            "---\nrefresh: incremental\n---\nSELECT customer_id, effective_ts, region, \
+             LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS \
+             valid_to\nFROM smelt.sources.customer_changes{clamp}\n"
+        ),
+    )
+    .expect("write customer_history.sql");
+
+    // A sibling keyed-upsert model over the same source, proving the
+    // succession lines never leak onto a non-succession cell (test 8).
+    std::fs::write(
+        project_dir.join("models/customer_counts.sql"),
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT customer_id, COUNT(*) AS n\nFROM smelt.sources.customer_changes\nGROUP BY \
+         customer_id\n",
+    )
+    .expect("write customer_counts.sql");
+
+    project_dir
+}
