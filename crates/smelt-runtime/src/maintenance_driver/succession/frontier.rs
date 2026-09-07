@@ -65,13 +65,18 @@ pub(crate) async fn record_succession_frontiers(
 
 /// The succession dispatch's `ModelRunRecord` constructor — moved out of
 /// `execute/project/mod.rs` (at its large-file baseline) to pay for the
-/// [`record_succession_frontiers`] call site added there.
+/// [`record_succession_frontiers`] call site added there. `probes` is the
+/// run's own accumulated append-only posture dispatch, from
+/// [`super::dispatch_succession_source_probes`] — no longer hardcoded empty
+/// (`docs/outcomes/20260906-scd2-keyed-succession/phases/06c-plan.md`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_succession_run_record(
     strategy: &str,
     time_range: Option<TimeRangeRecord>,
     row_count: usize,
     duration_ms: u64,
     definition_hash: String,
+    probes: Vec<smelt_state::ProbeRecord>,
 ) -> ModelRunRecord {
     ModelRunRecord {
         strategy: strategy.to_string(),
@@ -84,7 +89,7 @@ pub(crate) fn build_succession_run_record(
         definition_hash,
         error: None,
         retry_count: 0,
-        probes: Vec::new(),
+        probes,
         subsumed: None,
         deferred_cells: Vec::new(),
     }

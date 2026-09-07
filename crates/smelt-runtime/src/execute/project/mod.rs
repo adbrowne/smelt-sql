@@ -2280,31 +2280,10 @@ pub async fn execute_project(
             }));
         }
 
-        // ── Succession-patch dispatch (`docs/outcomes/
-        // 20260906-scd2-keyed-succession/phases/05b-plan.md`) ───────────────
-        // A `refresh: incremental` model with no declared/derivable grain
-        // (`metadata.resolved_grain() == None`) is the keyed-succession
-        // grain's own undeclared-admission shape (`docs/specs/
-        // incremental_shapes.md` §"The succession grain") — dispatched here,
-        // before the ordinary `plan.incremental` match, since it carries no
-        // `Grain::Key`/`Grain::Partition` plan at all.
-        // `resolve_live_succession_cell` itself refuses (`Ok(None)`) for a
-        // non-incremental model, a `NotSuccession` classifier verdict, or a
-        // state-downgraded cell (technique no longer `SuccessionPatch`), so
-        // this guard only needs the grain check.
-        //
-        // Below, `request.full_refresh || force_full_refresh || request.rebuild`
-        // takes the full-ledger `rebuild_succession_state` path (phase 5c,
-        // widened in phase 6a); every other run takes the ordinary
-        // window-forward patch loop. `request.rebuild` is set only by
-        // `smelt rebuild` (`crates/smelt-cli/src/commands/rebuild.rs`); per
-        // `docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
-        // state)" — "Lifecycle", a succession model has no run-axis column to
-        // restrict a rebuild by, so `smelt rebuild`'s `--event-time-start/-end`
-        // range selects which models rebuild, never how much of one model's
-        // state is re-derived: both the presented table and the ledger are
-        // always re-derived from the whole source, exactly as `--full-refresh`
-        // does.
+        // ── Succession-patch dispatch — see
+        // `crate::maintenance_driver::succession`'s module docs for why this
+        // dispatches before the ordinary `plan.incremental` match, and what
+        // the full-refresh/rebuild vs. window-forward split below means.
         if let Some(metadata) = plan
             .model_file
             .metadata
@@ -2343,6 +2322,24 @@ pub async fn execute_project(
                     .unwrap_or_default();
                 let succession_retry_policy =
                     RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+
+                // Pre-write append-only posture probe, covering both arms
+                // below (`crate::maintenance_driver::succession` module docs).
+                let succession_probe_records =
+                    crate::maintenance_driver::succession::dispatch_succession_source_probes(
+                        backend,
+                        &probe_policy_for_model(config, prior_runs, &plan.name),
+                        file_store,
+                        state_io_lock,
+                        &plan.name,
+                        &format!("{}.{} succession fold", schema, db_table_name),
+                        &plan.model_file,
+                        source_infos,
+                        model_target,
+                        schema,
+                        smelt_backend::maintenance_dialect(backend.dialect()),
+                    )
+                    .await?;
 
                 // `--full-refresh`/a schema-evolution-forced full refresh
                 // (phase 5c, `docs/outcomes/20260906-scd2-keyed-succession/
@@ -2433,6 +2430,7 @@ pub async fn execute_project(
                         succession_result.row_count,
                         model_start.elapsed().as_millis() as u64,
                         compute_model_hash(&plan.sql),
+                        succession_probe_records,
                     ),
                 );
                 reporter.model_completed(

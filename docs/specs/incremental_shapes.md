@@ -1232,7 +1232,11 @@ grain"). The driving source must declare `mutation_profile.kind: append_only`
 into the event sequence, and a source that can rewrite or retract an already-folded event
 would leave the stored sequence disagreeing with the oracle. The declaration is paired with
 its usual verification mechanism, the append-only posture probe (`sources.md` §Semantics,
-`SourceMutationProfileViolated`).
+`SourceMutationProfileViolated`): a succession run dispatches that probe before its fold, on
+the same terms as every other maintained grain, so a late append into a closed partition is an
+observation whose covering window is re-presented, while an in-place mutation of a closed
+partition fails the run with `SourceMutationProfileViolated` before either the presented table
+or the ledger is touched.
 
 **Two axes, deliberately distinct.** The **run axis** is the source's `partition_column` —
 what a window covers and what the driver steps. The **succession clock** is the `ORDER BY`

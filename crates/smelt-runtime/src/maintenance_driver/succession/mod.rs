@@ -7,6 +7,34 @@
 //! needs a pre-write clock-tie probe, a two-statement transactional patch
 //! group, and a second (tombstone) table's own DDL. `mod.rs` (this file) is
 //! live-cell resolution; `execute.rs` is the step loop.
+//!
+//! ## Dispatch site (`crate::execute::project`)
+//!
+//! A `refresh: incremental` model with no declared/derivable grain
+//! (`metadata.resolved_grain() == None`) is the keyed-succession grain's own
+//! undeclared-admission shape (`docs/specs/incremental_shapes.md` §"The
+//! succession grain") — dispatched before the ordinary `plan.incremental`
+//! match, since it carries no `Grain::Key`/`Grain::Partition` plan at all.
+//! [`resolve_live_succession_cell`] itself refuses (`Ok(None)`) for a
+//! non-incremental model, a `NotSuccession` classifier verdict, or a
+//! state-downgraded cell (technique no longer `SuccessionPatch`), so the
+//! dispatch site's guard only needs the grain check.
+//!
+//! `request.full_refresh || force_full_refresh || request.rebuild` takes the
+//! full-ledger [`rebuild_succession_state`] path (`docs/outcomes/
+//! 20260906-scd2-keyed-succession/phases/05c-plan.md`, widened in phase 6a);
+//! every other run takes the ordinary window-forward patch loop
+//! ([`execute_succession_maintenance`]). `request.rebuild` is set only by
+//! `smelt rebuild` (`crates/smelt-cli/src/commands/rebuild.rs`); per
+//! `docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+//! state)" — "Lifecycle", a succession model has no run-axis column to
+//! restrict a rebuild by, so `smelt rebuild`'s `--event-time-start/-end`
+//! range selects which models rebuild, never how much of one model's state
+//! is re-derived: both the presented table and the ledger are always
+//! re-derived from the whole source, exactly as `--full-refresh` does.
+//! [`dispatch_succession_source_probes`] runs before this split, so both
+//! arms verify the source's append-only posture before writing
+//! (`docs/outcomes/20260906-scd2-keyed-succession/phases/06c-plan.md`).
 
 use std::collections::HashSet;
 
@@ -23,6 +51,9 @@ pub use execute::{execute_succession_maintenance, rebuild_succession_state};
 
 mod frontier;
 pub(crate) use frontier::{build_succession_run_record, record_succession_frontiers};
+
+mod probes;
+pub(crate) use probes::dispatch_succession_source_probes;
 
 #[cfg(test)]
 mod tests;

@@ -159,6 +159,46 @@ pub fn insert_row_succession_for(
     Ok(())
 }
 
+/// Mutate a staged driving-source row's payload IN PLACE — an `UPDATE`
+/// naming `key`/`event_time` exactly (never a range), so the row count for
+/// its partition is unchanged and only its content fingerprint moves. Pairs
+/// with the append-only posture probe's fingerprint leg
+/// (`crate::gate_succession`'s sibling `crates/smelt-runtime/tests/
+/// succession_probes.rs`, `docs/outcomes/20260906-scd2-keyed-succession/
+/// phases/06c-plan.md`): applied to a row in an already-baselined (closed)
+/// partition, the next run must fail loud with
+/// `SourceMutationProfileViolated` rather than silently accepting the
+/// mutation as a legitimate append.
+pub fn mutate_row_payload_in_place_succession(
+    project: &LinkCProject,
+    recipe: &SuccessionRecipe,
+    key: i64,
+    event_time: NaiveDateTime,
+    new_payload: &str,
+) -> Result<()> {
+    let src = &recipe.source;
+    let conn = project.connect()?;
+    let updated = conn.execute(
+        &format!(
+            "UPDATE main.sources_{name} SET {payload_col} = '{new_payload}' WHERE {key_col} = \
+             {key} AND {clock_col} = TIMESTAMP '{event_time}'",
+            name = src.name,
+            payload_col = src.payload_column,
+            key_col = src.key_column,
+            clock_col = src.clock_column,
+            event_time = event_time.format("%Y-%m-%d %H:%M:%S"),
+        ),
+        [],
+    )?;
+    if updated != 1 {
+        anyhow::bail!(
+            "mutate_row_payload_in_place_succession: expected to update exactly one row for \
+             key {key} at {event_time}, updated {updated}"
+        );
+    }
+    Ok(())
+}
+
 /// The end-state equivalence assertion for a [`SuccessionRecipe`]: the
 /// maintained table's full contents equal the model's own SQL evaluated over
 /// the CURRENT physical source table (`render::render_succession_oracle_body_over`) —
@@ -530,5 +570,62 @@ mod tests {
             )
             .expect("read back is_deleted");
         assert!(is_deleted, "the deleted row's is_deleted flag must persist");
+    }
+
+    /// `mutate_row_payload_in_place_succession_changes_content_not_count`
+    /// (phase 6c task 6): the helper updates exactly the named row's
+    /// payload, leaving the source table's total row count unchanged — the
+    /// fingerprint-only mutation the append-only posture probe's
+    /// closed-partition leg must catch.
+    #[tokio::test]
+    async fn mutate_row_payload_in_place_succession_changes_content_not_count() {
+        let recipe = SuccessionRecipe::new_lead();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_succession_recipe_for(&recipe, &tmp, ConformanceTarget::DuckDb)
+            .expect("stage succession recipe");
+        let event_time = NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap();
+        insert_row_succession_for(
+            &project,
+            &recipe,
+            &SuccessionEventRow::new(1, event_time, "gold"),
+        )
+        .expect("insert row");
+
+        let conn = project.connect().expect("connect");
+        let count_before: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM main.sources_{}", recipe.source.name),
+                [],
+                |r| r.get(0),
+            )
+            .expect("count before");
+
+        mutate_row_payload_in_place_succession(&project, &recipe, 1, event_time, "platinum")
+            .expect("mutate in place");
+
+        let count_after: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM main.sources_{}", recipe.source.name),
+                [],
+                |r| r.get(0),
+            )
+            .expect("count after");
+        assert_eq!(count_before, count_after, "row count must not change");
+
+        let after_conn = project.connect().expect("reconnect");
+        let payload: String = after_conn
+            .query_row(
+                &format!(
+                    "SELECT tier FROM main.sources_{} WHERE customer_id = 1",
+                    recipe.source.name
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .expect("read back tier");
+        assert_eq!(payload, "platinum");
     }
 }
