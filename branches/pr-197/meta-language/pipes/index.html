@@ -1471,6 +1471,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/scd2-succession/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCD2 Succession
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
@@ -2881,6 +2909,7 @@
 </ul>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <hr />
+<p><a id="piperhsnotcall"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">PipeRhsNotCall</p>
 <p><strong>When it fires:</strong> The right-hand side of <code>|&gt;</code> is not a function call expression.</p>
@@ -2893,6 +2922,7 @@
 <p><strong>What to fix:</strong> The right-hand side of <code>|&gt;</code> must be a call: <code>f(args)</code>, <code>map(fn x =&gt; ...)</code>, <code>smelt.my_fn(args)</code>, etc. If you mean to pass the left-hand value as the only argument, write <code>f(left)</code> without pipe, or add empty parentheses: <code>f()</code> with <code>LHS |&gt; f()</code>.</p>
 </div>
 <hr />
+<p><a id="pipeindataposition"></a></p>
 <div class="admonition warning">
 <p class="admonition-title">PipeInDataPosition</p>
 <p><strong>When it fires:</strong> A pipe expression (<code>LHS |&gt; f(...)</code>) appears in a Data-World grammar position — for example, inside a <code>WHERE</code> predicate or as the right-hand side of a SQL binary operator.</p>
