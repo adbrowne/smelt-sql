@@ -2,9 +2,9 @@
 
 **Created:** 2026-09-06
 **Status:** in progress
-**Driver:** split. Phases 2–4, 6 and 8 are loop-grindable (no warehouse, no credentials)
+**Driver:** split. Phases 2–4, 6, 8 and 9 are loop-grindable (no warehouse, no credentials)
 and this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
-BigQuery token for one fixture regeneration (see "## Blocked"); phases 7 and 9–14 are
+BigQuery token for one fixture regeneration (see "## Blocked"); phases 7 and 10–15 are
 **human-gated** — they provision cloud resources and run live BigQuery, which a headless
 loop cannot do, so those phases must emit `<<PHASE_BLOCKED>>` rather than attempt it.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
@@ -118,14 +118,29 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | blocked |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
-| 9 | Build the loader in the dogfood project: `sample.sql` and the redelivery rule reproduced verbatim into `raw.github_events`, day-partitioned, day-range-bounded, N-day trimmed; measure and record cost per run | pending |
-| 10 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
-| 11 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
-| 12 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
-| 13 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
-| 14 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
+| 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | planned |
+| 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | pending |
+| 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
+| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
+| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
+| 15 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 9 plan): **reshape — the loader phase is split into an authoring half
+  the loop can do and a deploy half it cannot; old 10–14 become 11–15.** As written, phase 9
+  bundled "reproduce `sample.sql` verbatim" (pure text/SQL authoring, no cloud) with "land it
+  in the dogfood dataset and measure cost per run" (needs the project phase 7 is blocked on —
+  re-checked this iteration: `gcloud` reports "No credentialed accounts", so nothing has been
+  provisioned). Blocking the whole thing would strand the verbatim-reproduction work that
+  criterion 3 — and through it criterion 6's comparability — actually turns on, and would
+  leave the human's deploy step improvising the query at the console. New phase 9 makes
+  "verbatim" mechanical rather than aspirational: the loader *derives* its SQL from
+  `sample.sql` and a per-PR test asserts the projection and `MOD(repo.id, 1000)` filter come
+  through byte-identical, with only the `_TABLE_SUFFIX` range parameterised. Nothing left the
+  outcome — new phase 10 carries the deploy, the retention check and the cost measurement,
+  and stays human-gated.
 
 - 2026-09-08 (phase 8 implement): **criterion 7's DuckDB half is settled — the phase 6
   "self-heals" claim was wrong, and two more previously-unknown divergences surfaced.**
