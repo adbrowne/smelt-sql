@@ -82,9 +82,16 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | done |
 | 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | done |
 | 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | done |
-| 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
+| 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | planned |
 
 ## Decision log
+
+- 2026-09-09 (phase 11 planning): **no reshape.** Row 11 is the last row and every success
+  criterion has a named evidence site at HEAD, so nothing serving the criteria is left
+  unrowed. Scoping note: the close-out is an *audit against the code*, not against the phase
+  summaries — a criterion whose claimed evidence does not actually assert what the criterion
+  says gets its test written here, and only a gap needing new production behaviour turns the
+  outcome `blocked`.
 
 - 2026-09-09 (phase 10 implementation): shipped the `Retention:` text section and `--json`
   `retention` array; the rendering logic lives in a new `crates/smelt-cli/src/explain/
