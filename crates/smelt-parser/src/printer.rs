@@ -254,10 +254,10 @@ impl Display for SelectItem {
                 if let Some(as_pos) = text.to_uppercase().find(" AS ") {
                     write!(f, "{}", text[..as_pos].trim())?;
                 } else {
-                    write!(f, "{}", text.trim())?;
+                    write!(f, "{}", crate::ast::trim_source_text(self.syntax()))?;
                 }
             } else {
-                write!(f, "{}", text.trim())?;
+                write!(f, "{}", crate::ast::trim_source_text(self.syntax()))?;
             }
         }
 
@@ -1152,5 +1152,19 @@ mod tests {
     #[test]
     fn test_except_all_round_trip() {
         assert_round_trip("SELECT id FROM a EXCEPT ALL SELECT id FROM b");
+    }
+
+    // Regression test for a `round_trip` fuzz crash: a SELECT item ending in
+    // an unterminated `--` line comment must keep the newline that
+    // terminates it when printed, or the following clause keyword gets
+    // silently swallowed into the comment on re-parse.
+    #[test]
+    fn test_select_item_trailing_line_comment_before_having_round_trip() {
+        assert_round_trip("SELECT x --comment\nHAVING y > 1");
+    }
+
+    #[test]
+    fn test_select_star_trailing_line_comment_before_from_round_trip() {
+        assert_round_trip("SELECT * --comment\nFROM t");
     }
 }
