@@ -4,9 +4,10 @@
 **Status:** in progress
 **Driver:** split. Phases 2–4, 6, 8 and 9 are loop-grindable (no warehouse, no credentials)
 and this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
-BigQuery token for one fixture regeneration (see "## Blocked"); phases 7 and 10–15 are
+BigQuery token for one fixture regeneration (see "## Blocked"); phases 7, 10–14 and 16 are
 **human-gated** — they provision cloud resources and run live BigQuery, which a headless
 loop cannot do, so those phases must emit `<<PHASE_BLOCKED>>` rather than attempt it.
+Phase 15 banks the DuckDB half of the evidence and is loop-grindable.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/multi_backend.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/smelt_yml.md`; `docs/specs/run_state.md`; `docs/specs/state.md`
 
@@ -119,14 +120,31 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
-| 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | pending |
-| 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
-| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
-| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
-| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
-| 15 | Bank the evidence: the findings handoff, the punch-list handed to `bigquery-correctness`, and the requirements handed to the two feature outcomes | pending |
+| 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | blocked |
+| 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | blocked |
+| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | blocked |
+| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | blocked |
+| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | blocked |
+| 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | planned |
+| 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | blocked |
 
 ## Decision log
+
+- 2026-09-08 (phase 10 plan): **phases 10-14 and 16 marked `blocked` in one pass, and the
+  evidence-banking phase split so the loop has real work.** All five live phases share one
+  gate, already documented in this file's header and in phase 7's "## Blocked" entry: they
+  need a provisioned GCP project and a credential that does not exist (re-verified this
+  iteration: `gcloud auth list` -> "No credentialed accounts", no
+  `~/.config/gcloud/application_default_credentials.json`). Blocking them one iteration at a
+  time would burn five planner contexts to learn the same fact five times. Against that, the
+  DuckDB half has produced substantial, *bankable* evidence that three downstream outcomes are
+  explicitly waiting on -- `bigquery-correctness` phase 2 ("read the spine's findings handoff
+  and rewrite the remaining phases from it"), and `external-dag-steps` / `trimmed-history-
+  sources` phase 2 ("written by phase 1's planner from the spine's requirements") are all
+  parked on a document that does not exist yet. Old phase 15 (bank *all* the evidence) is
+  therefore split: new phase 15 banks the DuckDB-half findings now and is loop-grindable; new
+  phase 16 extends the same document with the live-run findings and inherits the live gate.
+  Criterion 8 is unchanged and is met by the two together -- nothing left this outcome.
 
 - 2026-09-08 (phase 9 implement): **the loader's own retention bound (45 days,
   `partition_expiration_days`) is a different number from the pre-existing
@@ -554,6 +572,25 @@ exists — so the live run is a test of the *backend*, not of the models.
   centrepiece per-window sweep is blocked on this finding.
 
 ## Blocked
+
+- 2026-09-08 -- **phases 10-14 and 16, one shared gate: no cloud identity exists.** Phase 10
+  (deploy the loader and measure cost per run), 11 (first live full refresh), 12 (three
+  incremental windows), 13 (dual-target parity), 14 (both-target oracle) and 16 (the live half
+  of the findings handoff) all require the dogfood GCP project that phase 7 is itself blocked
+  on. Re-verified this iteration rather than assumed: `~/google-cloud-sdk/bin/gcloud auth
+  list` reports "No credentialed accounts" and
+  `~/.config/gcloud/application_default_credentials.json` does not exist, unchanged since
+  phases 7, 8 and 9. Nothing in the repo was changed for these phases.
+
+  **What a human must do:** exactly `phases/07-plan.md` tasks 1-5, as spelled out in the phase
+  7 entry below -- create the project, link billing, enable `bigquery.googleapis.com` and
+  `billingbudgets.googleapis.com`, create the no-expiry dataset and the budget alert, create
+  and grant `smelt-dogfood@<PROJECT>.iam.gserviceaccount.com`, then
+  `gcloud auth application-default login --impersonate-service-account=...`. Once that exists,
+  phase 7's verification gate and then phases 10-14 become executable in order; the loader
+  artifact they deploy is already written and tested (`scripts/bq-dogfood-loader.sh`, phase 9).
+  Phase 5's separate credential need (a `bigquery-auth.sh` passphrase for the `payload` re-pin)
+  is independent of this and still stands.
 
 - 2026-09-08 — **phase 7 (provision the dogfood project), attempted, blocked immediately.**
   Per this file's own header ("phases 7–13 are human-gated ... phase 7 must emit
