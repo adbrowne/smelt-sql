@@ -64,11 +64,22 @@ visible in the run report.
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | done |
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | done |
 | 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | done |
-| 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
+| 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | planned |
 | 7 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
 | 8 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 6 planning): **no reshape; one design call settled.** External steps are
+  rendered as a **separate top-level `external_steps` map** in `smelt explain --json` (and a
+  distinct `External steps:` text section), **not** as entries in `execution_order`/`models`.
+  `cli.md` §Constraints 5 makes the explain JSON append-stable and defines `execution_order` as a
+  topological sort of *models*; orchestrators feed that list to model-shaped tasks, so injecting a
+  non-model address would break them for no gain — the run path (phase 4) already orders a step
+  ahead of every consumer structurally, not through this list. Also settled: `smelt explain <step>`
+  rejects `--show-sql`/`--period`/`--technique` as usage errors (exit 2) rather than silently
+  ignoring them, and `explain` never spawns the `command:` — which is what lets §Semantics 12 keep
+  naming it the non-refusing preview surface for a step. Rows 7-8 unchanged; nothing left the outcome.
 
 - 2026-09-08 (phase 5 implementation): **shipped as planned, no reshape.** `RunManifest`/
   `RunReport` gained `external_steps: BTreeMap<String, ExternalStepRunRecord>`
