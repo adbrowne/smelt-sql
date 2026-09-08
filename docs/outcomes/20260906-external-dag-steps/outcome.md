@@ -61,13 +61,24 @@ visible in the run report.
 |---|-------|--------|
 | 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | done |
 | 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | done |
-| 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | pending |
+| 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | planned |
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
 | 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
 | 6 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
 | 7 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 3 planning): **two design calls settled, no reshape.** (a) `ExternalStep`
+  **does** participate in `resolve_address_map` (the question `phases/02-summary.md` left open):
+  once a step is selector-addressable, a step address colliding with a model/seed/source address
+  would make selection ambiguous with no diagnostic, so `EntityRefKind` gains the variant and
+  steps register alongside the other three kinds. (b) **Node resolution is a distinct seam from
+  ref resolution** — a step is not a `smelt.ref()` target (a model references the produced source,
+  never its producer), so `resolve_ref_path` stays step-free and CLI argument resolution moves to
+  a new `resolve_node_path` = refs ∪ steps; a SQL ref naming a step keeps failing
+  `UndefinedModelRef` rather than silently resolving. Phase table rows 4-7 unchanged; nothing left
+  the outcome.
 
 - 2026-09-08 (phase 2 implementation): **shape landed** — `crates/smelt-core/src/external_step.rs`
   parses and validates `external_step:` declarations fail-loud (`MalformedExternalStep`,
