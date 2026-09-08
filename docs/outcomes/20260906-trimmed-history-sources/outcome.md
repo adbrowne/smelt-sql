@@ -67,7 +67,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | done |
-| 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | planned |
+| 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | done |
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | pending |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | pending |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | pending |
@@ -77,6 +77,16 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 ## Decision log
 
+- 2026-09-09 (phase 2 implement): **an inert retention in `examples/timeseries` was
+  removed, not made well-formed.** `examples/timeseries/models/sources/raw/events.yml`
+  declared `retention: '400 days'` on a source with no `timeseries:` — exactly the shape
+  this phase refuses. Rather than adding a `timeseries:` block to make it parse, the
+  `retention:` line was deleted: the source is deliberately an unclocked lookup
+  (`watermark:` + `unique_key:` only), and nothing in the workspace reads its retention
+  value. `crates/smelt-core/src/sources.rs` also grew past its large-file-ratchet baseline
+  (1297 → 1336); reviewer sign-off: three cohesive error variants plus ~20 lines of
+  validation in the file that already single-owns source YAML parsing, baseline updated
+  via `.claude/scripts/large-file-check.sh --update`.
 - 2026-09-08 (phase 2 planning): **a malformed rolling bound is refused, and an inert one
   counts as malformed** — phase 2 refuses `retention:` when the interval is unparseable,
   when it is zero, and when the source declares no `timeseries:`. Reasoning: the first is

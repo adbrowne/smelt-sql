@@ -263,9 +263,14 @@ fn watermark_and_retention_parse() {
 columns:
   - { name: conversion_id, type: BIGINT, nullable: false }
   - { name: conversion_ts, type: TIMESTAMP, nullable: false }
+  - { name: conversion_date, type: DATE, nullable: false }
 watermark:
   complete_through: conversion_ts
 retention: '400 days'
+timeseries:
+  event_time_column: conversion_ts
+  partition_column: conversion_date
+  granularity: day
 "#,
     );
     let info = parse_source_yaml(&path).expect("should parse");
@@ -274,6 +279,108 @@ retention: '400 days'
         "conversion_ts"
     );
     assert_eq!(info.retention.expect("retention declared").to_days(), 400);
+}
+
+// ---------------------------------------------------------------------------
+// retention well-formedness (Phase 2 of
+// docs/outcomes/20260906-trimmed-history-sources)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retention_unparseable_interval_is_malformed() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: id, type: BIGINT, nullable: false }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+retention: 'banana'
+"#,
+    );
+    let err = parse_source_yaml(&path).expect_err("should refuse");
+    let message = err.to_string();
+    assert!(
+        message.contains("retention") && message.contains("banana"),
+        "expected message naming retention and the offending value, got: {message}"
+    );
+    assert!(
+        matches!(err, SourceError::RetentionUnparseable { .. }),
+        "expected RetentionUnparseable, got: {err:?}"
+    );
+}
+
+#[test]
+fn retention_zero_is_malformed() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: id, type: BIGINT, nullable: false }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+retention: '0 days'
+"#,
+    );
+    let err = parse_source_yaml(&path).expect_err("should refuse");
+    assert!(
+        matches!(err, SourceError::RetentionZero { .. }),
+        "expected RetentionZero, got: {err:?}"
+    );
+}
+
+#[test]
+fn retention_without_timeseries_is_malformed() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: id, type: BIGINT, nullable: false }
+retention: '45 days'
+"#,
+    );
+    let err = parse_source_yaml(&path).expect_err("should refuse");
+    let message = err.to_string();
+    assert!(
+        message.contains("timeseries"),
+        "expected message naming timeseries, got: {message}"
+    );
+    assert!(
+        matches!(err, SourceError::RetentionWithoutTimeseries { .. }),
+        "expected RetentionWithoutTimeseries, got: {err:?}"
+    );
+}
+
+#[test]
+fn retention_with_timeseries_parses() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: id, type: BIGINT, nullable: false }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+retention: '45 days'
+"#,
+    );
+    let info = parse_source_yaml(&path).expect("should parse");
+    assert_eq!(info.retention.expect("retention declared").to_days(), 45);
 }
 
 // ---------------------------------------------------------------------------

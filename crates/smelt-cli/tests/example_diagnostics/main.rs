@@ -20,5 +20,6 @@ mod meta_hofs;
 mod meta_lists;
 mod meta_workspace;
 mod per_cohort_union;
+mod retention_diagnostics;
 mod smoke_and_migration;
 mod timeseries_incremental;

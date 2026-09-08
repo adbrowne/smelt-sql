@@ -18,4 +18,3 @@ mutation_profile:
 watermark:
   complete_through: event_timestamp
 unique_key: [event_id]
-retention: '400 days'
