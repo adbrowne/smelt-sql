@@ -81,11 +81,19 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | done |
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | done |
 | 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | done |
-| 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
+| 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | planned |
 | 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
 
+- 2026-09-09 (phase 10 planning): **no reshape.** The phase-9 summary confirms rows 10 and 11 are
+  unaffected in scope, and no success criterion is unserved by the remaining two rows. Scoping
+  note: the explain surface reads `MaintenancePlan::retention_reaches`/`retention_downgrades`
+  verbatim and derives nothing (maintenance-plan purity), and renders the bound in **seconds**,
+  matching the units `refusal_diag.rs` already prints for `SourceRetentionExceeded` — a new
+  interval formatter would be a second spelling of the same quantity. The docs half gains a
+  two-sided `SourceRetention*` spec ↔ docs-site sync test, mirroring the existing succession-code
+  gate, so the two catalogues cannot drift.
 - 2026-09-09 (phase 9 planning): **no reshape; the divergence looks permissive, not silent — the
   phase is scoped as prove-or-close.** Reading the code rather than trusting the phase-7 note:
   the run-time candidate pool is a *subset* of the diagnostics pool, and
