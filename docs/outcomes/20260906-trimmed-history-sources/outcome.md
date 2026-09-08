@@ -62,6 +62,12 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 - Backfilling history a source no longer retains.
 - Any change to the contract lattice's declared points.
 
+- An `--allow-full-refresh` affordance in `smelt-ui` (`run_manager.rs` hardcodes
+  `allow_full_refresh: false`, flagged by the phase-6 summary). The UI *refuses* a
+  whole-table recompute over a retained source rather than running it silently, so
+  criterion 4 is already met; giving the UI a way to license one is a UI affordance, not
+  a correctness gap in this outcome.
+
 ## Phases
 
 | # | Phase | Status |
@@ -72,12 +78,32 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | done |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | done |
 | 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | done |
-| 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | pending |
+| 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | planned |
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
 | 9 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
 | 10 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-09 (phase 7 planning): **no reshape; the granularity plumbing mirrors the
+  diagnostics path, not the propagation path.** Verified against the code rather than the
+  phase-5 note: `derive_model_maintenance_plan` calls `establish_locality` (whose structural
+  precondition 3 refuses outright on `driving_source_granularity: None`) at
+  `crates/smelt-db/src/queries/maintenance/plan.rs`, and the retention fold lives ~120 lines
+  further down in `smelt-logical`'s `derive_maintenance_plan_impl` — so a `grain: key` +
+  `timeseries:` model genuinely returns `locality_refused_plan` with empty
+  `retention_reaches` at run time while the diagnostics path (`maintenance_refs/plan.rs`,
+  which resolves the real granularity) admits it. The fix mirrors
+  `maintenance_refs/plan.rs`'s *unconditional* `single_clocked_granularity` resolution
+  rather than `clamp_locality.rs`'s key-grain-scoped one, because the derivation this run-time
+  call must agree with is the diagnostics one; the value is unused for partition grain, so
+  unconditional costs nothing. The composed-upstream candidate pool (`model_source_granularities`,
+  which this call site cannot see) is the one residual divergence — phase 7 must determine
+  reachability and either cover it or hand the phase-8 planner a row, since it is the same
+  silent-skip class and may not leave the outcome silently.
+- 2026-09-09 (phase 7 planning): the `smelt-ui` `allow_full_refresh` gap the phase-6 summary
+  flagged is recorded under **Out of scope** — it is an affordance gap behind a fail-loud
+  refusal, not a silent under-read, so no success criterion depends on it.
 
 - 2026-09-09 (phase 6 implement): **gate on `plan.refresh == RefreshStrategy::Incremental`, not `plan.incremental.is_some()`** — the plan's own task 4 named the latter, but it is false for exactly the runs this gate must catch: `build_model_plans`' window-resolution fallback sets `plan.incremental: None` whenever `request.full_refresh` is requested with no explicit `--start`/`--end` (an ordinary `--full-refresh` invocation), collapsing the model to the "full-refresh arm" the way a `materialized_view` model already does by construction. Discovered red (first landing let every full-refresh run through with no gate at all, no error); `plan.refresh` is refresh-strategy-derived and untouched by window resolution, matching that field's own doc comment.
 - 2026-09-09 (phase 6 implement): `request.rebuild` (`smelt rebuild`) does not itself license a whole-table recompute — only `request.allow_full_refresh` (`Explicit`) or `force_full_refresh` (`Forced`, smelt-internal) do. An upstream-closure `smelt rebuild` over a model with stored output and a retained source still needs `--allow-full-refresh`, consistent with reusing that one flag as the sole operator override.
