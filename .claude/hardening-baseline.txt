@@ -16,6 +16,16 @@
 #   `CliReporter::external_step_failed`'s new `eprintln!` naming a failed
 #   step's exit code, matching the existing `run_failed`/`run_cancelled`
 #   stderr pattern in the same file.
+# 2026-09-08 andrew: smelt-cli println 176 -> 188, expect 42 -> 44
+#   (docs/outcomes/20260906-external-dag-steps/ phase 6). `smelt explain
+#   <step>`'s new text/JSON report in the new
+#   `commands/explain_external_step.rs` module (10 println!, matching the
+#   existing model-report rendering style) plus the whole-project `External
+#   steps:` text section in `commands/explain.rs` (2 println!) — all
+#   legitimate user-facing CLI stdout, none in a library crate. The 2 new
+#   `.expect(` calls are the same `Workspace::try_get`/`project_input`
+#   infallible-after-`init_db` pattern already used by
+#   `explain_maintenance_plan` in the same file.
 #
 smelt-backend-bigquery expect 0
 smelt-backend-bigquery println 0
@@ -35,8 +45,8 @@ smelt-backend unwrap 0
 smelt-bench expect 3
 smelt-bench println 27
 smelt-bench unwrap 8
-smelt-cli expect 42
-smelt-cli println 176
+smelt-cli expect 44
+smelt-cli println 188
 smelt-cli unwrap 0
 smelt-core expect 6
 smelt-core println 0

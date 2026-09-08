@@ -28,6 +28,30 @@ pub struct ExplainOutput {
     pub execution_order: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub physical: Option<ExplainPhysical>,
+    /// External steps (`sources.md` §"Externally-produced sources (black-box
+    /// steps)"), keyed by canonical address. Never entries in `models` or
+    /// `execution_order` (`cli.md` §"`smelt explain --json` output schema") —
+    /// a step is not a model, and the run path orders it ahead of its
+    /// consumers structurally, not through that list. Omitted entirely when
+    /// the project declares none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_steps: BTreeMap<String, ExplainExternalStep>,
+}
+
+/// One external step's rendering in the whole-project `smelt explain --json`
+/// output and (as a single value, wrapped with `kind`/`address`) in `smelt
+/// explain <step>`'s own report. `command` is the literal declared argv,
+/// unsubstituted — `explain` never resolves `{run_date}`/`{run_end}` and
+/// never spawns it (`sources.md` §Semantics 12).
+#[derive(Debug, Serialize, Clone)]
+pub struct ExplainExternalStep {
+    pub produces: Vec<String>,
+    pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cadence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub consumers: Vec<String>,
 }
 
 /// Per-model metadata in the explain output.
@@ -1899,6 +1923,7 @@ pub fn build_explain_output(
     fn_bodies: &smelt_runtime::FnBodyMap,
     origins: &std::collections::HashMap<String, (String, String)>,
     period: Option<&(String, String)>,
+    steps: &[smelt_core::external_step::ExternalStepInfo],
 ) -> Result<ExplainOutput> {
     let execution_order = graph.execution_order()?;
 
@@ -1971,10 +1996,29 @@ pub fn build_explain_output(
         );
     }
 
+    let external_steps = steps
+        .iter()
+        .map(|step| {
+            let addr = step.address_segments.join(".");
+            let consumers = graph.consumers_of_step(&addr).to_vec();
+            (
+                addr,
+                ExplainExternalStep {
+                    produces: step.produces.clone(),
+                    command: step.command.clone(),
+                    cadence: step.cadence.as_ref().map(|c| c.display.clone()),
+                    description: step.description.clone(),
+                    consumers,
+                },
+            )
+        })
+        .collect();
+
     Ok(ExplainOutput {
         models,
         execution_order,
         physical: None,
+        external_steps,
     })
 }
 
@@ -2280,7 +2324,7 @@ mod tests {
         );
 
         let bs = |fns: &smelt_runtime::FnBodyMap| {
-            build_explain_output(&graph, &config, fns, &HashMap::new(), None)
+            build_explain_output(&graph, &config, fns, &HashMap::new(), None, &[])
                 .unwrap()
                 .models["sessions"]
                 .incremental
@@ -2317,7 +2361,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         assert_eq!(output.execution_order.len(), 2);
         assert_eq!(output.execution_order[0], "orders");
@@ -2371,7 +2416,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         let daily = &output.models["daily_revenue"];
         assert_eq!(daily.materialization, Materialization::Table);
@@ -2390,7 +2436,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
 
         assert!(json.contains("\"models\""));
@@ -2413,7 +2460,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")
@@ -2448,7 +2496,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         let model_entry = &output.models["device_stats"];
 
@@ -2500,7 +2549,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         let model_entry = &output.models["orders"];
         assert_eq!(

@@ -779,6 +779,11 @@ async fn main() -> std::process::ExitCode {
     // `3` via `commands::run::exit_code_for` — same pattern as `migrate`
     // above. See `docs/specs/cli.md` §"Exit codes" — `smelt run` specifics.
     let is_run = matches!(cli.command, Commands::Run(_));
+    // `smelt explain <step> --show-sql`/`--period`/`--technique` classify to
+    // exit 2 (usage error) via `commands::explain_external_step::exit_code_for`
+    // — same pattern as `init`/`list`/`migrate`/`run` above. See
+    // `docs/specs/cli.md` §"`smelt explain <external step>`".
+    let is_explain = matches!(cli.command, Commands::Explain(_));
 
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
@@ -819,6 +824,8 @@ async fn main() -> std::process::ExitCode {
                 commands::migrate::exit_code_for(&err)
             } else if is_run {
                 commands::run::exit_code_for(&err)
+            } else if is_explain {
+                commands::explain_external_step::exit_code_for(&err)
             } else {
                 smelt_cli::exit_code_for(&err)
             };

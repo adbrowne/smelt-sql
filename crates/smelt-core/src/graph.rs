@@ -229,6 +229,16 @@ impl DependencyGraph {
         self.source_producer.get(source_address).map(|s| s.as_str())
     }
 
+    /// The models whose own `smelt.sources.*` refs directly name a source
+    /// `step_addr` produces (`smelt explain <step>`'s "consumers" field).
+    /// Empty when the step is unregistered or has no direct consumer yet.
+    pub fn consumers_of_step(&self, step_addr: &str) -> &[String] {
+        self.step_consumers
+            .get(step_addr)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     /// The set of external steps that must run before `selected` can be
     /// built: the producers of every source a model in `selected` reads
     /// directly via `smelt.sources.*`. `selected` is an arbitrary model set
@@ -793,6 +803,48 @@ mod tests {
             kind: crate::discovery::ModelKind::Sql,
             address_segments: vec![layer.to_string(), name.to_string()],
         }
+    }
+
+    /// A step producing `sources.raw.events`, consumed by a model whose
+    /// only ref is that source.
+    #[test]
+    fn consumers_of_step_returns_source_readers() {
+        let source_ref = RefInfo {
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![
+                "sources".to_string(),
+                "raw".to_string(),
+                "events".to_string(),
+            ]),
+        };
+        let path: std::path::PathBuf = "models/consumer.sql".into();
+        let consumer = ModelFile {
+            name: "consumer".to_string(),
+            model_id: crate::model_id::ModelId::from_path(path.clone()),
+            path,
+            content: String::new(),
+            refs: vec![source_ref],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            address_segments: vec!["consumer".to_string()],
+        };
+        let bystander = make_model("bystander", vec![]);
+
+        let mut graph = DependencyGraph::build(vec![consumer, bystander], None).unwrap();
+        let step = crate::external_step::ExternalStepInfo {
+            path: "models/loader.yml".into(),
+            address_segments: vec!["loader".to_string()],
+            description: None,
+            produces: vec!["smelt.sources.raw.events".to_string()],
+            command: vec!["bash".to_string(), "loader.sh".to_string()],
+            cadence: None,
+        };
+        graph.add_external_steps(&[step]);
+
+        assert_eq!(graph.consumers_of_step("loader"), &["consumer".to_string()]);
+        assert!(graph.consumers_of_step("unregistered").is_empty());
     }
 
     #[test]

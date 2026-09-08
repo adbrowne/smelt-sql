@@ -38,7 +38,7 @@ fn sessions_explain() -> smelt_cli::explain::ExplainOutput {
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None)
+    build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None, &[])
         .expect("build explain output")
 }
 
