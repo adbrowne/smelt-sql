@@ -65,10 +65,33 @@ visible in the run report.
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | done |
 | 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | done |
 | 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | done |
-| 7 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
-| 8 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
+| 7 | Fixture — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics, and actually runs it: one extracted day-loader program, invoked by `smelt run`, with the replay/oracle drivers rewired onto it and the `duckdb` CLI provisioned in CI | planned |
+| 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | pending |
+| 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 7 planning): **reshape — the old row 7 is split in two**, and the fixture
+  half grew a real design. Split rationale: "declare the step in the fixture" and "write the
+  docs-site page" share no code, no gate and no failure mode, exactly like the phase-5 split;
+  rows 7 (fixture) and 8 (docs), old row 8 renumbered to 9. Nothing left the outcome. The
+  fixture half is bigger than the row implied, because a step declared in
+  `examples/github_activity/` is *invoked* by every `smelt run` the replay and oracle tests
+  make — so the fixture cannot merely declare a loader, it has to be driven by one. Three
+  calls settled: (a) the loader is `load_day.sh` (bash + the `duckdb` CLI), since CI installs
+  only `libduckdb.so` and has neither the CLI nor the DuckDB Python module — the phase
+  provisions the CLI rather than gating the fixture's tests off, and a Rust loader binary was
+  rejected for putting fixture code in a shipped crate and inside the hardening ratchet's
+  "production" derivation; (b) the loader carries **its own per-day ledger and is idempotent
+  per day**, which is load-bearing rather than decorative — the oracle leg stages N days
+  without running smelt N times and then runs `--full-refresh` (whose step invocation would
+  otherwise re-append a staged day), and `run.rs`'s propagated-region loop calls
+  `execute_project`, and therefore the step, once per region; smelt guarantees no idempotence
+  of the external program, so this is the loader's own bookkeeping, opaque to smelt, exactly
+  as a real at-least-once day loader would carry it; (c) the day-load semantics (the 2%
+  `MOD(id,50)=0` redelivery of D-1, stamped `ingested_date = D` on the arrival twin) collapse
+  from three drifting copies — `run_incremental.py`, the Rust test helper, and the BigQuery
+  shell loader — to one, pinned by a test.
 
 - 2026-09-08 (phase 6 implementation): **shipped as planned, no reshape.** `docs/specs/cli.md`
   gained the `external_steps` JSON schema block and the `### smelt explain <external step>`
