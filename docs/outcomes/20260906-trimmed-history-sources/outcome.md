@@ -1,7 +1,7 @@
 # Outcome: A source whose history is bounded and moving forward refuses or degrades, never silently under-reads
 
 **Created:** 2026-09-06
-**Status:** queued
+**Status:** active
 **Driver:** outcome loop (`.claude/outcome-backlog`)
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"Trimmed-history sources", §"Trimmed history versus SCD2 lifetime", §Open questions 3 and 4
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/model_properties.md`; `docs/specs/state.md` §"The degradation contract"; `docs/specs/diagnostics.md`
@@ -66,10 +66,23 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | pending |
-| 2 | (written by phase 1's planner from the spine's requirements) | pending |
+| 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | planned |
+| 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | pending |
+| 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | pending |
+| 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | pending |
+| 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | pending |
+| 6 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
+| 7 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
+| 8 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 1 planning): **table reshaped from the placeholder** into rows 2-8, one
+  per remaining success criterion, ordered declaration → walk verdict → refuse/degrade →
+  bound-movement → conformance → explain/docs → close-out. Nothing left the outcome; the
+  spine's handoff requirement (reconciling the example's inert `retention: '90 days'` against
+  the loader's real 45-day `partition_expiration_days`) is folded into phase 1 rather than
+  deferred, since it is a doc-level fact the quantifier decision settles.
 
 - 2026-09-08 (bigquery-dogfood-spine phase 15): **the interim findings handoff now
   exists** at `docs/handoffs/2026-09-08-github-activity-findings.md`, covering the
