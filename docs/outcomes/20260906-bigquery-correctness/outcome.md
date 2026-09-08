@@ -72,7 +72,7 @@ difference is either fixed or registered with a reason — never tolerated silen
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | done |
-| 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | pending |
+| 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | planned |
 | 3 | Harvest: read the spine's findings handoff and rewrite the remaining phases from it, moving anything not reached by a spine model to Out of scope with its rationale | pending |
 | 4 | (written by phase 3) | pending |
 | 5 | Resolve every cross-target divergence the spine registered: fix, or promote to a reasoned divergence-registry entry naming engines and construct | pending |
