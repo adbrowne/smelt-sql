@@ -66,6 +66,11 @@ difference is either fixed or registered with a reason — never tolerated silen
 - Widening the sample, the model set, or the pipeline's scope (the spine owns that).
 - Retiring the PostgreSQL emission dialect (tracked separately by the
   dialect-emission-vocabulary outcome).
+- **Any BigQuery-only emission defect not already in hand.** The spine is `blocked` with
+  its live-BigQuery half (its phase 16) never run, so its findings handoff is DuckDB-half
+  only and harvested no BigQuery-reached registry entry, technique, grain or capability
+  row. Building any would be speculation against issue #179, which criterion 2 forbids;
+  it stays on #179 and on the spine's resume.
 
 ## Phases
 
@@ -73,13 +78,29 @@ difference is either fixed or registered with a reason — never tolerated silen
 |---|-------|--------|
 | 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | done |
 | 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | done |
-| 3 | Harvest: read the spine's findings handoff and rewrite the remaining phases from it, moving anything not reached by a spine model to Out of scope with its rationale | pending |
-| 4 | (written by phase 3) | pending |
-| 5 | Resolve every cross-target divergence the spine registered: fix, or promote to a reasoned divergence-registry entry naming engines and construct | pending |
-| 6 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
-| 7 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
+| 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | planned |
+| 4 | Punch-list 2 — the missing `UpstreamMutation(gold.repo_dim)` cell for a `grain: partition` downstream reading a clockless keyed dimension: a new route in `append_model_edge_cells`, or a refusal surfaced at `run`/`build` rather than only `explain` | pending |
+| 5 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
+| 6 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phase 4's mechanism already covers it | pending |
+| 7 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
+| 8 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
+| 9 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 3 planning): **the harvest happened at plan time, and row 3 became
+  the first real punch-list item.** Row 3 as scaffolded was a meta-phase whose entire
+  content — "read the handoff and rewrite the remaining rows" — is exactly what the
+  outcome loop's plan step does under its own reshape rule, so running it as an implement
+  iteration would have burned a step producing only a table edit. The handoff
+  (`docs/handoffs/2026-09-08-github-activity-findings.md`) is final for loop purposes: the
+  spine's `**Status:**` is `blocked` and its live-BigQuery half will not land unattended,
+  so waiting for a richer input is waiting for something no loop iteration can produce.
+  Rows 3-6 are now its four punch-list items verbatim, in its order (item 4 explicitly
+  after item 2 because the handoff asks whether item 2's mechanism subsumes it); old rows
+  5-7 shift to 7-9. Nothing from the handoff was dropped: its two "requirements handed
+  to" sections address the other two backlog outcomes, not this one, and its "latent,
+  unmeasured" clock-tie item folds into row 3 where the same emitter is already open.
 
 - 2026-09-08 (phase 2 implementation): **`supports_fingerprint_sidecar` stays
   DuckDB-only after phase 2.** Phase 2 proved the fingerprint/repair-group digest
