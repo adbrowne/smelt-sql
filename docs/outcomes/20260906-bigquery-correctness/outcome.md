@@ -1,7 +1,7 @@
 # Outcome: Every defect the real pipeline hits on BigQuery is fixed, and DuckDB and BigQuery agree
 
 **Created:** 2026-09-06
-**Status:** queued
+**Status:** active
 **Driver:** outcome loop (`.claude/outcome-backlog`)
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D2), §"Sequencing: models first, punch-list second", §"Findings already banked"
 **Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Statement-level lowering", §"Output-schema type conformance", §"Cross-engine emission audit"; `docs/specs/architecture.md` §"Constraints & Invariants" item 14; `docs/reference/dialect-coverage.md`
@@ -71,14 +71,23 @@ difference is either fixed or registered with a reason — never tolerated silen
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | pending |
-| 2 | Harvest: read the spine's findings handoff and rewrite the remaining phases from it, moving anything not reached by a spine model to Out of scope with its rationale | pending |
-| 3 | (written by phase 2) | pending |
-| 4 | Resolve every cross-target divergence the spine registered: fix, or promote to a reasoned divergence-registry entry naming engines and construct | pending |
-| 5 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
-| 6 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
+| 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | planned |
+| 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | pending |
+| 3 | Harvest: read the spine's findings handoff and rewrite the remaining phases from it, moving anything not reached by a spine model to Out of scope with its rationale | pending |
+| 4 | (written by phase 3) | pending |
+| 5 | Resolve every cross-target divergence the spine registered: fix, or promote to a reasoned divergence-registry entry naming engines and construct | pending |
+| 6 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
+| 7 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 1 planning): **reshape — a new row 2 for the remaining dialect-blind
+  fingerprint SQL.** Reading the emitter for criterion 1 surfaced two siblings with the
+  same defect class: `key_expr_for_columns` hardcodes `CAST(... AS VARCHAR)` (GoogleSQL
+  has no `VARCHAR` at all) and `emit_repair_group_digest_select` hardcodes both that cast
+  and DuckDB's `bit_xor(hash(...))`. Fixing only the digest expression would leave the
+  same emitted statement invalid on BigQuery, so this serves criterion 1's substance and
+  criterion 3 and is not deferred out. Old rows 2-6 shift to 3-7.
 
 - 2026-09-08 (bigquery-dogfood-spine phase 15): **the interim findings handoff now
   exists** at `docs/handoffs/2026-09-08-github-activity-findings.md` — the four measured
