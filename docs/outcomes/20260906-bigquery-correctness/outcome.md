@@ -66,6 +66,12 @@ difference is either fixed or registered with a reason — never tolerated silen
 - Widening the sample, the model set, or the pipeline's scope (the spine owns that).
 - Retiring the PostgreSQL emission dialect (tracked separately by the
   dialect-emission-vocabulary outcome).
+- **Closing the LSP-diagnostics / `smelt explain` divergence for model-edge refusals**
+  (found by phase 4, recorded in the decision log). `smelt-db`'s `maintenance_plan` Salsa
+  query never threads model edges, so no model-edge refusal — the pre-existing
+  `ReachNotDerivable` included — reaches `file_diagnostics()`. It is an editor-surface gap
+  that predates this outcome and is not a defect the real pipeline hits on BigQuery, so it
+  serves none of the success criteria; it needs its own outcome.
 - **Any BigQuery-only emission defect not already in hand.** The spine is `blocked` with
   its live-BigQuery half (its phase 16) never run, so its findings handoff is DuckDB-half
   only and harvested no BigQuery-reached registry entry, technique, grain or capability
@@ -80,7 +86,7 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | done |
 | 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | done |
 | 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | done |
-| 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | pending |
+| 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | planned |
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | pending |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
@@ -88,6 +94,18 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 5 planning): **no reshape to the phase rows; one item moved to Out of
+  scope.** Reading the run path confirmed phase 4's split was right and phase 5's scope is
+  exactly as written — the resolver takes no edges, so the derived cell is invisible to both
+  dispatch branches. One design question the row did not name is settled in the plan: an
+  enrichment-keyed cell's write is addressed by the join key, not by a partition interval,
+  so the existing per-batch `ColumnMergeDispatch::Full` arm (which MERGEs the *window-
+  filtered* compiled SQL) cannot heal rows written on earlier days and would leave the stale
+  count non-zero. The cell is therefore excluded from the per-batch dispatch and dispatched
+  once per run over the model's unwindowed output, licensed by the edge's declared
+  `allow_full_scan`. Phase 4's LSP-diagnostics finding is recorded under Out of scope: it is
+  a pre-existing editor-surface gap serving none of this outcome's success criteria.
 
 - 2026-09-08 (phase 4 implementation): **found, did not fix, a pre-existing LSP-diagnostics
   gap for every model-edge refusal.** `smelt-db`'s LSP-facing `maintenance_plan` Salsa query
