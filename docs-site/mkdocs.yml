@@ -90,6 +90,7 @@ nav:
     - SQL Models: guide/sql-models.md
     - Pipe Syntax: guide/pipe-syntax.md
     - Sources: guide/sources.md
+    - External Steps: guide/external-steps.md
     - Materializations: guide/materializations.md
     - Incremental Models: guide/incremental-models.md
     - SCD2 Succession: guide/scd2-succession.md

@@ -92,6 +92,36 @@ mutation_profile:
 
 Declaring `mutation_profile: mutable_snapshot` derives a mutation-maintenance cell for a model that reads this source whether or not the source is also clocked (`timeseries:` declared) — a late correction to an already-processed row is maintained either way, not only for an unclocked lookup. An `append_only` source read by an aggregate gets one too: a late-arriving append into an already-written region still changes the stored aggregate, so that region is maintained rather than left stale. Either case may have no statically derivable scan bound, refusing loudly (`MaintenanceScanUnbounded`) until `maintenance.scan_bounds.per_source.<name>.allow_full_scan` accepts the full-table cost.
 
+### The `external_step:` block
+
+A relation landed by a program smelt itself invokes — rather than an out-of-band pipeline
+smelt has no visibility into — is declared as an **external step**: a `.yml` file carrying
+a top-level `external_step:` block instead of `columns:`. The presence of `external_step:`
+makes the file a step, never a source; `columns:` is **forbidden** alongside it on the
+same file (`MalformedExternalStep`). See [External Steps](../guide/external-steps.md) for
+the full guide.
+
+```yaml
+# models/sources/raw/github_loader.yml
+external_step:
+  description: Loads the previous UTC day of GitHub events.
+  produces:
+    - smelt.sources.raw.github_events
+  command: ["bash", "scripts/loader.sh", "--date", "{run_date}"]
+  cadence: '1 day'
+```
+
+| Key | Required | Default | Meaning |
+|-----|----------|---------|---------|
+| `produces` | **yes** | — | Non-empty list of source addresses (`smelt.<path>` form) this step populates. Every entry must resolve to a declared source; a source may be named by at most one step in the workspace. |
+| `command` | **yes** | — | Argv list smelt invokes as the step's program. Never parsed or type-checked — an opaque external command, run and observed only by its exit code. |
+| `cadence` | no | absent | How often the producer intends to run (an interval, e.g. `'1 day'`). Describes the producer's schedule, distinct from `mutation_profile.lateness`. |
+| `description` | no | absent | Free-text description, surfaced in LSP hover and `smelt explain`. |
+
+`command:`'s argv accepts the closed placeholder grammar `{run_date}`/`{run_end}` (the run
+window's start and exclusive end, ISO `YYYY-MM-DD`); `{{`/`}}` escape to literal
+`{`/`}`. Any other `{name}` is `MalformedExternalStep` at declaration time.
+
 ## Supported types
 
 | Type | Description |

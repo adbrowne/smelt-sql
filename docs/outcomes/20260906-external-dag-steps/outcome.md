@@ -66,7 +66,7 @@ visible in the run report.
 | 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | done |
 | 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | done |
 | 7 | Fixture — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics, and actually runs it: one extracted day-loader program, invoked by `smelt run`, with the replay/oracle drivers rewired onto it and the `duckdb` CLI provisioned in CI | done |
-| 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | planned |
+| 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | done |
 | 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log

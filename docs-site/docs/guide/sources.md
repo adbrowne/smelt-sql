@@ -126,7 +126,9 @@ This is a narrowing declaration, not a hint: every consuming run re-checks it ov
 
 ## Loading source data
 
-smelt does not load source data. You are responsible for ensuring the source tables exist in your target database before running models that depend on them.
+By default, sources are loaded outside the smelt pipeline — you are responsible for ensuring the source tables exist in your target database before running models that depend on them.
+
+The exception is a source whose loader smelt itself invokes as a **declared external step**: a program smelt orders ahead of every model that reads the sources it produces, runs as part of the pipeline, and fails the run loudly if it fails. This is opt-in per source — see [External Steps](external-steps.md) for the declaration, what smelt guarantees, and what stays the loader's own responsibility.
 
 ## Project structure
 
@@ -147,4 +149,5 @@ models/
 ## Further reading
 
 - [Sources YAML Reference](../reference/sources-yml.md) for the full per-entity YAML schema
+- [External Steps](external-steps.md) for sources whose loader smelt itself invokes
 - [SQL Models](sql-models.md) for how to write models that reference sources
