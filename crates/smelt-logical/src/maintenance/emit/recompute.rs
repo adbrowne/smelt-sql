@@ -149,7 +149,7 @@ pub fn emit_per_group_recompute(
     key: &[String],
     affected_keys_select: &str,
     candidate_select: &str,
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !key.is_empty(),
@@ -168,14 +168,14 @@ pub fn emit_per_group_recompute(
     let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
 
     let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
-    let table_key_expr = key_expr_for_columns(&table_key_columns);
+    let table_key_expr = key_expr_for_columns(&table_key_columns, dialect);
     let delete = format!(
         "DELETE FROM {table} USING {affected_relation} WHERE {table_key_expr} = \
          __smelt_affected.delta_key"
     );
 
     let staged_key_columns: Vec<String> = key.iter().map(|k| format!("s.{k}")).collect();
-    let staged_key_expr = key_expr_for_columns(&staged_key_columns);
+    let staged_key_expr = key_expr_for_columns(&staged_key_columns, dialect);
     let insert = format!(
         "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s JOIN {affected_relation} ON \
          {staged_key_expr} = __smelt_affected.delta_key"

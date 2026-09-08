@@ -1597,6 +1597,7 @@ pub async fn execute_project(
                                             key,
                                             Some(slice),
                                             &region,
+                                            smelt_backend::maintenance_dialect(backend.dialect()),
                                         );
                                     (select, None)
                                 }
@@ -1668,6 +1669,7 @@ pub async fn execute_project(
                                     &compiled.sql,
                                     key,
                                     &affected_keys_select,
+                                    smelt_backend::maintenance_dialect(backend.dialect()),
                                 );
                             match write {
                                 crate::maintenance_driver::RepairWrite::TargetedDeleteInsert => {
@@ -1693,6 +1695,7 @@ pub async fn execute_project(
                                             &db_table_name,
                                             key,
                                             &affected_keys_select,
+                                            smelt_backend::maintenance_dialect(backend.dialect()),
                                         );
                                     // A group whose PRESENTED value is
                                     // unchanged but whose hidden state moved

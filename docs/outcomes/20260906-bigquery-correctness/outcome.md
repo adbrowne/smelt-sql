@@ -72,7 +72,7 @@ difference is either fixed or registered with a reason — never tolerated silen
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | done |
-| 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | planned |
+| 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | done |
 | 3 | Harvest: read the spine's findings handoff and rewrite the remaining phases from it, moving anything not reached by a spine model to Out of scope with its rationale | pending |
 | 4 | (written by phase 3) | pending |
 | 5 | Resolve every cross-target divergence the spine registered: fix, or promote to a reasoned divergence-registry entry naming engines and construct | pending |
@@ -80,6 +80,14 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 7 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 2 implementation): **`supports_fingerprint_sidecar` stays
+  DuckDB-only after phase 2.** Phase 2 proved the fingerprint/repair-group digest
+  SQL well-formed per dialect (BigQuery, Spark), pinned by 8 new tests including
+  a loud-refusal gate (`sidecar_capability_is_declared_only_where_the_digest_sql_
+  is_verified` in `crates/smelt-runtime/tests/fingerprint_sidecar.rs`) that fails
+  offline if the capability flag moves without a live value-leg sweep for that
+  backend. No such sweep ran this phase — the flag is unchanged.
 
 - 2026-09-08 (phase 1 implementation): **the fixed path is not reachable on a live
   `mutable_snapshot` run today.** `crates/smelt-dialect/src/dialect.rs` declares

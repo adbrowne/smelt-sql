@@ -902,6 +902,7 @@ mutation_profile:
         "customer_max_amount",
         &key,
         &affected_keys_select,
+        MaintenanceDialect::DuckDb,
     );
     let expected = emit_diff_patch(
         "main.customer_max_amount",

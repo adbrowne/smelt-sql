@@ -450,7 +450,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
             .map(|k| format!("{output_table}.{k}"))
             .collect();
         let output_key_expr =
-            smelt_logical::maintenance::emit::key_expr_for_columns(&output_key_columns);
+            smelt_logical::maintenance::emit::key_expr_for_columns(&output_key_columns, dialect);
         let stored_keys_sql = format!("SELECT {output_key_expr} AS delta_key FROM {output_table}");
         let stored_batches = backend.execute_sql(&stored_keys_sql).await?;
         keys.extend(extract_delta_keys(&stored_batches));

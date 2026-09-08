@@ -1,7 +1,7 @@
 use super::*;
 use anyhow::Result;
 use smelt_backend::{maintenance_dialect, Backend, ExecutionResult};
-use smelt_logical::maintenance::emit::emit_per_group_recompute;
+use smelt_logical::maintenance::emit::{emit_per_group_recompute, MaintenanceDialect};
 use std::time::Instant;
 
 /// The affected-key relation a repair reads: the distinct group keys present
@@ -33,8 +33,9 @@ pub fn repair_affected_keys_select(
     key: &[String],
     clamp: Option<&ScanClamp>,
     region: &Region,
+    dialect: MaintenanceDialect,
 ) -> String {
-    let key_expr = smelt_logical::maintenance::emit::key_expr_for_columns(key);
+    let key_expr = smelt_logical::maintenance::emit::key_expr_for_columns(key, dialect);
     match clamp {
         Some(clamp) => format!(
             "SELECT DISTINCT {key_expr} AS delta_key FROM {source_table} WHERE {}",
@@ -89,13 +90,14 @@ pub fn repair_candidate_select(
     full_model_sql: &str,
     key: &[String],
     affected_keys_select: &str,
+    dialect: MaintenanceDialect,
 ) -> String {
     let candidate_key_columns: Vec<String> = key
         .iter()
         .map(|k| format!("__smelt_repair_candidate.{k}"))
         .collect();
     let candidate_key_expr =
-        smelt_logical::maintenance::emit::key_expr_for_columns(&candidate_key_columns);
+        smelt_logical::maintenance::emit::key_expr_for_columns(&candidate_key_columns, dialect);
     format!(
         "SELECT __smelt_repair_candidate.* FROM ({full_model_sql}) AS __smelt_repair_candidate \
          WHERE EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE \
@@ -221,9 +223,15 @@ pub fn diff_patch_staged_relation(table: &str) -> String {
 /// [`repair_affected_keys_select`]/[`repair_candidate_select`] use) so it
 /// composes unambiguously into both the update-leg and delete-leg `DELETE`s
 /// `emit_diff_patch` builds.
-pub fn repair_slice_predicate(table: &str, key: &[String], affected_keys_select: &str) -> String {
+pub fn repair_slice_predicate(
+    table: &str,
+    key: &[String],
+    affected_keys_select: &str,
+    dialect: MaintenanceDialect,
+) -> String {
     let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
-    let table_key_expr = smelt_logical::maintenance::emit::key_expr_for_columns(&table_key_columns);
+    let table_key_expr =
+        smelt_logical::maintenance::emit::key_expr_for_columns(&table_key_columns, dialect);
     format!(
         "EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE \
          {table_key_expr} = __smelt_repair_keys.delta_key)"

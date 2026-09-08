@@ -1,23 +1,15 @@
 # Large-file ratchet baseline
-# Updated: 2026-09-07 — bumped crates/smelt-cli/src/{commands/explain.rs,
-# explain.rs} for the succession-grain `smelt explain` rendering (phase 8,
-# docs/outcomes/20260906-scd2-keyed-succession); the succession-specific
-# struct/render/JSON logic was already split into a new
-# crates/smelt-cli/src/explain/succession.rs (200 lines, under the tracked
-# threshold), and the residual growth in the two report-builder entry points
-# is thin single-owner wiring (a plan-derived `SuccessionExplainView`
-# threaded through `delta_signature_headline`/`build_maintenance_plan_report`/
-# `build_maintenance_plan_json`) that would fragment those functions'
-# single ownership if pushed out further.
-# Updated: 2026-09-07 — bumped crates/smelt-lsp/tests/example_workspaces.rs
-# (1473 -> 1480) for one new `#[tokio::test]` covering the succession-grain
-# worked example (phase 9, docs/outcomes/20260906-scd2-keyed-succession);
-# mechanical one-test addition following the file's existing per-example
-# pattern, not new structure.
-# Updated: 2026-09-08 — bumped crates/smelt-lsp/tests/example_workspaces.rs
-# (1480 -> 1485) for one new `#[tokio::test]` covering examples/github_activity
-# (phase 2, docs/outcomes/20260906-bigquery-dogfood-spine); mechanical
-# one-test addition following the file's existing per-example pattern.
+# Updated: 2026-09-08 — bumped crates/smelt-runtime/src/execute/project/mod.rs
+# (4689 -> 4690), crates/smelt-runtime/tests/fingerprint_sidecar.rs
+# (1688 -> 1717), crates/smelt-runtime/tests/repair_lowering.rs
+# (1545 -> 1568), and added crates/smelt-logical/src/maintenance/emit/
+# fingerprint.rs (1189, newly tracked) for
+# docs/outcomes/20260906-bigquery-correctness phase 2: threading
+# `MaintenanceDialect` through `key_expr_for_columns` and giving
+# `emit_repair_group_digest_select` a real per-dialect body added one new
+# parameter's plumbing at each call site plus 7 new red-green tests pinning
+# the per-dialect SQL shapes — mechanical signature-threading and test
+# growth, not new structure.
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -33,6 +25,7 @@ crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1439
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
+crates/smelt-cli/tests/github_activity_oracle.rs 1072
 crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
 crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
 crates/smelt-cli/tests/resume.rs 1057
@@ -78,6 +71,7 @@ crates/smelt-logical/src/analysis/source_bounds.rs 3367
 crates/smelt-logical/src/analysis/walk/tree.rs 1183
 crates/smelt-logical/src/backbuild/classify.rs 4637
 crates/smelt-logical/src/maintenance/choice/mod.rs 1231
+crates/smelt-logical/src/maintenance/emit/fingerprint.rs 1189
 crates/smelt-logical/src/maintenance/grouping.rs 1099
 crates/smelt-logical/src/maintenance/locality.rs 2089
 crates/smelt-logical/src/maintenance/propagate.rs 2113
@@ -112,15 +106,16 @@ crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-parser/src/printer.rs 1156
 crates/smelt-runtime/src/compile.rs 4015
 crates/smelt-runtime/src/cumulative.rs 2179
-crates/smelt-runtime/src/execute/project/mod.rs 4689
+crates/smelt-runtime/src/execute/project/mod.rs 4690
 crates/smelt-runtime/src/maintenance_driver/tests.rs 1079
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
 crates/smelt-runtime/src/windowing.rs 1173
-crates/smelt-runtime/tests/fingerprint_sidecar.rs 1688
+crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1059
+crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
 crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1145
 crates/smelt-runtime/tests/observed_delta.rs 1331
-crates/smelt-runtime/tests/repair_lowering.rs 1545
+crates/smelt-runtime/tests/repair_lowering.rs 1568
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1120
 crates/smelt-runtime/tests/windowing_parity.rs 1150
