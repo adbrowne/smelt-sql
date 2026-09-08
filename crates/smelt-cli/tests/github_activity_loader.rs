@@ -240,6 +240,46 @@ fn ddl_declares_day_partitioning_and_the_documented_retention_bound() {
     assert!(!ddl.contains("expiration_timestamp"));
 }
 
+/// The `retention:` a source YAML declares must equal the loader's real
+/// `partition_expiration_days` (`docs/specs/incremental_models.md`
+/// §"The equivalence invariant", trimmed-history paragraph): an inert value
+/// that disagrees with what the loader actually keeps is exactly the silent
+/// under-read this outcome exists to prevent.
+#[test]
+fn source_yaml_retention_matches_the_loader_expiration() {
+    let readme = std::fs::read_to_string(readme_path()).expect("read README.md");
+    let documented: u32 = readme
+        .lines()
+        .find_map(|l| {
+            l.split_once("partition_expiration_days = ")
+                .and_then(|(_, rest)| {
+                    rest.split_whitespace()
+                        .next()
+                        .map(|tok| tok.trim_matches(|c: char| !c.is_ascii_digit()))
+                        .and_then(|digits| digits.parse().ok())
+                })
+        })
+        .expect("README.md documents partition_expiration_days = N");
+
+    for source_file in [
+        "examples/github_activity/models/sources/raw/github_events.yml",
+        "examples/github_activity/models/sources/raw/github_events_arrival.yml",
+    ] {
+        let path = repo_root().join(source_file);
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {source_file}: {e}"));
+        let retention_line = text
+            .lines()
+            .find(|l| l.starts_with("retention:"))
+            .unwrap_or_else(|| panic!("{source_file} declares retention:"));
+        let expected = format!("retention: '{documented} days'");
+        assert_eq!(
+            retention_line, expected,
+            "{source_file} must declare the loader's real retention bound"
+        );
+    }
+}
+
 #[test]
 fn emit_sql_touches_no_cloud() {
     let stripped_path = std::env::var("PATH")

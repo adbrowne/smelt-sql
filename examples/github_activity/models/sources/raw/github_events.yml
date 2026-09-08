@@ -25,13 +25,14 @@ mutation_profile:
     key: [id]
     window: '0 days'
 unique_key: [id]
-# Does NOT match the loader's own trim (`scripts/bq-dogfood-loader.sh`
-# --emit-ddl` / `README.md` declare `partition_expiration_days = 45`); this
-# field is unconsumed by any maintenance logic today (inert, scaffolding for
-# `docs/outcomes/20260906-trimmed-history-sources`, which owns reconciling
-# the two numbers or making this field real). The fixture itself only spans
-# 30 days, well inside either bound.
-retention: '90 days'
+# Matches the loader's own trim (`scripts/bq-dogfood-loader.sh --emit-ddl` /
+# `README.md` declare `partition_expiration_days = 45`) — a rolling bound,
+# not a fixed calendar date (`docs/specs/sources.md` §Semantics 5). This
+# field is unconsumed by any maintenance logic today, since retention only
+# gates a backfill whose window reaches past it and this fixture never
+# backfills that far; the fixture itself spans 30 days, well inside the
+# bound.
+retention: '45 days'
 timeseries:
   event_time_column: created_at
   partition_column: created_at

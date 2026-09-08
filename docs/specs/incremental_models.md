@@ -691,6 +691,20 @@ snapshot-consuming cells are admitted against the current-snapshot oracle instea
 the rest could one day get a weaker, never-smuggled-in **observer / prefix-consistency
 contract** (§Future Extensions).
 
+**Trimmed history narrows replayability, never `S`.** A source whose declared `retention:`
+(`sources.md` §Semantics 5) bounds how far back it can be re-read stays fully in `S`: a
+partition that has aged out of retention was still scanned by the runs that consumed it, so it
+remains part of the processed-input set and the stored table is still the answer of record over
+it. What retention removes is the *executable* `full_refresh` oracle over the departed region —
+a recompute whose window reaches past the bound cannot produce the invariant's right-hand side
+over that region at all, so it is refused (`SourceRetentionExceeded`, `sources.md` §Semantics 5)
+rather than run to produce a strictly smaller answer. This is the replayability split above,
+applied to a bound that moves: retention shrinks which regions are replayable, never the
+quantifier `S` ranges over. Because the bound advances with every run, a region's replayability
+is a property of *when* the recompute runs, not of the model's code — a backfill admissible last
+month can be refused today with no change to the model, and steady-state maintenance (which
+reads forward only) is unaffected.
+
 **Key departure follows the source posture.** Deletion is derived, never declared: the
 default behaviour is whatever preserves the full-refresh equation for the posture actually
 consumed. An append-only source never loses a key, so nothing departs and nothing is deleted.

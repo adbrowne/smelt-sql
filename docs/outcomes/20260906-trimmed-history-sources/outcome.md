@@ -66,7 +66,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | planned |
+| 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | done |
 | 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | pending |
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | pending |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | pending |
@@ -77,6 +77,32 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 ## Decision log
 
+- 2026-09-08 (phase 1 implement): **quantifier settled: over all history ever processed,
+  never narrowed by retention.** `docs/specs/incremental_models.md` §"The equivalence
+  invariant" now states it directly: a partition that ages out of `retention:` was still
+  scanned, so it stays in `S` and the stored table remains the answer of record over it —
+  retention narrows the *executable* `full_refresh` oracle's replayable region, never the
+  quantifier. A recompute reaching past the bound is refused (`SourceRetentionExceeded`)
+  rather than run to produce a smaller answer. Reasoning: this is the existing
+  replayability split applied to a bound that moves, and it is what keeps the feature
+  small — only a model whose reach exceeds the bound, or an explicit backfill, is ever
+  affected; steady-state forward-only maintenance never is.
+- 2026-09-08 (phase 1 implement): **retention is declared, verified, never observed** —
+  `docs/specs/sources.md`'s `retention:` row and §Semantics 5 now say so explicitly.
+  Reasoning: `retention:` is a narrowing world-fact under the existing trust rule (it
+  licenses smelt to stop trusting replay over a region), so it follows the same
+  discipline as every other narrowing declaration — trusted only paired with a
+  verification mechanism, never discovered by probing the warehouse, with over-claiming
+  (longer than the producer actually keeps) as the unsafe direction the mechanism must
+  catch. `retention:` is also **rolling** (anchored to the current run, advancing on its
+  own) rather than a fixed calendar date, because that is the physical fact real
+  warehouses expose (BigQuery `partition_expiration_days`, Delta's retention window).
+- 2026-09-08 (phase 1 implement): reconciled `examples/github_activity`'s inert
+  `retention: '90 days'` to the loader's real 45-day `partition_expiration_days` on both
+  `github_events.yml` and `github_events_arrival.yml`, per the spine's findings handoff;
+  new red-then-green test
+  `crates/smelt-cli/tests/github_activity_loader.rs::source_yaml_retention_matches_the_loader_expiration`
+  guards the two staying in sync.
 - 2026-09-08 (phase 1 planning): **table reshaped from the placeholder** into rows 2-8, one
   per remaining success criterion, ordered declaration → walk verdict → refuse/degrade →
   bound-movement → conformance → explain/docs → close-out. Nothing left the outcome; the

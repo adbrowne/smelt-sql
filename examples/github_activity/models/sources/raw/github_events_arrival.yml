@@ -22,7 +22,7 @@ mutation_profile:
     key: [id]
     window: '0 days'
 unique_key: [id]
-retention: '90 days'
+retention: '45 days'
 timeseries:
   event_time_column: created_at
   partition_column: ingested_date
