@@ -125,7 +125,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | blocked |
 | 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | blocked |
 | 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | blocked |
-| 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | planned |
+| 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | blocked |
 
 ## Decision log

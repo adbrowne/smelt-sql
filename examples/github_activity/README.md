@@ -222,3 +222,9 @@ incremental windows (measured at 108s for the full sweep, well under the 5-minut
 and is green. All four measured root causes are handed to
 `docs/outcomes/20260906-bigquery-correctness` as criterion-8 findings — this pipeline
 characterises and bounds them, it does not fix them.
+
+The interim, DuckDB-half writeup of these findings — the four root causes, the five
+registered divergences, and the requirements handed to the three downstream feature
+outcomes — is banked at
+`docs/handoffs/2026-09-08-github-activity-findings.md`. It is interim: the live-BigQuery
+half lands in phase 16 of `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`.

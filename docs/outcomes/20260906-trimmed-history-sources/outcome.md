@@ -71,6 +71,13 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 ## Decision log
 
+- 2026-09-08 (bigquery-dogfood-spine phase 15): **the interim findings handoff now
+  exists** at `docs/handoffs/2026-09-08-github-activity-findings.md`, covering the
+  DuckDB half only ("Requirements handed to `20260906-trimmed-history-sources`" section) —
+  the loader's 45-day `partition_expiration_days` bound and its derivation, and the
+  inert, now-corrected-comment-but-still-inconsistent `retention: '90 days'` field on both
+  `examples/github_activity/models/sources/raw/github_events{,_arrival}.yml` that this
+  outcome must reconcile. The live-BigQuery half lands in that outcome's phase 16.
 - 2026-09-06 (scaffold): **deliberately short**, for the same reason as
   `20260906-external-dag-steps` — the declaration's shape depends on what the spine's
   loader actually retains and on whether that retention is a smelt-visible declaration or

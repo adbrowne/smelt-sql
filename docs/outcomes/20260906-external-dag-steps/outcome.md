@@ -64,6 +64,11 @@ visible in the run report.
 
 ## Decision log
 
+- 2026-09-08 (bigquery-dogfood-spine phase 15): **the interim findings handoff now
+  exists** at `docs/handoffs/2026-09-08-github-activity-findings.md`, covering the
+  DuckDB half only ("Requirements handed to `20260906-external-dag-steps`" section) — the
+  real loader's shape and what a `produced_by:`-style declaration would need to express to
+  replace it. The live-BigQuery half lands in that outcome's phase 16.
 - 2026-09-06 (scaffold): **deliberately short.** Only the spec-decision phase is written.
   The phase list is completed by the phase-1 planner once
   `docs/outcomes/20260906-bigquery-dogfood-spine` has produced a real loader and its

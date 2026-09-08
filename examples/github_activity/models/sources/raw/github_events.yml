@@ -25,9 +25,12 @@ mutation_profile:
     key: [id]
     window: '0 days'
 unique_key: [id]
-# Matches the loader's own N-day trim (`docs/outcomes/
-# 20260906-bigquery-dogfood-spine/outcome.md` criterion 3); the fixture
-# itself only spans 30 days, well inside this bound.
+# Does NOT match the loader's own trim (`scripts/bq-dogfood-loader.sh`
+# --emit-ddl` / `README.md` declare `partition_expiration_days = 45`); this
+# field is unconsumed by any maintenance logic today (inert, scaffolding for
+# `docs/outcomes/20260906-trimmed-history-sources`, which owns reconciling
+# the two numbers or making this field real). The fixture itself only spans
+# 30 days, well inside either bound.
 retention: '90 days'
 timeseries:
   event_time_column: created_at

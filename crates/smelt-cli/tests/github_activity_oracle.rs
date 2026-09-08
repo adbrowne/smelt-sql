@@ -995,3 +995,78 @@ fn registry_entries_are_all_live() {
         );
     }
 }
+
+/// The interim findings handoff banked by phase 15
+/// (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/15-plan.md`) — a
+/// cheap, string-level drift gate over a committed doc, not a content check.
+const FINDINGS_HANDOFF: &str =
+    include_str!("../../../docs/handoffs/2026-09-08-github-activity-findings.md");
+
+/// Relation names the handoff's "five registered divergences" table claims
+/// are registered — parsed from its own markdown table rather than assumed,
+/// so a renamed or retired `DIVERGENCE_REGISTRY` entry cannot leave a stale
+/// row silently behind (test `findings_handoff_names_no_unknown_relation`).
+fn handoff_claimed_relations() -> Vec<String> {
+    FINDINGS_HANDOFF
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line.starts_with("| `") {
+                return None;
+            }
+            let rest = &line[3..];
+            let end = rest.find('`')?;
+            Some(rest[..end].to_string())
+        })
+        .collect()
+}
+
+/// Test 6 (phase 15, accept direction): every `DIVERGENCE_REGISTRY` entry's
+/// relation name appears verbatim in the findings handoff.
+#[test]
+fn every_registry_entry_is_named_in_the_findings_handoff() {
+    for entry in DIVERGENCE_REGISTRY {
+        assert!(
+            FINDINGS_HANDOFF.contains(entry.relation),
+            "docs/handoffs/2026-09-08-github-activity-findings.md does not name registry \
+             relation `{}` — every DIVERGENCE_REGISTRY entry must be traceable in the \
+             findings handoff",
+            entry.relation
+        );
+    }
+}
+
+/// Test 7 (phase 15, reverse direction): every relation the handoff's
+/// divergence table claims is registered actually resolves to a
+/// `DIVERGENCE_REGISTRY` entry, so a renamed or retired entry cannot leave a
+/// stale row in the document.
+#[test]
+fn findings_handoff_names_no_unknown_relation() {
+    let claimed = handoff_claimed_relations();
+    assert!(
+        !claimed.is_empty(),
+        "expected the findings handoff's divergence table to name at least one relation"
+    );
+    for relation in &claimed {
+        assert!(
+            DIVERGENCE_REGISTRY.iter().any(|e| e.relation == relation),
+            "findings handoff names relation `{relation}` as registered, but no \
+             DIVERGENCE_REGISTRY entry with that name exists — stale or renamed entry"
+        );
+    }
+}
+
+/// Test 8 (phase 15): the handoff carries an explicit interim marker so a
+/// downstream harvest phase cannot mistake it for the complete criterion-8
+/// artifact — the live-BigQuery half lands in phase 16.
+#[test]
+fn findings_handoff_declares_its_interim_status() {
+    assert!(
+        FINDINGS_HANDOFF.contains("DuckDB half only"),
+        "findings handoff must declare it is the DuckDB half only"
+    );
+    assert!(
+        FINDINGS_HANDOFF.contains("phase 16"),
+        "findings handoff must point to phase 16 for the live-BigQuery half"
+    );
+}

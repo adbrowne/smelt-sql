@@ -80,6 +80,11 @@ difference is either fixed or registered with a reason — never tolerated silen
 
 ## Decision log
 
+- 2026-09-08 (bigquery-dogfood-spine phase 15): **the interim findings handoff now
+  exists** at `docs/handoffs/2026-09-08-github-activity-findings.md` — the four measured
+  root causes, the five registered divergences, and this outcome's punch-list, all
+  DuckDB-half only. Its live-BigQuery half lands in that outcome's phase 16; until then,
+  this document is the phase-2 planner's rewrite input, not the final one.
 - 2026-09-06 (scaffold): **deliberately near-empty.** Phase 3 is a placeholder the phase-2
   planner rewrites. This is the outcome loop's just-in-time planning used as intended, and
   it is the mechanism by which §"Sequencing"'s "let the real models generate the
