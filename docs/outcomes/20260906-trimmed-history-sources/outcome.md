@@ -79,11 +79,37 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | done |
 | 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | done |
 | 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | done |
-| 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
-| 9 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
-| 10 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
+| 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | planned |
+| 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | pending |
+| 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
+| 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-09 (phase 8 planning): **table reshaped — new row 9 for the composed-upstream
+  granularity gap the phase-7 summary handed over.** `derive_model_retention_plan`
+  (`crates/smelt-runtime/src/execute/retention_admission.rs`) builds its candidate pool from
+  `model_file.refs` matched against `source_infos` alone, so a `grain: key` model whose only
+  clocked candidate is an upstream *model*'s composed output resolves
+  `driving_source_granularity: None` and can still short-circuit into `locality_refused_plan`
+  before the retention fold — the same silent-skip class phase 7 closed for declared sources,
+  and therefore exactly the silent under-read criterion 4 forbids. It gets a row rather than
+  leaving the outcome; it is not folded into phase 8, because phase 8 is a testkit/gate phase
+  over declared sources and the fix is production plumbing at a different seam. Rows 9-10 shift
+  to 10-11.
+- 2026-09-09 (phase 8 planning): **the conformance leg needs no oracle transform and no new
+  contract-lattice point.** Verified against `s_tracker.rs`: `s_restricted_oracle_sql`
+  materialises the baseline from the tracker's own recorded rows into a temp table
+  (`materialize_rows`), never from the physical source relation — so trimming the source
+  table leaves the oracle exactly `full_refresh(inputs ∈ S)` over all history ever processed,
+  which *is* phase 1's quantifier. Retention is therefore not a declared relaxation of the
+  equivalence invariant and mints no lattice point; the leg asserts the unrelaxed invariant.
+- 2026-09-09 (phase 8 planning): **the producer's trim rides the existing driver rather than a
+  new `ConformanceStep` variant.** Trimming before each run-bearing step, gated on
+  `recipe.source.retention.is_some()`, makes the bound advance with the schedule's own clock
+  (a rolling interval, per phase 1) and keeps every existing case byte-identical under `None` —
+  where a new step variant would churn every `match` over `ConformanceStep` for no added
+  fidelity.
 
 - 2026-09-09 (phase 7 planning): **no reshape; the granularity plumbing mirrors the
   diagnostics path, not the propagation path.** Verified against the code rather than the
