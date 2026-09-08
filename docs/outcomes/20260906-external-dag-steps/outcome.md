@@ -60,14 +60,27 @@ visible in the run report.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | done |
-| 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | pending |
+| 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | planned |
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | pending |
-| 4 | Invocation on the run path — order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
+| 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
 | 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
 | 6 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
 | 7 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 2 planning): **cross-entity validation placement decided** (the question
+  phase 1's summary left open) — per-file shape checks live in `parse_external_step_yaml`; the
+  two checks needing the whole project (a `produces:` address resolving to no declared source,
+  and two steps naming one source) live in a pure `validate_external_steps` called as a second
+  pass from the Salsa query, mirroring how `project_source_diagnostics` already runs the
+  per-target `name:`-key check. Phase 2 registers only the two parse-time codes
+  (`MalformedExternalStep`, `SourceProducerConflict`) in the enum and catalogue; the two
+  run-path codes arrive with their behaviour in phase 4, so no variant sits unused.
+- 2026-09-08 (phase 2 planning): **reshape — row 4 widened**, not added: the `command:`
+  placeholder grammar (`{run_date}`) that phase 1's summary flagged as unspecified is folded
+  into phase 4's row, since it is the invocation phase's own question and serves criterion 4.
+  No work left the outcome.
 
 - 2026-09-08 (phase 1 implementation): **spec delta landed** in `docs/specs/sources.md` —
   §Surface `### Externally-produced sources (black-box steps)`, four diagnostic rows, six
