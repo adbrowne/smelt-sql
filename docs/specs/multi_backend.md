@@ -961,6 +961,20 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
+- **The BigQuery conformance leg's live evidence has a date.** The last all-green live sweep of
+  `crates/smelt-cli/tests/maintenance_conformance_bigquery/` against a real warehouse is
+  2026-08-22 (22 cases, 621.61s, 4-way concurrent); every commit since is verified offline
+  only. A re-sweep is owed whenever maintenance emission or the shared
+  `smelt-maintenance-testkit` render surface changes again. Between sweeps, the offline gates
+  standing in for a live re-run are `cargo test -p smelt-maintenance-testkit --test
+  googlesql_render` (every DAG-body and composed-pool rendered body prints clean GoogleSQL),
+  `cargo test -p smelt-dialect --test modulo_lowering --test power_lowering` (the `%`/`^`
+  lowerings those bodies depend on), `cargo test -p smelt-backend --test
+  merge_columns_guard` (`require_merge_columns`), and
+  `no_family_hardcodes_a_backend_dialect` (`crates/smelt-maintenance-testkit/src/families/mod.rs`,
+  `dags.rs`) — none of them substitutes for the live leg itself, only for the specific defect
+  classes a prior live sweep found and fixed.
+
 - **`%` on BigQuery still lowers to `MOD` for every operand (#173).** GoogleSQL's `MOD` accepts only
   `INT64`/`NUMERIC` and fails at the warehouse on a floating-point operand; `Emission::Conditional`
   exists and is populated for `//`, `LOG`, `TRUNC` and `TO_JSON` on Spark, but `%` on BigQuery has

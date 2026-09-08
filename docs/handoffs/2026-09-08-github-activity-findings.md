@@ -226,6 +226,46 @@ future reader cannot again find them silently disagreeing.
    mechanism) naturally covers this too, or whether they need separate maintenance-cell
    work.
 
+## Criterion 6 — the two known live conformance failures
+
+Both `dags_bigquery::diamond_propagation_suffices_on_bigquery` and
+`gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` are already
+**fixed and live-confirmed** in the repo record — neither was open when this outcome's phase 9
+looked. What phase 9 added is the durable, offline half: a gate that would have caught the
+diamond mechanism before any live sweep ever needed to run, plus the retirement of the stale
+"uncharacterised"/"not yet re-confirmed" wording that still sat in the BigQuery conformance
+binary's own doc comments.
+
+| Test | Mechanism | Fix | Live evidence |
+|---|---|---|---|
+| Test: `diamond_propagation_suffices_on_bigquery` | `diamond_dag`'s `ParityFilter` body renders `WHERE id % 2 = 0`; GoogleSQL has no infix `%` (`400 Syntax error: Expected ")" but got "%"`, measured live 2026-08-19). Chasing it found the worse sibling: infix `^` is bitwise XOR on GoogleSQL, so it returns a *different number* rather than erroring. | `7a2eb89d0` (`%`→`MOD`), `af972abe0` (`^`→`POWER`) | targeted re-run 2026-08-19 (231.65s, pass); whole sweep 2026-08-21 (21/21); concurrent sweep 2026-08-22 (22 cases) |
+| Test: `composed_keyed_pool_upholds_equivalence_on_bigquery` | No mechanism of its own — collateral from three already-closed gaps it reached in one case: the keyed-fold `MERGE`'s not-matched arm hardcoding `INSERT *` (`build_cumulative_merge_sql` took no dialect), `Backend::execute_model`'s unconditional `DROP VIEW`/`DROP TABLE` across an object-type mismatch, and the composed route-3 delta query's hand-rolled `FROM (VALUES …) AS t(...)` row set. | `0178e6bd4`, `d84320a44`, `e028596e3`/`aee113753` | confirmed live 2026-08-19 sweep (14/21, this case in the passing set); same two sweeps above |
+
+**Offline gates now holding each mechanism**, so a regression in either fails before any live
+sweep is needed:
+
+- `cargo test -p smelt-maintenance-testkit --test googlesql_render` — new this phase. Parses
+  and prints every `DagBody` variant's rendered body (all six DAG recipes, all eight `DagBody`
+  variants) and the composed keyed pool's rendered bodies (all four `ComposedRoute`s) under the
+  BigQuery dialect, and asserts no refused construct (infix `%`, infix `^`, `MEDIAN(`,
+  `VARCHAR`, `DOUBLE`, `EXCEPT ALL`, `FROM (VALUES`) survived. This is the gate that would have
+  caught `diamond_propagation_suffices` offline, before it ever reached a live warehouse. A
+  negative control (`the_refused_construct_scan_is_not_vacuous`) and a fail-loud check on an
+  unparseable body (`a_body_that_does_not_parse_fails_loud`) guard the scanner itself against
+  passing vacuously.
+- `cargo test -p smelt-dialect --test modulo_lowering --test power_lowering` — the `%`→`MOD`
+  and `^`/`**`→`POWER` lowerings `googlesql_render` depends on.
+- `cargo test -p smelt-backend --test merge_columns_guard` (`require_merge_columns`) and
+  `no_family_hardcodes_a_backend_dialect` (`crates/smelt-maintenance-testkit/src/families/mod.rs`,
+  `dags.rs`) — hold the composed-pool collateral fixes' own dialect-awareness.
+
+**The one genuinely unrunnable item**: re-confirming green at today's HEAD. The live leg needs
+credentials this loop does not have, and phases 1-8 of this outcome touched maintenance
+emitters since the last live sweep (2026-08-22). This is recorded as a dated, named debt —
+`docs/specs/multi_backend.md` §"Known Divergences" "The BigQuery conformance leg's live
+evidence has a date" — rather than skipped green; it belongs to the
+`20260906-bigquery-dogfood-spine` outcome's blocked live half (its phase 16).
+
 ## References
 
 - `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` — outcome header, criteria,

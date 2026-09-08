@@ -90,10 +90,40 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | done |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | done |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | done |
-| 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | planned |
+| 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | done |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 9 implementation): **the plan's citation table verified exactly as
+  written; the durable half is now landed and no live re-run is needed.** All six commits
+  (`7a2eb89d0`, `af972abe0`, `0178e6bd4`, `d84320a44`, `e028596e3`, `aee113753`) confirmed via
+  `git show`; `modulo_lowering`/`power_lowering` both pass at HEAD unchanged. New
+  `crates/smelt-maintenance-testkit/tests/googlesql_render.rs` (4 tests: the two positive
+  scans over every `DagBody` variant across all six DAG recipes and all four `ComposedRoute`s,
+  a non-vacuity negative control over all seven refused-construct needles, and a fail-loud
+  check on an unparseable body) — none of the scans found a live needle, so no fix was needed,
+  only the gate. `crates/smelt-cli/tests/maintenance_conformance_bigquery/backend.rs` gained
+  `bigquery_oracle_relation_issues_no_ddl_and_returns_an_inline_subquery` against the REAL
+  `BigQueryConformanceBackend` (not a stand-in fake) and a real in-memory-equivalent
+  `DuckDbBackend`, gated `#[cfg(feature = "duckdb")]` (on by default alongside `bigquery`) so
+  it needs no warehouse and no `SMELT_BQ_PROJECT`. `main.rs`'s doc comment and
+  `gate_composed_bigquery.rs`'s doc comment both retired their stale
+  "uncharacterised"/"not yet re-confirmed" wording in favour of the plan's table plus the
+  2026-08-21/2026-08-22 sweep results. Spec delta landed
+  (`docs/specs/multi_backend.md` §"Known Divergences": "The BigQuery conformance leg's live
+  evidence has a date", naming the 2026-08-22 sweep and the five offline gates that stand in
+  for a live re-run between sweeps). `docs/handoffs/2026-09-08-github-activity-findings.md`
+  gained a §"Criterion 6" section carrying the table verbatim; its leading-cell format had to
+  change from `` | `name` `` to `` | Test: `name` `` after `findings_handoff_names_no_unknown_relation`
+  (a pre-existing generic scan for any `` | ` `` -leading markdown row, not specific to the
+  divergence-registry table) flagged both new rows as stale registered-divergence claims — a
+  real, if narrow, false positive in a gate this phase didn't own, fixed by reformatting rather
+  than touching the gate. All gates green: `verify-phase.sh`, `googlesql_render` (4/4),
+  `modulo_lowering`+`power_lowering` (11/11), `maintenance_conformance --features duckdb`
+  (101/101, including `dags::diamond_propagation_suffices` and the `composed_pool` family),
+  `cargo check -p smelt-cli --features bigquery --tests`, the new BigQuery-gated test (1/1,
+  `SMELT_BQ_PROJECT` unset), `large-file-check.sh`. Row 10 is unchanged.
 
 - 2026-09-08 (phase 9 planning): **no reshape, and no block — the two failures are already
   characterised AND fixed in the repo record, so phase 9 is offline forensics plus the gate that

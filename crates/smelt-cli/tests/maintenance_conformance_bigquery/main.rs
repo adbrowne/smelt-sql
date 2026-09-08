@@ -96,6 +96,20 @@
 //! only classification, and the boundary-row reach check, none of which
 //! reach the broken code paths above).
 //!
+//! **This doc comment describes the 2026-08-17 run (7/21), which is no
+//! longer current.** All four defects above are fixed
+//! (`7a2eb89d0`/`af972abe0` for the diamond `%`/`^` lowering;
+//! `0178e6bd4`/`d84320a44`/`e028596e3`/`aee113753` for the composed-pool
+//! collateral; `dags_bigquery.rs`'s own doc comment for the per-case-dataset
+//! staging fix) and confirmed live: 21/21 (2026-08-21, 2190.85s) and 22
+//! cases (2026-08-22, 621.61s, 4-way concurrent) both all-green. The
+//! **2026-08-22 sweep is the last live confirmation** — every commit since
+//! is verified offline only (`crates/smelt-maintenance-testkit/tests/googlesql_render.rs`
+//! plus the DuckDB-leg twin, `maintenance_conformance`), and a re-sweep is
+//! owed whenever maintenance emission or the shared testkit render surface
+//! changes again (`docs/specs/multi_backend.md` §"Known Divergences",
+//! `docs/outcomes/20260906-bigquery-correctness/phases/09-plan.md`).
+//!
 //! **Run via `scripts/bigquery-conformance.sh`**, which passes a bounded
 //! `--test-threads` (default 4, overridable via
 //! `SMELT_CONFORMANCE_BQ_TEST_THREADS`) rather than the Spark twin's
