@@ -2816,6 +2816,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#smelt-explain-external-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        smelt explain &lt;external step&gt;
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3679,6 +3690,17 @@
     <span class="md-ellipsis">
       
         Property diff
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#smelt-explain-external-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        smelt explain &lt;external step&gt;
       
     </span>
   </a>
@@ -5801,6 +5823,28 @@ dependencies, per-column determinism/comparability/discriminants, row identity, 
 <a id="__codelineno-55-42" name="__codelineno-55-42" href="#__codelineno-55-42"></a>
 <a id="__codelineno-55-43" name="__codelineno-55-43" href="#__codelineno-55-43"></a>Probes (0):
 </code></pre></div>
+<h3 id="smelt-explain-external-step"><code>smelt explain &lt;external step&gt;</code><a class="headerlink" href="#smelt-explain-external-step" title="Permanent link">&para;</a></h3>
+<p>When <code>MODEL_NAME</code> resolves to a discovered <a href="../../guide/external-steps/">external step</a> rather
+than a model, <code>smelt explain</code> prints that step's report instead of a maintenance plan: the
+source addresses it <code>produces:</code>, the literal <code>command:</code> argv exactly as declared (unsubstituted
+— <code>{run_date}</code>/<code>{run_end}</code> placeholders are shown raw, since <code>explain</code> has no run window to
+resolve them against), the <code>cadence:</code> when declared, the <code>description:</code> when declared, the
+models that directly consume a produced source, and a fixed sentence that smelt does not author
+or parse the step's program. <code>smelt explain</code> never spawns the step's <code>command:</code>.</p>
+<p><code>--show-sql</code>, <code>--period</code>, and <code>--technique</code> are maintenance-plan flags with no meaning for a step
+— each is rejected as a usage error (exit <code>2</code>) naming the step and the flag, rather than treated
+as "model not found" or silently ignored. <code>--select</code> is ignored when a positional argument is
+given, matching model-report behavior.</p>
+<p>With <code>--json</code>, <code>smelt explain &lt;step&gt;</code> emits one object: <code>kind: "external_step"</code>, <code>address</code>,
+<code>produces</code> (array of source addresses), <code>command</code> (argv array, unsubstituted), <code>cadence</code> and
+<code>description</code> when declared, and <code>consumed_by</code> (models reading a produced source). See
+<code>docs/specs/cli.md</code> §"<code>smelt explain &lt;external step&gt;</code>" for the full schema.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-56-1" name="__codelineno-56-1" href="#__codelineno-56-1"></a><span class="c1"># Explain a declared external step</span>
+<a id="__codelineno-56-2" name="__codelineno-56-2" href="#__codelineno-56-2"></a>smelt<span class="w"> </span>explain<span class="w"> </span>github_loader
+<a id="__codelineno-56-3" name="__codelineno-56-3" href="#__codelineno-56-3"></a>
+<a id="__codelineno-56-4" name="__codelineno-56-4" href="#__codelineno-56-4"></a><span class="c1"># Same, machine-readable</span>
+<a id="__codelineno-56-5" name="__codelineno-56-5" href="#__codelineno-56-5"></a>smelt<span class="w"> </span>explain<span class="w"> </span>github_loader<span class="w"> </span>--json
+</code></pre></div>
 <hr />
 <h2 id="smelt-bakeoff">smelt bakeoff<a class="headerlink" href="#smelt-bakeoff" title="Permanent link">&para;</a></h2>
 <p>Measure the wall-clock cost of every admissible maintenance technique for a model's cells against
@@ -5810,7 +5854,7 @@ ladder</a> a live run consults — <code>smelt bakeoff</code> measures
 what that ladder would cost under each candidate, it doesn't change what a run does until you
 paste the emitted pin yourself.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-56-1" name="__codelineno-56-1" href="#__codelineno-56-1"></a>smelt bakeoff &lt;MODEL_NAME&gt; [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-57-1" name="__codelineno-57-1" href="#__codelineno-57-1"></a>smelt bakeoff &lt;MODEL_NAME&gt; [OPTIONS]
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -5888,29 +5932,29 @@ fails the whole run loudly rather than reporting a cost for a technique whose ou
 <p>A model with no cell that has 2+ admissible techniques prints a "nothing to measure" report and
 exits <code>0</code> — there is nothing to bake off.</p>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-57-1" name="__codelineno-57-1" href="#__codelineno-57-1"></a><span class="c1"># Measure every multi-technique cell of daily_events_enriched over 3 replayed windows</span>
-<a id="__codelineno-57-2" name="__codelineno-57-2" href="#__codelineno-57-2"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched
-<a id="__codelineno-57-3" name="__codelineno-57-3" href="#__codelineno-57-3"></a>
-<a id="__codelineno-57-4" name="__codelineno-57-4" href="#__codelineno-57-4"></a><span class="c1"># Narrow to one cell, replay 5 windows, keep the scratch schemas for inspection</span>
-<a id="__codelineno-57-5" name="__codelineno-57-5" href="#__codelineno-57-5"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--cells<span class="w"> </span>user_name@users<span class="w"> </span>--runs<span class="w"> </span><span class="m">5</span><span class="w"> </span>--keep
-<a id="__codelineno-57-6" name="__codelineno-57-6" href="#__codelineno-57-6"></a>
-<a id="__codelineno-57-7" name="__codelineno-57-7" href="#__codelineno-57-7"></a><span class="c1"># Measure and print the winning technique as a ready-to-paste frontmatter pin</span>
-<a id="__codelineno-57-8" name="__codelineno-57-8" href="#__codelineno-57-8"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--pin
-</code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-58-1" name="__codelineno-58-1" href="#__codelineno-58-1"></a>$ smelt bakeoff daily_events_enriched --runs 2 --pin
-<a id="__codelineno-58-2" name="__codelineno-58-2" href="#__codelineno-58-2"></a>smelt bakeoff report for `daily_events_enriched` (target=dev, runs=2)
+<div class="highlight"><pre><span></span><code><a id="__codelineno-58-1" name="__codelineno-58-1" href="#__codelineno-58-1"></a><span class="c1"># Measure every multi-technique cell of daily_events_enriched over 3 replayed windows</span>
+<a id="__codelineno-58-2" name="__codelineno-58-2" href="#__codelineno-58-2"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched
 <a id="__codelineno-58-3" name="__codelineno-58-3" href="#__codelineno-58-3"></a>
-<a id="__codelineno-58-4" name="__codelineno-58-4" href="#__codelineno-58-4"></a>cell: columns=[&quot;user_name&quot;] on=users trigger=UpstreamMutation
-<a id="__codelineno-58-5" name="__codelineno-58-5" href="#__codelineno-58-5"></a>  - fold             total=   842ms per-run=[421, 421] rows=100000 schema=smelt_bakeoff_daily_events_enriched_fold
-<a id="__codelineno-58-6" name="__codelineno-58-6" href="#__codelineno-58-6"></a>  - recompute        total=  1930ms per-run=[965, 965] rows=100000 schema=smelt_bakeoff_daily_events_enriched_recompute
-<a id="__codelineno-58-7" name="__codelineno-58-7" href="#__codelineno-58-7"></a>  equivalence: OK (EXCEPT ALL empty both directions)
-<a id="__codelineno-58-8" name="__codelineno-58-8" href="#__codelineno-58-8"></a>
-<a id="__codelineno-58-9" name="__codelineno-58-9" href="#__codelineno-58-9"></a>to pin this choice, add to `daily_events_enriched.sql` frontmatter:
-<a id="__codelineno-58-10" name="__codelineno-58-10" href="#__codelineno-58-10"></a>maintenance:
-<a id="__codelineno-58-11" name="__codelineno-58-11" href="#__codelineno-58-11"></a>  cells:
-<a id="__codelineno-58-12" name="__codelineno-58-12" href="#__codelineno-58-12"></a>    - columns: [user_name]
-<a id="__codelineno-58-13" name="__codelineno-58-13" href="#__codelineno-58-13"></a>      on: users
-<a id="__codelineno-58-14" name="__codelineno-58-14" href="#__codelineno-58-14"></a>      technique: fold
+<a id="__codelineno-58-4" name="__codelineno-58-4" href="#__codelineno-58-4"></a><span class="c1"># Narrow to one cell, replay 5 windows, keep the scratch schemas for inspection</span>
+<a id="__codelineno-58-5" name="__codelineno-58-5" href="#__codelineno-58-5"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--cells<span class="w"> </span>user_name@users<span class="w"> </span>--runs<span class="w"> </span><span class="m">5</span><span class="w"> </span>--keep
+<a id="__codelineno-58-6" name="__codelineno-58-6" href="#__codelineno-58-6"></a>
+<a id="__codelineno-58-7" name="__codelineno-58-7" href="#__codelineno-58-7"></a><span class="c1"># Measure and print the winning technique as a ready-to-paste frontmatter pin</span>
+<a id="__codelineno-58-8" name="__codelineno-58-8" href="#__codelineno-58-8"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--pin
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-59-1" name="__codelineno-59-1" href="#__codelineno-59-1"></a>$ smelt bakeoff daily_events_enriched --runs 2 --pin
+<a id="__codelineno-59-2" name="__codelineno-59-2" href="#__codelineno-59-2"></a>smelt bakeoff report for `daily_events_enriched` (target=dev, runs=2)
+<a id="__codelineno-59-3" name="__codelineno-59-3" href="#__codelineno-59-3"></a>
+<a id="__codelineno-59-4" name="__codelineno-59-4" href="#__codelineno-59-4"></a>cell: columns=[&quot;user_name&quot;] on=users trigger=UpstreamMutation
+<a id="__codelineno-59-5" name="__codelineno-59-5" href="#__codelineno-59-5"></a>  - fold             total=   842ms per-run=[421, 421] rows=100000 schema=smelt_bakeoff_daily_events_enriched_fold
+<a id="__codelineno-59-6" name="__codelineno-59-6" href="#__codelineno-59-6"></a>  - recompute        total=  1930ms per-run=[965, 965] rows=100000 schema=smelt_bakeoff_daily_events_enriched_recompute
+<a id="__codelineno-59-7" name="__codelineno-59-7" href="#__codelineno-59-7"></a>  equivalence: OK (EXCEPT ALL empty both directions)
+<a id="__codelineno-59-8" name="__codelineno-59-8" href="#__codelineno-59-8"></a>
+<a id="__codelineno-59-9" name="__codelineno-59-9" href="#__codelineno-59-9"></a>to pin this choice, add to `daily_events_enriched.sql` frontmatter:
+<a id="__codelineno-59-10" name="__codelineno-59-10" href="#__codelineno-59-10"></a>maintenance:
+<a id="__codelineno-59-11" name="__codelineno-59-11" href="#__codelineno-59-11"></a>  cells:
+<a id="__codelineno-59-12" name="__codelineno-59-12" href="#__codelineno-59-12"></a>    - columns: [user_name]
+<a id="__codelineno-59-13" name="__codelineno-59-13" href="#__codelineno-59-13"></a>      on: users
+<a id="__codelineno-59-14" name="__codelineno-59-14" href="#__codelineno-59-14"></a>      technique: fold
 </code></pre></div>
 <p>The report lists, per measured cell, every admissible technique's total and per-window
 wall-clock cost, the resulting row count, and the scratch schema it ran in; the <code>equivalence:</code>
@@ -5924,7 +5968,7 @@ arbitrarily.</p>
 <h2 id="smelt-ui">smelt ui<a class="headerlink" href="#smelt-ui" title="Permanent link">&para;</a></h2>
 <p>Start a local web UI for visualizing the model graph and project structure.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-59-1" name="__codelineno-59-1" href="#__codelineno-59-1"></a>smelt ui [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-60-1" name="__codelineno-60-1" href="#__codelineno-60-1"></a>smelt ui [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -5965,14 +6009,14 @@ arbitrarily.</p>
 </table>
 <p><strong>Network exposure:</strong> <code>smelt ui</code> has no authentication or HTTPS. It is meant to be reached at <code>http://127.0.0.1:&lt;port&gt;</code> from the machine running it. Binding to a non-loopback host without <code>--allow-remote</code> fails loudly rather than silently binding to loopback instead; with the flag, the server starts and logs a startup warning that it is reachable from other hosts. CORS is restricted to the server's own origin.</p>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-60-1" name="__codelineno-60-1" href="#__codelineno-60-1"></a><span class="c1"># Start the web UI on default port</span>
-<a id="__codelineno-60-2" name="__codelineno-60-2" href="#__codelineno-60-2"></a>smelt<span class="w"> </span>ui
-<a id="__codelineno-60-3" name="__codelineno-60-3" href="#__codelineno-60-3"></a>
-<a id="__codelineno-60-4" name="__codelineno-60-4" href="#__codelineno-60-4"></a><span class="c1"># Start on a custom port</span>
-<a id="__codelineno-60-5" name="__codelineno-60-5" href="#__codelineno-60-5"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--port<span class="w"> </span><span class="m">8080</span>
-<a id="__codelineno-60-6" name="__codelineno-60-6" href="#__codelineno-60-6"></a>
-<a id="__codelineno-60-7" name="__codelineno-60-7" href="#__codelineno-60-7"></a><span class="c1"># Bind to all interfaces (for remote access) — requires the opt-in</span>
-<a id="__codelineno-60-8" name="__codelineno-60-8" href="#__codelineno-60-8"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0<span class="w"> </span>--port<span class="w"> </span><span class="m">3000</span><span class="w"> </span>--allow-remote
+<div class="highlight"><pre><span></span><code><a id="__codelineno-61-1" name="__codelineno-61-1" href="#__codelineno-61-1"></a><span class="c1"># Start the web UI on default port</span>
+<a id="__codelineno-61-2" name="__codelineno-61-2" href="#__codelineno-61-2"></a>smelt<span class="w"> </span>ui
+<a id="__codelineno-61-3" name="__codelineno-61-3" href="#__codelineno-61-3"></a>
+<a id="__codelineno-61-4" name="__codelineno-61-4" href="#__codelineno-61-4"></a><span class="c1"># Start on a custom port</span>
+<a id="__codelineno-61-5" name="__codelineno-61-5" href="#__codelineno-61-5"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--port<span class="w"> </span><span class="m">8080</span>
+<a id="__codelineno-61-6" name="__codelineno-61-6" href="#__codelineno-61-6"></a>
+<a id="__codelineno-61-7" name="__codelineno-61-7" href="#__codelineno-61-7"></a><span class="c1"># Bind to all interfaces (for remote access) — requires the opt-in</span>
+<a id="__codelineno-61-8" name="__codelineno-61-8" href="#__codelineno-61-8"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0<span class="w"> </span>--port<span class="w"> </span><span class="m">3000</span><span class="w"> </span>--allow-remote
 </code></pre></div>
 
 
