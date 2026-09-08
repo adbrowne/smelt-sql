@@ -67,7 +67,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | done |
-| 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | pending |
+| 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | planned |
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | pending |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | pending |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | pending |
@@ -76,6 +76,17 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 8 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 2 planning): **a malformed rolling bound is refused, and an inert one
+  counts as malformed** — phase 2 refuses `retention:` when the interval is unparseable,
+  when it is zero, and when the source declares no `timeseries:`. Reasoning: the first is
+  ordinary fail-loud parsing (today it escapes as an opaque serde `YamlParse` naming the
+  retired `data_latency` key); the last two are the same failure this outcome exists to
+  prevent, one level up — a bound with no clock has no reach to be compared against, so
+  accepting it would silently license every replay it was written to forbid. No new
+  `DiagnosticCode`: `MalformedSource` already names the retention clause in
+  `sources.md` §"Diagnostic codes". Phase table otherwise unchanged — the phase-1 summary
+  surfaced no work needing a new row.
 
 - 2026-09-08 (phase 1 implement): **quantifier settled: over all history ever processed,
   never narrowed by retention.** `docs/specs/incremental_models.md` §"The equivalence
