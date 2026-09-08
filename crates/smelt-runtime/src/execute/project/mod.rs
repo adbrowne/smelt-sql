@@ -1023,6 +1023,37 @@ pub async fn execute_project(
 
         reporter.model_started(run_id, &plan.name, model_idx, models_total);
 
+        // Reach-versus-retention rolling re-evaluation (`docs/specs/sources.md`
+        // §Semantics 5 "Retention refusal", `docs/outcomes/
+        // 20260906-trimmed-history-sources/outcome.md` criterion 5): before any
+        // statement is emitted or executed for this model, re-check its derived
+        // reach against every declared `retention:` source's bound, aged by
+        // THIS run's own window — a region admissible last month can stop being
+        // admissible with no change to the model. `start_date` is `None` for a
+        // forward-only run (age zero, steady-state maintenance unaffected);
+        // `run_start` (never `Utc::now()` inline) is the run's own clock.
+        if let Some(retention_plan) =
+            crate::execute::retention_admission::derive_model_retention_plan(
+                &plan.model_file,
+                source_infos,
+            )
+        {
+            if let Err(err) = crate::execute::retention_admission::check_retention_admission(
+                &retention_plan,
+                start_date,
+                run_start.date_naive(),
+            ) {
+                return Err(anyhow::anyhow!(err));
+            }
+            for downgrade in &retention_plan.retention_downgrades {
+                reporter.maintenance_warning(
+                    run_id,
+                    &plan.name,
+                    &crate::execute::retention_admission::downgrade_warning_message(downgrade),
+                );
+            }
+        }
+
         let model_start = Instant::now();
         let mut total_rows = 0usize;
 

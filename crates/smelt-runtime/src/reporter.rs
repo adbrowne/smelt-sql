@@ -126,6 +126,13 @@ pub trait RunReporter: Send + Sync {
     /// `"pass"`, `"fail"`, `"warn"`, or `"target_not_built"`.
     fn check_result(&self, _run_id: &str, _check: &str, _status: &str, _row_count: usize) {}
 
+    /// A recorded degradation that does not block the run — surfaced as a
+    /// warning rather than silently absorbed (e.g. a `SourceRetentionDowngraded`
+    /// reach into a `retention:`-bearing source, `docs/specs/sources.md`
+    /// §Semantics 5). Default no-op; a reporter that wants to surface these
+    /// overrides it.
+    fn maintenance_warning(&self, _run_id: &str, _model: &str, _message: &str) {}
+
     /// A model's statement-group execution hit a transient backend error
     /// (`BackendError::is_transient`) and is about to retry the whole group
     /// after a backoff delay (`docs/plans/20260719-prod-w2-operability.md`

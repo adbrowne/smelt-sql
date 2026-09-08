@@ -125,6 +125,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
         refusals: vec![],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 
@@ -139,6 +140,7 @@ fn refused_plan(source: &str) -> MaintenancePlan {
         }],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 

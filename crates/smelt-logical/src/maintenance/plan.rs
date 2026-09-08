@@ -42,6 +42,15 @@ pub struct MaintenancePlan {
     /// Empty for a model that declares no `retention:`-bearing sources, or
     /// whose reach was proven to fit every one it does.
     pub retention_downgrades: Vec<RetentionDowngrade>,
+    /// Every source's bounded reach-versus-retention proof
+    /// (`retention::retention_reaches`'s output — `Within` and `Exceeds`
+    /// verdicts alike), carried so a run can re-evaluate admission against
+    /// its own window age without re-walking the model's SQL
+    /// (`docs/outcomes/20260906-trimmed-history-sources/outcome.md`
+    /// criterion 5). Empty for a model that declares no `retention:`-bearing
+    /// sources, or whose reach could not be proven at all (`UnprovableWithin`
+    /// — nothing bounded to age).
+    pub retention_reaches: Vec<RetentionReach>,
 }
 
 impl MaintenancePlan {
@@ -103,6 +112,7 @@ pub fn unsupported_grain_plan(grain: &str) -> MaintenancePlan {
         }],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 
@@ -119,6 +129,7 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
         refusals: vec![Refusal::LocalityNotEstablished { message }],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 
@@ -134,6 +145,7 @@ pub fn succession_refused_plan(
         refusals: vec![Refusal::SuccessionNotRecognized { reason }],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 
@@ -151,6 +163,7 @@ pub fn recurrence_mismatch_plan(message: String) -> MaintenancePlan {
         refusals: vec![Refusal::KeyedRecurrenceDeclarationMismatch { message }],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 
@@ -164,6 +177,7 @@ pub fn identity_not_derivable_plan(message: String) -> MaintenancePlan {
         refusals: vec![Refusal::IdentityNotDerivable { message }],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 

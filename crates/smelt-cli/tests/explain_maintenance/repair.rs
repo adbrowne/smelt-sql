@@ -123,6 +123,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
             refusals: vec![],
             key_locality: None,
             retention_downgrades: Vec::new(),
+            retention_reaches: Vec::new(),
         },
         column_groups: vec![ColumnGroup {
             columns: vec!["max_val".to_string()],

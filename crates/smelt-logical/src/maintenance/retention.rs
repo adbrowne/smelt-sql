@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
+
 use crate::analysis::retention_reach::{RetentionVerdict, UnprovableReason};
 use crate::analysis::source_bounds::Seconds;
 use crate::maintenance::Refusal;
@@ -75,4 +77,226 @@ pub fn retention_outcomes(
         }
     }
     (refusals, downgrades)
+}
+
+/// One source's **bounded** reach-versus-retention proof, carried on
+/// [`super::MaintenancePlan::retention_reaches`] so a run can re-evaluate it
+/// against its own window age without re-walking the model's SQL
+/// (`docs/outcomes/20260906-trimmed-history-sources/outcome.md` criterion 5,
+/// maintenance-plan purity). `required_lookback` here is the model's own
+/// derived reach at plan-derivation time (`window_age: Seconds::ZERO`) —
+/// never the run-window-aged quantity, which [`retention_refusals_at_age`]
+/// folds in later, once, at the run's own clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionReach {
+    pub source: String,
+    pub required_lookback: Seconds,
+    pub retained: Seconds,
+}
+
+/// Collect the **bounded** verdicts (`Within` and `Exceeds` alike) as
+/// [`RetentionReach`] proofs — the totality of `derive_retention_verdicts`'s
+/// output this phase's rolling re-evaluation needs. `NoDeclaredBound` (no
+/// comparison exists) and `UnprovableWithin` (no bound to age at all — the
+/// reach itself was never proven finite) carry no reach and are omitted.
+/// Iterates sources in sorted order, matching [`retention_outcomes`].
+pub fn retention_reaches(verdicts: &HashMap<String, RetentionVerdict>) -> Vec<RetentionReach> {
+    let mut sources: Vec<&String> = verdicts.keys().collect();
+    sources.sort();
+    sources
+        .into_iter()
+        .filter_map(|source| match &verdicts[source] {
+            RetentionVerdict::Within {
+                required_lookback,
+                retained,
+            }
+            | RetentionVerdict::Exceeds {
+                required_lookback,
+                retained,
+            } => Some(RetentionReach {
+                source: source.clone(),
+                required_lookback: *required_lookback,
+                retained: *retained,
+            }),
+            RetentionVerdict::NoDeclaredBound | RetentionVerdict::UnprovableWithin { .. } => None,
+        })
+        .collect()
+}
+
+/// Age every [`RetentionReach`] by `window_age` (the run's own backfill age,
+/// [`run_window_age`]) and refuse the ones that now exceed their retained
+/// bound — the rolling re-evaluation
+/// (`docs/outcomes/20260906-trimmed-history-sources/outcome.md` criterion 5):
+/// a reach that fit last month can stop fitting today with no change to the
+/// model's SQL. Pure fold over the plan's own already-derived proof; never
+/// re-walks anything. Monotone in `window_age` — a reach already exceeding
+/// at age zero stays refused at every larger age (adding a non-negative
+/// quantity to an already-too-large `required_lookback` cannot bring it back
+/// under `retained`).
+pub fn retention_refusals_at_age(reaches: &[RetentionReach], window_age: Seconds) -> Vec<Refusal> {
+    reaches
+        .iter()
+        .filter_map(|reach| {
+            let aged_lookback = Seconds(reach.required_lookback.0.saturating_add(window_age.0));
+            if aged_lookback > reach.retained {
+                Some(Refusal::SourceRetentionExceeded {
+                    source: reach.source.clone(),
+                    required_lookback_secs: aged_lookback.0,
+                    retained_secs: reach.retained.0,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The age of a run's window, measured from `window_start` to the run's own
+/// clock (`now`) — the quantity [`retention_refusals_at_age`] folds onto
+/// each reach's plan-time `required_lookback`
+/// (`docs/specs/sources.md` §Semantics 5 "Retention refusal"). Saturates at
+/// zero for a forward-dated or same-day window rather than going negative —
+/// a forward-only run (no explicit `--start`) has age zero by construction,
+/// which is what keeps steady-state maintenance unaffected by this check.
+pub fn run_window_age(window_start: NaiveDate, now: NaiveDate) -> Seconds {
+    let days = now.signed_duration_since(window_start).num_days().max(0);
+    Seconds(days as u64 * 86400)
+}
+
+#[cfg(test)]
+mod rolling_tests {
+    use super::*;
+
+    fn verdicts_with(source: &str, verdict: RetentionVerdict) -> HashMap<String, RetentionVerdict> {
+        let mut m = HashMap::new();
+        m.insert(source.to_string(), verdict);
+        m
+    }
+
+    #[test]
+    fn retention_reaches_carry_the_bounded_proof() {
+        let mut verdicts = HashMap::new();
+        verdicts.insert(
+            "silver.within".to_string(),
+            RetentionVerdict::Within {
+                required_lookback: Seconds::days(7),
+                retained: Seconds::days(45),
+            },
+        );
+        verdicts.insert(
+            "silver.exceeds".to_string(),
+            RetentionVerdict::Exceeds {
+                required_lookback: Seconds::days(90),
+                retained: Seconds::days(45),
+            },
+        );
+        verdicts.insert(
+            "silver.unprovable".to_string(),
+            RetentionVerdict::UnprovableWithin {
+                retained: Seconds::days(45),
+                reason: UnprovableReason::UnboundedReach,
+            },
+        );
+        verdicts.insert(
+            "silver.undeclared".to_string(),
+            RetentionVerdict::NoDeclaredBound,
+        );
+
+        let reaches = retention_reaches(&verdicts);
+        assert_eq!(
+            reaches,
+            vec![
+                RetentionReach {
+                    source: "silver.exceeds".to_string(),
+                    required_lookback: Seconds::days(90),
+                    retained: Seconds::days(45),
+                },
+                RetentionReach {
+                    source: "silver.within".to_string(),
+                    required_lookback: Seconds::days(7),
+                    retained: Seconds::days(45),
+                },
+            ],
+            "exactly one entry per bounded verdict (Within and Exceeds), sorted by source, \
+             none for UnprovableWithin or NoDeclaredBound: {reaches:?}"
+        );
+    }
+
+    #[test]
+    fn an_admissible_reach_refuses_once_the_window_ages_past_the_bound() {
+        let reaches = vec![RetentionReach {
+            source: "silver.events".to_string(),
+            required_lookback: Seconds::days(7),
+            retained: Seconds::days(45),
+        }];
+
+        assert!(
+            retention_refusals_at_age(&reaches, Seconds::ZERO).is_empty(),
+            "age zero must not refuse a reach that fits at authoring time"
+        );
+
+        let refusals = retention_refusals_at_age(&reaches, Seconds::days(60));
+        assert_eq!(refusals.len(), 1);
+        match &refusals[0] {
+            Refusal::SourceRetentionExceeded {
+                source,
+                required_lookback_secs,
+                retained_secs,
+            } => {
+                assert_eq!(source, "silver.events");
+                assert_eq!(*required_lookback_secs, Seconds::days(67).0);
+                assert_eq!(*retained_secs, Seconds::days(45).0);
+            }
+            other => panic!("expected SourceRetentionExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn age_never_rescues_an_already_exceeding_reach() {
+        let reaches = vec![RetentionReach {
+            source: "silver.events".to_string(),
+            required_lookback: Seconds::days(90),
+            retained: Seconds::days(45),
+        }];
+        for age in [Seconds::ZERO, Seconds::days(1), Seconds::days(365)] {
+            let refusals = retention_refusals_at_age(&reaches, age);
+            assert_eq!(
+                refusals.len(),
+                1,
+                "a reach already exceeding at age zero must stay refused at age {age:?}: {refusals:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_window_age_is_zero_for_a_window_at_or_after_now() {
+        let now = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        assert_eq!(run_window_age(now, now), Seconds::ZERO);
+        let forward_dated = NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+        assert_eq!(
+            run_window_age(forward_dated, now),
+            Seconds::ZERO,
+            "a window starting after the run clock must saturate at zero age, not go negative"
+        );
+    }
+
+    #[test]
+    fn retention_reaches_survive_a_plan_round_trip_unchanged() {
+        let verdicts = verdicts_with(
+            "silver.events",
+            RetentionVerdict::Within {
+                required_lookback: Seconds::days(7),
+                retained: Seconds::days(45),
+            },
+        );
+        let reaches = retention_reaches(&verdicts);
+        // The rolling fold reads only the already-derived `RetentionReach`
+        // list — no SQL, no `BoundContext`, nothing re-walked — so calling
+        // it twice on the exact same slice is byte-identical, which is the
+        // only property maintenance-plan purity can be checked for at this
+        // layer (the walk itself is `walk_coverage`'s job).
+        let first = retention_refusals_at_age(&reaches, Seconds::days(60));
+        let second = retention_refusals_at_age(&reaches, Seconds::days(60));
+        assert_eq!(first, second);
+    }
 }

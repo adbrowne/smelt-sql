@@ -14,8 +14,8 @@ use smelt_types::SqlFunction;
 
 pub use super::SourceRetentions;
 use super::{
-    retention_outcomes, ColumnGroup, Corner, FingerprintProjection, Grain, MaintenancePlan,
-    MutationProfile, OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity,
+    retention_outcomes, retention_reaches, ColumnGroup, Corner, FingerprintProjection, Grain,
+    MaintenancePlan, MutationProfile, OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity,
     RowIdentityVerdict, ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::definition_change::{

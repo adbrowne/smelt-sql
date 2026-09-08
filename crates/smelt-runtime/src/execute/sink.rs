@@ -61,6 +61,9 @@ pub(crate) enum ReporterEvent {
         retry_max: u32,
         error: String,
     },
+    MaintenanceWarning {
+        message: String,
+    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -141,6 +144,9 @@ impl EventSink {
                     retry_max,
                     error,
                 } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
+                ReporterEvent::MaintenanceWarning { message } => {
+                    reporter.maintenance_warning(run_id, model, message)
+                }
             }
         }
     }
@@ -223,6 +229,12 @@ impl RunReporter for EventSink {
             attempt,
             retry_max,
             error: error.to_string(),
+        });
+    }
+
+    fn maintenance_warning(&self, _run_id: &str, _model: &str, message: &str) {
+        self.push(ReporterEvent::MaintenanceWarning {
+            message: message.to_string(),
         });
     }
 }

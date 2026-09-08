@@ -78,6 +78,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
             refusals: vec![],
             key_locality: None,
             retention_downgrades: Vec::new(),
+            retention_reaches: Vec::new(),
         },
         column_groups: vec![ColumnGroup {
             columns: vec!["user_name".to_string()],
@@ -207,6 +208,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
             refusals: vec![],
             key_locality: None,
             retention_downgrades: Vec::new(),
+            retention_reaches: Vec::new(),
         },
         column_groups: vec![
             ColumnGroup {

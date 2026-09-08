@@ -26,6 +26,7 @@ fn admitted_plan(source: &str, technique: Technique, corner: Corner) -> Maintena
         refusals: vec![],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 
@@ -357,6 +358,7 @@ fn pin_scoped_to_a_sibling_cell_is_consulted_not_only_the_first() {
         refusals: vec![],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     };
     let trigger = Trigger::UpstreamMutation {
         source: "users".to_string(),

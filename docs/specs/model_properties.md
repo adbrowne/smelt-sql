@@ -144,7 +144,10 @@ retained}` \| `UnprovableWithin{retained, reason}`. `required_lookback = before 
 `window_age` is how far the current run's window has drifted from the point a backfill or replay
 was declared — carrying this term is what makes the verdict a **rolling** re-evaluation against the
 bound in effect at plan time on every run, rather than a value fixed at the point the model was
-authored (`sources.md` §Semantics 5). A reach the unified derivation could not bound at all
+authored (`sources.md` §Semantics 5). Concretely, the quantity a run compares against `retention:`
+is the model's derived reach plus the age of the oldest region the run writes, aged against the
+run's own clock: a forward-only run has age zero, so steady-state maintenance is never affected,
+while a backfill of an old region ages into the bound. A reach the unified derivation could not bound at all
 (`Unbounded` or `NotDerivable`) fails closed to `UnprovableWithin` rather than an optimistic
 `Within` — absence of a proof is a rejection, never a pass. A source declared in the model's
 `BoundContext` but absent from the walk's output (the model never actually reads it) carries no

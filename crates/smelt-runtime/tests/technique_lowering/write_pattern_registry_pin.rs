@@ -59,6 +59,7 @@ fn composed_keyed_fold_plan(source: &str) -> MaintenancePlan {
         refusals: vec![],
         key_locality: None,
         retention_downgrades: Vec::new(),
+        retention_reaches: Vec::new(),
     }
 }
 

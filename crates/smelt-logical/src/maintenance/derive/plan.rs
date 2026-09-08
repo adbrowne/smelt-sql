@@ -170,11 +170,12 @@ fn derive_maintenance_plan_impl(
 
     // Reach-versus-retention (`model_properties.md` §"Reach versus retained
     // history"): posed only for the sources the caller actually declared a
-    // `retention:` bound for. `window_age` stays `Seconds::ZERO` here — the
-    // rolling re-evaluation against a run's own drift is
-    // `derive_retention_verdicts`'s own `window_age` term, owned by a later
-    // phase (`docs/outcomes/20260906-trimmed-history-sources/outcome.md`
-    // phase 5).
+    // `retention:` bound for. `window_age` stays `Seconds::ZERO` here — this
+    // is the model's own plan-time reach, authoring-time, never the run's.
+    // The bounded proof is carried on `retention_reaches` so a run can fold
+    // its own window age onto it later, via `retention_refusals_at_age`,
+    // without re-deriving anything (`docs/outcomes/
+    // 20260906-trimmed-history-sources/outcome.md` criterion 5).
     if !retentions.is_empty() {
         let mut ctx = inputs.bound_context();
         for (source, retention) in retentions {
@@ -184,6 +185,7 @@ fn derive_maintenance_plan_impl(
         let (refusals, downgrades) = retention_outcomes(&verdicts);
         plan.refusals.extend(refusals);
         plan.retention_downgrades.extend(downgrades);
+        plan.retention_reaches.extend(retention_reaches(&verdicts));
     }
 
     plan

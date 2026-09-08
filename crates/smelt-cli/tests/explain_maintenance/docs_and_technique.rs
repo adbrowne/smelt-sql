@@ -74,6 +74,7 @@ fn text_report_technique_matches_the_profile_technique() {
             refusals: vec![],
             key_locality: None,
             retention_downgrades: Vec::new(),
+            retention_reaches: Vec::new(),
         },
         column_groups: vec![ColumnGroup {
             columns: vec!["amount".to_string()],

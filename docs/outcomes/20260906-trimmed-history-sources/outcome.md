@@ -70,7 +70,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | done |
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | done |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | done |
-| 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | planned |
+| 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | done |
 | 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | pending |
 | 7 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
 | 8 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
@@ -78,6 +78,9 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 ## Decision log
 
+- 2026-09-09 (phase 5 implement): **`derive_model_retention_plan` must call `maintenance_availability::derive_resolved`, not `smelt_db::queries::maintenance::derive_model_maintenance_plan` directly** — `cargo test -p smelt-runtime --test availability_seam`'s structural gate enforces exactly one call site for the raw derivation in `smelt-runtime`; `StateAvailability::all()` is passed since retention derivation never reads `plan.cells`/availability. Discovered red on first landing, fixed before green.
+- 2026-09-09 (phase 5 implement): the runtime fixtures derive their bounded/unbounded reach from a `RANGE BETWEEN ... PRECEDING` window frame, not a `WHERE col >= CURRENT_DATE - INTERVAL '...'` predicate — `CURRENT_DATE` type-checks as `UndeclaredColumn` in the current dialect surface (confirmed against `examples/broken/models/retention_exceeded.sql`, which carries the same diagnostic, just unfiltered by that fixture's own narrower test), which trips `execute_project`'s pre-execution diagnostics gate. Orthogonal to retention; the window-frame pattern is the one phase 3's own unit tests already use.
+- 2026-09-09 (phase 5 implement): **known gap, not exercised by this phase's tests** — `derive_model_retention_plan` passes `driving_source_granularity: None`, so a `grain: key` model with its own `timeseries:` block could have its plan derivation short-circuit into `locality_refused_plan` (empty `retention_reaches`) before reaching the retention fold, silently skipping the rolling re-evaluation for that shape. Every `grain: partition` model (this phase's tested shape) is unaffected. Left for phase 6 or a follow-up to confirm scope or plumb the real granularity through.
 - 2026-09-09 (phase 5 planning): **the run's required look-back is `derived reach + the age of
   the oldest region the run writes`, measured against the run's own clock** — so the rolling
   re-evaluation needs no new analysis, only the run window plan-time analysis does not have.
