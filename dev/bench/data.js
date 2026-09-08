@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788899671685,
+  "lastUpdate": 1788899676136,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 32.094819959033074,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "01a328b3b6386d8e75daed67f98b47767ad459d2",
+          "message": "Merge pull request #199 from adbrowne/fix-round-trip-line-comment-fuzz-crash\n\nfix(smelt-parser): preserve line-comment newline when printing raw source spans",
+          "timestamp": "2026-09-09T06:29:38+10:00",
+          "tree_id": "d7b32c65004aa073a49dc85a12bdd8599fcbd9a2",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/01a328b3b6386d8e75daed67f98b47767ad459d2"
+        },
+        "date": 1788899674571,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.97156050123059,
             "unit": "MB/s"
           }
         ]
