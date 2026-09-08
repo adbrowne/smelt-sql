@@ -80,11 +80,26 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | done |
 | 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | done |
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | done |
-| 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | pending |
+| 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | planned |
 | 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
 | 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-09 (phase 9 planning): **no reshape; the divergence looks permissive, not silent — the
+  phase is scoped as prove-or-close.** Reading the code rather than trusting the phase-7 note:
+  the run-time candidate pool is a *subset* of the diagnostics pool, and
+  `single_clocked_granularity` is "exactly one element else `None`" with no dedup, so adding the
+  composed-upstream candidates can only take `Some → None`, never `None → Some`. A run-time
+  `None` (the short-circuit into `locality_refused_plan`) therefore implies a diagnostics `None`
+  too, i.e. an Error-severity `KeyedForbidsTimeseries` that `gate_diagnostics` blocks
+  pre-execution — the model never runs, so the skipped retention fold is never a silent
+  under-read. Two supporting legs: `retention:` is refused without `timeseries:`, so every
+  retained ref is necessarily clocked and present in the run-time pool; and `retention:` is a
+  source-only declaration, so a composed upstream carries no bound the pool could be missing.
+  Phase 9 pins all four legs as tests (breaking each premise once to prove sensitivity) and, if
+  any leg fails, closes the gap by threading `derive_clamp_and_locality`'s converged
+  `composed_sources` map into the call site instead. Rows unchanged.
 
 - 2026-09-09 (phase 8 implement): **the generative pool anchors its schedule a year into the
   future relative to `Utc::now()`.** `smelt-runtime`'s run-time retention admission ages a
