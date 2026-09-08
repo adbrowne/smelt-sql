@@ -68,7 +68,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 |---|-------|--------|
 | 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | done |
 | 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | done |
-| 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | planned |
+| 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | done |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | pending |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | pending |
 | 6 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
@@ -77,6 +77,32 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 ## Decision log
 
+- 2026-09-09 (phase 3 implement): **`RetentionVerdict`'s setters and its one
+  conversion test live in the new `retention_reach.rs`, not in
+  `source_bounds.rs`**, even though `BoundContext` itself is defined there —
+  an inherent `impl BoundContext` block does not need to share a file with
+  the struct definition in Rust, and `source_bounds.rs` was already pinned at
+  its 3367-line ratchet baseline. This kept the unavoidable field-only growth
+  in `source_bounds.rs` to +4 lines (the `retentions` field plus its doc
+  comment) instead of +41. `crates/smelt-logical/src/rules/incremental.rs`
+  still grew by +2 (the two struct-literal fixes task 2 requires — no way to
+  add a struct field without touching every literal construction of it).
+  Both files were already sitting exactly on their baseline, so any growth
+  regresses; reviewer sign-off: both deltas are the minimum the plan's own
+  task list requires, baseline updated via
+  `.claude/scripts/large-file-check.sh --update`.
+- 2026-09-09 (phase 3 implement): test 8 in the phase plan
+  ("a_source_absent_from_the_model_gets_no_verdict") assumed
+  `derive_model_bounds` omits a source the model's SQL never reads. In fact
+  `derive_model_bounds`'s existing whole-text top-up (`source_bounds.rs`,
+  predating this phase) backfills **every** source present in
+  `ctx.source_partition_cols` with at least `Bounded{0,0}` when the walk
+  itself doesn't find it as a FROM leaf — so a source *registered* in ctx is
+  never actually absent from the bounds map. The test instead covers the
+  case the map genuinely omits: a source with a declared `retention:` but no
+  corresponding `ctx.source_partition_cols` entry at all (not a timeseries
+  source in this model's context). Verified against the real fallback
+  behaviour before rewriting the test, not assumed.
 - 2026-09-09 (phase 3 planning): **the verdict is a fold over the walk's output, in a new
   module, not a new transfer function.** The required look-back the criterion names is
   already the composition walk's own product (`derive_model_bounds`'s `BoundResult`, walked

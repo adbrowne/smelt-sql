@@ -57,7 +57,7 @@ crates/smelt-logical/src/analysis/diff_stories.rs 1698
 crates/smelt-logical/src/analysis/diff/tests.rs 1338
 crates/smelt-logical/src/analysis/monotonicity.rs 1877
 crates/smelt-logical/src/analysis/output_delta.rs 1630
-crates/smelt-logical/src/analysis/source_bounds.rs 3367
+crates/smelt-logical/src/analysis/source_bounds.rs 3371
 crates/smelt-logical/src/analysis/walk/tree.rs 1183
 crates/smelt-logical/src/backbuild/classify.rs 4637
 crates/smelt-logical/src/maintenance/choice/mod.rs 1231
@@ -66,7 +66,7 @@ crates/smelt-logical/src/maintenance/grouping.rs 1099
 crates/smelt-logical/src/maintenance/locality.rs 2089
 crates/smelt-logical/src/maintenance/propagate.rs 2113
 crates/smelt-logical/src/rules/cumulative.rs 2674
-crates/smelt-logical/src/rules/incremental.rs 3430
+crates/smelt-logical/src/rules/incremental.rs 3432
 crates/smelt-logical/src/rules/rule_diagnostics.rs 1587
 crates/smelt-logical/tests/backbuild_conformance.rs 3294
 crates/smelt-logical/tests/backbuild_options.rs 2249

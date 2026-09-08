@@ -382,6 +382,10 @@ pub struct BoundContext {
     /// partition column itself — see [`derive_cross_axis_links`]. Empty for a
     /// source whose partition column has no such sibling (never a guess).
     pub source_partition_col_aliases: HashMap<String, Vec<String>>,
+    /// Maps source name to its declared `retention:` bound, converted to
+    /// [`Seconds`] once at population time (`analysis::retention_reach`'s
+    /// setters). Absent = no declared bound (trusted replayable).
+    pub retentions: HashMap<String, Seconds>,
 }
 
 impl BoundContext {

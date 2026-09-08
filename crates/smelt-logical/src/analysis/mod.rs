@@ -24,6 +24,7 @@ mod partition_alignment;
 pub mod partition_axis;
 pub mod presentation;
 pub mod profile;
+pub mod retention_reach;
 mod select_analysis;
 pub mod skeleton_closure;
 pub mod source_bounds;
