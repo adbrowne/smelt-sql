@@ -154,9 +154,14 @@ enum Bound {
 }
 
 /// Which side of a [`Bound::MonotoneDivergence`] is never allowed to lead.
+/// `Oracle` has no current registry entry (phase 6 de-registered the one
+/// that used it, `silver_actor_sessions`) but `check_bound` still dispatches
+/// on it — kept for the next oracle-behind divergence this registry finds,
+/// rather than deleting a still-live match arm.
 #[derive(PartialEq, Eq)]
 enum Side {
     Incremental,
+    #[allow(dead_code)]
     Oracle,
 }
 
@@ -201,31 +206,18 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
 /// heals and the two legs compare exactly equal on this relation too — see
 /// `gold_events_enriched_matches_the_full_refresh_oracle` below.
 ///
-/// `silver_actor_sessions`'s entry traces to a third, unrelated root cause,
-/// also measured this phase and *not* anticipated by the phase's own plan
-/// (which asked "is any relation other than gold_events_enriched involved"
-/// without assuming the answer): here the **oracle itself under-computes**.
-/// `silver.actor_sessions` is a "Form B" partition-column model
-/// (`docs/specs/incremental_shapes.md` — the partition column is a
-/// *computed*, forward-reaching value, not the raw event-time column) whose
-/// sessionization window function has a declared backward-only lookback
-/// (`RANGE BETWEEN INTERVAL '2 days' PRECEDING`). `compute_calendar_windows`
-/// (`crates/smelt-runtime/src/windowing.rs`) applies the Form-B forward-reach
-/// rebase only to the two *outer* edges of a single invocation's whole
-/// requested range, never to an interior chunk boundary — confirmed by
-/// reading the function directly, not inferred. A single `--full-refresh`
-/// spanning many days is exactly such an invocation, so an interior chunk's
-/// write sees no forward tail and truncates any session that continues past
-/// its own day at that day's 23:59:59, undercounting `event_count` and
-/// `session_end`. The **incremental replay is correct** here — it
-/// re-triggers the edge rebase on every separate day's own narrow-window
-/// invocation, and matches a from-scratch raw-SQL recomputation of the same
-/// window-function logic. This is the one class in this registry where the
-/// full-refresh oracle, not the incremental leg, is the side to fix — owner:
-/// `docs/outcomes/20260906-bigquery-correctness`. Scope, from reading the
-/// windowing code: any Form-B model materialized by a single invocation
-/// spanning more than one partition chunk is affected, not just
-/// `--full-refresh` specifically.
+/// `silver_actor_sessions` no longer has an entry here: its divergence
+/// traced to the **oracle itself under-computing**, not the incremental leg
+/// — `compute_calendar_windows` (`crates/smelt-runtime/src/windowing.rs`)
+/// applied the Form-B forward-reach rebase only to the two *outer* edges of
+/// a single invocation's whole requested range, never to an interior chunk
+/// boundary, so a single `--full-refresh` spanning many days truncated any
+/// session that continued past its own day. Phase 6 of
+/// `docs/outcomes/20260906-bigquery-correctness` folds the skew into every
+/// chunk's own scan (`docs/specs/incremental_shapes.md` §"Execution model
+/// (DuckDB)", `docs/specs/model_transforms.md` §Semantics "The output window
+/// is derived, never assumed"), so the two legs now compare exactly equal —
+/// see `silver_actor_sessions_matches_the_full_refresh_oracle` below.
 ///
 /// `marts_daily_active_contributors`'s entry is a **fourth** root cause,
 /// direction reversed from `silver_actor_sessions`'s — measured, not
@@ -247,31 +239,18 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
 /// oracle's fully-formed session data, confined to `total_events` (measured:
 /// `total_sessions`/`distinct_actors` always match exactly). Owner:
 /// `docs/outcomes/20260906-bigquery-correctness`.
-const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[
-    DivergenceEntry {
-        relation: "silver_actor_sessions",
-        reason: "the full-refresh ORACLE undercounts a cross-midnight (Form-B) session's \
-                  reach inside a multi-day invocation — see this const's doc comment",
-        bound: Bound::MonotoneDivergence {
-            key_col: "session_id",
-            exact_columns: &["actor_id", "session_start_ts", "session_start_date"],
-            monotone_columns: &["session_end", "event_count"],
-            behind_side: Side::Oracle,
-        },
-    },
-    DivergenceEntry {
-        relation: "marts_daily_active_contributors",
-        reason: "no repair edge from silver_actor_sessions's own Form-B rebase to this Form-A \
+const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[DivergenceEntry {
+    relation: "marts_daily_active_contributors",
+    reason: "no repair edge from silver_actor_sessions's own Form-B rebase to this Form-A \
                   downstream aggregate: total_events is frozen at first-write time, a subset \
                   of the oracle's fully-formed session data — see this const's doc comment",
-        bound: Bound::MonotoneDivergence {
-            key_col: "session_start_date",
-            exact_columns: &["total_sessions", "distinct_actors"],
-            monotone_columns: &["total_events"],
-            behind_side: Side::Incremental,
-        },
+    bound: Bound::MonotoneDivergence {
+        key_col: "session_start_date",
+        exact_columns: &["total_sessions", "distinct_actors"],
+        monotone_columns: &["total_events"],
+        behind_side: Side::Incremental,
     },
-];
+}];
 
 /// A registry entry's bound, dispatched on [`Bound`]'s shape.
 fn check_bound(incr_db: &Path, full_db: &Path, entry: &DivergenceEntry) -> Result<(), String> {
@@ -608,7 +587,7 @@ fn full_replay_pair() -> &'static FullReplayPair {
 /// Test 1: the phase's centrepiece. Replay the 30-day fixture day by day;
 /// after **every** day (not sampled — see below), stage a fresh full-refresh
 /// oracle over the identical rows seen so far and compare every materialised
-/// relation row-for-row, against the 2-entry [`DIVERGENCE_REGISTRY`].
+/// relation row-for-row, against the 1-entry [`DIVERGENCE_REGISTRY`].
 ///
 /// Was `#[ignore]`d (`docs/outcomes/20260906-bigquery-dogfood-spine/
 /// outcome.md` "## Blocked", phase 6) on an uncharacterised `gold_events_
@@ -620,8 +599,10 @@ fn full_replay_pair() -> &'static FullReplayPair {
 /// full-refresh-oracle bug — same doc comment). All three were registered
 /// bounds at the time, so this ran unignored; `gold_events_enriched`'s own
 /// divergence was fixed and de-registered by phases 4-5 (see
-/// `gold_events_enriched_matches_the_full_refresh_oracle`), leaving the
-/// 2-entry registry above.
+/// `gold_events_enriched_matches_the_full_refresh_oracle`), and
+/// `silver_actor_sessions`'s by phase 6 (see
+/// `silver_actor_sessions_matches_the_full_refresh_oracle`), leaving the
+/// 1-entry registry above.
 ///
 /// Checks **every** day, not the first-10-plus-final sampling the phase 6
 /// plan allowed for runtime: phase 8 task 9 measured the every-day sweep
@@ -724,7 +705,7 @@ fn oracle_comparison_covers_every_materialised_relation() {
 }
 
 /// Test 3: every registry entry is bounded, not blanket — over the full
-/// 30-day fixture, both hold their declared `MonotoneDivergence` bound.
+/// 30-day fixture, it holds its declared `MonotoneDivergence` bound.
 #[test]
 fn succession_divergence_is_exactly_tied_row_multiplicity() {
     let pair = full_replay_pair();
@@ -760,6 +741,44 @@ fn gold_events_enriched_matches_the_full_refresh_oracle() {
     check_columns_match_exactly(&conn, "gold_events_enriched", "id", &all_columns).expect(
         "gold_events_enriched must match the full-refresh oracle on every column, including \
          current_repo_name, now that the enrichment-keyed heal (phases 4-5) is live",
+    );
+}
+
+/// Test 5 (phase 6, `docs/outcomes/20260906-bigquery-correctness`): with
+/// every chunk's own scan folding the Form-B skew (`compute_calendar_
+/// windows`'s interior-chunk widening), the full-refresh oracle no longer
+/// under-computes a cross-midnight session, so `silver_actor_sessions` no
+/// longer diverges from the incremental replay at all — replaces the
+/// `MonotoneDivergence` bound this const's doc comment used to name. With no
+/// registry entry for this relation, `assert_matches_oracle`'s own
+/// unregistered-divergence sweep (exercised by `every_window_matches_the_
+/// full_refresh_oracle`) already enforces exact equality on every window;
+/// this test names the invariant directly, once, over the full 30-day
+/// fixture, so a reader sees it without deriving it from the generic
+/// sweep's silence.
+#[test]
+fn silver_actor_sessions_matches_the_full_refresh_oracle() {
+    let pair = full_replay_pair();
+    let conn = attached_conn(&pair.incr_db, &pair.full_db);
+
+    check_key_sets_equal(&conn, "silver_actor_sessions", "session_id")
+        .expect("silver_actor_sessions must have identical session_id key sets on both legs");
+    check_columns_match_exactly(
+        &conn,
+        "silver_actor_sessions",
+        "session_id",
+        &[
+            "actor_id",
+            "session_start_ts",
+            "session_start_date",
+            "session_start",
+            "session_end",
+            "event_count",
+        ],
+    )
+    .expect(
+        "silver_actor_sessions must match the full-refresh oracle on every column, now that \
+         every interior chunk's scan carries the model's own Form-B forward reach (phase 6)",
     );
 }
 

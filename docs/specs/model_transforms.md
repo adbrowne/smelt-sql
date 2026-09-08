@@ -153,6 +153,17 @@ construction) and the outer clamp is dropped as textually redundant.
 UNION-branch wrap-and-filter is the same pushdown distributed independently
 over each set-operation branch.
 
+When the derived output window is split into chunks (backfill/batch
+execution, `incremental_shapes.md` §"First-run and backfill"), each chunk's
+own scan margin is sized relative to *that chunk's* partition range, not the
+run's outer output window: to write partitions `[bs, be)` the scan reads
+driving dates skew-inverted from that same range, `[bs − before, be +
+after)`, folded on top of any frame-reach margin — clamped to the
+invocation's own outer scan envelope so the outermost chunk never reads past
+the run window's own trailing edge. `--batch-size`/batch-safety sizing
+changes only how many statements a run issues, never the rows a written
+partition ends up with — the output is invariant under chunk count.
+
 **Hidden decomposed state + presentation view.** The stored column is a monoid
 element that is not itself the user value; the user value is a pure function
 `π(state)` exposed through a presentation view. `merge_into` maintains the state

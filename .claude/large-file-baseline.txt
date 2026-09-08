@@ -15,6 +15,21 @@
 # `dispatch_enrichment_keyed_heal_for_run` to hold this growth down; the
 # remainder is the two calls' own (unavoidably long) argument lists.
 # Sign-off: implementer, phase 5.
+# Also bumped windowing.rs by 45 lines, execute/project/mod.rs by 18 more
+# lines, and explain.rs by 5 lines for phase 6: the interior-chunk skew
+# widening itself plus a new `IncrementalBatch::scan_start`/`scan_end` field
+# pair (windowing.rs), and threading a new `scan_range` parameter through
+# `derive_batch_filtered_sql` and its three call sites —
+# `IncrementalBatch::filter_start`/`filter_end` turned out to have no real
+# consumer before this phase, so wiring the skew widening into the actual
+# per-source scan pushdown (not just computing it) was required to make the
+# fix load-bearing. `scan_start`/`scan_end` had to be a field distinct from
+# `filter_start`/`filter_end` (not a repurposing) — folding the skew into the
+# already-lookback-widened `filter_start`/`filter_end` and wiring that into
+# the pushdown double-widened the lookback component for any model with a
+# nonzero SQL-inferred lookback, caught by `web_analytics_tutorial_pages_are_
+# fresh` regenerating a wider-than-expected scan literal for `silver.
+# events_parsed`. Sign-off: implementer, phase 6.
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -25,7 +40,7 @@
 #
 crates/smelt-backend-duckdb/src/lib.rs 1902
 crates/smelt-cli/src/commands/explain.rs 1163
-crates/smelt-cli/src/explain.rs 2523
+crates/smelt-cli/src/explain.rs 2528
 crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1439
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
@@ -110,11 +125,11 @@ crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-parser/src/printer.rs 1156
 crates/smelt-runtime/src/compile.rs 4015
 crates/smelt-runtime/src/cumulative.rs 2179
-crates/smelt-runtime/src/execute/project/mod.rs 4743
+crates/smelt-runtime/src/execute/project/mod.rs 4761
 crates/smelt-runtime/src/maintenance_driver/tests.rs 1079
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
-crates/smelt-runtime/src/windowing.rs 1173
+crates/smelt-runtime/src/windowing.rs 1218
 crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1059
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
 crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1146

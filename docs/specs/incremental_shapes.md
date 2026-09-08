@@ -535,6 +535,10 @@ the output window's own reach, never the run window's. DELETE range and output c
 from one window so the contract is idempotent for any write-window width; the output window is
 a range to be **covered**, not one mandated statement — backfill chunking (§"First-run and
 backfill") splits it into sequential DELETE+INSERT pairs, each sized from its own chunk's reach.
+A chunk's own reach is the skew inversion of that chunk's own partition range — scanning
+`[bs − before, be + after)` to write partitions `[bs, be)` — not only the SQL-inferred frame
+margin; a run's written output is invariant under chunk count, clamped to the invocation's own
+outer scan envelope so the outer edge never reads past the run window's own margin.
 
 #### Strategy enum (backend-internal)
 

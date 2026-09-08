@@ -1364,10 +1364,15 @@ fn build_delete_insert_period_statement_group(
         end: dw.output_end.clone(),
         axis: dw.axis,
     };
+    // `--period` is a single, unbatched window — the whole invocation's own
+    // outer envelope, never an interior chunk — so its scan range equals its
+    // output range exactly (`derive_batch_filtered_sql`'s doc comment: the
+    // clamp is a no-op at the outer edge).
     let filtered_sql = smelt_runtime::derive_batch_filtered_sql(
         &stripped_sql,
         &partition_col,
         &dw.scan_bounds,
+        &run_range,
         &run_range,
         dw.run_start,
         dw.skew,

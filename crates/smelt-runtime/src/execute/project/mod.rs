@@ -3165,21 +3165,38 @@ pub async fn execute_project(
                         end: batch.partition_end.to_string(),
                         axis: smelt_logical::PartitionAxis::Calendar,
                     };
+                    // The scan-side skew inversion of this same batch
+                    // (`windowing::IncrementalBatch::scan_start`/`scan_end` —
+                    // `docs/specs/model_transforms.md` §Semantics "The output
+                    // window is derived, never assumed"): equals `run_range`
+                    // for a zero-skew model, wider for a Form-B model's
+                    // interior chunk. Deliberately not `filter_start`/
+                    // `filter_end`, which already carries the SQL-inferred
+                    // lookback/lookahead `derive_batch_filtered_sql` widens
+                    // again per source below — folding both into one range
+                    // would double that margin.
+                    let scan_range = TimeRange {
+                        start: batch.scan_start.to_string(),
+                        end: batch.scan_end.to_string(),
+                        axis: smelt_logical::PartitionAxis::Calendar,
+                    };
 
                     // Two-layer widened-scan + exact output clamp
                     // (`docs/specs/model_transforms.md` §Semantics — "Source-filter
                     // pushdown + the two clamps"): the *scan* may read a margin
                     // (handled per-source by `inject_source_filters`, which widens
-                    // each bounded source independently), but the *output clamp*
-                    // must equal the output window exactly — the margin is read but
-                    // never re-written. B0 (unified pushdown-depth walk,
-                    // `docs/research/20260703-model-updates.md` §3.3/§3.5): for the
-                    // transparent slice — a single bounded source with no lookback
-                    // margin AND zero partition-column skew — the source-level filter
-                    // on the exact output-window batch *is* the output clamp; the
-                    // outer `inject_time_filter` wrap would inject a textually
-                    // identical, redundant filter. Skip it and rely solely on the
-                    // source-level filter (`derive_batch_filtered_sql`'s
+                    // each bounded source independently, folded onto `scan_range`
+                    // above), but the *output clamp* must equal the output window
+                    // exactly — the margin is read but never re-written. B0
+                    // (unified pushdown-depth walk, `docs/research/
+                    // 20260703-model-updates.md` §3.3/§3.5): for the transparent
+                    // slice — a single bounded source with no lookback margin AND
+                    // zero partition-column skew — the source-level filter on the
+                    // exact output-window batch *is* the output clamp (`scan_range
+                    // == run_range` when `skew == Skew::ZERO`); the outer
+                    // `inject_time_filter` wrap would inject a textually identical,
+                    // redundant filter. Skip it and rely solely on the source-level
+                    // filter (`derive_batch_filtered_sql`'s
                     // `is_transparent_single_source(...) && skew == Skew::ZERO` gate).
                     // A model with a real lookback margin, a genuine partition-column
                     // skew, or more than one source keeps both layers, but the outer
@@ -3199,6 +3216,7 @@ pub async fn execute_project(
                         &inc_plan.timeseries.partition_column,
                         &per_model_source_bounds,
                         &run_range,
+                        &scan_range,
                         run_start,
                         inc_plan.skew,
                     )?;

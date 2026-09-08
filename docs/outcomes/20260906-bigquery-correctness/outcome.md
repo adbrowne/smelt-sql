@@ -87,13 +87,37 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | done |
 | 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | done |
 | 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | done |
-| 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | planned |
+| 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | done |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | pending |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 6 implementation): **the plan's diagnosis targeted a dead field; the real
+  fix needed a second layer.** `IncrementalBatch::filter_start`/`filter_end` — what the plan's
+  formula computes — turned out to have zero consumers anywhere in the real execute path
+  (`rg`-confirmed): `derive_batch_filtered_sql` (`crate::execute::sources`) widens each bounded
+  source's scan from `run_range` (`batch.partition_start`/`partition_end`, unwidened) plus a
+  *per-source*, independently-derived lookback/lookahead bound (`per_model_source_bounds`) —
+  never from `filter_start`/`filter_end` at all. So the phase 6 plan's formula, applied only in
+  `windowing.rs`, was inert against the actual defect; the `github_activity` oracle test still
+  failed after it (a real cross-midnight session still truncated at the interior chunk
+  boundary). Fixed by threading a new `scan_range` parameter through `derive_batch_filtered_sql`
+  and its three call sites (`execute/project/mod.rs`, `execute/project/dry_run.rs`,
+  `smelt-cli/explain.rs`), sourced from a **new** `IncrementalBatch::scan_start`/`scan_end` field
+  pair — deliberately not a repurposing of `filter_start`/`filter_end`. The first attempt reused
+  `filter_start`/`filter_end` (already skew-widened) as `scan_range`, which passed the
+  `github_activity` oracle but **double-widened** the lookback component for any model with a
+  nonzero SQL-inferred lookback: `derive_batch_filtered_sql` still adds `per_model_source_bounds`'
+  own lookback on top, so a model carrying both a real lookback and a chunked run got its scan
+  literal widened twice. Caught by `web_analytics_tutorial_pages_are_fresh` (the doc-freshness
+  gate), not by any windowing-crate test, because none of them combine a nonzero lookback with
+  chunking and a literal-text assertion — see phases/06-summary.md "For the next planner" for the
+  gap this leaves. `scan_start`/`scan_end` carries skew alone (clamped to the outer envelope,
+  same clamp as the plan's original formula); `filter_start`/`filter_end` keeps its pre-existing,
+  lookback-only meaning untouched.
 
 - 2026-09-08 (phase 6 planning): **no reshape; the fix is scan-side and clamped to the existing
   outer envelope.** Reading `compute_calendar_windows` confirmed the row's diagnosis and pinned the

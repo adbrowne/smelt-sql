@@ -298,11 +298,23 @@ pub(super) async fn build_dry_run_outcome(
                     end: end.clone(),
                     axis: batch.partition_start.axis(),
                 };
+                // Scan-side skew inversion of this batch (see
+                // `derive_batch_filtered_sql`'s doc comment) — equals
+                // `run_range` for a zero-skew model. Not `filter_start`/
+                // `filter_end`, which already carries the SQL-inferred
+                // lookback/lookahead this function's per-source widening
+                // would otherwise double.
+                let scan_range = TimeRange {
+                    start: batch.scan_start.to_string(),
+                    end: batch.scan_end.to_string(),
+                    axis: batch.scan_start.axis(),
+                };
                 let filtered_sql = derive_batch_filtered_sql(
                     &clean_sql,
                     partition_col,
                     &per_model_source_bounds,
                     &run_range,
+                    &scan_range,
                     run_start,
                     inc.skew,
                 )?;

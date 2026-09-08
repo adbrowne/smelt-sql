@@ -69,6 +69,20 @@ number is traceable to one of those.
    than one partition chunk is affected, not just `--full-refresh` — a very wide ordinary
    incremental backfill window could show the same undercount.
 
+   **Fixed** by `docs/outcomes/20260906-bigquery-correctness/phases/06-plan.md`: two
+   changes, not one. `compute_calendar_windows` now folds the skew into every interior
+   batch's own `filter_start`/`filter_end` (clamped to the invocation's outer scan
+   envelope, `docs/specs/incremental_shapes.md` §"Execution model (DuckDB)"), but those
+   fields turned out to have no consumer on the real execute path — `derive_batch_filtered_sql`
+   (`crates/smelt-runtime/src/execute/sources.rs`) built its per-source scan pushdown from
+   the batch's own unwidened output range (`run_range`, i.e. `partition_start`/
+   `partition_end`) instead, the actual mechanism the divergence traced to. The fix threads
+   a second, separate `scan_range` parameter (sourced from `IncrementalBatch::filter_start`/
+   `filter_end`) through `derive_batch_filtered_sql` and its three call sites, so the
+   per-source pushdown widens by the model's own skew on an interior chunk while the output
+   clamp stays exact. The two legs now compare exactly equal on `silver_actor_sessions` —
+   no `DIVERGENCE_REGISTRY` entry remains for it.
+
 4. **Mart repair gap** — `marts.daily_active_contributors`. This Form-A downstream
    aggregate has no rebase of its own and never revisits an already-written partition, so
    it never learns when `actor_sessions`'s own (correct) Form-B rebase rewrites an earlier
@@ -77,7 +91,7 @@ number is traceable to one of those.
    triggered by an ordinary self-rebase rather than a renamed dimension
    (`phases/08-summary.md`).
 
-## The two registered divergences
+## The one registered divergence
 
 Root cause 1 (`silver_repo_naming` / `silver_actor_naming`) is **fixed**, not registered:
 `docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md` folded
@@ -93,9 +107,14 @@ derive and dispatch the enrichment-keyed `UpstreamMutation(gold.repo_dim)` cell,
 `current_repo_name` now heals and the two legs compare exactly equal on this relation too —
 no `DIVERGENCE_REGISTRY` entry remains for it.
 
+Root cause 3 (`silver_actor_sessions`) is also **fixed**, not registered:
+`docs/outcomes/20260906-bigquery-correctness/phases/06-plan.md` threads the model's own
+skew into every interior chunk's source-scan pushdown (`derive_batch_filtered_sql`'s new
+`scan_range` parameter), so the two legs now compare exactly equal on this relation too —
+no `DIVERGENCE_REGISTRY` entry remains for it.
+
 | Relation | Bound | Root cause | Defect or fixture artifact |
 |---|---|---|---|
-| `silver_actor_sessions` | `MonotoneDivergence` (oracle behind on `session_end`, `event_count`) | 3 | Smelt defect (oracle/windowing, not the incremental leg) |
 | `marts_daily_active_contributors` | `MonotoneDivergence` (incremental behind on `total_events`) | 4 | Smelt defect (missing repair edge) |
 
 (Full predicate parameters — key columns, exact-match columns — live in
@@ -159,14 +178,18 @@ future reader cannot again find them silently disagreeing.
    and `silver.actor_naming`. (An exploratory `SELECT DISTINCT *` wrap was tried and found
    insufficient — see `phases/03-summary.md` — the real fix needed the full output schema
    threaded into the emitter.)
-2. **Fix-or-register** the missing `UpstreamMutation(gold.repo_dim)` maintenance cell for a
-   `grain: partition` downstream reading a clockless keyed-model dimension — provoked by
-   `gold.events_enriched`. Needs either a new route in `append_model_edge_cells` for this
-   combination, or a documented refusal surfaced at `run`/`build` time rather than only
-   `explain`.
-3. **Fix-or-register** `compute_calendar_windows`'s interior-chunk-boundary forward-reach
-   loss for Form-B models — provoked by `silver.actor_sessions`, and by any other Form-B
-   model materialized in one invocation spanning multiple partition chunks.
+2. **Done** (`docs/outcomes/20260906-bigquery-correctness/phases/04-plan.md`,
+   `phases/05-plan.md`). A new enrichment-keyed route in `append_model_edge_cells` derives
+   the missing `UpstreamMutation(gold.repo_dim)` cell for a `grain: partition` downstream
+   reading a clockless keyed-model dimension, and the run path dispatches it once per run
+   over the model's unwindowed output — `gold.events_enriched`'s `current_repo_name` now
+   heals and the stale-row count reaches zero. `Refusal::RepairKeysNotDiscoverable` also
+   gained a real `DiagnosticCode` for the fail-closed leg that survives the new route.
+3. **Done** (`docs/outcomes/20260906-bigquery-correctness/phases/06-plan.md`).
+   `compute_calendar_windows`'s interior-chunk-boundary forward-reach loss for Form-B
+   models is fixed — provoked by `silver.actor_sessions`, and by any other Form-B model
+   materialized in one invocation spanning multiple partition chunks. See root cause 3's
+   own **Fixed** paragraph above for the two-part mechanism.
 4. **Fix-or-register** the missing repair edge from a Form-B model's own self-rebase to a
    Form-A downstream aggregate that reads it verbatim — provoked by
    `marts.daily_active_contributors`. Worth checking whether the fix for item 2 (a
