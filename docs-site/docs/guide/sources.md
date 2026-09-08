@@ -124,6 +124,48 @@ referential_integrity: [user_id]
 
 This is a narrowing declaration, not a hint: every consuming run re-checks it over the region it touched (the row count out of the join must equal the row count into it), and a violation — a fact row whose key has no match in the dimension, disproving the declaration — fails the run loudly rather than silently trusting stale metadata. Declare it only when you can back the guarantee (e.g. the dimension is populated ahead of the fact table, or a foreign-key constraint enforces it upstream).
 
+## Bounded history (`retention:`)
+
+Some sources don't keep their full history forever — a BigQuery table with
+`partition_expiration_days`, or a Delta table under a retention job, drops old partitions on a
+rolling schedule. Declaring that bound lets smelt refuse or flag a maintenance plan that reaches
+further back than the source can actually still answer for, instead of silently rebuilding from
+whatever happens to survive:
+
+```yaml
+# models/sources/raw/events.yml
+description: Raw events; the warehouse expires partitions after 45 days.
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+retention: '45 days'
+columns:
+  - { name: event_id, type: BIGINT, nullable: false }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+```
+
+`retention:` requires `timeseries:` on the same source — a bound with nothing clocked has no
+reach to compare it against, and declaring one without the other is refused at parse time
+(`MalformedSource`), as is an unparseable or zero-length interval. The bound is **rolling**: it
+is anchored to the current run and advances with it, so a model that was admissible last month
+can stop being admissible this month with no change to its SQL — smelt re-evaluates admission
+against the bound in effect on every run, not the one in effect when the model was authored.
+
+At plan time, a model whose derived required reach into a `retention:` source is *proven* to
+exceed the bound refuses (`SourceRetentionExceeded`) rather than silently recomputing over a
+shorter window than it asked for. A reach that cannot be proven to fit — an unbounded cumulative
+aggregation, or a shape the analyzer can't classify — is admitted but recorded as a downgrade
+(`SourceRetentionDowngraded`): the model still runs, but its pre-bound region stops being claimed
+replayable. A whole-table recompute (`--full-refresh`, `smelt rebuild`) reaches past every finite
+bound by construction, so it is refused outright when stored output already exists, and licensed
+with a recorded downgrade only for a first build, a smelt-forced full refresh, or an explicit
+operator override. `smelt explain <model>` renders the bound against the required reach for every
+declared-`retention:` source — see [Retention reach](../reference/smelt-explain.md#retention-reach).
+
+Absent `retention:`, a source is trusted fully replayable — the common case for a warehouse table
+that never expires partitions.
+
 ## Loading source data
 
 By default, sources are loaded outside the smelt pipeline — you are responsible for ensuring the source tables exist in your target database before running models that depend on them.

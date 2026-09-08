@@ -12,6 +12,7 @@ mod observed_delta;
 mod projection;
 mod pushdown_and_locality;
 mod relation_contract;
+mod retention;
 mod row_identity;
 mod sql_and_grain;
 mod write_pin_explain_surface;

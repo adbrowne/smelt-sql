@@ -301,6 +301,26 @@ row. With `--json`, a downgraded cell's entry in `cells[]` carries a `state_down
 that was not downgraded omits the key entirely, never `null` — the same append-stable posture
 (§Constraints item 5) as `contract_point`.
 
+**Retention reach.** Each declared-`retention:` source's bounded reach-versus-retention proof
+(`model_properties.md` §"Reach versus retained history") is read verbatim from
+`MaintenancePlan::retention_reaches`/`retention_downgrades` — `smelt explain` derives no
+retention verdict of its own (maintenance-plan purity). A model referencing no `retention:`
+source prints no `Retention:` section at all. Otherwise the report prints a `Retention:`
+section with one row per source carrying a bounded proof or a recorded downgrade, in the
+`retention_reaches`-then-`retention_downgrades` order the plan already fixes (both lists sorted
+by source), rendered in seconds — the same unit `SourceRetentionExceeded`'s own diagnostic text
+already renders, so no second interval formatter exists for the same quantity:
+
+- `<source>: retained <n>s, required reach <n>s — within bound`
+- `<source>: retained <n>s, required reach <n>s — exceeds bound (SourceRetentionExceeded)`
+- `<source>: retained <n>s, reach unprovable — downgraded (SourceRetentionDowngraded): <reason>`
+
+With `--json`, the per-model report gains an append-stable `retention` array (§Constraints item
+5), omitted entirely when empty, never `null`: `{"source": "...", "verdict":
+"within"|"exceeds"|"unprovable", "retained_secs": n, "required_lookback_secs": n, "reason":
+"..."}` — `required_lookback_secs` present only for the bounded verdicts (`within`/`exceeds`)
+and `reason` only for `unprovable`.
+
 ### `smelt explain <external step>`
 
 The positional argument `smelt explain` accepts also resolves to a discovered external step

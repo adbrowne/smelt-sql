@@ -15,7 +15,9 @@ use smelt_planner::{analyze_batch_safety, BatchSafety, BoundResult, ModelInfo};
 use smelt_runtime::{CompilerRegistry, EphemeralResolver, SourceBound, TimeRange};
 use std::collections::BTreeMap;
 
+mod retention;
 mod succession;
+pub use retention::{retention_json_rows, write_retention_text, ExplainRetentionJson};
 pub use succession::{
     build_succession_explain_view, SuccessionExplainView, SuccessionJson,
     SuccessionTombstoneLedgerJson,
@@ -1128,6 +1130,13 @@ pub fn build_maintenance_plan_report(
     }
     let _ = writeln!(out);
 
+    // `docs/specs/cli.md` §"Retention reach."
+    write_retention_text(
+        &mut out,
+        &result.plan.retention_reaches,
+        &result.plan.retention_downgrades,
+    );
+
     // Relation Contract (`docs/specs/models.md` §"The Relation Contract"):
     // this model's own clock/identity/derived-grain rows, then one contract
     // block per inbound edge — a source and an upstream model render
@@ -1724,6 +1733,9 @@ pub struct ExplainMaintenanceJson {
     /// grain"), absent for a non-succession model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub succession: Option<SuccessionJson>,
+    /// `docs/specs/cli.md` §"Retention reach."
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retention: Vec<ExplainRetentionJson>,
 }
 
 /// A pending definition delta, as reported by `smelt explain --json`
@@ -1804,6 +1816,8 @@ pub fn build_maintenance_plan_json(
     own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
     key_locality: Option<&smelt_logical::maintenance::KeyLocality>,
     succession: Option<&SuccessionExplainView>,
+    retention_reaches: &[smelt_logical::maintenance::RetentionReach],
+    retention_downgrades: &[smelt_logical::maintenance::RetentionDowngrade],
 ) -> ExplainMaintenanceJson {
     let delta_signature =
         delta_signature_headline(own_output_delta, key_locality, &own_contract, succession);
@@ -1907,6 +1921,7 @@ pub fn build_maintenance_plan_json(
         refusals,
         definition_delta,
         succession: succession_json,
+        retention: retention_json_rows(retention_reaches, retention_downgrades),
     }
 }
 

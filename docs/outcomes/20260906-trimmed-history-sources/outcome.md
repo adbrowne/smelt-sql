@@ -81,11 +81,19 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | done |
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | done |
 | 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | done |
-| 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | planned |
+| 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | done |
 | 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
 
+- 2026-09-09 (phase 10 implementation): shipped the `Retention:` text section and `--json`
+  `retention` array; the rendering logic lives in a new `crates/smelt-cli/src/explain/
+  retention.rs` module (mirroring `explain/succession.rs`'s own split-out-once-large precedent).
+  The residual wiring in `explain.rs`/`commands/explain.rs` (mod decl, one new struct field, two
+  new function params, two call sites) is irreducible glue that had to live where the struct and
+  function are defined; `.claude/large-file-baseline.txt` was updated for both files with a
+  sign-off note (see `phases/10-summary.md` Decisions) since further extraction wasn't possible
+  without breaking the struct/function boundary.
 - 2026-09-09 (phase 10 planning): **no reshape.** The phase-9 summary confirms rows 10 and 11 are
   unaffected in scope, and no success criterion is unserved by the remaining two rows. Scoping
   note: the explain surface reads `MaintenancePlan::retention_reaches`/`retention_downgrades`

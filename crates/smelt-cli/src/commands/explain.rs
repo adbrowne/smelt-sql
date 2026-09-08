@@ -857,6 +857,8 @@ async fn explain_maintenance_plan(
             own_output_delta.as_ref(),
             result.plan.key_locality.as_ref(),
             succession_view.as_ref(),
+            &result.plan.retention_reaches,
+            &result.plan.retention_downgrades,
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

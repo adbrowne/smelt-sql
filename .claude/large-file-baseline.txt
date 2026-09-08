@@ -9,8 +9,8 @@
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
 crates/smelt-backend-duckdb/src/lib.rs 1902
-crates/smelt-cli/src/commands/explain.rs 1193
-crates/smelt-cli/src/explain.rs 2578
+crates/smelt-cli/src/commands/explain.rs 1195
+crates/smelt-cli/src/explain.rs 2593
 crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1441
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
