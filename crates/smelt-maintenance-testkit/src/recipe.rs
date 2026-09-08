@@ -20,6 +20,8 @@
 
 use proptest::prelude::*;
 
+use crate::retention::RetentionDecl;
+
 /// Bound for generated integer payload literals (design §5 "Numeric payload
 /// discipline"): integer-valued payloads with magnitude at most this bound
 /// keep additive folds bit-exact well under 2^53, so incremental-vs-full
@@ -342,6 +344,11 @@ pub struct SourceRecipe {
     /// A declared `NOT NULL` delete-flag column (succession's `is_deleted`).
     /// `None` for every source with no such column.
     pub delete_flag_column: Option<String>,
+    /// A declared, rolling `retention:` bound (`sources.md` §"Retention
+    /// refusal") — `None` for every source built before phase 8 of
+    /// `docs/outcomes/20260906-trimmed-history-sources`, so every prior
+    /// caller's rendering stays byte-identical.
+    pub retention: Option<RetentionDecl>,
 }
 
 /// A declared `key_recurrence` bound (`sources.md` §"`mutation_profile` —
@@ -373,6 +380,7 @@ impl SourceRecipe {
             key_recurrence: None,
             partition_column: None,
             delete_flag_column: None,
+            retention: None,
         }
     }
 
@@ -413,6 +421,7 @@ impl SourceRecipe {
             key_recurrence: None,
             partition_column: None,
             delete_flag_column: None,
+            retention: None,
         }
     }
 

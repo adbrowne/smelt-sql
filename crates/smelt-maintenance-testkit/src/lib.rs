@@ -90,6 +90,7 @@ pub mod oracle_modes;
 pub mod probes;
 pub mod recipe;
 pub mod render;
+pub mod retention;
 pub mod s_tracker;
 pub mod schedule_gen;
 pub mod verdict;

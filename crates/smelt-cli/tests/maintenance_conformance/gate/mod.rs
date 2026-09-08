@@ -23,6 +23,7 @@ pub(crate) mod migrate_step;
 pub(crate) mod mixed_pool;
 pub(crate) mod once_write;
 pub(crate) mod partition_pool;
+pub(crate) mod retention_pool;
 pub(crate) mod schedule_enrichment;
 pub(crate) mod support;
 pub(crate) mod technique_agreement;

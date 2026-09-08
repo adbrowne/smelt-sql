@@ -108,6 +108,23 @@ pub(crate) async fn drive_and_assert_collecting(
     for (i, step) in schedule.0.iter().enumerate() {
         match step {
             ConformanceStep::RunWindow { start, end, rows } => {
+                // Retention trim (phase 8, no-op unless `recipe.source.retention`
+                // is declared): departs rows older than the bound relative to
+                // THIS step's own window, so a declared bound advances with the
+                // schedule's own clock rather than the run's real wall-clock
+                // time (that distinction is what keeps the run-time admission
+                // check in `smelt-runtime`, which ages against the real clock,
+                // independent of this physical departure).
+                {
+                    let backend = project.backend().await?;
+                    smelt_maintenance_testkit::retention::trim_source_to_retention(
+                        backend.as_ref(),
+                        &recipe.source,
+                        *start,
+                    )
+                    .await?;
+                }
+
                 for row in rows {
                     insert_row(project, recipe, row).await?;
                 }
@@ -134,6 +151,15 @@ pub(crate) async fn drive_and_assert_collecting(
                 // Redelivery: same window as an earlier `RunWindow`, no new
                 // rows. Never-fold-twice under the partition-grain
                 // DELETE+INSERT full-replace technique must hold (Phase 6).
+                {
+                    let backend = project.backend().await?;
+                    smelt_maintenance_testkit::retention::trim_source_to_retention(
+                        backend.as_ref(),
+                        &recipe.source,
+                        *start,
+                    )
+                    .await?;
+                }
                 let snapshot = {
                     let conn = project.connect()?;
                     read_source_snapshot(&conn, &recipe.source)
@@ -171,7 +197,20 @@ pub(crate) async fn drive_and_assert_collecting(
             }
             ConformanceStep::BackfillRegion { start, end } => {
                 // An explicit backfill: same execution shape as `RunWindow`
-                // with no accompanying insert (Phase 6).
+                // with no accompanying insert (Phase 6). Trimmed BEFORE the
+                // run so an aged backfill's own admission check (`smelt-
+                // runtime`'s real-wall-clock age, independent of this
+                // physical departure) is exercised against the same source
+                // state a real trimmed warehouse would present.
+                {
+                    let backend = project.backend().await?;
+                    smelt_maintenance_testkit::retention::trim_source_to_retention(
+                        backend.as_ref(),
+                        &recipe.source,
+                        *start,
+                    )
+                    .await?;
+                }
                 let snapshot = {
                     let conn = project.connect()?;
                     read_source_snapshot(&conn, &recipe.source)

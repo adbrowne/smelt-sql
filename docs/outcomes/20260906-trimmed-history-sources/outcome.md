@@ -79,13 +79,24 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | done |
 | 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | done |
 | 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | done |
-| 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | planned |
+| 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | done |
 | 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | pending |
 | 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
 | 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
 
+- 2026-09-09 (phase 8 implement): **the generative pool anchors its schedule a year into the
+  future relative to `Utc::now()`.** `smelt-runtime`'s run-time retention admission ages a
+  run's window against the REAL wall clock, independent of the schedule's own (often
+  synthetic) dates — so a window dated in the past by construction (as every other pool in
+  this harness uses, fixed at 2024-01-01) would already read as hundreds of days old today,
+  refusing any modest retention bound regardless of the schedule's own internal spacing.
+  Anchoring in the future makes `window_age` saturate at zero (an over-future window can never
+  have negative age), decoupling admission from calendar drift entirely, while the physical
+  trim still uses each step's own `start` as `as_of` so rows depart once `WINDOW_GAP_DAYS`
+  (60) exceeds the declared `RETENTION_DAYS` (30) — the two clocks are independent by design,
+  not an oversight. See `phases/08-summary.md` for the full reasoning.
 - 2026-09-09 (phase 8 planning): **table reshaped — new row 9 for the composed-upstream
   granularity gap the phase-7 summary handed over.** `derive_model_retention_plan`
   (`crates/smelt-runtime/src/execute/retention_admission.rs`) builds its candidate pool from

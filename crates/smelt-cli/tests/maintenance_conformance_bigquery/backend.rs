@@ -281,6 +281,7 @@ mod oracle_relation_tests {
             key_recurrence: None,
             partition_column: None,
             delete_flag_column: None,
+            retention: None,
         };
         let mut tracker = STracker::new(&source);
         let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");

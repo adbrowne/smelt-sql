@@ -31,6 +31,7 @@ impl SourceRecipe {
             key_recurrence: None,
             partition_column: Some("arrival_date".to_string()),
             delete_flag_column: Some("is_deleted".to_string()),
+            retention: None,
         }
     }
 
