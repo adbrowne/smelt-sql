@@ -298,6 +298,28 @@ pub async fn execute_project(
 
     let all_models: Vec<smelt_core::ModelFile> =
         graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
+    // Composed-upstream candidate map for the per-model retention re-check
+    // below (`docs/outcomes/20260906-trimmed-history-sources/
+    // phases/09-plan.md` task 6): a `grain: key` model whose sole clocked
+    // candidate is an upstream maintained model's own composed output must
+    // resolve `driving_source_granularity` from that candidate too, not
+    // just its own declared `sources:` refs — see
+    // `retention_admission::derive_model_retention_plan`'s doc comment for
+    // why. Gated on at least one referenced source declaring `retention:`
+    // so a workspace with no trimmed source pays nothing for the
+    // fixed-point derivation (`crate::propagation::derive_clamp_and_locality`
+    // is otherwise-unneeded work on this path).
+    let composed_source_granularities: std::collections::BTreeMap<
+        String,
+        (
+            smelt_logical::maintenance::SourceFacts,
+            smelt_core::config::Granularity,
+        ),
+    > = if source_infos.iter().any(|s| s.retention.is_some()) {
+        crate::propagation::composed_source_granularities(&all_models, &source_infos)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     // T3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
     // Phase E3): keyed by canonical address so the real per-batch loop
     // below can build each model's `ModelEdge` list (`model_edges_for`)
@@ -838,6 +860,7 @@ pub async fn execute_project(
     let compilers = &compilers;
     let ephemeral_resolvers = &ephemeral_resolvers;
     let source_infos = &source_infos;
+    let composed_source_granularities = &composed_source_granularities;
     let model_by_addr = &model_by_addr;
     let source_timeseries = &source_timeseries;
     let source_key_recurrence = &source_key_recurrence;
@@ -1036,6 +1059,7 @@ pub async fn execute_project(
             crate::execute::retention_admission::derive_model_retention_plan(
                 &plan.model_file,
                 source_infos,
+                composed_source_granularities,
             )
         {
             if let Err(err) = crate::execute::retention_admission::check_retention_admission(

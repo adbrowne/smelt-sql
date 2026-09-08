@@ -81,25 +81,63 @@ pub(crate) fn window_age(window_start: Option<NaiveDate>, run_clock: NaiveDate) 
 /// it must be resolved here the same way `smelt-db`'s
 /// `maintenance_refs/plan.rs` (the diagnostics path this derivation must
 /// agree with) resolves it: `single_clocked_granularity` over the
-/// unconditional declared-source candidate pool, never
-/// `clamp_locality.rs`'s `grain: key`-gated form (that form additionally
-/// folds in composed-upstream-model candidates this call site does not
-/// have — see the doc comment on the composed-upstream gap this leaves,
-/// tracked for phase 8).
+/// declared-source candidate pool UNION every referenced upstream
+/// maintained model this workspace admits key temporal locality for
+/// (`composed_sources`, resolved once in `execute_project` via
+/// `crate::propagation::composed_source_granularities` — the same
+/// converged candidate `clamp_locality.rs`'s `grain: key`-gated form
+/// folds in). This closes the divergence phases 7/8 left open: leg 3 of
+/// the closure argument (`docs/outcomes/20260906-trimmed-history-sources/
+/// phases/09-plan.md`) — "adding a composed-upstream candidate can only
+/// take `Some → None`, never `None → Some`" — is FALSE when the
+/// declared-source pool is empty (a `grain: key` model whose SOLE clocked
+/// candidate is an upstream model's composed output): adding that one
+/// candidate resolves `None → Some`
+/// (`smelt-logical`'s `adding_a_candidate_to_an_empty_pool_resolves_an_
+/// undecided_granularity` pins the counterexample). Without this fold, that
+/// exact model shape would have resolved `driving_source_granularity: None`
+/// here — refused by `establish_locality`'s own precondition before the
+/// retention fold ever ran, even though `smelt-db`'s diagnostics path (and a
+/// real `smelt build`) admits it.
 pub(crate) fn derive_model_retention_plan(
     model_file: &smelt_core::ModelFile,
     source_infos: &[smelt_core::sources::SourceInfo],
+    composed_sources: &std::collections::BTreeMap<
+        String,
+        (
+            smelt_logical::maintenance::SourceFacts,
+            smelt_core::config::Granularity,
+        ),
+    >,
 ) -> Option<MaintenancePlan> {
     let metadata = model_file.metadata.as_deref()?;
     let sql = smelt_parser::strip_frontmatter(&model_file.content);
     let table = model_file.db_name_owned();
-    let (sources, _) = super::key_addressed::build_maint_source_facts(model_file, source_infos);
+    let (mut sources, _) = super::key_addressed::build_maint_source_facts(model_file, source_infos);
     let source_refs =
         crate::maintenance_driver::build_succession_source_refs(model_file, source_infos);
-    let clocked_granularities = source_refs
+    let mut clocked_granularities: Vec<smelt_core::config::Granularity> = source_refs
         .iter()
         .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()))
-        .map(|t| t.granularity);
+        .map(|t| t.granularity)
+        .collect();
+    // Mirrors `smelt-db::maintenance_refs::plan.rs`'s own `grain: key`-gated
+    // composed-upstream fold: every referenced address that resolves in the
+    // converged `composed_sources` map contributes both a `SourceFacts`
+    // candidate (so `resolve_driving_source` can anchor on it, the same way
+    // a declared source anchors) and a clocked-granularity candidate.
+    if metadata.resolved_grain() == Some(smelt_core::config::Grain::Key) {
+        for r in &model_file.refs {
+            let addr = r.smelt_ref.to_path().join(".");
+            let Some((facts, granularity)) = composed_sources.get(&addr) else {
+                continue;
+            };
+            if !sources.iter().any(|s| s.name == facts.name) {
+                sources.push(facts.clone());
+                clocked_granularities.push(*granularity);
+            }
+        }
+    }
     let driving_source_granularity =
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     let result = crate::maintenance_availability::derive_resolved(
@@ -271,6 +309,7 @@ pub(crate) fn downgrade_warning_message(
 mod tests {
     use super::*;
     use smelt_logical::maintenance::RetentionReach;
+    use std::collections::BTreeMap;
 
     fn plan_with_reach(required_lookback: Seconds, retained: Seconds) -> MaintenancePlan {
         MaintenancePlan {
@@ -377,7 +416,7 @@ GROUP BY 1, 2
         std::fs::write(tmp.path().join("models/keyed.sql"), model_sql).unwrap();
 
         let (model, source_infos) = discover(tmp.path(), "keyed");
-        let plan = derive_model_retention_plan(&model, &source_infos)
+        let plan = derive_model_retention_plan(&model, &source_infos, &BTreeMap::new())
             .expect("refresh: incremental with metadata must derive a plan");
 
         assert!(
@@ -469,7 +508,7 @@ FROM smelt.sources.events
         std::fs::write(tmp.path().join("models/agg.sql"), model_sql).unwrap();
 
         let (model, source_infos) = discover(tmp.path(), "agg");
-        let plan = derive_model_retention_plan(&model, &source_infos)
+        let plan = derive_model_retention_plan(&model, &source_infos, &BTreeMap::new())
             .expect("refresh: incremental with metadata must derive a plan");
 
         assert_eq!(plan.retention_reaches.len(), 1);
@@ -479,5 +518,189 @@ FROM smelt.sources.events
             Seconds::days(7)
         );
         assert_eq!(plan.retention_reaches[0].retained, Seconds::days(45));
+    }
+
+    // ---- Phase 9: composed-upstream granularity at this call site
+    // (`docs/outcomes/20260906-trimmed-history-sources/phases/09-plan.md`
+    // tests 4-5). Test 2 in `smelt-logical`'s own `locality` module pins the
+    // counterexample that falsifies this phase's planning-stage leg-3
+    // argument ("adding a candidate can only take `Some → None`, never
+    // `None → Some`"): a `grain: key` model with ZERO declared clocked
+    // source refs whose SOLE clocked candidate is an upstream maintained
+    // model's own composed output resolves `None` at this call site without
+    // the fold below, but `Some` once `composed_sources` is threaded in
+    // (matching `smelt-db`'s `maintenance_refs/plan.rs` diagnostics path).
+
+    /// Test 4: a `grain: key` model ("b") whose sole clocked candidate is
+    /// an upstream maintained model ("a")'s composed output — no declared
+    /// `sources:` ref of its own. WITHOUT `composed_sources` (the pre-fix
+    /// shape), the plan comes back `Refusal::LocalityNotEstablished` (empty
+    /// declared-source pool resolves `None`), even though a real project
+    /// (`smelt-db`'s diagnostics path, which already folds composed
+    /// upstreams) admits it — this is the divergence phase 9 closes.
+    /// WITH the real `composed_source_granularities` map
+    /// (`crate::propagation::composed_source_granularities`, the same
+    /// fixed point `execute_project` now threads through), locality is
+    /// established and the spurious refusal disappears. Neither case
+    /// leaves the model "running with a silently empty `retention_reaches`
+    /// that should have been non-empty" — "b" references no `retention:`
+    /// source at all (declared or composed; test 5 pins why a composed
+    /// upstream can never carry a retained bound), so an empty
+    /// `retention_reaches` is the CORRECT answer once locality resolves,
+    /// not a skipped check.
+    #[test]
+    fn a_keyed_model_over_a_composed_upstream_resolves_locality_via_composed_sources() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        stage_source(tmp.path(), "events", "day", false);
+        let model_a_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
+---
+SELECT device_id, event_date, SUM(amount) AS total_amount
+FROM smelt.sources.events
+GROUP BY 1, 2
+"#;
+        let model_b_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      a:
+        allow_full_scan: true
+---
+SELECT device_id, event_date, SUM(total_amount) AS grand_total
+FROM smelt.a
+GROUP BY 1, 2
+"#;
+        std::fs::create_dir_all(tmp.path().join("models")).unwrap();
+        std::fs::write(tmp.path().join("models/a.sql"), model_a_sql).unwrap();
+        std::fs::write(tmp.path().join("models/b.sql"), model_b_sql).unwrap();
+
+        let paths = vec!["models".to_string()];
+        let source_infos = smelt_core::discover_source_infos(tmp.path(), &paths);
+        let all_models = smelt_core::ModelDiscovery::new(tmp.path().to_path_buf(), paths)
+            .discover_models()
+            .expect("discover_models");
+        let model_b = all_models
+            .iter()
+            .find(|m| m.name == "b")
+            .expect("model 'b' discovered")
+            .clone();
+
+        // Pre-fix shape: no composed candidates threaded in.
+        let plan_without_fold =
+            derive_model_retention_plan(&model_b, &source_infos, &BTreeMap::new())
+                .expect("refresh: incremental with metadata must derive a plan");
+        assert!(
+            plan_without_fold.refusals.iter().any(|r| matches!(
+                r,
+                smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
+            )),
+            "with an empty composed-source pool, 'b' has zero clocked candidates and must be \
+             spuriously locality-refused: {:?}",
+            plan_without_fold.refusals
+        );
+        assert!(plan_without_fold.retention_reaches.is_empty());
+
+        // Real fold, the same one `execute_project` now threads through.
+        let composed =
+            crate::propagation::composed_source_granularities(&all_models, &source_infos)
+                .expect("acyclic model-ref graph converges");
+        assert!(
+            composed.contains_key("a"),
+            "'a' is an admitted grain: key + timeseries model — it must be a composed candidate: \
+             {composed:?}"
+        );
+        let plan_with_fold = derive_model_retention_plan(&model_b, &source_infos, &composed)
+            .expect("refresh: incremental with metadata must derive a plan");
+        assert!(
+            !plan_with_fold.refusals.iter().any(|r| matches!(
+                r,
+                smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
+            )),
+            "with the composed-source fold, 'b' has exactly one clocked candidate ('a') and \
+             locality must establish: {:?}",
+            plan_with_fold.refusals
+        );
+        // No `retention:` source in reach (declared or composed) — an
+        // empty fold here is the correct answer, not a skipped check.
+        assert!(plan_with_fold.retention_reaches.is_empty());
+    }
+
+    /// Test 5: `model_source_retentions` reads DECLARED `sources:` refs
+    /// only — a referenced upstream *model* never contributes a retained
+    /// bound, because `retention:` is a source-only declaration
+    /// (`smelt-core`'s `RetentionWithoutTimeseries` refusal). This is why
+    /// test 4's "b" (composed-upstream-only) can never have retention
+    /// exposure to silently skip: the only way a model acquires retention
+    /// exposure is by directly referencing a `retention:`-bearing source,
+    /// which is itself always a declared clocked candidate — never a
+    /// composed-only one.
+    #[test]
+    fn a_composed_upstream_contributes_no_retained_bound() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        stage_source(tmp.path(), "events", "day", false);
+        let model_a_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
+---
+SELECT device_id, event_date, SUM(amount) AS total_amount
+FROM smelt.sources.events
+GROUP BY 1, 2
+"#;
+        let model_b_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      a:
+        allow_full_scan: true
+---
+SELECT device_id, event_date, SUM(total_amount) AS grand_total
+FROM smelt.a
+GROUP BY 1, 2
+"#;
+        std::fs::create_dir_all(tmp.path().join("models")).unwrap();
+        std::fs::write(tmp.path().join("models/a.sql"), model_a_sql).unwrap();
+        std::fs::write(tmp.path().join("models/b.sql"), model_b_sql).unwrap();
+
+        let (model_b, source_infos) = discover(tmp.path(), "b");
+        let retentions = model_source_retentions(&model_b, &source_infos);
+        assert!(
+            retentions.is_empty(),
+            "a referenced upstream model must never contribute a retained bound: {retentions:?}"
+        );
     }
 }

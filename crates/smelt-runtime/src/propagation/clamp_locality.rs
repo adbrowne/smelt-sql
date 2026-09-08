@@ -42,6 +42,20 @@ pub(super) struct ClampAndLocality {
     /// on model edges" — "This composes with the derived settle bound").
     pub(super) key_locality_settle_bound:
         BTreeMap<String, smelt_logical::maintenance::locality::SettleBound>,
+    /// The converged composed-upstream candidate map the fixed-point loop
+    /// below builds — every maintained `grain: key` model this workspace
+    /// admits key temporal locality for, as a `SourceFacts` + declared
+    /// `Granularity` candidate keyed by its own canonical address. Exposed
+    /// (`docs/outcomes/20260906-trimmed-history-sources/phases/09-plan.md`
+    /// task 6) so a run-time call site with no query-recursion to lean on —
+    /// [`crate::execute::retention_admission::derive_model_retention_plan`]
+    /// — can extend a downstream `grain: key` model's clocked-granularity
+    /// candidate pool with an upstream composed output exactly the way
+    /// `smelt-db`'s `maintenance_refs/plan.rs` (the diagnostics path this
+    /// derivation must agree with) does, rather than leaving a run-time
+    /// `driving_source_granularity: None` for a model the diagnostics path
+    /// would resolve `Some` for.
+    pub(super) composed_sources: BTreeMap<String, (SourceFacts, Granularity)>,
 }
 
 pub(super) fn derive_clamp_and_locality(
@@ -96,6 +110,7 @@ pub(super) fn derive_clamp_and_locality(
             locality_admitted,
             key_locality_slice,
             key_locality_settle_bound,
+            ..
         } = derive_clamp_and_locality_pass(
             models,
             source_infos,
@@ -151,6 +166,7 @@ pub(super) fn derive_clamp_and_locality(
                 locality_admitted,
                 key_locality_slice,
                 key_locality_settle_bound,
+                composed_sources,
             });
         }
         composed_sources = next_composed_sources;
@@ -664,6 +680,12 @@ fn derive_clamp_and_locality_pass(
         locality_admitted,
         key_locality_slice,
         key_locality_settle_bound,
+        // The caller (`derive_clamp_and_locality`) computes the converged
+        // `composed_sources` map itself from `locality_admitted`/
+        // `key_locality_slice` above and discards this per-pass field via
+        // `..` — echoing the input candidate pool back here keeps the
+        // struct's field count honest without inventing a second value.
+        composed_sources: composed_sources.clone(),
     })
 }
 

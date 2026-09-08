@@ -80,7 +80,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | done |
 | 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | done |
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | done |
-| 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | planned |
+| 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | done |
 | 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
 | 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
@@ -97,6 +97,31 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
   under-read. Two supporting legs: `retention:` is refused without `timeseries:`, so every
   retained ref is necessarily clocked and present in the run-time pool; and `retention:` is a
   source-only declaration, so a composed upstream carries no bound the pool could be missing.
+- 2026-09-09 (phase 9 implementation): **leg 3 as stated is FALSE; took the closure branch
+  (task 6).** `single_clocked_granularity`'s "exactly one else `None`" rule is not monotone in
+  the direction planning assumed: an EMPTY run-time pool (`P → None`) adding exactly one
+  composed-upstream candidate (`P′ = P ∪ {g}`) resolves `P′ → Some(g)` — a real `None → Some`
+  transition, pinned by `smelt-logical`'s
+  `adding_a_candidate_to_an_empty_pool_resolves_an_undecided_granularity`. This is exactly row
+  9's named shape: a `grain: key` model with zero declared clocked `sources:` refs whose sole
+  clocked candidate is an upstream maintained model's composed output. Separately: for this
+  divergence to ever move `retention_reaches`/`retention_downgrades` (the only two fields this
+  call site reads), the model would need a directly-referenced `retention:`-bearing source —
+  but every `retention:` source is refused without `timeseries:`, so referencing one always
+  makes the run-time pool non-empty already, meaning the empty-pool case can never carry
+  retention exposure to silently skip. So the closure was taken anyway, for a narrower reason
+  than "prevent a silent retention skip": it removes a spurious `Refusal::LocalityNotEstablished`
+  this call site's plan carried for an otherwise-admissible composed-only model (inert today,
+  since this call site never reads `plan.refusals` — but exactly the kind of latent divergence
+  from the diagnostics path this outcome exists to close, and cheap to close now rather than
+  leave for a future caller that does read `refusals`). Implementation: `ClampAndLocality`
+  (`crates/smelt-runtime/src/propagation/clamp_locality.rs`) now returns its already-computed
+  `composed_sources` fixed point; `crate::propagation::composed_source_granularities` exposes it;
+  `execute_project` computes it once (gated on any source declaring `retention:`) and threads it
+  into `derive_model_retention_plan`, which extends its `SourceFacts`/clocked-granularity pools
+  for `grain: key` models exactly the way `smelt-db`'s `maintenance_refs/plan.rs` does. Rows
+  10/11 are unaffected — no spec delta, no new refusal shape, `smelt explain --json` was already
+  reading the diagnostics path's correct verdict.
   Phase 9 pins all four legs as tests (breaking each premise once to prove sensitivity) and, if
   any leg fails, closes the gap by threading `derive_clamp_and_locality`'s converged
   `composed_sources` map into the call site instead. Rows unchanged.
