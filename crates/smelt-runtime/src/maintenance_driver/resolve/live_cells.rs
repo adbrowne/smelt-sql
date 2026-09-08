@@ -5,7 +5,7 @@ use smelt_logical::maintenance::choice::{
     effective_override, resolve_cell_choice, resolve_cell_write_suppression, ChosenTechnique,
     WriteSuppression,
 };
-use smelt_logical::maintenance::derive::SourceReferentialIntegrity;
+use smelt_logical::maintenance::derive::{ModelEdge, SourceReferentialIntegrity};
 use smelt_logical::maintenance::{PlanCell, ScanClamp, SourceFacts, Technique, Trigger};
 use std::collections::HashSet;
 
@@ -62,40 +62,67 @@ pub fn resolve_live_column_scoped_cell(
     metadata: &smelt_core::ModelMetadata,
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
+    model_edges: &[ModelEdge],
     backend_supports_column_scoped_merge: bool,
     technique_overrides: &[crate::types::CellTechniqueOverride],
     availability: &StateAvailability,
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
-    let Some(result) = crate::maintenance_availability::derive_resolved(
-        sql,
-        table,
-        metadata,
-        sources,
-        explicitly_mutable,
-        // Not (yet) plumbed with the driving source's declared granularity
-        // at this call site — a keyed model with its own `timeseries:`
-        // block fails the locality gate's granularity-equality precondition
-        // closed here, same as before this phase (`smelt-db`'s own
-        // diagnostic path, `maintenance_plan_diagnostics`, has the real
-        // value; the runtime execution path,
-        // `smelt-runtime::cumulative::execute_cumulative_aggregate`, is
-        // this phase's actual slice-pruning consumer).
-        None,
-        // Not (yet) plumbed with declared `key_recurrence` bounds at this
-        // call site, for the same reason as the granularity `None` above —
-        // this resolver only inspects mutation-trigger cells, which key
-        // temporal locality's routes do not gate.
-        &[],
-        // This resolver only inspects `UpstreamMutation` cells — a
-        // `ColumnAdded` trigger never affects them, so no deployed-schema
-        // snapshot is needed here.
-        &[],
-        &SourceReferentialIntegrity::new(),
-        None,
-        None,
-        availability,
-        &[],
-    ) else {
+    let result = if model_edges.is_empty() {
+        crate::maintenance_availability::derive_resolved(
+            sql,
+            table,
+            metadata,
+            sources,
+            explicitly_mutable,
+            // Not (yet) plumbed with the driving source's declared granularity
+            // at this call site — a keyed model with its own `timeseries:`
+            // block fails the locality gate's granularity-equality precondition
+            // closed here, same as before this phase (`smelt-db`'s own
+            // diagnostic path, `maintenance_plan_diagnostics`, has the real
+            // value; the runtime execution path,
+            // `smelt-runtime::cumulative::execute_cumulative_aggregate`, is
+            // this phase's actual slice-pruning consumer).
+            None,
+            // Not (yet) plumbed with declared `key_recurrence` bounds at this
+            // call site, for the same reason as the granularity `None` above —
+            // this resolver only inspects mutation-trigger cells, which key
+            // temporal locality's routes do not gate.
+            &[],
+            // This resolver only inspects `UpstreamMutation` cells — a
+            // `ColumnAdded` trigger never affects them, so no deployed-schema
+            // snapshot is needed here.
+            &[],
+            &SourceReferentialIntegrity::new(),
+            None,
+            None,
+            availability,
+            &[],
+        )
+    } else {
+        // Edge-aware derivation (phase 5, `docs/outcomes/
+        // 20260906-bigquery-correctness`): a model reading an upstream
+        // maintained model in value-enrichment position derives an
+        // `EnrichmentKeyed` `Trigger::UpstreamMutation` cell only through
+        // `derive_model_maintenance_plan_with_edges` — the source-only
+        // derivation above never sees the edge at all.
+        crate::maintenance_availability::derive_resolved_with_edges(
+            sql,
+            table,
+            metadata,
+            sources,
+            explicitly_mutable,
+            model_edges,
+            None,
+            &[],
+            &[],
+            &SourceReferentialIntegrity::new(),
+            None,
+            None,
+            availability,
+            &[],
+        )
+    };
+    let Some(result) = result else {
         return Ok(None);
     };
     let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
@@ -128,7 +155,22 @@ pub fn resolve_live_column_scoped_cell(
         .cloned()
         .chain(cells_cfg.iter().cloned())
         .collect();
-    for source in explicitly_mutable {
+    // Distinct `Trigger::UpstreamMutation` source names the derived plan
+    // itself carries cells for, in cell order — a `HashSet` iteration over
+    // `explicitly_mutable` (the pre-edge-aware source of this loop) is not
+    // deterministic, and an edge trigger (its source name is the upstream
+    // MODEL's bare address, never a member of `explicitly_mutable`, which
+    // only ever holds declared SOURCE names) is only reachable through the
+    // plan's own cells at all.
+    let mut mutation_sources: Vec<String> = Vec::new();
+    for cell in &result.plan.cells {
+        if let Trigger::UpstreamMutation { source } = &cell.trigger {
+            if !mutation_sources.contains(source) {
+                mutation_sources.push(source.clone());
+            }
+        }
+    }
+    for source in &mutation_sources {
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
         };

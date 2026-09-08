@@ -1,5 +1,6 @@
 use super::backend::*;
 use super::bootstrap::*;
+use super::enrichment_heal::*;
 use super::key_addressed::*;
 use super::outcome::*;
 use super::plan::*;
@@ -1339,6 +1340,9 @@ pub async fn execute_project(
                 .table_exists(schema, &db_table_name)
                 .await
                 .unwrap_or(false);
+            // Hoisted above `resolve_live_column_scoped_cell` below (phase 5) so
+            // its enrichment-keyed route is visible.
+            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
             let column_scoped_cell = match plan.model_file.metadata.as_deref() {
                 Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
                     &clean_sql_for_merge,
@@ -1346,6 +1350,7 @@ pub async fn execute_project(
                     metadata,
                     &maint_source_facts,
                     &explicitly_mutable,
+                    &keyed_model_edges,
                     backend.capabilities().supports_column_scoped_merge,
                     &request.technique_overrides,
                     &availability,
@@ -1420,7 +1425,7 @@ pub async fn execute_project(
             // upstream's affected key set rather than a source's `ScanClamp` —
             // the sibling of `per_group_recompute_cell` above for this
             // model's upstream MODEL edges rather than its declared sources.
-            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+            // (`keyed_model_edges` is hoisted above, ~L1346.)
             let key_edge_dispatch = resolve_and_dispatch_key_addressed_edge_cell(
                 backend,
                 schema,
@@ -1923,21 +1928,10 @@ pub async fn execute_project(
                     );
                     if mutation_should_dispatch {
                     // The mutated dimension's own declared `unique_key`
-                    // (`sources.md` §"Row identity") — same lookup the
-                    // non-keyed incremental branch performs, needed only for
-                    // the horizon-clamped corner's join-contribution proof.
-                    let dimension_unique_key: Vec<String> = source_infos
-                        .iter()
-                        .find(|info| {
-                            let segs = &info.address_segments;
-                            let bare = match segs.split_first() {
-                                Some((first, rest)) if first == "sources" => rest.join("."),
-                                _ => segs.join("."),
-                            };
-                            &bare == source
-                        })
-                        .and_then(|info| info.unique_key.clone())
-                        .unwrap_or_default();
+                    // (`sources.md` §"Row identity"), edge-aware (falls back
+                    // to `ModelEdge::unique_key` for a model-edge trigger).
+                    let dimension_unique_key =
+                        dimension_unique_key_for(source, source_infos, &keyed_model_edges);
                     let contribution = if matches!(
                         cell.partition_local,
                         smelt_logical::maintenance::PartitionLocal::Yes
@@ -2039,6 +2033,44 @@ pub async fn execute_project(
                             state_io_lock,
                         )
                         .await;
+                    } else if let Some(metadata) = plan.model_file.metadata.as_deref() {
+                        // `dispatch` is `None` for an `EnrichmentKeyed` cell
+                        // (excluded above) — dispatch the run-level heal.
+                        if let Some(heal_result) = dispatch_enrichment_keyed_heal_for_run(
+                            backend,
+                            schema,
+                            &plan.name,
+                            &db_table_name,
+                            table_exists_before_run,
+                            &clean_sql_for_merge,
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &keyed_model_edges,
+                            &availability,
+                            column_scoped_cell.as_ref(),
+                            &model_unique_key,
+                            &plan.model_file,
+                            compiler,
+                            resolver,
+                            start_date,
+                            end_date,
+                            request,
+                            run_id,
+                            reporter,
+                        )
+                        .await?
+                        {
+                            used_column_scoped_merge = true;
+                            total_rows = heal_result.row_count;
+                            record_upstream_mutation_baseline(
+                                mutation_gate,
+                                source,
+                                file_store,
+                                state_io_lock,
+                            )
+                            .await;
+                        }
                     }
                     }
                 }
@@ -2714,6 +2746,7 @@ pub async fn execute_project(
                         metadata,
                         &maint_source_facts,
                         &explicitly_mutable,
+                        &model_edges,
                         backend.capabilities().supports_column_scoped_merge,
                         &request.technique_overrides,
                         &availability,
@@ -2833,26 +2866,10 @@ pub async fn execute_project(
                                 smelt_logical::maintenance::PartitionLocal::Yes
                             ) {
                                 // The mutated dimension's own declared
-                                // `unique_key` (`sources.md` §"Row identity")
-                                // — never `SourceFacts`' always-empty
-                                // `unique_key` field (`smelt-db`'s
-                                // `source_facts()` does not populate it
-                                // yet), read straight off the
-                                // already-resolved `source_infos`.
-                                let dimension_unique_key: Vec<String> = source_infos
-                                    .iter()
-                                    .find(|info| {
-                                        let segs = &info.address_segments;
-                                        let bare = match segs.split_first() {
-                                            Some((first, rest)) if first == "sources" => {
-                                                rest.join(".")
-                                            }
-                                            _ => segs.join("."),
-                                        };
-                                        &bare == source
-                                    })
-                                    .and_then(|info| info.unique_key.clone())
-                                    .unwrap_or_default();
+                                // `unique_key`, edge-aware (see
+                                // `dimension_unique_key_for`'s doc comment).
+                                let dimension_unique_key =
+                                    dimension_unique_key_for(source, source_infos, &model_edges);
                                 crate::maintenance_driver::dimension_join_contribution(
                                     &sql_for_bounds,
                                     source,
@@ -3876,6 +3893,41 @@ pub async fn execute_project(
                         exec_result.row_count,
                         batch_duration,
                     );
+                }
+
+                // An `EnrichmentKeyed` cell was excluded from every batch's
+                // window-scoped dispatch above — dispatch the run-level heal
+                // once here instead (see `enrichment_heal.rs`'s doc comment).
+                if let Some(metadata) = plan.model_file.metadata.as_deref() {
+                    if let Some(heal_result) = dispatch_enrichment_keyed_heal_for_run(
+                        backend,
+                        schema,
+                        &plan.name,
+                        &plan.model_file.db_name_owned(),
+                        table_exists_before_run,
+                        &sql_for_bounds,
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &model_edges,
+                        &availability,
+                        column_scoped_cell.as_ref(),
+                        &inc_plan.config.unique_key,
+                        &plan.model_file,
+                        compilers.get(model_target),
+                        &ephemeral_resolvers[model_target],
+                        start_date,
+                        end_date,
+                        request,
+                        run_id,
+                        reporter,
+                    )
+                    .await?
+                    {
+                        used_column_scoped_merge = true;
+                        total_rows += heal_result.row_count;
+                        total_rows_overall += heal_result.row_count;
+                    }
                 }
 
                 // Recorded once for the whole run — the observed fingerprint

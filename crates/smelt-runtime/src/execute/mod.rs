@@ -18,6 +18,7 @@
 
 mod backend;
 mod bootstrap;
+mod enrichment_heal;
 mod key_addressed;
 mod outcome;
 mod plan;

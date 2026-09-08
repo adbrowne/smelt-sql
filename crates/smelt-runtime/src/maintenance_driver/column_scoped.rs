@@ -8,7 +8,7 @@ use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, MaintenanceDialect,
 };
-use smelt_logical::maintenance::{PartitionLocal, PlanCell, ScanClamp};
+use smelt_logical::maintenance::{KeyDiscovery, PartitionLocal, PlanCell, ScanClamp};
 use smelt_state::ddl_duckdb;
 use std::time::Instant;
 
@@ -573,6 +573,22 @@ pub fn decide_column_merge_dispatch(
     contribution: &ContributionVerdict,
 ) -> Option<ColumnMergeDispatch> {
     if !table_exists || !model_declares_unique_key {
+        return None;
+    }
+    // An enrichment-keyed cell's write is addressed by its own join key, not
+    // a partition interval (`admit_enrichment_keyed_merge`'s `PartitionLocal::
+    // No { why: "addressed by its own join key, not a partition interval" }`)
+    // — the per-batch window-scoped dispatch this function decides for would
+    // MERGE only the batch's `[start, end)`-filtered rows and never revisit
+    // an already-written row from an earlier batch, leaving a stale value
+    // forever unhealed. `execute_enrichment_keyed_heal` dispatches it once
+    // per run instead, over the model's unwindowed output
+    // (`docs/outcomes/20260906-bigquery-correctness/phases/05-plan.md`).
+    if cell
+        .key_scope
+        .as_ref()
+        .is_some_and(|scope| scope.discovery == KeyDiscovery::EnrichmentKeyed)
+    {
         return None;
     }
     match &cell.partition_local {

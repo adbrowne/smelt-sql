@@ -35,10 +35,11 @@ maintenance:
 -- `Technique::ColumnScopedMerge`, addressed by `repo_id` — characterised via
 -- `smelt explain gold.events_enriched --json` in
 -- `events_enriched_dimension_mutation_cell_technique`
--- (`crates/smelt-cli/tests/github_activity_replay.rs`). Making that cell
--- live on the run path (so a rename in `silver.repo_naming` actually heals
--- this table's already-written rows) is phase 5's own scope
--- (`docs/outcomes/20260906-bigquery-correctness/phases/04-plan.md`).
+-- (`crates/smelt-cli/tests/github_activity_replay.rs`). The cell is live on
+-- the run path: dispatched once per run over this model's unwindowed output
+-- (its write is addressed by `repo_id`, not a partition interval), so a
+-- rename in `silver.repo_naming` actually heals this table's already-written
+-- rows (`docs/outcomes/20260906-bigquery-correctness/phases/05-plan.md`).
 --
 -- `merge_key: [id]` (not top-level `unique_key:`) is the write/dedup-only
 -- spelling: a top-level `unique_key:` would flip the derived grain to

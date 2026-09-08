@@ -52,6 +52,13 @@ number is traceable to one of those.
    phase 6 claim ("self-heals") that turned out to be a row-count check, not a content
    check.
 
+   **Fixed** by `docs/outcomes/20260906-bigquery-correctness/phases/04-plan.md` and
+   `phases/05-plan.md`: a new enrichment-keyed route in `append_model_edge_cells` derives
+   an `UpstreamMutation(gold.repo_dim)` / `Technique::ColumnScopedMerge` cell addressed by
+   the join key the downstream itself carries (phase 4), and the run path dispatches it
+   once per run over the model's unwindowed output (phase 5) — `gold.events_enriched`'s
+   `current_repo_name` now heals and the stale-row count reaches zero.
+
 3. **Oracle windowing gap** — `silver.actor_sessions`. `compute_calendar_windows`
    (`crates/smelt-runtime/src/windowing.rs`) applies the Form-B forward-reach rebase only
    at the two *outer* edges of a single multi-day invocation, never at an interior chunk
@@ -70,7 +77,7 @@ number is traceable to one of those.
    triggered by an ordinary self-rebase rather than a renamed dimension
    (`phases/08-summary.md`).
 
-## The three registered divergences
+## The two registered divergences
 
 Root cause 1 (`silver_repo_naming` / `silver_actor_naming`) is **fixed**, not registered:
 `docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md` folded
@@ -80,9 +87,14 @@ equal on both relations — no `DIVERGENCE_REGISTRY` entry remains for either. T
 path also now runs the clock-tie probe (previously latent — see below) before its
 presented write.
 
+Root cause 2 (`gold_events_enriched`) is also **fixed**, not registered:
+`docs/outcomes/20260906-bigquery-correctness/phases/04-plan.md` and `phases/05-plan.md`
+derive and dispatch the enrichment-keyed `UpstreamMutation(gold.repo_dim)` cell, so
+`current_repo_name` now heals and the two legs compare exactly equal on this relation too —
+no `DIVERGENCE_REGISTRY` entry remains for it.
+
 | Relation | Bound | Root cause | Defect or fixture artifact |
 |---|---|---|---|
-| `gold_events_enriched` | `StaleButHistoricallyValid` (`current_repo_name` only; every stale value genuinely held earlier) | 2 | Smelt defect (missing maintenance cell) |
 | `silver_actor_sessions` | `MonotoneDivergence` (oracle behind on `session_end`, `event_count`) | 3 | Smelt defect (oracle/windowing, not the incremental leg) |
 | `marts_daily_active_contributors` | `MonotoneDivergence` (incremental behind on `total_events`) | 4 | Smelt defect (missing repair edge) |
 

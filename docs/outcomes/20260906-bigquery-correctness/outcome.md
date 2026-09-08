@@ -86,7 +86,7 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | done |
 | 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | done |
 | 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | done |
-| 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | planned |
+| 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | done |
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | pending |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
@@ -94,6 +94,24 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 5 implementation): **the enrichment-keyed cell is live;
+  `github_activity`'s stale-row count reaches zero.** `resolve_live_column_
+  scoped_cell` gained a `model_edges` parameter and switched to
+  `derive_resolved_with_edges` when non-empty; `decide_column_merge_dispatch`
+  excludes an `EnrichmentKeyed` cell from per-batch dispatch; a new
+  `execute/enrichment_heal.rs` dispatches it once per run over the model's
+  unwindowed output. The mutation gate's existing `None`-on-missing-
+  `SourceInfo` behaviour already implements the plan's "fails open to
+  dispatch" posture for an edge trigger — no new gating code was needed, only
+  tests and a spec sentence naming the property. `execute/project/mod.rs`
+  grew 52 lines past its large-file baseline (the two call sites' own
+  ~20-argument lists, irreducible without moving locals); bumped with a
+  sign-off note rather than left red. Full 30-day replay
+  (`enrichment_heal_repairs_rows_written_before_the_rename`,
+  `gold_events_enriched_matches_the_full_refresh_oracle`) confirms zero stale
+  rows; the plan's `statement_parity` isolation test (test 5) was not added —
+  see `phases/05-summary.md` "For the next planner".
 
 - 2026-09-08 (phase 5 planning): **no reshape to the phase rows; one item moved to Out of
   scope.** Reading the run path confirmed phase 4's split was right and phase 5's scope is

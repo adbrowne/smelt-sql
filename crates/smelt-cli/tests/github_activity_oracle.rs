@@ -141,21 +141,6 @@ fn compare_databases(incr_db: &Path, full_db: &Path) -> Result<Vec<RelationDiff>
 /// `emit_succession_full_rebuild`'s own fold made its two entries
 /// (`silver_repo_naming`, `silver_actor_naming`) compare exactly equal.
 enum Bound {
-    /// A value column that can go stale but is never fabricated: every row
-    /// present in both legs matches on every column except `stale_column`,
-    /// and every stale value that does appear is some value
-    /// `history_value_col` genuinely held for the row's own `value_key_col`
-    /// (a foreign key, not necessarily `key_col` itself) at some point in
-    /// `history_relation` — a real prior state, not invented data.
-    StaleButHistoricallyValid {
-        key_col: &'static str,
-        stale_column: &'static str,
-        other_columns: &'static [&'static str],
-        value_key_col: &'static str,
-        history_relation: &'static str,
-        history_key_col: &'static str,
-        history_value_col: &'static str,
-    },
     /// One side of the pair is always at or ahead of the other on
     /// `monotone_columns` (`behind_side` names which side is never allowed
     /// to lead), and every row present in both legs matches exactly on
@@ -183,8 +168,9 @@ struct DivergenceEntry {
     bound: Bound,
 }
 
-/// Enrichment column names for `gold_events_enriched`'s `StaleButHistoricallyValid`
-/// entry (excludes `id`, the key, and `current_repo_name`, the stale column).
+/// Enrichment column names for `gold_events_enriched` (excludes `id`, the
+/// key, and `current_repo_name`, the enrichment column phase 5's heal keeps
+/// current).
 const ENRICHED_OTHER_COLUMNS: &[&str] = &[
     "type",
     "actor_id",
@@ -207,23 +193,13 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
 /// phases/03-plan.md`; `crates/smelt-logical/src/maintenance/emit/
 /// succession.rs`). The two legs now compare equal on both relations.
 ///
-/// `gold_events_enriched`'s entry traces to a different, measured root cause
-/// (phase 8): no `UpstreamMutation(gold.repo_dim)` maintenance cell is ever
-/// derived for this model (`RepairKeysNotDiscoverable`, `crates/
-/// smelt-logical/src/maintenance/derive/model_edge.rs`), so once an event
-/// `id` is MERGEd into this table its `current_repo_name` is frozen forever
-/// — nothing ever revisits it just because `gold.repo_dim` later changes.
-/// Measured over the full 30-day fixture (`every_window_deep_sweep`): this
-/// does **not** self-heal or converge — the stale-row count is monotonically
-/// non-decreasing (1, 1, 2, 5, 5, 8, 13, ... 39 by the final window), which
-/// corrects an earlier, wrong claim in this outcome's decision log that the
-/// staleness "self-heals within a few subsequent runs" (that claim came from
-/// a row-count-only manual check; a genuine content-level check shows it
-/// never does, for any of the 39 affected rows, within this fixture). A
-/// stale value is always some name the repo genuinely held at an earlier
-/// point (frozen at MERGE time from `gold.repo_dim`'s then-current value),
-/// never a fabricated one — that is the bound this phase can actually stand
-/// behind. Owner of a fix: `docs/outcomes/20260906-bigquery-correctness`.
+/// `gold_events_enriched` no longer has an entry here: phases 4-5 of
+/// `docs/outcomes/20260906-bigquery-correctness` derive and dispatch a real
+/// `UpstreamMutation(gold.repo_dim)` / `Technique::ColumnScopedMerge` cell
+/// (an enrichment-keyed route in `append_model_edge_cells`, dispatched once
+/// per run over the model's unwindowed output), so `current_repo_name` now
+/// heals and the two legs compare exactly equal on this relation too — see
+/// `gold_events_enriched_matches_the_full_refresh_oracle` below.
 ///
 /// `silver_actor_sessions`'s entry traces to a third, unrelated root cause,
 /// also measured this phase and *not* anticipated by the phase's own plan
@@ -273,21 +249,6 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
 /// `docs/outcomes/20260906-bigquery-correctness`.
 const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[
     DivergenceEntry {
-        relation: "gold_events_enriched",
-        reason: "no UpstreamMutation(gold.repo_dim) maintenance cell exists, so a written \
-                  row's current_repo_name is frozen forever; never fabricated, but never \
-                  repaired either — see this const's doc comment",
-        bound: Bound::StaleButHistoricallyValid {
-            key_col: "id",
-            stale_column: "current_repo_name",
-            other_columns: ENRICHED_OTHER_COLUMNS,
-            value_key_col: "repo_id",
-            history_relation: "silver_repo_naming",
-            history_key_col: "repo_id",
-            history_value_col: "repo_name",
-        },
-    },
-    DivergenceEntry {
         relation: "silver_actor_sessions",
         reason: "the full-refresh ORACLE undercounts a cross-midnight (Form-B) session's \
                   reach inside a multi-day invocation — see this const's doc comment",
@@ -316,43 +277,6 @@ const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[
 fn check_bound(incr_db: &Path, full_db: &Path, entry: &DivergenceEntry) -> Result<(), String> {
     let conn = attached_conn(incr_db, full_db);
     match &entry.bound {
-        Bound::StaleButHistoricallyValid {
-            key_col,
-            stale_column,
-            other_columns,
-            value_key_col,
-            history_relation,
-            history_key_col,
-            history_value_col,
-        } => {
-            check_key_sets_equal(&conn, entry.relation, key_col)?;
-            check_columns_match_exactly(&conn, entry.relation, key_col, other_columns)?;
-
-            let fabricated = scalar_on(
-                &conn,
-                &format!(
-                    "SELECT count(*) FROM ( \
-                       SELECT i.{value_key_col} AS vk, i.{stale_column} AS stale_val \
-                       FROM incr_db.main.{r} i JOIN full_db.main.{r} f USING ({key_col}) \
-                       WHERE i.{stale_column} IS DISTINCT FROM f.{stale_column} \
-                     ) stale \
-                     WHERE NOT EXISTS ( \
-                       SELECT 1 FROM full_db.main.{history_relation} h \
-                       WHERE h.{history_key_col} = stale.vk \
-                         AND h.{history_value_col} = stale.stale_val \
-                     )",
-                    r = entry.relation,
-                ),
-            );
-            if fabricated != 0 {
-                return Err(format!(
-                    "{fabricated} stale `{stale_column}` value(s) are not any value the key \
-                     ever genuinely held in `{history_relation}` — a fabricated value, not a \
-                     stale-but-valid one"
-                ));
-            }
-            Ok(())
-        }
         Bound::MonotoneDivergence {
             key_col,
             exact_columns,
@@ -684,7 +608,7 @@ fn full_replay_pair() -> &'static FullReplayPair {
 /// Test 1: the phase's centrepiece. Replay the 30-day fixture day by day;
 /// after **every** day (not sampled — see below), stage a fresh full-refresh
 /// oracle over the identical rows seen so far and compare every materialised
-/// relation row-for-row, against the 3-entry [`DIVERGENCE_REGISTRY`].
+/// relation row-for-row, against the 2-entry [`DIVERGENCE_REGISTRY`].
 ///
 /// Was `#[ignore]`d (`docs/outcomes/20260906-bigquery-dogfood-spine/
 /// outcome.md` "## Blocked", phase 6) on an uncharacterised `gold_events_
@@ -693,8 +617,11 @@ fn full_replay_pair() -> &'static FullReplayPair {
 /// see `DIVERGENCE_REGISTRY`'s doc comment) and phase 8 also found two
 /// further, previously-unknown divergent relations
 /// (`silver_actor_sessions`/`marts_daily_active_contributors`, a genuine
-/// full-refresh-oracle bug — same doc comment). All three are now registered
-/// bounds, so this runs unignored.
+/// full-refresh-oracle bug — same doc comment). All three were registered
+/// bounds at the time, so this ran unignored; `gold_events_enriched`'s own
+/// divergence was fixed and de-registered by phases 4-5 (see
+/// `gold_events_enriched_matches_the_full_refresh_oracle`), leaving the
+/// 2-entry registry above.
 ///
 /// Checks **every** day, not the first-10-plus-final sampling the phase 6
 /// plan allowed for runtime: phase 8 task 9 measured the every-day sweep
@@ -797,8 +724,7 @@ fn oracle_comparison_covers_every_materialised_relation() {
 }
 
 /// Test 3: every registry entry is bounded, not blanket — over the full
-/// 30-day fixture, all three hold their declared bound (one
-/// `StaleButHistoricallyValid`, two `MonotoneDivergence`).
+/// 30-day fixture, both hold their declared `MonotoneDivergence` bound.
 #[test]
 fn succession_divergence_is_exactly_tied_row_multiplicity() {
     let pair = full_replay_pair();
@@ -808,62 +734,33 @@ fn succession_divergence_is_exactly_tied_row_multiplicity() {
     }
 }
 
-/// Test: on the full 30-day fixture, `gold_events_enriched`'s divergence is
-/// confined exactly the way its registry entry claims — no row is missing or
-/// extra (the key set matches exactly) and no column other than
-/// `current_repo_name` ever differs. Distinguishes "stale value" from
-/// "wrong/missing rows" (`docs/outcomes/20260906-bigquery-dogfood-spine/
-/// phases/08-plan.md` task/test 2).
+/// Test (phase 5, `docs/outcomes/20260906-bigquery-correctness`): with the
+/// enrichment-keyed heal live, `gold_events_enriched` no longer diverges from
+/// the full-refresh oracle at all — replaces the two tests that asserted the
+/// (now-fixed) `StaleButHistoricallyValid` divergence was present
+/// (`enrichment_staleness_is_confined_to_the_enriched_column`,
+/// `enrichment_staleness_is_never_a_fabricated_value`). With no registry
+/// entry for this relation, `assert_matches_oracle`'s own unregistered-
+/// divergence sweep (exercised by `every_window_matches_the_full_refresh_
+/// oracle`) already enforces exact equality on every window; this test names
+/// the invariant directly, once, over the full 30-day fixture, so a reader
+/// sees it without deriving it from the generic sweep's silence.
 #[test]
-fn enrichment_staleness_is_confined_to_the_enriched_column() {
+fn gold_events_enriched_matches_the_full_refresh_oracle() {
     let pair = full_replay_pair();
     let conn = attached_conn(&pair.incr_db, &pair.full_db);
 
     check_key_sets_equal(&conn, "gold_events_enriched", "id")
         .expect("gold_events_enriched must have identical id key sets on both legs");
-    check_columns_match_exactly(&conn, "gold_events_enriched", "id", ENRICHED_OTHER_COLUMNS)
-        .expect("only current_repo_name may differ on gold_events_enriched");
-
-    let cd = column_level_diff(&conn, "gold_events_enriched", "id", &{
+    let all_columns: Vec<&str> = {
         let mut cols: Vec<&str> = ENRICHED_OTHER_COLUMNS.to_vec();
         cols.push("current_repo_name");
         cols
-    });
-    assert_eq!(
-        cd.differing
-            .iter()
-            .map(|(c, _)| c.as_str())
-            .collect::<Vec<_>>(),
-        vec!["current_repo_name"],
-        "expected exactly one differing column (current_repo_name): {:?}",
-        cd.differing
+    };
+    check_columns_match_exactly(&conn, "gold_events_enriched", "id", &all_columns).expect(
+        "gold_events_enriched must match the full-refresh oracle on every column, including \
+         current_repo_name, now that the enrichment-keyed heal (phases 4-5) is live",
     );
-    assert!(
-        !cd.differing.is_empty(),
-        "expected the fixture to still reproduce the enrichment divergence — if this is now \
-         empty, the registry entry for gold_events_enriched is dead and should be deleted"
-    );
-}
-
-/// Test: the plan's original task 3 asked whether the staleness "converges
-/// within N windows" — measured (`every_window_deep_sweep`) and found not to:
-/// the stale-row count is monotonically non-decreasing across the full
-/// 30-day fixture, never returning to zero. So the honest, checkable
-/// invariant is not convergence but non-fabrication: every stale
-/// `current_repo_name` this fixture ever produces is some name the repo
-/// genuinely held at an earlier point in `silver_repo_naming`'s history,
-/// never an invented string. This is exactly `check_bound`'s
-/// `StaleButHistoricallyValid` predicate, asserted directly here rather than
-/// only indirectly via `succession_divergence_is_exactly_tied_row_
-/// multiplicity`'s generic loop, so a reader sees the invariant's own name.
-#[test]
-fn enrichment_staleness_is_never_a_fabricated_value() {
-    let pair = full_replay_pair();
-    let entry = DIVERGENCE_REGISTRY
-        .iter()
-        .find(|e| e.relation == "gold_events_enriched")
-        .expect("gold_events_enriched registry entry must exist");
-    check_bound(&pair.incr_db, &pair.full_db, entry).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Test 4: negative control on the comparator itself. Perturb one row of an

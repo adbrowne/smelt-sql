@@ -1553,6 +1553,21 @@ routes decline — `MaintenanceRepairKeysNotDiscoverable` now fires only when al
 decline (no enrichment join is even resolvable against the edge, or the join's own key columns
 are not projected by the downstream's `SELECT` list).
 
+An enrichment-keyed cell's dispatch differs from every other `Technique::ColumnScopedMerge`
+cell's: its write is addressed by the join key the downstream's own output carries, not by a
+partition interval, so it cannot be scoped to a run's `[start, end)` window the way a per-batch
+column-scoped MERGE is — a window-scoped write would heal only rows the current run's window
+happens to rewrite, never an already-written row from an earlier window. It therefore dispatches
+**once per run**, after the model's own creation-trigger writes (never on the creation run — there
+is nothing yet to heal), over the model's whole **unwindowed** compiled output — the read the
+edge's own `allow_full_scan` already licenses — writing a keyed MERGE on the downstream's own
+write key that updates only the cell's own group columns. A model-edge `UpstreamMutation`
+trigger carries no `SourceInfo` (edges are keyed on the upstream model's bare address, never a
+declared source) and therefore no recorded source-mutation baseline, so §"When a mutation cell
+dispatches"'s fingerprint gate has no baseline to compare against and **fails open to dispatch**
+for it, every run — a declared behaviour, with its declared cost (a full-table merge every run),
+not an accident of a lookup returning nothing.
+
 A key-addressed cell's affected-key set is discovered from the **group-grain fingerprint
 sidecar diff** over the upstream's own output table (§"The repair family" — "Obligation 7 over
 a `mutable_snapshot` source"): a clockless keyed upstream is, from the consumer's own view,

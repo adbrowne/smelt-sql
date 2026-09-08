@@ -6,6 +6,15 @@
 # and doc comments for the new enrichment-keyed model-edge route and its
 # `MaintenanceRepairKeysNotDiscoverable` diagnostic. Mechanical additions,
 # not new structure. Sign-off: implementer, phase 4.
+# Also bumped execute/project/mod.rs by 52 lines for phase 5: two new
+# call sites (keyed and non-keyed branches) dispatching
+# `execute_enrichment_keyed_heal` for the run-level heal, plus the hoisted
+# `keyed_model_edges` construction and edge-aware `dimension_unique_key`
+# lookups the phase's own design requires — the shared window/retry-policy
+# boilerplate was already factored into `enrichment_heal.rs`'s
+# `dispatch_enrichment_keyed_heal_for_run` to hold this growth down; the
+# remainder is the two calls' own (unavoidably long) argument lists.
+# Sign-off: implementer, phase 5.
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -21,7 +30,6 @@ crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1439
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
-crates/smelt-cli/tests/github_activity_oracle.rs 1013
 crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
 crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
 crates/smelt-cli/tests/resume.rs 1057
@@ -102,7 +110,7 @@ crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-parser/src/printer.rs 1156
 crates/smelt-runtime/src/compile.rs 4015
 crates/smelt-runtime/src/cumulative.rs 2179
-crates/smelt-runtime/src/execute/project/mod.rs 4691
+crates/smelt-runtime/src/execute/project/mod.rs 4743
 crates/smelt-runtime/src/maintenance_driver/tests.rs 1079
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174

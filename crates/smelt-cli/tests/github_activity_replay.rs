@@ -558,6 +558,36 @@ fn events_enriched_renamed_repo_carries_current_name() {
     );
 }
 
+/// Test (phase 5, `docs/outcomes/20260906-bigquery-correctness`): the
+/// enrichment-keyed cell heals every already-written row, not merely the one
+/// early event `events_enriched_renamed_repo_carries_current_name` samples —
+/// after the full 30-day replay, every `gold_events_enriched` row's
+/// `current_repo_name` equals its repo's CURRENT `gold_repo_dim` name,
+/// including rows written days before that repo's rename ever happened.
+#[test]
+fn enrichment_heal_repairs_rows_written_before_the_rename() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let stale = duckdb::Connection::open(&db)
+        .unwrap_or_else(|e| panic!("open {db:?}: {e}"))
+        .query_row(
+            "SELECT count(*) FROM main.gold_events_enriched e \
+             JOIN main.gold_repo_dim d ON e.repo_id = d.repo_id \
+             WHERE e.current_repo_name IS DISTINCT FROM d.current_repo_name",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query stale row count");
+    assert_eq!(
+        stale, 0,
+        "expected zero gold_events_enriched rows with a stale current_repo_name after the \
+         full 30-day replay — the enrichment-keyed heal must dispatch every run and repair \
+         every row, not just newly-written ones"
+    );
+}
+
 /// Test: the `{current_repo_name}` `UpstreamMutation(gold.repo_dim)` cell's
 /// resolved verdict, characterised exactly as `smelt explain --json`
 /// produces it. `gold.repo_dim` is a clockless upstream MODEL feeding a
