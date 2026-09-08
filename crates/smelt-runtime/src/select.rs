@@ -19,6 +19,7 @@ use anyhow::Result;
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
+use smelt_core::selector::SelectionMethod;
 use std::collections::HashMap;
 
 /// Plan for which models execute and how their backends connect.
@@ -34,6 +35,12 @@ pub struct SelectionPlan {
     /// these become Parquet exchanges at execution time.
     /// Tuple is `(model_name, dep_name, model_target, dep_target)`.
     pub cross_engine_edges: Vec<(String, String, String, String)>,
+    /// External steps this run must invoke before any model builds
+    /// (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)"): the union of any step named directly by a selector and
+    /// every producer of a source a selected model reads, minus any step
+    /// named by an `--exclude` selector. Sorted for deterministic ordering.
+    pub required_steps: Vec<String>,
 }
 
 /// Inputs for [`select_executable_models`]. A lightweight value rather than
@@ -71,6 +78,7 @@ pub fn select_executable_models(
     config: &Config,
     request: &SelectionRequest,
 ) -> Result<SelectionPlan> {
+    let mut selected_steps: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut selected_set = if request.select.is_empty() {
         graph.all_model_names()
     } else {
@@ -81,9 +89,12 @@ pub fn select_executable_models(
                 parse_selector(s).map_err(|e| anyhow::anyhow!("Invalid selector '{}': {}", s, e))
             })
             .collect::<Result<_, _>>()?;
-        graph.select_models(&selectors, config)?
+        let node_selection = graph.select_nodes(&selectors, config)?;
+        selected_steps = node_selection.steps;
+        node_selection.models
     };
 
+    let mut excluded_steps: std::collections::HashSet<String> = std::collections::HashSet::new();
     if !request.exclude.is_empty() {
         let excludes: Vec<_> = request
             .exclude
@@ -92,6 +103,11 @@ pub fn select_executable_models(
                 parse_selector(s).map_err(|e| anyhow::anyhow!("Invalid exclude '{}': {}", s, e))
             })
             .collect::<Result<_, _>>()?;
+        for exclude in &excludes {
+            if let SelectionMethod::ModelName(name) = &exclude.method {
+                excluded_steps.insert(name.clone());
+            }
+        }
         selected_set = graph.exclude_models(&selected_set, &excludes, config)?;
 
         // D-39: refuse an inconsistent working set — a retained model must not
@@ -154,10 +170,17 @@ pub fn select_executable_models(
 
     let cross_engine_edges = graph.find_cross_backend_edges(&target_assignments);
 
+    let mut required_steps: std::collections::HashSet<String> = selected_steps;
+    required_steps.extend(graph.steps_required_by(&selected_set));
+    required_steps.retain(|s| !excluded_steps.contains(s));
+    let mut required_steps: Vec<String> = required_steps.into_iter().collect();
+    required_steps.sort();
+
     Ok(SelectionPlan {
         ordered_models,
         target_assignments,
         cross_engine_edges,
+        required_steps,
     })
 }
 

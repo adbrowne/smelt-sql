@@ -62,12 +62,27 @@ visible in the run report.
 | 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | done |
 | 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | done |
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | done |
-| 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | planned |
+| 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | done |
 | 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
 | 6 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
 | 7 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 4 implementation): **shipped as planned, no reshape.** Closed
+  `{run_date}`/`{run_end}` placeholder grammar landed in `smelt-core::external_step`
+  (declaration-time rejection of an unknown placeholder, pure `resolve_command`);
+  `SelectionPlan::required_steps` landed in `select.rs`; a new
+  `execute/external_steps.rs` invokes required steps sequentially before
+  `build_model_plans`, covering both the dry-run and live paths; `ExecuteRequest`
+  gained `invoke_external_steps` (default `true`). 11/11 planned tests pass against a
+  real DuckDB backend (one test additionally gates on the `duckdb` CLI being on PATH,
+  since no other test in this repo already depends on that binary — it skips
+  gracefully, mirroring the Spark/BigQuery-gated-test posture, rather than failing CI
+  runners that provision only `libduckdb.so`). No UI call site sets
+  `invoke_external_steps: false` yet — the "plan-preview endpoint" the phase-4-planning
+  decision log (below) names does not exist in `smelt-ui` today; left for whoever builds
+  it. See `phases/04-summary.md`.
 
 - 2026-09-08 (phase 4 planning): **five design calls settled, no reshape.** (a) The
   `command:` **placeholder grammar** is a closed set — `{run_date}` and `{run_end}`,

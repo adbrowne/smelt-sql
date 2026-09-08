@@ -1,0 +1,5 @@
+external_step:
+  description: command argv uses a placeholder outside the closed set.
+  produces:
+    - smelt.sources.step_unknown_placeholder_target
+  command: ["bash", "scripts/loader.sh", "--date", "{nope}"]

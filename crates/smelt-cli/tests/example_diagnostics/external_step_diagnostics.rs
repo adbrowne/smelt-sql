@@ -107,6 +107,11 @@ fn broken_workspace_external_step_fixtures() {
         "sources/step_dup_producer_b.yml",
         smelt_db::DiagnosticCode::SourceProducerConflict,
     );
+    assert_exactly_one(
+        &diags,
+        "sources/step_unknown_placeholder.yml",
+        smelt_db::DiagnosticCode::MalformedExternalStep,
+    );
 
     // `step_dup_producer_a.yml` itself is well-formed and is not the conflict
     // anchor — it must not appear in the diagnostic set at all.
@@ -139,7 +144,8 @@ fn broken_workspace_external_step_fixtures() {
                 || p.ends_with("sources/step_columns_present.yml")
                 || p.ends_with("sources/step_bad_cadence.yml")
                 || p.ends_with("sources/step_unknown_source.yml")
-                || p.ends_with("sources/step_dup_producer_b.yml"))
+                || p.ends_with("sources/step_dup_producer_b.yml")
+                || p.ends_with("sources/step_unknown_placeholder.yml"))
         })
         .collect();
     assert!(

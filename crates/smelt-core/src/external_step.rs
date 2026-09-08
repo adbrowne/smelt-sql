@@ -81,6 +81,137 @@ pub enum ExternalStepError {
         step_a: PathBuf,
         step_b: PathBuf,
     },
+
+    #[error("`external_step.command:` {0}")]
+    UnknownPlaceholder(String),
+}
+
+/// Runtime values available to substitute into a step's `command:` argv —
+/// the closed placeholder set (`sources.md` §"Externally-produced sources
+/// (black-box steps)"): `{run_date}` (run-window start) and `{run_end}`
+/// (run-window end, exclusive), both ISO `YYYY-MM-DD`. `None` means this
+/// run has no value for that placeholder (e.g. no window), which
+/// [`resolve_command`] turns into [`CommandResolveError::NoValueForPlaceholder`]
+/// rather than substituting an empty string.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepRunContext {
+    pub run_date: Option<String>,
+    pub run_end: Option<String>,
+}
+
+/// Errors resolving a step's `command:` argv against a [`StepRunContext`].
+/// Distinct from [`ExternalStepError`] — an unknown placeholder is caught at
+/// *declaration* time ([`ExternalStepError::UnknownPlaceholder`]) so this
+/// variant should be unreachable for any step that passed
+/// [`parse_external_step_yaml`], but `resolve_command` stays total rather
+/// than assuming that invariant.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CommandResolveError {
+    #[error("command placeholder '{{{0}}}' has no value in this run")]
+    NoValueForPlaceholder(String),
+
+    #[error("`external_step.command:` {0}")]
+    UnknownPlaceholder(String),
+}
+
+/// One parsed segment of a `command:` argv element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandSegment {
+    Literal(String),
+    /// `"run_date"` or `"run_end"` — the closed placeholder set.
+    Placeholder(&'static str),
+}
+
+/// Parse one argv element into literal and placeholder segments. `{{`/`}}`
+/// are literal braces; `{name}` for `name` outside the closed set
+/// (`run_date`, `run_end`) is an error naming the unrecognised placeholder.
+fn parse_command_segments(s: &str) -> Result<Vec<CommandSegment>, String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut segments = Vec::new();
+    let mut literal = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '{' if chars.get(i + 1) == Some(&'{') => {
+                literal.push('{');
+                i += 2;
+            }
+            '{' => {
+                let Some(close_offset) = chars[i + 1..].iter().position(|&c| c == '}') else {
+                    return Err(format!("unterminated '{{' in command argv element '{s}'"));
+                };
+                let name: String = chars[i + 1..i + 1 + close_offset].iter().collect();
+                let placeholder = match name.as_str() {
+                    "run_date" => "run_date",
+                    "run_end" => "run_end",
+                    _ => {
+                        return Err(format!(
+                            "uses unknown placeholder '{{{name}}}' — only {{run_date}} and \
+                             {{run_end}} are recognised"
+                        ))
+                    }
+                };
+                if !literal.is_empty() {
+                    segments.push(CommandSegment::Literal(std::mem::take(&mut literal)));
+                }
+                segments.push(CommandSegment::Placeholder(placeholder));
+                i += 1 + close_offset + 1;
+            }
+            '}' if chars.get(i + 1) == Some(&'}') => {
+                literal.push('}');
+                i += 2;
+            }
+            '}' => {
+                return Err(format!("stray '}}' in command argv element '{s}'"));
+            }
+            c => {
+                literal.push(c);
+                i += 1;
+            }
+        }
+    }
+    if !literal.is_empty() {
+        segments.push(CommandSegment::Literal(literal));
+    }
+    Ok(segments)
+}
+
+/// Resolve a step's `command:` argv against `ctx`, substituting each
+/// closed-set placeholder per-argv-element (`sources.md` §"Externally-
+/// produced sources (black-box steps)"). Pure — performs no I/O and spawns
+/// nothing.
+pub fn resolve_command(
+    step: &ExternalStepInfo,
+    ctx: &StepRunContext,
+) -> Result<Vec<String>, CommandResolveError> {
+    step.command
+        .iter()
+        .map(|arg| resolve_argv_element(arg, ctx))
+        .collect()
+}
+
+fn resolve_argv_element(arg: &str, ctx: &StepRunContext) -> Result<String, CommandResolveError> {
+    let segments = parse_command_segments(arg).map_err(CommandResolveError::UnknownPlaceholder)?;
+    let mut out = String::new();
+    for segment in segments {
+        match segment {
+            CommandSegment::Literal(s) => out.push_str(&s),
+            CommandSegment::Placeholder(name) => {
+                let value = match name {
+                    "run_date" => ctx.run_date.as_deref(),
+                    "run_end" => ctx.run_end.as_deref(),
+                    _ => None,
+                };
+                match value {
+                    Some(v) => out.push_str(v),
+                    None => {
+                        return Err(CommandResolveError::NoValueForPlaceholder(name.to_string()))
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +287,11 @@ pub fn parse_external_step_yaml(path: &Path) -> Result<ExternalStepInfo, Externa
     };
     if command.is_empty() {
         return Err(ExternalStepError::EmptyCommand);
+    }
+    for arg in &command {
+        if let Err(name) = parse_command_segments(arg) {
+            return Err(ExternalStepError::UnknownPlaceholder(name));
+        }
     }
 
     let cadence = match raw.external_step.cadence {

@@ -321,6 +321,7 @@ pub async fn run_bakeoff(
                         on: cell.on.clone(),
                         technique,
                     }],
+                    invoke_external_steps: true,
                 };
                 let run_id = format!("bakeoff-{schema}-{i}");
                 let backend_factory = CliBackendFactory {

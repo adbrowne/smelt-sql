@@ -78,7 +78,19 @@ pub async fn execute_project(
     }
 
     // ── Selection ───────────────────────────────────────────────────────
-    let graph_lock = graph.lock().await;
+    let mut graph_lock = graph.lock().await;
+
+    // External steps are registered on the graph before selection so a
+    // selector can reach a step node the same way it reaches any other
+    // (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    // steps)"). `add_external_steps` is idempotent (map inserts), mirroring
+    // the existing inline `discover_source_infos` precedent below.
+    let external_steps = smelt_core::discover_external_steps(project_dir, &config.paths);
+    graph_lock.add_external_steps(&external_steps);
+    let external_steps_by_addr: HashMap<String, smelt_core::ExternalStepInfo> = external_steps
+        .into_iter()
+        .map(|s| (s.address_segments.join("."), s))
+        .collect();
 
     let selection_request = SelectionRequest {
         select: request.select.clone(),
@@ -89,6 +101,26 @@ pub async fn execute_project(
     let selected = selection.ordered_models;
     let target_assignments = selection.target_assignments;
     let cross_edges = selection.cross_engine_edges;
+    let required_steps = selection.required_steps;
+
+    // ── External-step invocation ─────────────────────────────────────────
+    // Runs before `build_model_plans` so both the dry-run branch and the
+    // real run below refuse or invoke identically (`docs/specs/sources.md`
+    // §Semantics 9, 11, 12) — a required step's `command:` runs to
+    // completion, sequentially, before any model builds.
+    crate::execute::external_steps::invoke_required_steps(
+        &required_steps,
+        &external_steps_by_addr,
+        project_dir,
+        &smelt_core::external_step::StepRunContext {
+            run_date: request.start.clone(),
+            run_end: request.end.clone(),
+        },
+        request.dry_run,
+        request.invoke_external_steps,
+        &cancel,
+    )
+    .await?;
 
     // The run's availability-resolution input (`docs/specs/state.md` §"The
     // degradation contract" step 2): one `StateAvailability` per target this
