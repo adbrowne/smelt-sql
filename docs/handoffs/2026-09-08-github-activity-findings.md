@@ -266,6 +266,38 @@ emitters since the last live sweep (2026-08-22). This is recorded as a dated, na
 evidence has a date" — rather than skipped green; it belongs to the
 `20260906-bigquery-dogfood-spine` outcome's blocked live half (its phase 16).
 
+## Close-out (2026-09-08)
+
+`docs/outcomes/20260906-bigquery-correctness` closed its own phase 10 by verifying every
+success criterion's evidence at HEAD rather than re-deriving it. One row per criterion,
+naming the artifact and the gate that holds it:
+
+| # | Criterion | Artifact | Holding gate |
+|---|---|---|---|
+| 1 | The unconditional fix | `emit_fingerprint_digest_select` threads `dialect` to `row_fingerprint_expr` (phase 1) | per-dialect unit tests in `crates/smelt-logical/src/maintenance/emit/fingerprint.rs` |
+| 2 | Punch-list harvested, not invented | This handoff's four punch-list items, carried into rows 3-7 verbatim (phase 3 planning) | none needed — a process check, not a code gate |
+| 3 | Every fixed construct is gated | Phases 1-9's per-construct tests, plus the new structural scan for the defect class itself | `cargo test -p smelt-logical --test maintenance_dialect_blindness` (new, phase 10) |
+| 4 | Ratchets move the right way | `.claude/dialect-gaps-baseline.txt` / `.claude/parser-gaps-baseline.txt`, held with a dated note (phase 10) | `cargo test -p smelt-db --test dialect_audit -- gap_count_ratchet` |
+| 5 | Cross-target agreement | `DIVERGENCE_REGISTRY` emptied by phases 3-7; fail-closed proof added in phase 8 | `cargo test -p smelt-cli --test github_activity_oracle` (`assert_matches_oracle_fails_closed_on_an_empty_registry`, `no_relation_diverges_unexplained`) |
+| 6 | The two known live conformance failures characterised | §"Criterion 6" table above (phase 9) | `cargo test -p smelt-maintenance-testkit --test googlesql_render`, `-p smelt-dialect --test modulo_lowering --test power_lowering` |
+| 7 | Gates green | This close-out's own run (phase 10) | `verify-phase.sh` + the six named crate-level gates below |
+
+**Stayed unverified, deliberately, per Out of scope:**
+
+- The BigQuery **value** leg (`scripts/bigquery-dialect-audit.sh`) — needs a live warehouse
+  this loop does not have. Already a dated, named debt in `docs/specs/multi_backend.md`
+  §"Known Divergences".
+- The 42 no-verdict `BuiltinRegistry` entries tracked by issue #179 — no spine model
+  reaches them (the spine's live-BigQuery half, its phase 16, never ran), so giving any of
+  them a verdict here would be speculation criterion 2 forbids. They stay on #179.
+
+**Gates run at phase 10 HEAD** (see `phases/10-summary.md` for verbatim counts):
+`verify-phase.sh`; `smelt-logical --test maintenance_dialect_blindness` (new); `smelt-cli
+--test github_activity_oracle`; `smelt-db --test dialect_audit`; `smelt-dialect --test
+emission_ownership`; `smelt-runtime --test dialect_seam --test
+projection_dialect_invariance`; `smelt-maintenance-testkit --test googlesql_render`;
+`large-file-check.sh`.
+
 ## References
 
 - `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` — outcome header, criteria,

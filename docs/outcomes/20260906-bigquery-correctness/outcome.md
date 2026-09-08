@@ -1,7 +1,7 @@
 # Outcome: Every defect the real pipeline hits on BigQuery is fixed, and DuckDB and BigQuery agree
 
 **Created:** 2026-09-06
-**Status:** active
+**Status:** done
 **Driver:** outcome loop (`.claude/outcome-backlog`)
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D2), §"Sequencing: models first, punch-list second", §"Findings already banked"
 **Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Statement-level lowering", §"Output-schema type conformance", §"Cross-engine emission audit"; `docs/specs/architecture.md` §"Constraints & Invariants" item 14; `docs/reference/dialect-coverage.md`
@@ -91,9 +91,29 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | done |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | done |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | done |
-| 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | planned |
+| 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | done |
 
 ## Decision log
+
+- 2026-09-08 (phase 10 implementation, close): **outcome done.** All success criteria
+  verified at HEAD as the planning entry laid out. New structural gate
+  (`cargo test -p smelt-logical --test maintenance_dialect_blindness`, 3/3) closes
+  criterion 3's remaining gap; `handoff_claimed_relations()` in
+  `crates/smelt-cli/tests/github_activity_oracle.rs` is now scoped to `## The registered
+  divergences` (fixing the false-positive phase 9 flagged), with two new tests proving
+  both the scoping and its non-vacuity. `docs/handoffs/2026-09-08-github-activity-findings.md`
+  gained a `## Close-out (2026-09-08)` section (one row per criterion, artifact + gate) and
+  `.claude/dialect-gaps-baseline.txt` gained a dated hold note —
+  `dialect_gaps_bigquery` stays 42, `duckdb_seed_gaps 0` confirmed untouched.
+  `SMELT_REGEN_DOCS=1 cargo test -p smelt-db --test dialect_audit
+  the_coverage_table_matches_the_registry` reconfirmed `docs/reference/dialect-coverage.md`
+  byte-identical (`git status` clean). Issue #179 got a comment
+  (github.com/adbrowne/smelt-sql/issues/179#issuecomment-5581444485) naming what was fixed
+  nearby and that its 42 entries are untouched — not closed. All gates green:
+  `verify-phase.sh`, `maintenance_dialect_blindness` (3/3), `github_activity_oracle` (18
+  passed, 1 ignored), `dialect_audit` (61/61), `emission_ownership` (11/11), `dialect_seam`
+  + `projection_dialect_invariance` (18/18 + 4/4), `googlesql_render` (4/4),
+  `large-file-check.sh`. Row 10 flipped to `done`; outcome Status flipped to `done`.
 
 - 2026-09-08 (phase 10 planning): **no reshape; row 10 is the last row and its "move the
   ratchets down" clause resolves to *hold*, with the reason written into the baseline

@@ -1077,9 +1077,37 @@ const FINDINGS_HANDOFF: &str =
 /// are registered — parsed from its own markdown table rather than assumed,
 /// so a renamed or retired `DIVERGENCE_REGISTRY` entry cannot leave a stale
 /// row silently behind (test `findings_handoff_names_no_unknown_relation`).
+///
+/// Scoped to the `## The registered divergences` section (bounded by its
+/// heading and the next `##`/`###` heading): the generic "any backtick-leading
+/// table row" scan used to run over the whole document, which flagged phase
+/// 9's unrelated `## Criterion 6` table (a test-name column, not a registered
+/// relation) as a stale registered-divergence claim — see
+/// `the_handoff_scan_is_scoped_to_the_divergence_section`.
 fn handoff_claimed_relations() -> Vec<String> {
-    FINDINGS_HANDOFF
-        .lines()
+    claimed_relations_in(FINDINGS_HANDOFF)
+}
+
+/// The pure scan behind [`handoff_claimed_relations`], taking the document
+/// text as a parameter so the scoping behaviour itself is testable against a
+/// synthetic document rather than only the one committed handoff.
+fn claimed_relations_in(text: &str) -> Vec<String> {
+    const SECTION_HEADING: &str = "## The registered divergences";
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines.iter().position(|l| l.trim() == SECTION_HEADING) else {
+        return Vec::new();
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| {
+            let l = l.trim();
+            l.starts_with("## ") || l.starts_with("### ")
+        })
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(lines.len());
+
+    lines[start + 1..end]
+        .iter()
         .filter_map(|line| {
             let line = line.trim();
             if !line.starts_with("| `") {
@@ -1133,6 +1161,54 @@ fn findings_handoff_names_no_unknown_relation() {
              DIVERGENCE_REGISTRY entry with that name exists — stale or renamed entry"
         );
     }
+}
+
+/// Phase 10 test 4: a backtick-leading table row in a section *other* than
+/// `## The registered divergences` (e.g. phase 9's `## Criterion 6` test-name
+/// table) is not read as a registered-divergence claim. RED before
+/// `handoff_claimed_relations()` was scoped to that section.
+#[test]
+fn the_handoff_scan_is_scoped_to_the_divergence_section() {
+    let synthetic = "\
+## The registered divergences
+
+Nothing registered here.
+
+## Criterion 6 — the two known live conformance failures
+
+| Test: `diamond_propagation_suffices` | fixed |
+| Test: `composed_keyed_pool_upholds_equivalence` | fixed |
+
+## References
+";
+    let claimed = claimed_relations_in(synthetic);
+    assert!(
+        claimed.is_empty(),
+        "expected no claimed relations from a table outside the divergence section, got \
+         {claimed:?}"
+    );
+}
+
+/// Phase 10 test 5: non-vacuity for test 4 — a fabricated backtick-leading
+/// row *inside* the divergence section is still collected, so
+/// `findings_handoff_names_no_unknown_relation` keeps its teeth.
+#[test]
+fn the_handoff_scan_still_catches_a_stale_claim_in_its_own_section() {
+    let synthetic = "\
+## The registered divergences
+
+| `some_stale_relation` | still claimed |
+
+## Criterion 6 — the two known live conformance failures
+
+Unrelated section.
+";
+    let claimed = claimed_relations_in(synthetic);
+    assert_eq!(
+        claimed,
+        vec!["some_stale_relation".to_string()],
+        "expected the in-section row to still be collected, got {claimed:?}"
+    );
 }
 
 /// Test 8 (phase 15): the handoff carries an explicit interim marker so a
