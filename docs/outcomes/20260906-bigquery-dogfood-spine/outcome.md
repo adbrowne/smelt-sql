@@ -1,7 +1,7 @@
 # Outcome: The GitHub-activity pipeline runs on BigQuery and DuckDB, and the numbers agree
 
 **Created:** 2026-09-06
-**Status:** in progress
+**Status:** blocked
 **Driver:** split. Phases 2–4, 6, 8 and 9 are loop-grindable (no warehouse, no credentials)
 and this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
 BigQuery token for one fixture regeneration (see "## Blocked"); phases 7, 10–14 and 16 are
@@ -129,6 +129,15 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | blocked |
 
 ## Decision log
+
+- 2026-09-08 (terminal): **outcome marked `blocked` rather than `done`.** Judged the success
+  criteria against the phase summaries: the DuckDB leg is substantially delivered and its
+  evidence is banked in `docs/handoffs/2026-09-08-github-activity-findings.md`, but criteria
+  1, 2, 5 and 6 -- provisioning, scoped reachability, the live BigQuery run and dual-target
+  parity -- cannot be reached without a GCP project and credential. No `pending` row remains
+  and no `blocked` row is unblockable by a headless step, so the outcome cannot progress
+  further under the loop. The two human actions that unblock it, and the order to take them
+  in, are in this file's "## Blocked" terminal entry.
 
 - 2026-09-08 (phase 10 plan): **phases 10-14 and 16 marked `blocked` in one pass, and the
   evidence-banking phase split so the loop has real work.** All five live phases share one
@@ -572,6 +581,45 @@ exists — so the live run is a test of the *backend*, not of the models.
   centrepiece per-window sweep is blocked on this finding.
 
 ## Blocked
+
+- 2026-09-08 -- **the outcome as a whole: every remaining phase needs cloud identity that
+  does not exist.** With phases 1-4, 8, 9 and 15 `done`, no workable row is left: 5, 6, 7,
+  10-14 and 16 are all `blocked`, and every one of them is gated on a human minting a
+  credential. This entry closes the loop's work on the outcome; the wrapper advances to the
+  next backlog entry.
+
+  **What the DuckDB half already satisfies:** criterion 4 in all but the typed silver
+  fan-out (phases 2-4 -- bronze, dedup, sessionization, both succession models, gold and the
+  marts all build with zero diagnostics, wired into per-PR CI), criterion 9 in full (phase 3
+  -- both partition postures and the redelivery-folds-once leg), criterion 7's DuckDB half
+  (phase 8 -- `every_window_matches_the_full_refresh_oracle` unignored and green over a
+  bounded, non-fabrication staleness registry), criterion 3's *artifact* (phase 9 --
+  `scripts/bq-dogfood-loader.sh` derives its load SQL from `sample.sql` under a per-PR
+  byte-identity gate; only its deployment and cost measurement are outstanding), criterion 8
+  in interim form (phase 15 -- `docs/handoffs/2026-09-08-github-activity-findings.md`, the
+  DuckDB-half findings the three downstream outcomes consume), and criterion 10 (gates green,
+  no ratchet lowered).
+
+  **What is unmet, and why none of it is loop work:** criteria 1, 2, 5 and 6 entirely, plus
+  the BigQuery halves of 3, 7 and 8, and the `payload`-dependent tail of 4. Two distinct
+  human actions unblock them, in this order:
+  1. **Phase 5's fixture re-pin** (independent of the rest): run `bash
+     scripts/bigquery-auth.sh` and supply the passphrase for the encrypted service-account
+     key, then `bash examples/github_activity/refresh_sample.sh` against a `sample.sql`
+     re-pinned to project `payload` (~12 GB scanned, ~US$0.06, already accepted in the
+     decision log). Everything after the committed fixture is ordinary loop work.
+  2. **Phase 7 tasks 1-5** -- create the dogfood GCP project, link billing, enable
+     `bigquery.googleapis.com` and `billingbudgets.googleapis.com`, create the no-expiry
+     dataset and the budget alert, create `smelt-dogfood@<PROJECT>.iam.gserviceaccount.com`
+     with `bigquery.jobUser` + dataset `WRITER`, grant `roles/iam.serviceAccountTokenCreator`
+     on it to the human account, and run the impersonating `gcloud auth
+     application-default login --impersonate-service-account=...`. That single act unblocks
+     phase 7's own gate and then 10-14 and 16 in order; the loader they deploy is already
+     written and tested.
+
+  **How to resume:** flip this file's `**Status:**` back to `in progress` after either human
+  action -- the loop will pick the outcome up again from the first `blocked` row that the
+  action unblocks (re-mark it `pending`).
 
 - 2026-09-08 -- **phases 10-14 and 16, one shared gate: no cloud identity exists.** Phase 10
   (deploy the loader and measure cost per run), 11 (first live full refresh), 12 (three
