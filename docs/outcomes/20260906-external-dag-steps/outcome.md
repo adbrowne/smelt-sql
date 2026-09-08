@@ -54,6 +54,10 @@ visible in the run report.
 - Retention semantics for what the step produces — owned by
   `20260906-trimmed-history-sources`.
 - A general plugin/hook system. This is one declaration kind for one contract.
+- Fixing `smelt list --format json`'s `ListError::ParseErrors` over non-model root SQL, and the
+  missing `concepts/incremental-equivalence.md` nav entry — both pre-existing, both reproduce
+  without any of this outcome's changes, neither touches the external-step contract. Recorded in
+  `docs/TODO.md` and the spine handoff by phase 9.
 
 ## Phases
 
@@ -67,9 +71,22 @@ visible in the run report.
 | 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | done |
 | 7 | Fixture — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics, and actually runs it: one extracted day-loader program, invoked by `smelt run`, with the replay/oracle drivers rewired onto it and the `duckdb` CLI provisioned in CI | done |
 | 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | done |
-| 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
+| 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | planned |
 
 ## Decision log
+
+- 2026-09-08 (phase 9 planning): **no reshape — the phase table is final.** Row 9 is the
+  close-out and every other row is `done`; nothing phase 8's summary surfaced serves a success
+  criterion in a way an existing row does not already cover. Two calls settled about what
+  close-out *is*: (a) it re-runs each criterion's gate at HEAD and records a criterion → evidence
+  table, rather than trusting the summaries — in particular `execute_parity`, which criterion 7
+  names and phase 8 declined to re-run; (b) the one asymmetry phase 8 flagged
+  (`docs-site/docs/reference/cli.md`'s `smelt explain` section never naming the step form, though
+  `smelt explain <step>` is spec'd in `cli.md`) is **fixed here with a gate test**, not deferred:
+  it is a docs-vs-behaviour gap inside criterion 5/6's surface. The two genuinely unrelated
+  residues (the `smelt list` `ListError::ParseErrors` scoping bug over project-wide-discovered
+  root SQL, and `concepts/incremental-equivalence.md` missing from the docs-site nav) go to
+  `docs/TODO.md` and the spine handoff rather than growing a row here — see "## Out of scope".
 
 - 2026-09-08 (phase 8 planning): **no reshape; two docs-placement calls settled.** (a) The
   page is a **Guide** page (`docs-site/docs/guide/external-steps.md`, nav directly after
