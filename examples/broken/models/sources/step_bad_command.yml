@@ -1,0 +1,5 @@
+external_step:
+  description: command is a scalar string, not an argv list.
+  produces:
+    - smelt.sources.step_bad_command_target
+  command: "bash scripts/loader.sh"

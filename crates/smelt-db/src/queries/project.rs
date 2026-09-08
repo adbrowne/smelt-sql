@@ -324,8 +324,54 @@ pub fn project_source_diagnostics(
                 });
             }
         }
-        diags.sort_by(|a, b| a.path.cmp(&b.path));
     }
+
+    // Third pass: external-step declarations (sources.md §"Externally-produced
+    // sources (black-box steps)"). Per-file shape errors first, mirroring the
+    // source parse-error scan above; then the cross-entity checks that need
+    // the whole project's step and source sets (a `produces:` address naming
+    // no declared source, or two steps naming the same source).
+    for (path, err) in smelt_core::discover_external_step_errors(&project_root, &paths) {
+        let code = match err {
+            smelt_core::ExternalStepError::ProducerConflict { .. } => {
+                DiagnosticCode::SourceProducerConflict
+            }
+            _ => DiagnosticCode::MalformedExternalStep,
+        };
+        diags.push(SourceDiagnostic {
+            path,
+            diagnostic: crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: err.to_string(),
+                range: TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(code),
+                data: None,
+            },
+        });
+    }
+
+    let steps = smelt_core::discover_external_steps(&project_root, &paths);
+    let sources = smelt_core::discover_source_infos(&project_root, &paths);
+    for (path, err) in smelt_core::validate_external_steps(&steps, &sources) {
+        let code = match err {
+            smelt_core::ExternalStepError::ProducerConflict { .. } => {
+                DiagnosticCode::SourceProducerConflict
+            }
+            _ => DiagnosticCode::MalformedExternalStep,
+        };
+        diags.push(SourceDiagnostic {
+            path,
+            diagnostic: crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: err.to_string(),
+                range: TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(code),
+                data: None,
+            },
+        });
+    }
+
+    diags.sort_by(|a, b| a.path.cmp(&b.path));
 
     Arc::new(diags)
 }

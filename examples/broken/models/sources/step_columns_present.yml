@@ -1,0 +1,7 @@
+external_step:
+  description: A step file must not also declare columns.
+  produces:
+    - smelt.sources.step_columns_present_target
+  command: ["bash", "scripts/loader.sh"]
+columns:
+  - { name: order_id, type: INTEGER }

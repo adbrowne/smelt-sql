@@ -34,6 +34,17 @@ pub enum DiagnosticCode {
     YamlParseError,
     SourceTypeError,
     MalformedSource,
+    /// An `external_step:` block violates the shape rules in
+    /// `docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)": `produces:` absent or empty; an entry that does not resolve
+    /// to a declared source; `columns:` present alongside `external_step:`;
+    /// a malformed `command:`; an unparseable `cadence:`. Anchored at the
+    /// offending `.yml` (whole-file, offset 0).
+    MalformedExternalStep,
+    /// Two declared external steps name the same source in their
+    /// `produces:` list (`sources.md` §"A source has at most one producing
+    /// step"). Anchored at the later-sorted (second-seen) step's `.yml`.
+    SourceProducerConflict,
     AmbiguousColumn,
     UnknownCastType,
     UnrecognizedFunction,

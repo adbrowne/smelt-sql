@@ -1,0 +1,3 @@
+external_step:
+  description: Missing produces list.
+  command: ["bash", "scripts/loader.sh"]

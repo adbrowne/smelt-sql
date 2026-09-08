@@ -60,7 +60,7 @@ visible in the run report.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | done |
-| 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | planned |
+| 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | done |
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | pending |
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
 | 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
@@ -69,6 +69,14 @@ visible in the run report.
 
 ## Decision log
 
+- 2026-09-08 (phase 2 implementation): **shape landed** — `crates/smelt-core/src/external_step.rs`
+  parses and validates `external_step:` declarations fail-loud (`MalformedExternalStep`,
+  `SourceProducerConflict`), wired into `project_source_diagnostics` as a third pass and into
+  `resolver::classify` as `EntityKind::ExternalStep` (checked before the seed-sidecar tiebreaker).
+  `command:` argv-list validation, the cross-entity `produces:` resolution, and six
+  `examples/broken/` fixtures are all in place. DAG membership, invocation, and reporting are
+  untouched (phases 3-5). Left open for phase 3: whether `ExternalStep` participates in
+  `resolve_address_map`'s cross-kind collision detection. See `phases/02-summary.md`.
 - 2026-09-08 (phase 2 planning): **cross-entity validation placement decided** (the question
   phase 1's summary left open) — per-file shape checks live in `parse_external_step_yaml`; the
   two checks needing the whole project (a `produces:` address resolving to no declared source,

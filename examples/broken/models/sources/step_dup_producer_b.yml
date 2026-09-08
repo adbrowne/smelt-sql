@@ -1,0 +1,5 @@
+external_step:
+  description: Second of two steps naming the same source in produces.
+  produces:
+    - smelt.sources.maintenance_orders
+  command: ["bash", "scripts/loader_b.sh"]

@@ -12,6 +12,7 @@ mod support_ext;
 mod alias_arity;
 mod emission_body;
 mod event_time_and_grain;
+mod external_step_diagnostics;
 mod keyed_frontmatter;
 mod meta_columns_and_broken_workspace;
 mod meta_config;

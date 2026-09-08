@@ -252,6 +252,8 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::YamlParseError => "yaml-parse-error",
         DbCode::SourceTypeError => "source-type-error",
         DbCode::MalformedSource => "malformed-source",
+        DbCode::MalformedExternalStep => "malformed-external-step",
+        DbCode::SourceProducerConflict => "source-producer-conflict",
         DbCode::AmbiguousColumn => "ambiguous-column",
         DbCode::UnknownCastType => "unknown-cast-type",
         DbCode::UnrecognizedFunction => "unrecognized-function",

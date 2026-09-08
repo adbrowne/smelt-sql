@@ -40,6 +40,11 @@ pub enum EntityKind {
     },
     /// A standalone `.yml` file (no sibling `.csv`).
     Source,
+    /// A standalone `.yml` file carrying a top-level `external_step:` block —
+    /// an externally-produced source's declared producer
+    /// (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)"). Checked before the source/seed-sidecar tiebreaker.
+    ExternalStep,
 }
 
 /// A discovered project entity with its kind and address.
@@ -143,6 +148,21 @@ pub fn classify(
             if stem == "sources" {
                 return None;
             }
+            let text = if let Some(c) = content {
+                c.to_string()
+            } else {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                }
+            };
+            // The `external_step:` discriminator is checked before the
+            // seed-sidecar tiebreaker: a step file producing a source that
+            // happens to share a stem with a `.csv` seed is still a step,
+            // never a sidecar (sources.md §"Externally-produced sources").
+            if looks_like_external_step_yaml(&text) {
+                return Some(EntityKind::ExternalStep);
+            }
             // If a sibling .csv exists (same stem), this is a sidecar — not addressable.
             let has_csv_sibling = sibling_paths.iter().any(|p| {
                 p.extension().and_then(|e| e.to_str()) == Some("csv")
@@ -154,14 +174,6 @@ pub fn classify(
             // Content-sniff: a per-entity source YAML is a top-level mapping
             // with at least one known source-schema key. Arbitrary data YAML
             // files (lists, mappings with domain-specific keys) are NOT sources.
-            let text = if let Some(c) = content {
-                c.to_string()
-            } else {
-                match std::fs::read_to_string(path) {
-                    Ok(s) => s,
-                    Err(_) => return None,
-                }
-            };
             if looks_like_source_yaml(&text) {
                 Some(EntityKind::Source)
             } else {
@@ -239,6 +251,16 @@ fn looks_like_source_yaml(text: &str) -> bool {
             .iter()
             .any(|k| line == *k || line.starts_with(k))
     })
+}
+
+/// Return `true` if a YAML file's content carries a top-level
+/// `external_step:` key — the discriminator for an externally-produced
+/// source's declared producer (`docs/specs/sources.md` §"Externally-produced
+/// sources (black-box steps)"). Checked before both the seed-sidecar
+/// tiebreaker and the source content-sniff.
+fn looks_like_external_step_yaml(text: &str) -> bool {
+    text.lines()
+        .any(|line| line == "external_step:" || line.starts_with("external_step:"))
 }
 
 // ---------------------------------------------------------------------------

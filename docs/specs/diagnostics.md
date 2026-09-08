@@ -92,6 +92,8 @@ Owned by `docs/specs/sources.md`.
 | `SourceCountPreservationViolated` | Error (fails the consuming run, transactionally) | A declared `referential_integrity` was disproved: an enrichment join licensed by it returned fewer rows than the driving side over the touched region. |
 | `SourceMutationProfileViolated` | Error (fails the consuming run) | A verification tripwire disproved a declared narrowing fact: a processed partition's row count decreased or its fingerprint changed under `append_only`; a delta-identity collision under `redelivery: none`; a retraction event under `retractions: false`. Names the source, the violated declaration, and the mitigation. |
 | `SourceUniqueKeyViolated` | Error (fails the consuming run) | The uniqueness probe found duplicate rows for the declared `unique_key` within the consuming run's scan window (or on `smelt verify`). |
+| `MalformedExternalStep` | Error | An `external_step:` block violates the shape rules in `sources.md` — `produces:` absent or empty, a `produces:` entry that does not resolve to a declared source, `columns:` present alongside `external_step:` on the same file, a malformed `command:` (not a non-empty argv list), or a malformed `cadence:` interval. |
+| `SourceProducerConflict` | Error | Two declared external steps name the same source in their `produces:` list. |
 
 ---
 
