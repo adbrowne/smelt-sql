@@ -1,7 +1,7 @@
 # Outcome: A source whose history is bounded and moving forward refuses or degrades, never silently under-reads
 
 **Created:** 2026-09-06
-**Status:** active
+**Status:** done
 **Driver:** outcome loop (`.claude/outcome-backlog`)
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"Trimmed-history sources", §"Trimmed history versus SCD2 lifetime", §Open questions 3 and 4
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/model_properties.md`; `docs/specs/state.md` §"The degradation contract"; `docs/specs/diagnostics.md`
@@ -82,10 +82,21 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | done |
 | 9 | Composed-upstream granularity: a `grain: key` model whose sole clocked candidate is an upstream model's composed output still resolves `driving_source_granularity: None` at the run-time retention call site — close that silent skip or record why it cannot be reached | done |
 | 10 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | done |
-| 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | planned |
+| 11 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | done |
 
 ## Decision log
 
+- 2026-09-09 (phase 11 implement): **outcome closed `done` — all eight success criteria
+  verified against code and tests at HEAD, no gaps found.** Evidence table in
+  `phases/11-summary.md`. Every named test file existed and passed
+  (`walk_coverage`, `smelt-logical`/`smelt-runtime` `retention_admission`,
+  `retention_full_refresh`, `statement_parity`, `execute_parity`,
+  `maintenance_conformance` (104/104), `example_diagnostics`, `cli_docs_coverage`,
+  `explain_model`, `explain_maintenance`); `docs/specs/incremental_models.md`'s
+  quantifier paragraph matches the conformance oracle's actual row source
+  (`s_tracker.rs`'s `materialize_rows`, tracker-recorded, never the physical
+  relation); `verify-phase.sh` ALL GREEN; `large-file-check.sh` OK; no `.claude/`
+  ratchet baseline moved. No new test or spec correction was needed.
 - 2026-09-09 (phase 11 planning): **no reshape.** Row 11 is the last row and every success
   criterion has a named evidence site at HEAD, so nothing serving the criteria is left
   unrowed. Scoping note: the close-out is an *audit against the code*, not against the phase
