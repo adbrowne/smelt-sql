@@ -69,13 +69,43 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | done |
 | 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | done |
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | done |
-| 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | pending |
+| 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | planned |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | pending |
 | 6 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
 | 7 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
 | 8 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-09 (phase 4 planning): **`Exceeds` refuses, `UnprovableWithin` takes the recorded
+  downgrade, `Within` records nothing.** Three candidate mappings were weighed. Refusing
+  every non-`Within` verdict was rejected: any existing model with a `NotDerivable` or
+  unbounded reach over a source that later declares `retention:` would break with no code
+  change, which is a worse failure than a recorded loss of replayability. Recording a
+  warning on every retained source (including honoured ones) was rejected as noise — a
+  bound the model provably fits inside is not news, and a diagnostic every run trains
+  operators to ignore the one that matters. So: proof present and negative ⇒ refusal
+  (`SourceRetentionExceeded`, error, exactly phase 1's wording); proof absent ⇒ recorded
+  downgrade (`SourceRetentionDowngraded`, warning) whose material effect is that the
+  model's pre-bound region stops being claimed replayable, so a later region recompute
+  over it hits the refusal rather than running short; proof present and positive ⇒ nothing.
+  Totality of that mapping is itself the criterion-4 "no silent under-read" test.
+- 2026-09-09 (phase 4 planning): **the downgrade follows the degradation contract's
+  doctrine but not its `StateDowngrade` record.** Derive-ideal-then-downgrade-late,
+  recorded, warning-level and explain-visible are all honoured, and the record is surfaced
+  alongside `MaintenanceStateDowngraded`; but retention is not a `StateStructure`, and
+  reusing `StateDowngrade` would mean inventing a fake structure variant. There is also no
+  cheaper-but-still-correct technique to downgrade *to* — under a trimmed source the
+  recompute family needs *more* history, not less — so the downgrade narrows the model's
+  replayability claim rather than substituting a technique.
+- 2026-09-09 (phase 4 planning): the retention map is threaded as a **side channel**
+  (`SourceRetentions`, one new `derive_maintenance_plan_with_*` entry point) and the
+  downgrade record lands on `MaintenancePlan`, not `PlanCell` — the
+  `build_source_referential_integrity` / `build_key_recurrences` precedent, chosen for the
+  same reason they were: 67 `ModelInputs` and 47 `PlanCell` literal constructions across
+  the workspace stay untouched. Phase table unchanged — the phase-3 summary surfaced no
+  work needing a new row (its one open item, where `window_age` comes from, is already
+  phase 5's).
 
 - 2026-09-09 (phase 3 implement): **`RetentionVerdict`'s setters and its one
   conversion test live in the new `retention_reach.rs`, not in
