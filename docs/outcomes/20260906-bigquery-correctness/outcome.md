@@ -88,12 +88,36 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | done |
 | 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | done |
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | done |
-| 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | pending |
-| 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
+| 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | planned |
+| 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | pending |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 7 planning): **no reshape of the phase order; row 8 reworded, and the
+  handoff's open question is answered inside phase 7 rather than by a row of its own.**
+  Reading the code settled punch-list item 4's mechanism: the edge from `silver.actor_sessions`
+  to `marts.daily_active_contributors` is *clocked*, so `append_model_edge_cells`' clock route
+  already derives a `NewData` / `RecomputeRegion` / `DeleteInsert` cell for it — the maintenance
+  cell is not missing. What is missing is the window it is ever dispatched over: `build_model_plans`
+  gives every model the invocation's requested run window verbatim, so a Form-A downstream never
+  learns that its Form-B upstream rebased `[D-1, D+2)` on a `[D, D+1)` run. Phases 4-5's
+  enrichment-keyed route therefore does **not** subsume this (it is key-addressed value enrichment
+  for a *clockless* upstream; this read is membership-sensitive and clocked), which is the handoff's
+  question answered — phase 7 confirms it by inspection as its first task rather than carrying a
+  separate row. The fix is one rule, stated in `docs/specs/incremental_models.md` §"Forward
+  propagation" for an explicit landed delta but never applied to an ordinary windowed run: a model's
+  run window is the union of the requested window and every in-run upstream's derived output window.
+  Row 8 is reworded because phases 3-7 are expected to leave `DIVERGENCE_REGISTRY` empty, at which
+  point its real content is proving the unregistered-divergence sweep still fails closed rather than
+  passing vacuously — criterion 5 stays owned by a row either way.
+- 2026-09-08 (phase 7 planning): **phase 6's suggested extra `statement_parity` lookback+skew+chunking
+  fixture does not get a row.** The regression it names is already gated at its source by
+  `windowing_form_b_chunking.rs::lookback_and_skew_widen_independently_never_summed`; a second fixture
+  asserting the same property further from the code would duplicate, not widen, coverage, so criterion 3
+  is satisfied without it. Recorded here rather than under Out of scope because no work is leaving the
+  outcome — it was never in it.
 
 - 2026-09-08 (phase 6 implementation): **the plan's diagnosis targeted a dead field; the real
   fix needed a second layer.** `IncrementalBatch::filter_start`/`filter_end` — what the plan's
