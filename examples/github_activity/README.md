@@ -134,20 +134,19 @@ Both `created_at` clock columns are projected verbatim (not aliased away): the
 succession-patch technique's tombstone ledger resolves the clock column's type from the
 model's own output schema by name, so the clock column must survive under its source name.
 
-**A genuine divergence, discovered rather than fixed here**: `silver.repo_naming` and
-`silver.actor_naming` do not satisfy the full-refresh/incremental equivalence invariant
-(criterion 7) at the raw row-count level. The window-forward patch loop addresses the
-presented table by `(key, clock)` (its `MERGE ... ON` condition), so a redelivered
+**A divergence discovered and since fixed here**: `silver.repo_naming` and
+`silver.actor_naming` originally failed to satisfy the full-refresh/incremental equivalence
+invariant (criterion 7) at the raw row-count level. The window-forward patch loop addresses
+the presented table by `(key, clock)` (its `MERGE ... ON` condition), so a redelivered
 duplicate or a same-second tie whose payload agrees converges to one presented row;
-`--full-refresh` re-runs the model's raw compiled `SELECT` with no such addressing, so it
-keeps every tied row. The gap matches exactly the fixture's own measured tie counts (139
-extra rows for `repo_naming`, 145 for `actor_naming`) —
-`crates/smelt-cli/tests/github_activity_replay.rs`'s
-`full_refresh_matches_incremental_replay` asserts the divergence explicitly rather than
-silently tolerating it. `marts.naming_history` is unaffected, since its `LAG`-based
+`--full-refresh` re-ran the model's raw compiled `SELECT` with no such addressing, so it kept
+every tied row — measured exactly at the fixture's own tie counts (139 extra rows for
+`repo_naming`, 145 for `actor_naming`). `docs/outcomes/20260906-bigquery-correctness/
+phases/03-plan.md` folded `emit_succession_full_rebuild`'s presented rebuild on
+`(key_cols, clock_col)`, so the two legs now compare exactly equal on both relations;
+`crates/smelt-cli/tests/github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY` no longer carries
+an entry for either. `marts.naming_history` was unaffected throughout, since its `LAG`-based
 "only where the name changed" filter drops a duplicated tie row identically on both legs.
-This is recorded for `docs/outcomes/20260906-scd2-keyed-succession`'s decision log, not
-fixed in this pipeline.
 
 ## Gold and marts
 

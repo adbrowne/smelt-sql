@@ -30,6 +30,12 @@ number is traceable to one of those.
    (`phases/03-summary.md`, `crates/smelt-cli/tests/github_activity_oracle.rs`'s
    `DIVERGENCE_REGISTRY` doc comment).
 
+   **Fixed** by `docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md`:
+   `emit_succession_full_rebuild` folds its presented rebuild on `(key_cols, clock_col)`
+   with a `MAX` aggregate over every other output column, and runs the clock-tie probe
+   over its own whole-source scope before the presented write — closing both the row-count
+   divergence and the previously-latent gap in the same paragraph above.
+
 2. **Enrichment freeze** — `gold.events_enriched`. No `UpstreamMutation(gold.repo_dim)`
    maintenance cell is ever derived
    (`crates/smelt-logical/src/maintenance/derive/model_edge.rs::append_model_edge_cells`):
@@ -64,12 +70,18 @@ number is traceable to one of those.
    triggered by an ordinary self-rebase rather than a renamed dimension
    (`phases/08-summary.md`).
 
-## The five registered divergences
+## The three registered divergences
+
+Root cause 1 (`silver_repo_naming` / `silver_actor_naming`) is **fixed**, not registered:
+`docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md` folded
+`emit_succession_full_rebuild`'s presented rebuild on `(key_cols, clock_col)`, the same
+addressing the patch loop's `MERGE ... ON` clause uses, so the two legs now compare exactly
+equal on both relations — no `DIVERGENCE_REGISTRY` entry remains for either. The rebuild
+path also now runs the clock-tie probe (previously latent — see below) before its
+presented write.
 
 | Relation | Bound | Root cause | Defect or fixture artifact |
 |---|---|---|---|
-| `silver_repo_naming` | `FoldEquality` (fold on `repo_id, created_at`) | 1 | Smelt defect (full-refresh rebuild path) |
-| `silver_actor_naming` | `FoldEquality` (fold on `actor_id, created_at`) | 1 | Smelt defect (full-refresh rebuild path) |
 | `gold_events_enriched` | `StaleButHistoricallyValid` (`current_repo_name` only; every stale value genuinely held earlier) | 2 | Smelt defect (missing maintenance cell) |
 | `silver_actor_sessions` | `MonotoneDivergence` (oracle behind on `session_end`, `event_count`) | 3 | Smelt defect (oracle/windowing, not the incremental leg) |
 | `marts_daily_active_contributors` | `MonotoneDivergence` (incremental behind on `total_events`) | 4 | Smelt defect (missing repair edge) |
@@ -80,10 +92,12 @@ here to avoid a second copy drifting from the registry.)
 
 ## Latent, unmeasured
 
-`emit_succession_full_rebuild` never runs the clock-tie probe, so a content-*disagreeing*
-tie (two rows sharing `(key, clock)` whose other columns differ) would corrupt a full
-refresh undetected. This fixture measured zero disagreeing ties, so the gap is real but
-unexercised — see root cause 1.
+Fixed by `docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md`:
+`emit_succession_full_rebuild` now runs the clock-tie probe over its own whole-source scope
+before its presented write, so a content-*disagreeing* tie (two rows sharing `(key, clock)`
+whose other columns differ) is refused rather than silently folded. This fixture still
+measures zero disagreeing ties, so the refusal path itself remains unexercised by this
+fixture, even though the mechanism is now wired.
 
 ## Requirements handed to `20260906-external-dag-steps`
 
@@ -126,12 +140,12 @@ future reader cannot again find them silently disagreeing.
 
 ## Punch-list for `20260906-bigquery-correctness`
 
-1. **Fix-or-register** the succession full-refresh rebuild path
-   (`emit_succession_full_rebuild`) so it folds on `(key_cols, clock_col)` with an
-   aggregate over every other column, closing the `silver_repo_naming` /
-   `silver_actor_naming` divergence — provoked by `silver.repo_naming` and
-   `silver.actor_naming`. (An exploratory `SELECT DISTINCT *` wrap was tried and found
-   insufficient — see `phases/03-summary.md` — the real fix needs the full output schema
+1. **Done** (`docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md`). The
+   succession full-refresh rebuild path (`emit_succession_full_rebuild`) now folds on
+   `(key_cols, clock_col)` with an aggregate over every other column, closing the
+   `silver_repo_naming` / `silver_actor_naming` divergence — provoked by `silver.repo_naming`
+   and `silver.actor_naming`. (An exploratory `SELECT DISTINCT *` wrap was tried and found
+   insufficient — see `phases/03-summary.md` — the real fix needed the full output schema
    threaded into the emitter.)
 2. **Fix-or-register** the missing `UpstreamMutation(gold.repo_dim)` maintenance cell for a
    `grain: partition` downstream reading a clockless keyed-model dimension — provoked by

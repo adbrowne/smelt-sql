@@ -1139,6 +1139,23 @@ backend. Ledger size is proportional to the number of delete events ever folded 
 compacted: a tombstone stays load-bearing for as long as a later-arriving event could splice
 next to it, which under the default contract point is forever.
 
+The presented table's own rebuild is folded on `(k, t)` — the same addressing the patch
+loop's `MERGE ... ON` clause uses — rather than a bare passthrough of the model's compiled
+`SELECT`: one whole physical row is kept per `(k, t)` tie, never a per-column aggregate
+across the tied rows. `LEAD`/`LAG` are evaluated by the model's own compiled `SELECT` over
+the unfolded physical rows, so two rows tied at one `t` can carry genuinely different
+derived-column values — one row's `LEAD` sees its own tied sibling as the "next" event (a
+same-`t` artifact of ordering two content-identical physical rows), while another row in the
+same tie correctly sees the true next event or `NULL`. A per-column aggregate would combine
+these into a value no physical row ever held, and would prefer the artifact over the
+genuinely correct `NULL`; picking one physical row cannot manufacture a new combination.
+Without this fold a full rebuild would present one physical source row per tie while the
+patch loop converges ties to a single presented row, so the two run shapes would disagree
+row-for-row on any key with a same-`t` tie. Before the rebuild's presented write, the same
+clock-tie probe the patch loop runs (§"Run shape and late events" — "Clock ties") runs over
+the rebuild's own full-source scope, refusing a content-disagreeing tie rather than silently
+resolving it by an arbitrary row pick.
+
 **Physical shape.** The ledger is a **per-model sibling table**, never the shared
 `_smelt_ledger`: the neighbour lookup runs `LEAD`/`LAG` over the union of presented rows and
 ledger rows ordered by `t`, so `k` and `t` must be stored in the model's own column types — a

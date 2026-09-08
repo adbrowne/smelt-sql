@@ -133,17 +133,14 @@ fn compare_databases(incr_db: &Path, full_db: &Path) -> Result<Vec<RelationDiff>
     Ok(all.iter().map(|rel| relation_diff(&conn, rel)).collect())
 }
 
-/// A registry entry's bound: three shapes have been measured so far
+/// A registry entry's bound: two shapes are live today
 /// (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/08-plan.md`), none
-/// of them a magic row count.
+/// of them a magic row count. A third, `FoldEquality` (the `(key, clock)`
+/// tuple the presented table's `MERGE ... ON` addresses by), was retired
+/// (`docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md`) once
+/// `emit_succession_full_rebuild`'s own fold made its two entries
+/// (`silver_repo_naming`, `silver_actor_naming`) compare exactly equal.
 enum Bound {
-    /// The `(key, clock)` tuple the presented table's `MERGE ... ON`
-    /// addresses by: the incremental relation has zero rows the oracle
-    /// lacks, and the oracle folds to exactly one row per `key_columns`
-    /// group.
-    FoldEquality {
-        key_columns: &'static [&'static str],
-    },
     /// A value column that can go stale but is never fabricated: every row
     /// present in both legs matches on every column except `stale_column`,
     /// and every stale value that does appear is some value
@@ -200,16 +197,15 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
     "event_date",
 ];
 
-/// The two succession entries trace to the same root cause: the incremental
-/// window-forward patch loop addresses the presented table by `(key,
-/// clock)`, so a redelivered duplicate or a genuine same-second tie whose
-/// payload agrees converges to one presented row; `--full-refresh` re-runs
-/// the model's raw compiled `SELECT` (`LEAD`/`LAG` over every physical row)
-/// with no such addressing, so it keeps every tied row
-/// (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` decision log,
-/// `github_activity_replay.rs::same_second_events_fold_once_within_a_key`).
-/// Owner of a fix, if one is ever wanted: `docs/outcomes/
-/// 20260906-scd2-keyed-succession`.
+/// `silver_repo_naming` and `silver_actor_naming` no longer have entries here:
+/// both traced to the same root cause (the window-forward patch loop
+/// addresses the presented table by `(key, clock)`, converging a same-second
+/// tie to one presented row, while `--full-refresh` re-ran the model's raw
+/// compiled `SELECT` with no such addressing and kept every tied physical
+/// row) and were fixed by folding `emit_succession_full_rebuild`'s rebuild on
+/// `(key_cols, clock_col)` (`docs/outcomes/20260906-bigquery-correctness/
+/// phases/03-plan.md`; `crates/smelt-logical/src/maintenance/emit/
+/// succession.rs`). The two legs now compare equal on both relations.
 ///
 /// `gold_events_enriched`'s entry traces to a different, measured root cause
 /// (phase 8): no `UpstreamMutation(gold.repo_dim)` maintenance cell is ever
@@ -277,22 +273,6 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
 /// `docs/outcomes/20260906-bigquery-correctness`.
 const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[
     DivergenceEntry {
-        relation: "silver_repo_naming",
-        reason: "same-second (repo_id, created_at) ties: incremental folds them to one \
-                  presented row, --full-refresh keeps every tied physical row",
-        bound: Bound::FoldEquality {
-            key_columns: &["repo_id", "created_at"],
-        },
-    },
-    DivergenceEntry {
-        relation: "silver_actor_naming",
-        reason: "same-second (actor_id, created_at) ties: incremental folds them to one \
-                  presented row, --full-refresh keeps every tied physical row",
-        bound: Bound::FoldEquality {
-            key_columns: &["actor_id", "created_at"],
-        },
-    },
-    DivergenceEntry {
         relation: "gold_events_enriched",
         reason: "no UpstreamMutation(gold.repo_dim) maintenance cell exists, so a written \
                   row's current_repo_name is frozen forever; never fabricated, but never \
@@ -336,45 +316,6 @@ const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[
 fn check_bound(incr_db: &Path, full_db: &Path, entry: &DivergenceEntry) -> Result<(), String> {
     let conn = attached_conn(incr_db, full_db);
     match &entry.bound {
-        Bound::FoldEquality { key_columns } => {
-            let incr_only = scalar_on(
-                &conn,
-                &format!(
-                    "SELECT count(*) FROM (SELECT * FROM incr_db.main.{r} EXCEPT ALL \
-                     SELECT * FROM full_db.main.{r})",
-                    r = entry.relation
-                ),
-            );
-            if incr_only != 0 {
-                return Err(format!(
-                    "{incr_only} row(s) present in the incremental relation but absent from \
-                     the oracle (expected 0 — the incremental side must never hold rows the \
-                     oracle lacks)"
-                ));
-            }
-
-            let key_list = key_columns.join(", ");
-            let distinct_full = scalar_on(
-                &conn,
-                &format!(
-                    "SELECT count(*) FROM (SELECT DISTINCT {key_list} FROM full_db.main.{r})",
-                    r = entry.relation
-                ),
-            );
-            let incr_count = scalar_on(
-                &conn,
-                &format!("SELECT count(*) FROM incr_db.main.{r}", r = entry.relation),
-            );
-            if distinct_full != incr_count {
-                return Err(format!(
-                    "fold mismatch: the oracle has {distinct_full} distinct ({key_list}) \
-                     groups but the incremental relation has {incr_count} rows — every \
-                     oracle-extra row must be a duplicate within a shared ({key_list}) \
-                     group, not a novel row"
-                ));
-            }
-            Ok(())
-        }
         Bound::StaleButHistoricallyValid {
             key_col,
             stale_column,
@@ -743,7 +684,7 @@ fn full_replay_pair() -> &'static FullReplayPair {
 /// Test 1: the phase's centrepiece. Replay the 30-day fixture day by day;
 /// after **every** day (not sampled — see below), stage a fresh full-refresh
 /// oracle over the identical rows seen so far and compare every materialised
-/// relation row-for-row, against the 5-entry [`DIVERGENCE_REGISTRY`].
+/// relation row-for-row, against the 3-entry [`DIVERGENCE_REGISTRY`].
 ///
 /// Was `#[ignore]`d (`docs/outcomes/20260906-bigquery-dogfood-spine/
 /// outcome.md` "## Blocked", phase 6) on an uncharacterised `gold_events_
@@ -856,8 +797,8 @@ fn oracle_comparison_covers_every_materialised_relation() {
 }
 
 /// Test 3: every registry entry is bounded, not blanket — over the full
-/// 30-day fixture, all five hold their declared bound (two `FoldEquality`,
-/// one `StaleButHistoricallyValid`, two `MonotoneDivergence`).
+/// 30-day fixture, all three hold their declared bound (one
+/// `StaleButHistoricallyValid`, two `MonotoneDivergence`).
 #[test]
 fn succession_divergence_is_exactly_tied_row_multiplicity() {
     let pair = full_replay_pair();

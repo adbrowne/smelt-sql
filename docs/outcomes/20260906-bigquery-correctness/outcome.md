@@ -78,7 +78,7 @@ difference is either fixed or registered with a reason — never tolerated silen
 |---|-------|--------|
 | 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | done |
 | 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | done |
-| 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | planned |
+| 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | done |
 | 4 | Punch-list 2 — the missing `UpstreamMutation(gold.repo_dim)` cell for a `grain: partition` downstream reading a clockless keyed dimension: a new route in `append_model_edge_cells`, or a refusal surfaced at `run`/`build` rather than only `explain` | pending |
 | 5 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
 | 6 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phase 4's mechanism already covers it | pending |
@@ -87,6 +87,20 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 9 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 3 implementation): **the plan's `MAX`-per-column fold was insufficient;
+  fixed to a `ROW_NUMBER()`-ranked whole-row pick instead.** Running the full 30-day
+  `every_window_matches_the_full_refresh_oracle` gate exposed two bugs a per-column `MAX`
+  aggregate over the model's compiled `SELECT` output cannot avoid: (1) `LEAD`/`LAG` computed
+  over physically-duplicated tied rows produces genuinely different derived-column values per
+  physical row (one row's `LEAD` self-references its tied sibling; `MAX` prefers that artifact
+  over the correct `NULL`), and (2) the fold's `SELECT` list must preserve the model's own
+  output column order (not force key-first), since the patch loop's bootstrap shell always
+  uses model order and position-based `EXCEPT ALL` comparisons broke under a reordered fold.
+  Both fixed; the full 30-day oracle (`crates/smelt-cli/tests/github_activity_oracle.rs`) and
+  the day-by-day replay (`crates/smelt-cli/tests/github_activity_replay.rs`) now pass with
+  `silver_repo_naming`/`silver_actor_naming` comparing exactly equal — see
+  `phases/03-summary.md`.
 
 - 2026-09-08 (phase 3 planning): **the harvest happened at plan time, and row 3 became
   the first real punch-list item.** Row 3 as scaffolded was a meta-phase whose entire

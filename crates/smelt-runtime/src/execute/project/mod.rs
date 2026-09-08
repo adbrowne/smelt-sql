@@ -2371,6 +2371,7 @@ pub async fn execute_project(
                                 &columns,
                                 &compiled.sql,
                                 &succession_retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
                                 reporter,
                                 run_id,
                             )

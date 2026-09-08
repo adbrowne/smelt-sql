@@ -335,6 +335,25 @@ pub fn emit_succession_patch(
 /// `execute_succession_maintenance`'s own precedent of running idempotent
 /// DDL before its transactional write).
 ///
+/// `output_columns` is the model's full resolved output schema, in the
+/// model's own projection order — `key_cols` and `clock_col` included, so
+/// the fold below can preserve that order rather than forcing a key-first
+/// layout. A model's own column order need not put the key or clock first
+/// (`examples/github_activity/models/silver/actor_naming.sql` projects
+/// `actor_id, actor_login, created_at, ...` — the clock third); the
+/// window-forward patch loop's bootstrap shell
+/// (`emit_create_empty_table`) always creates the presented table in this
+/// same model order, so a rebuild that instead emitted a key-first layout
+/// would leave the two run shapes' presented tables column-order-divergent,
+/// silently corrupting every position-based comparison of them (including
+/// this crate's own `EXCEPT ALL` conformance oracles).
+///
+/// `lead_derived`/`lag_derived` are the same `(output_column,
+/// `{lead}`/`{lag}`-templated expression)` pairs [`emit_succession_patch`]
+/// takes — used here only to break a tie deterministically (see below), not
+/// to recompute anything; the model's own compiled `LEAD`/`LAG` in
+/// `model_select_sql` remains the sole source of every derived value.
+///
 /// `delete_flag_expr` is `"FALSE"` when the model's grammar admits no
 /// delete filter, matching [`emit_succession_patch`]'s own default —
 /// callers resolve `recipe.delete_flag_expr.as_deref().unwrap_or("FALSE")`
@@ -351,6 +370,9 @@ pub fn emit_succession_full_rebuild(
     source_table: &str,
     key_cols: &[String],
     clock_col: &str,
+    output_columns: &[String],
+    lead_derived: &[DerivedColumn],
+    lag_derived: &[DerivedColumn],
     pre_filter: Option<&str>,
     delete_flag_expr: &str,
     dialect: MaintenanceDialect,
@@ -364,7 +386,48 @@ pub fn emit_succession_full_rebuild(
     let tombstone_table = tombstone_table_name(presented_table);
     let keys = key_col_list(key_cols);
 
-    let presented_create = super::emit_create_table_as(presented_table, model_select_sql, dialect);
+    // Fold the model's raw compiled output on `(key_cols, clock_col)` — the
+    // same addressing the patch loop's `MERGE ... ON` clause uses
+    // (`docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+    // state)" — "Lifecycle") — rather than presenting one row per physically
+    // duplicated tie. This picks one WHOLE physical row per group, never a
+    // per-column aggregate: `LEAD`/`LAG` are computed over the model's own
+    // physically-duplicated rows, so two tied rows can carry genuinely
+    // different derived-column values (one row's `LEAD` sees the other tied
+    // row as its own "next", a same-`t` artifact of ordering two identical
+    // events; the other row correctly sees the true next event, or `NULL`).
+    // A per-column `MAX`/`MIN` mixes these into a value no physical row ever
+    // held — worse, a `NULL` (the correct "no true successor" case) loses to
+    // any non-`NULL` artifact under either aggregate. Picking one row avoids
+    // manufacturing new combinations. The tie-break prefers a row whose own
+    // raw-passthrough (`{lead}`/`{lag}`, not further transformed) derived
+    // columns do NOT equal the group's own clock value — the exact shape of
+    // the same-`t` artifact above — falling back to an arbitrary stable pick
+    // when a model has no such raw-passthrough column to signal by (any
+    // genuine content disagreement within a tie is refused before this
+    // statement runs by the clock-tie probe the caller runs over the same
+    // scope, so an arbitrary pick among truly identical rows is safe). Every
+    // non-key/clock column is projected in the model's own column position,
+    // not moved ahead of the key/clock columns.
+    let artifact_terms: Vec<String> = lead_derived
+        .iter()
+        .chain(lag_derived.iter())
+        .filter(|(_, tmpl)| tmpl == "{lead}" || tmpl == "{lag}")
+        .map(|(col, _)| format!("(CASE WHEN {col} = {clock_col} THEN 1 ELSE 0 END)"))
+        .collect();
+    let tie_break = if artifact_terms.is_empty() {
+        "1".to_string()
+    } else {
+        artifact_terms.join(" + ")
+    };
+    let output_col_list = output_columns.join(", ");
+    let folded_select = format!(
+        "SELECT {output_col_list} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {keys}, \
+         {clock_col} ORDER BY {tie_break} ASC) AS __smelt_rn FROM ({model_select_sql}) AS \
+         __smelt_model) AS __smelt_ranked WHERE __smelt_rn = 1"
+    );
+
+    let presented_create = super::emit_create_table_as(presented_table, &folded_select, dialect);
     let ledger_delete = MaintenanceStatement::new(format!("DELETE FROM {tombstone_table}"));
     let ledger_rebuild_select = emit_succession_ledger_rebuild_select(
         source_table,
@@ -765,12 +828,22 @@ mod tests {
         let model_select_sql = "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER \
                                  (PARTITION BY customer_id ORDER BY changed_at) AS valid_to FROM \
                                  raw.customer_changes";
+        let output_columns = vec![
+            "customer_id".to_string(),
+            "changed_at".to_string(),
+            "tier".to_string(),
+            "valid_to".to_string(),
+        ];
+        let lead_derived = vec![("valid_to".to_string(), "{lead}".to_string())];
         let group = emit_succession_full_rebuild(
             "main.customer_history",
             model_select_sql,
             "raw.customer_changes",
             &keys(),
             "changed_at",
+            &output_columns,
+            &lead_derived,
+            &[],
             None,
             "FALSE",
             MaintenanceDialect::DuckDb,
@@ -779,7 +852,13 @@ mod tests {
         assert_eq!(group.statements.len(), 3);
         assert_eq!(
             group.statements[0].sql,
-            format!("CREATE TABLE main.customer_history AS {model_select_sql}")
+            format!(
+                "CREATE TABLE main.customer_history AS SELECT customer_id, changed_at, tier, \
+                 valid_to FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id, \
+                 changed_at ORDER BY (CASE WHEN valid_to = changed_at THEN 1 ELSE 0 END) ASC) \
+                 AS __smelt_rn FROM ({model_select_sql}) AS __smelt_model) AS __smelt_ranked \
+                 WHERE __smelt_rn = 1"
+            )
         );
         assert_eq!(
             group.statements[1].sql,
@@ -811,9 +890,78 @@ mod tests {
             "raw.customer_changes",
             &keys(),
             "changed_at",
+            &[],
+            &[],
+            &[],
             None,
             "FALSE",
             MaintenanceDialect::Spark,
+        );
+    }
+
+    #[test]
+    fn full_rebuild_fold_is_identity_with_no_extra_columns() {
+        let model_select_sql = "SELECT customer_id, changed_at FROM raw.customer_changes";
+        let output_columns = vec!["customer_id".to_string(), "changed_at".to_string()];
+        let group = emit_succession_full_rebuild(
+            "main.customer_history",
+            model_select_sql,
+            "raw.customer_changes",
+            &keys(),
+            "changed_at",
+            &output_columns,
+            &[],
+            &[],
+            None,
+            "FALSE",
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(
+            group.statements[0].sql,
+            format!(
+                "CREATE TABLE main.customer_history AS SELECT customer_id, changed_at FROM \
+                 (SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id, changed_at ORDER BY 1 \
+                 ASC) AS __smelt_rn FROM ({model_select_sql}) AS __smelt_model) AS \
+                 __smelt_ranked WHERE __smelt_rn = 1"
+            )
+        );
+    }
+
+    #[test]
+    fn full_rebuild_folds_on_key_and_clock_with_no_bare_passthrough() {
+        let model_select_sql = "SELECT customer_id, changed_at, tier FROM raw.customer_changes";
+        let output_columns = vec![
+            "customer_id".to_string(),
+            "changed_at".to_string(),
+            "tier".to_string(),
+        ];
+        let group = emit_succession_full_rebuild(
+            "main.customer_history",
+            model_select_sql,
+            "raw.customer_changes",
+            &keys(),
+            "changed_at",
+            &output_columns,
+            &[],
+            &[],
+            None,
+            "FALSE",
+            MaintenanceDialect::DuckDb,
+        );
+        let presented_sql = &group.statements[0].sql;
+        assert_ne!(
+            presented_sql,
+            &format!("CREATE TABLE main.customer_history AS {model_select_sql}"),
+            "the presented rebuild must not be a bare passthrough of the model select: \
+             {presented_sql}"
+        );
+        assert!(
+            presented_sql.contains("PARTITION BY customer_id, changed_at"),
+            "{presented_sql}"
+        );
+        assert!(
+            presented_sql.contains("WHERE __smelt_rn = 1"),
+            "{presented_sql}"
         );
     }
 
