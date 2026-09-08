@@ -66,10 +66,22 @@ visible in the run report.
 | 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | done |
 | 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | done |
 | 7 | Fixture — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics, and actually runs it: one extracted day-loader program, invoked by `smelt run`, with the replay/oracle drivers rewired onto it and the `duckdb` CLI provisioned in CI | done |
-| 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | pending |
+| 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | planned |
 | 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 8 planning): **no reshape; two docs-placement calls settled.** (a) The
+  page is a **Guide** page (`docs-site/docs/guide/external-steps.md`, nav directly after
+  Sources), with the key table mirrored into `reference/sources-yml.md` — the same
+  guide/reference split sources already use, rather than a reference-only page: the
+  declaration is cheap but the *contract* (what smelt guarantees vs. what stays the
+  external program's problem) is the part users get wrong, and that is guide material.
+  (b) `guide/sources.md` §"Loading source data" — today a flat "smelt does not load source
+  data" — is **corrected**, not merely cross-linked: it is now false as an absolute, and
+  leaving it would contradict the new page. That is a user-doc correction, not a spec
+  change; no spec delta is needed, since phases 1/5/6 already landed the whole normative
+  surface. Row 9 (close-out) unchanged; nothing left the outcome.
 
 - 2026-09-08 (phase 7 implementation): **shipped as planned, no reshape. One
   new discovery, unrelated to external steps, deferred rather than fixed.**
