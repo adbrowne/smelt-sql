@@ -70,12 +70,33 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | done |
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | done |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | done |
-| 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | pending |
-| 6 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
-| 7 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
-| 8 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
+| 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | planned |
+| 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | pending |
+| 7 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
+| 8 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
+| 9 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-09 (phase 5 planning): **the run's required look-back is `derived reach + the age of
+  the oldest region the run writes`, measured against the run's own clock** — so the rolling
+  re-evaluation needs no new analysis, only the run window plan-time analysis does not have.
+  A forward-only run (no `--start`/`--end`) has age zero and is unaffected, which is what keeps
+  steady-state maintenance untouched; a backfill of an old region ages into the bound exactly as
+  `sources.md` §Semantics 5 describes. The plan therefore carries its own **proof**
+  (`MaintenancePlan::retention_reaches`, the bounded per-source reach-vs-retained pair) and the
+  rolling step is a pure fold over it in `smelt-logical` — maintenance-plan purity holds: the
+  reach is derived once by the walk, never re-derived at run time, and `smelt-runtime` only
+  evaluates a pure function of the plan's own data at the run's age.
+- 2026-09-09 (phase 5 planning): **table reshaped — a new row 6 for whole-table recompute.**
+  A `--full-refresh` (or first build) of a model over a trimmed source reaches past *every*
+  finite retained bound and today rebuilds the table from whatever history survives — a silent
+  under-read, which is exactly what criterion 4 forbids and what no analysis-time verdict can
+  catch (it is a property of the run's shape, not the model's SQL). It was not deferred out of
+  the outcome; it gets its own row rather than being folded into phase 5 because refusing it is
+  a materially larger behaviour change (it can break an existing `--full-refresh` on
+  `examples/github_activity`, whose sources now declare a 45-day bound) and deserves its own
+  red-green cycle. Rows 6-8 shift to 7-9.
 
 - 2026-09-09 (phase 4 planning): **`Exceeds` refuses, `UnprovableWithin` takes the recorded
   downgrade, `Within` records nothing.** Three candidate mappings were weighed. Refusing
