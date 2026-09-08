@@ -63,11 +63,29 @@ visible in the run report.
 | 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | done |
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | done |
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | done |
-| 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
-| 6 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
-| 7 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
+| 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | planned |
+| 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
+| 7 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
+| 8 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 5 planning): **reshape — the old row 5 is split in two**, and one design
+  call settled. The row bundled two surfaces with separate spec anchors, separate gates and
+  no shared code (`RunReporter`/`smelt-state` on one side, `smelt-cli/src/commands/explain.rs`
+  on the other); split into row 5 (run-path reporting) and row 6 (`smelt explain`), with the
+  old rows 6-7 renumbered to 7-8. Nothing left the outcome. The design call: **a step failure
+  produces no run-report artifact, by construction, and is surfaced through the reporter and
+  the CLI's run output instead.** Required steps are invoked at the top of `execute_project`
+  (before plan derivation, per the phase-4 decision that plan decisions must not be derived
+  from frontiers a step has not advanced), which is ~330 lines before the `FileStore` and
+  ~680 before the `RunManifest` exists; a step failure therefore aborts exactly like any other
+  pre-execution failure (a bad target, a selection error), which also writes no report today.
+  Rejected: hoisting `FileStore`/manifest construction above the step pass — it would write
+  state artifacts outside the advisory lock that is acquired later, to record a run that never
+  reached a model. The manifest's new `external_steps` record therefore covers the steps a run
+  *successfully* invoked; the failure leg is the reporter's `external_step_failed` plus
+  `run_failed`, both of which the CLI prints.
 
 - 2026-09-08 (phase 4 implementation): **shipped as planned, no reshape.** Closed
   `{run_date}`/`{run_end}` placeholder grammar landed in `smelt-core::external_step`
