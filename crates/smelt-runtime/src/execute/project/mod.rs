@@ -108,7 +108,7 @@ pub async fn execute_project(
     // real run below refuse or invoke identically (`docs/specs/sources.md`
     // §Semantics 9, 11, 12) — a required step's `command:` runs to
     // completion, sequentially, before any model builds.
-    crate::execute::external_steps::invoke_required_steps(
+    let invoked_external_steps = crate::execute::external_steps::invoke_required_steps(
         &required_steps,
         &external_steps_by_addr,
         project_dir,
@@ -119,6 +119,8 @@ pub async fn execute_project(
         request.dry_run,
         request.invoke_external_steps,
         &cancel,
+        reporter,
+        &run_id,
     )
     .await?;
 
@@ -789,6 +791,7 @@ pub async fn execute_project(
         started_at: run_start,
         completed_at: None,
         models: HashMap::new(),
+        external_steps: invoked_external_steps.into_iter().collect(),
     };
 
     let mut total_rows_overall: usize = 0;

@@ -101,6 +101,8 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
             models,
+
+            external_steps: std::collections::BTreeMap::new(),
         }
     }
 

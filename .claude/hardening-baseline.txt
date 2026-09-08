@@ -1,5 +1,5 @@
 # Production code debt baseline
-# Updated: 2026-09-06
+# Updated: 2026-09-08
 # Format: <crate> <pattern> <count>
 # Patterns: unwrap  expect  println
 # Regenerate with: .claude/scripts/hardening-budget.sh --update
@@ -10,6 +10,12 @@
 #   docs/outcomes/20260905-property-diff/ phase 5). The one new println! is
 #   the `--json` branch of `smelt explain --diff`, matching the existing
 #   single-model `--json` pattern — legitimate user-facing CLI stdout.
+# 2026-09-08 andrew: smelt-cli println 175 -> 176 (docs/outcomes/
+#   20260906-external-dag-steps/ phase 5). The count includes `eprintln!`
+#   calls (the script's substring match on `println!` catches both) —
+#   `CliReporter::external_step_failed`'s new `eprintln!` naming a failed
+#   step's exit code, matching the existing `run_failed`/`run_cancelled`
+#   stderr pattern in the same file.
 #
 smelt-backend-bigquery expect 0
 smelt-backend-bigquery println 0
@@ -30,7 +36,7 @@ smelt-bench expect 3
 smelt-bench println 27
 smelt-bench unwrap 8
 smelt-cli expect 42
-smelt-cli println 175
+smelt-cli println 176
 smelt-cli unwrap 0
 smelt-core expect 6
 smelt-core println 0

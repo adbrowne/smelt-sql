@@ -143,6 +143,27 @@ pub trait RunReporter: Send + Sync {
         _error: &str,
     ) {
     }
+
+    /// An external step's `command:` is about to be spawned
+    /// (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)"). `argv` is the resolved command, after placeholder
+    /// substitution. Called before the process is spawned; a step that
+    /// refuses (`ExternalStepNotInvocable`) fires no step events at all,
+    /// since nothing was spawned.
+    fn external_step_started(&self, _run_id: &str, _step: &str, _argv: &[String]) {}
+
+    /// An external step's `command:` exited zero. `duration` is the
+    /// invocation's wall time. Called once per successfully-invoked step,
+    /// before the run manifest records it (`docs/specs/run_state.md`
+    /// §"Run manifest").
+    fn external_step_completed(&self, _run_id: &str, _step: &str, _duration: Duration) {}
+
+    /// An external step's `command:` exited non-zero. `exit_code` is the
+    /// process's exit status; `error` is the display text of the resulting
+    /// `ExternalStepFailedError`. The run aborts immediately after this
+    /// fires — no manifest is ever written for this run
+    /// (`docs/specs/run_state.md` §"Run report").
+    fn external_step_failed(&self, _run_id: &str, _step: &str, _exit_code: i32, _error: &str) {}
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that

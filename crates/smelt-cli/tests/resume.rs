@@ -938,6 +938,7 @@ async fn resume_picks_up_completed_run_with_non_success_outcome() {
         started_at: chrono::Utc::now(),
         completed_at: Some(chrono::Utc::now()),
         models,
+        external_steps: Default::default(),
     };
     file_store
         .save_run(&constructed)

@@ -63,13 +63,26 @@ visible in the run report.
 | 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | done |
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | done |
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | done |
-| 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | planned |
+| 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | done |
 | 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
 | 7 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
 | 8 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
 
+- 2026-09-08 (phase 5 implementation): **shipped as planned, no reshape.** `RunManifest`/
+  `RunReport` gained `external_steps: BTreeMap<String, ExternalStepRunRecord>`
+  (`#[serde(default, skip_serializing_if)]`); `RunReporter` gained `external_step_started`/
+  `_completed`/`_failed`; `invoke_required_steps` now fires them and returns the successfully-
+  invoked steps' records for `execute/project/mod.rs` to fold into the manifest; `CliReporter`
+  renders all three. All 8 planned tests pass against a real DuckDB backend
+  (`crates/smelt-runtime/tests/external_step_reporting.rs`, plus 2 pure unit tests in
+  `smelt-state`). One incidental finding: the hardening-budget `println!` ratchet's substring
+  match also counts `eprintln!`, so the one new CLI `eprintln!` (the failure line) bumped
+  `smelt-cli println` 175→176 — baseline updated with a sign-off note, not a real new `println!`.
+  Three already-oversized files grew a handful of lines each from adding the new field to
+  existing struct literals — baseline bumped for all three, no split attempted (mechanical, not
+  scope creep). See `phases/05-summary.md`.
 - 2026-09-08 (phase 5 planning): **reshape — the old row 5 is split in two**, and one design
   call settled. The row bundled two surfaces with separate spec anchors, separate gates and
   no shared code (`RunReporter`/`smelt-state` on one side, `smelt-cli/src/commands/explain.rs`

@@ -18,7 +18,7 @@ crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
 crates/smelt-cli/tests/github_activity_oracle.rs 1227
 crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
 crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
-crates/smelt-cli/tests/resume.rs 1058
+crates/smelt-cli/tests/resume.rs 1059
 crates/smelt-cli/tests/since_upstream.rs 1274
 crates/smelt-core/src/config.rs 3909
 crates/smelt-core/src/discovery.rs 1090
@@ -96,7 +96,7 @@ crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-parser/src/printer.rs 1156
 crates/smelt-runtime/src/compile.rs 4015
 crates/smelt-runtime/src/cumulative.rs 2179
-crates/smelt-runtime/src/execute/project/mod.rs 4793
+crates/smelt-runtime/src/execute/project/mod.rs 4796
 crates/smelt-runtime/src/maintenance_driver/tests.rs 1079
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
@@ -111,6 +111,6 @@ crates/smelt-runtime/tests/technique_lowering/basic.rs 1120
 crates/smelt-runtime/tests/windowing_parity.rs 1150
 crates/smelt-state/src/ddl_duckdb.rs 1883
 crates/smelt-state/src/ddl_spark.rs 1708
-crates/smelt-state/src/file_store.rs 1690
+crates/smelt-state/src/file_store.rs 1695
 crates/smelt-state/src/schema_tracking.rs 4611
 crates/smelt-types/src/signatures/tests.rs 2467

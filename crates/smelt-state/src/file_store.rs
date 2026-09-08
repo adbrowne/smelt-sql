@@ -922,6 +922,8 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
             models,
+
+            external_steps: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1499,6 +1501,8 @@ mod tests {
             started_at: Utc::now(),
             completed_at: None,
             models,
+
+            external_steps: std::collections::BTreeMap::new(),
         };
 
         store.save_run(&manifest).unwrap();
@@ -1587,6 +1591,7 @@ mod tests {
                 duration_ms: 0,
                 outcome_counts: crate::OutcomeCounts::default(),
                 failures: Vec::new(),
+                external_steps: std::collections::BTreeMap::new(),
             })
             .unwrap();
         store.save_intervals(&IntervalStore::default()).unwrap();

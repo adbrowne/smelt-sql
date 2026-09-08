@@ -3,16 +3,23 @@
 //! steps)"). A required step runs to completion, sequentially, before any
 //! model executes (§Semantics 9) — ordering ahead of every consumer is
 //! structural (a single pass before the model loop), not scheduled into
-//! `execution_waves`.
+//! `execution_waves`. Each invoked step's start, success, and non-zero exit
+//! fire on the run's `RunReporter` (`docs/specs/run_state.md` §"Run
+//! manifest"); a step that refuses (`ExternalStepNotInvocable`) fires no
+//! events at all, since nothing was spawned.
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::Result;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use smelt_core::external_step::{resolve_command, ExternalStepInfo, StepRunContext};
+use smelt_state::{ExternalStepRunRecord, RunOutcomeKind};
+
+use crate::reporter::RunReporter;
 
 /// `ExternalStepNotInvocable` (`docs/specs/sources.md` §Semantics 12): a run
 /// reached a step it may not or cannot invoke — a dry run, an environment
@@ -41,7 +48,11 @@ pub struct ExternalStepFailedError {
 /// environment declining external invocation (`invoke_external_steps ==
 /// false`) refuses with `ExternalStepNotInvocable` rather than spawning
 /// anything, so a run never proceeds against a reached step's possibly-
-/// stale produced sources.
+/// stale produced sources. Refusal branches return before any reporter
+/// event fires. Returns one [`ExternalStepRunRecord`] per successfully
+/// invoked step, keyed by step address, for the caller to fold into the run
+/// manifest.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn invoke_required_steps(
     required_steps: &[String],
     steps_by_addr: &HashMap<String, ExternalStepInfo>,
@@ -50,9 +61,11 @@ pub(crate) async fn invoke_required_steps(
     dry_run: bool,
     invoke_external_steps: bool,
     cancel: &CancellationToken,
-) -> Result<()> {
+    reporter: &dyn RunReporter,
+    run_id: &str,
+) -> Result<Vec<(String, ExternalStepRunRecord)>> {
     if required_steps.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     if dry_run {
@@ -72,6 +85,8 @@ pub(crate) async fn invoke_required_steps(
         .into());
     }
 
+    let mut records = Vec::new();
+
     for step_addr in required_steps {
         let Some(step) = steps_by_addr.get(step_addr) else {
             continue;
@@ -85,6 +100,7 @@ pub(crate) async fn invoke_required_steps(
         };
 
         tracing::info!("Invoking external step '{}': {:?}", step_addr, argv);
+        reporter.external_step_started(run_id, step_addr, &argv);
 
         let mut command = tokio::process::Command::new(program);
         command.args(args).current_dir(project_dir);
@@ -93,6 +109,7 @@ pub(crate) async fn invoke_required_steps(
             reason: format!("failed to spawn '{program}': {e}"),
         })?;
 
+        let start = Instant::now();
         let status = tokio::select! {
             status = child.wait() => status.map_err(|e| ExternalStepNotInvocableError {
                 step: step_addr.clone(),
@@ -103,17 +120,31 @@ pub(crate) async fn invoke_required_steps(
                 anyhow::bail!("Run cancelled while invoking external step '{}'", step_addr);
             }
         };
+        let duration = start.elapsed();
 
         if !status.success() {
-            return Err(ExternalStepFailedError {
+            let exit_code = status.code().unwrap_or(-1);
+            let error = ExternalStepFailedError {
                 step: step_addr.clone(),
-                exit_code: status.code().unwrap_or(-1),
-            }
-            .into());
+                exit_code,
+            };
+            reporter.external_step_failed(run_id, step_addr, exit_code, &error.to_string());
+            return Err(error.into());
         }
 
         tracing::info!("External step '{}' completed successfully", step_addr);
+        reporter.external_step_completed(run_id, step_addr, duration);
+
+        records.push((
+            step_addr.clone(),
+            ExternalStepRunRecord {
+                command: argv,
+                produces: step.produces.clone(),
+                duration_ms: duration.as_millis() as u64,
+                outcome: RunOutcomeKind::Success,
+            },
+        ));
     }
 
-    Ok(())
+    Ok(records)
 }
