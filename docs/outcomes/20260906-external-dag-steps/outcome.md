@@ -59,7 +59,7 @@ visible in the run report.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | planned |
+| 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | done |
 | 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | pending |
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | pending |
 | 4 | Invocation on the run path — order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
@@ -69,6 +69,11 @@ visible in the run report.
 
 ## Decision log
 
+- 2026-09-08 (phase 1 implementation): **spec delta landed** in `docs/specs/sources.md` —
+  §Surface `### Externally-produced sources (black-box steps)`, four diagnostic rows, six
+  §Semantics items, a §Design rejected-alternative paragraph, three §Constraints items, one
+  §Known Divergences entry, §References links. No code changes (spec-only phase). See
+  `phases/01-summary.md` for the full list and follow-ups handed to phase 2.
 - 2026-09-08 (phase 1 planning): **decided — a distinct declaration kind, not a `produced_by:`
   key on a source.** Reasoning, from evidence the spine actually produced rather than from the
   scaffold's guess: (a) `scripts/bq-dogfood-loader.sh` populates **two** relations

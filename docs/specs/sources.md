@@ -138,6 +138,47 @@ referential_integrity: [customer_id]
 
 This is a **narrowing** declaration under the trust rule (§Semantics "The trust rule") — a mis-declared `referential_integrity` would license a join-shape assumption (no row dropped) that a real gap in the dimension would silently violate, corrupting every skeleton-source-closure-licensed technique built on it. It is admitted only paired with the **count-preservation tripwire**: every consuming run that relies on the declaration re-checks, over the region it touched, that the enrichment join's row count equals the driving side's row count (no row lost to a missing key) — a violation fails the run loudly (`SourceCountPreservationViolated`) and marks prior output built on the declaration as suspect, per the trust rule's general shape. The tripwire is scoped to the touched region, not a full-table scan, the same way the other narrowing tripwires (§Semantics 4) are scan-window-scoped rather than full-table by default.
 
+### Externally-produced sources (black-box steps)
+
+A source's data can be landed by a program smelt itself invokes, rather than by an
+out-of-band pipeline smelt has no visibility into. Such a program is declared as an
+**external step**: a workspace file, discovered and addressed like any other project
+entity, carrying a top-level `external_step:` block. A file carrying this block is a
+step, never a source — it declares no `columns:`, and the discriminator between "this
+file is a source" and "this file is a step" is the presence of `external_step:` at the
+top level, checked before the source/seed-sidecar tiebreaker (§"Discovery and
+addressing").
+
+A step names the source addresses it produces; the sources themselves are declared
+exactly as any other source, with their own `columns:`, `timeseries:`, and world-facts
+unchanged by having a step behind them. The step carries only *who* produces the data,
+*how* it is invoked, and *how often* — never the produced relations' shape.
+
+```yaml
+# models/sources/raw/github_loader.yml
+external_step:
+  description: >
+    Loads the previous two UTC days of githubarchive.day events into
+    raw.github_events and its one-day redelivery arm.
+  produces:
+    - smelt.sources.raw.github_events
+    - smelt.sources.raw.github_events_arrival
+  command: ["bash", "scripts/bq-dogfood-loader.sh", "--date", "{run_date}"]
+  cadence: '1 day'
+```
+
+| Key | Required | Default | Meaning |
+|-----|----------|---------|---------|
+| `description` | no | absent | Free-text description, surfaced in LSP hover and `smelt explain`. |
+| `produces` | yes | — | Non-empty list of source addresses (`smelt.<path>` form) this step populates. Every entry must resolve to a declared source; a source may be named by at most one step in the workspace. |
+| `command` | yes | — | Argv list smelt invokes as the step's program. Never parsed or type-checked by smelt — an opaque external command, run and observed only by its exit code. |
+| `cadence` | no | absent (unknown) | How often the producer intends to run (an interval, e.g. `'1 day'`), distinct from the source's own `mutation_profile.lateness`: cadence describes the *producer's* schedule, lateness describes how far behind the *clock* a landed row can be. Enables comparing "when did this source's data last land" against "when did the declared producer last run" (a staleness check consumed outside this spec). |
+
+A step is discovered and addressed exactly like a source or model — a workspace path
+under `paths:`, subject to the same cross-path uniqueness rule (`architecture.md`
+§"Resolution"). It is a graph node in its own right, not a property of the sources it
+produces.
+
 ### Landed-delta (derived, recorded)
 
 For every source a maintenance run consumes, smelt records **what changed** since the source's delta was last consumed — the per-source delta. In its fullest form this is a **changed-row set with a partition projection** onto the source's own axis (which partition intervals contain at least one changed row); a delta the graph layer actually schedules against is always the *projected* form, never the raw row set. Where no row-level record exists for a source, the delta **widens** to the coarsest representation that source's shape supports — an append-only clocked source with no row-level tracking still resolves to the interval diff of processed partitions; a `change_feed` source's deltas come from the feed's offsets (already row-level); a `mutable_snapshot` source with no derived changed-row record resolves to "the whole table" (which propagates as whole-model dirt downstream). This is the input to cross-model forward propagation (`incremental_models.md` §"The graph layer": what landed decides which downstream partitions run), which applies the same rule to a **model** edge's delta (`incremental_models.md` §"The graph layer" — the observed output delta where recorded, else the run's written window). **Widen-never-narrow governs the whole hierarchy**: absent a recorded changed-row set, the coarser interval-or-whole-table form is always the correct fallback — a consumer may never assume a narrower delta exists than what was actually recorded. The recording is derived, never declared. Row-level recording for a `mutable_snapshot` source with no native change feed is synthesized by the **fingerprint sidecar** (§"The fingerprint sidecar", below); it feeds the delta-restricted recompute directly (`incremental_models.md` §"Per-cell admission" — the region DELETE+INSERT family's conditional variant), but the graph layer's own per-source delta computed by this section still widens to whole-table for a `mutable_snapshot` source — see §Known Divergences. The record lives in smelt's run state (`run_state.md`), keyed by source address.
@@ -298,6 +339,10 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 | `SourceRetentionExceeded` | Error (plan-time refusal) | A backfill window reaches past the declared `retention:` — the recompute would silently rebuild from partial input; points at the declaration and the stored-state provenance. |
 | `KeyedRecurrenceBoundViolated` | Error (fails the consuming run, transactionally) | The `key_recurrence` bound was disproved by the consuming run's check (`incremental_models.md`). |
 | `SourceCountPreservationViolated` | Error (fails the consuming run, transactionally) | The count-preservation tripwire disproved a declared `referential_integrity`: an enrichment join licensed by the declaration returned fewer rows than the driving side over the touched region. Names the source, the declared key, and the region checked. |
+| `MalformedExternalStep` | Error | An `external_step:` block violates the shape above: `produces:` absent or empty; a `produces:` entry that does not resolve to a declared source; `columns:` present alongside `external_step:` on the same file; a malformed `command:` (not a non-empty argv list); a malformed `cadence:` interval. |
+| `SourceProducerConflict` | Error | Two declared steps name the same source in their `produces:` list. |
+| `ExternalStepNotInvocable` | Error (fails the run rather than proceeding) | A run reaches a step that produces a source a selected model depends on, but the run cannot invoke it — no `command:` resolvable in the run environment, a dry run, or an environment that categorically cannot execute external commands. |
+| `ExternalStepFailed` | Error (fails the run) | The step's `command:` exited non-zero. Names the step and its exit code; every model downstream of the sources it produces is left unbuilt. |
 
 ## Semantics
 
@@ -312,6 +357,11 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 6. **Smelt does not validate that the source exists.** A reference to a non-existent source surfaces only at execution time as a backend error; `smelt verify` is the on-demand pass that checks declared sources (existence, columns, probes) against the live database.
 7. **Address-only references.** A source has no body for the planner to inspect — it is black-box, like an `extern`, but addressable by path rather than by bare name (`architecture.md` §"Two orthogonal axes").
 8. **Discovery and uniqueness.** A source's address is its workspace path under `paths:`, with the scan-root prefix stripped. The cross-path uniqueness rule (`architecture.md` §"Resolution") applies.
+9. **An external step is ordered ahead of every consumer of the sources it produces.** A run that selects a downstream model pulls in the step the same way it pulls in any upstream node; the step runs before anything reading its produced sources is built.
+10. **A step's success advances the frontier of the sources it produces**, exactly as a maintained model's successful write advances its own; a step's failure does not.
+11. **A non-zero exit from a step's `command:` is a run failure naming the step** (`ExternalStepFailed`), and leaves every model downstream of its produced sources unbuilt — the same fail-loud posture as any other run failure, never a silent skip to stale data.
+12. **A run that cannot invoke a reached step refuses rather than proceeding** (`ExternalStepNotInvocable`): no resolvable command, a dry run, or an environment that cannot execute external commands. Reading the produced sources' possibly-stale existing content instead is never the fallback.
+13. **What smelt does not guarantee about a step.** smelt never authors, parses, or inspects the step's `command:` — it is invoked and observed by exit code only. smelt applies no retry policy beyond whatever the run's existing general retry policy already provides; it grants no idempotence guarantee over re-invocation, and makes no claim that the program actually populated what the produced sources declare — that trust is governed exactly as any other source's world-facts are (§Semantics "The trust rule"): a step producing a source is not itself a verification mechanism.
 
 ## Design
 
@@ -339,6 +389,23 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 
 **`materialization:` not allowed on sources.** Sources are external by definition — there is no smelt-controlled materialization.
 
+**An external step is a distinct declaration kind, not a `produced_by:` key on a source.** A
+per-source key was the cheaper-looking option — it reuses the source's existing contract
+surface at the cost of one field — but two things rule it out. First, a single external
+program routinely produces more than one relation in one invocation (the BigQuery dogfood
+loader populates `raw.github_events` and its redelivery arm `raw.github_events_arrival` from
+one script run); a key on each source would duplicate the producer identifier across both
+declarations and let the two copies drift, and smelt's graph would carry two nodes for what
+is really one invocation. Second, the source YAML grammar is shared verbatim with seed
+sidecars (`seeds.md`), so a key meaningful on exactly one of the two overloads a grammar the
+resolver already disambiguates by a sibling-`.csv` rule. Naming the sources a step produces,
+rather than naming a producer on each source, makes "at most one producing step per source" a
+single validation over the step set, and adding a step needs no edit to any source — the
+source keeps the whole contract for *what* is produced (schema and world-facts), the step
+carries only *who* produces it, *how* it is invoked, and its cadence. A step is a node smelt
+orders and invokes, not a general plugin or hook system — it has exactly one shape (produces
+a fixed set of declared sources, runs a fixed command) and no extension points beyond it.
+
 ## Constraints & Invariants
 
 1. A `.yml` file with no sibling `.csv` is a source; with a sibling `.csv` it is a sidecar. The kinds are disjoint.
@@ -350,6 +417,9 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 7. **A `smelt.sources.<path>` reference resolves by its path prefix, not a separate namespace.** Addressing is the single `smelt.<path>` scheme (`architecture.md`); the path prefix is dispositive over any same-named model.
 8. **No narrowing declaration is consumed without its verification mechanism.** A licence read from a declared world-fact must be revocable by a tripwire, probe, or plan-time check; wiring the licence without the check is a spec violation, not an optimisation. `model_properties.md` §"Probe obligation" states the same rule for model-scoped declarations and registers this spec's mechanisms by name.
 9. **Undeclared is strictest** (except retention's trusted-replayable default, deliberately): absence of a world-fact must never license a cheaper technique than its most conservative value would.
+10. **A source has at most one producing step.** Two declared steps naming the same source in `produces:` is a hard error (`SourceProducerConflict`).
+11. **A step's `produces:` list is never empty.** A step with nothing to produce is malformed (`MalformedExternalStep`).
+12. **smelt never authors or parses a step's program.** The `command:` argv is opaque; smelt's only observation of it is its exit code.
 
 ## Known Divergences / Open Questions
 
@@ -375,6 +445,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 - **Probe cost governance is open**: which tripwires run per-run vs sampled vs on-demand — likely a project-level policy key, not per-source (`docs/research/20260705-refresh-as-maintenance-plan/05-source-properties.md` §Open questions).
 - **Column-level tests on sources.** Same status as for seeds — per-column assertions on the shared YAML grammar are not yet defined.
 - **Co-location with seeds.** A `.yml` declaring a source can be co-located with seed CSVs in the same directory (different stems); style guides may discourage mixing, the resolver does not.
+- **External steps are specified but not yet parsed, ordered, or invoked.** `external_step:` declarations, the `MalformedExternalStep`/`SourceProducerConflict`/`ExternalStepNotInvocable`/`ExternalStepFailed` diagnostics, DAG membership, run-path invocation, and `smelt explain` rendering are all unbuilt — this section states the target surface and semantics only. Tracked by `docs/outcomes/20260906-external-dag-steps/outcome.md`.
 - **The source-side derived grain is landed.** `SourceInfo::resolved_grain` derives the effective grain label from a source's declared clock/identity facts via the same pure derivation a model output's `grain` reads, and `smelt explain <model>` prints it for every source edge alongside the model's own contract (`models.md` §"The Relation Contract"). Only the clock/identity/derived-grain slots render this way; the mutation/completeness/replay slots remain readable only from the source YAML itself.
 
 ## References
@@ -390,6 +461,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
   - `docs-site/docs/guide/sources.md` — user-facing source guide.
   - `docs-site/docs/reference/sources-yml.md` — per-key YAML reference (to be reconciled with this spec by the migration plan).
 - **Plans (history)**: `docs/plans/20260403-sources-yml-live-updates.md` (prior aggregate-shape work, superseded); `docs/plans/20260704-model-updates.md`.
+- **Research**: `docs/research/20260906-bigquery-dogfood.md` §"Black-box steps in the DAG" — the motivating case for external steps; `docs/handoffs/2026-09-08-github-activity-findings.md` §"Requirements handed to `20260906-external-dag-steps`" — the real loader's shape and what a declaration needs to express.
 - **Related specs**:
   - `architecture.md` §"Resolution" — kind-determination, sidecar tiebreaker, cross-path uniqueness.
   - `seeds.md` — shares the YAML grammar; the load-side complement of this spec.
