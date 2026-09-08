@@ -237,6 +237,35 @@ pub fn maintenance_plan_diagnostics(
                     reason: reason.clone(),
                 })
             }
+            smelt_logical::maintenance::Refusal::SourceRetentionExceeded {
+                source,
+                required_lookback_secs,
+                retained_secs,
+            } => Some(MaintenanceRefusal::SourceRetentionExceeded {
+                source: source.clone(),
+                required_lookback_secs: *required_lookback_secs,
+                retained_secs: *retained_secs,
+            }),
+        })
+        .collect();
+    let retention_downgrades: Vec<RetentionDowngradeDiagnostic> = result
+        .plan
+        .retention_downgrades
+        .iter()
+        .map(|d| RetentionDowngradeDiagnostic {
+            source: d.source.clone(),
+            retained_secs: d.retained.0,
+            reason: match d.reason {
+                smelt_logical::analysis::retention_reach::UnprovableReason::UnboundedReach => {
+                    "the source requires reading unbounded history (e.g. a cumulative \
+                     aggregation)"
+                        .to_string()
+                }
+                smelt_logical::analysis::retention_reach::UnprovableReason::ReachNotDerivable => {
+                    "the required reach could not be derived from the SQL patterns present"
+                        .to_string()
+                }
+            },
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -345,5 +374,6 @@ pub fn maintenance_plan_diagnostics(
         state_downgrades,
         contract_state_refusals,
         succession_advisories: result.succession_advisories,
+        retention_downgrades,
     }
 }

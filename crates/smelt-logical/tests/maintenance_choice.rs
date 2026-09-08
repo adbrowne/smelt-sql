@@ -48,6 +48,7 @@ fn admitted_column_merge_plan(source: &str) -> MaintenancePlan {
         }],
         refusals: vec![],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 

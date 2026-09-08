@@ -471,6 +471,8 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::SuccessionDeleteFilterMisplaced => "succession-delete-filter-misplaced",
         DbCode::SuccessionPreFilterNegatesFlag => "succession-pre-filter-negates-flag",
         DbCode::SuccessionPatternUnrecognized => "succession-pattern-unrecognized",
+        DbCode::SourceRetentionExceeded => "source-retention-exceeded",
+        DbCode::SourceRetentionDowngraded => "source-retention-downgraded",
     }
 }
 

@@ -381,10 +381,17 @@ pub fn derive_model_maintenance_plan(
         &added_columns,
     );
 
-    let mut plan = derive_maintenance_plan_with_referential_integrity(
+    // Reach-versus-retention (`model_properties.md` §"Reach versus retained
+    // history"): built from the same `source_refs` this function already
+    // takes for succession-context resolution, rather than a new parameter —
+    // every one of this function's dozens of existing call sites stays
+    // unaffected by a channel this phase alone introduces.
+    let retentions = build_source_retentions(source_refs);
+    let mut plan = smelt_logical::maintenance::derive::derive_maintenance_plan_with_referential_integrity_and_retentions(
         &inputs,
         &triggers,
         source_referential_integrity,
+        &retentions,
     );
     plan.key_locality = established_key_locality.map(|slice| {
         let bound = smelt_logical::maintenance::locality::settle_bound(&slice);

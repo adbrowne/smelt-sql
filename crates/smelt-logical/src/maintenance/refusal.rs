@@ -121,6 +121,20 @@ pub enum Refusal {
     SuccessionNotRecognized {
         reason: crate::analysis::succession::NotSuccessionReason,
     },
+    /// A model's derived required reach into a declared-`retention:` source
+    /// (`analysis::retention_reach::RetentionVerdict::Exceeds`) is *proven*
+    /// to exceed the source's retained bound — the recompute would silently
+    /// rebuild from partial input (`docs/specs/sources.md` §Semantics 5
+    /// "Retention refusal"). The `SourceRetentionExceeded` diagnostic. Unlike
+    /// `UnprovableWithin`'s recorded downgrade
+    /// ([`crate::maintenance::RetentionDowngrade`]), this always blocks the
+    /// plan — the totality of the two is `model_properties.md` §"Reach
+    /// versus retained history"'s no-silent-under-read mapping.
+    SourceRetentionExceeded {
+        source: String,
+        required_lookback_secs: u64,
+        retained_secs: u64,
+    },
 }
 
 /// The diagnostic-code **name** a refusal of this shape raises through the
@@ -187,6 +201,7 @@ pub fn refusal_code(refusal: &Refusal) -> Option<&'static str> {
                 PatternUnrecognized(_) => "SuccessionPatternUnrecognized",
             })
         }
+        Refusal::SourceRetentionExceeded { .. } => Some("SourceRetentionExceeded"),
     }
 }
 
@@ -255,6 +270,11 @@ mod refusal_code_tests {
                 reason: crate::analysis::succession::NotSuccessionReason::PatternUnrecognized(
                     "r".to_string(),
                 ),
+            },
+            Refusal::SourceRetentionExceeded {
+                source: "s".to_string(),
+                required_lookback_secs: 100,
+                retained_secs: 10,
             },
         ];
         for r in &sample {

@@ -155,6 +155,19 @@ refusal or degradation it licenses (`sources.md`'s `SourceRetentionExceeded` and
 contract, `state.md` §"The degradation contract") is a separate consumer's concern, layered on top
 of this fold rather than folded into it.
 
+The consumer's mapping from verdict to outcome is total and admits exactly three shapes, no
+others: `Exceeds` refuses (`sources.md`'s `SourceRetentionExceeded`) — a proof that the reach does
+not fit is never silently admitted. `UnprovableWithin` takes a recorded downgrade
+(`SourceRetentionDowngraded`, Warning) rather than an optimistic admission — the absence of a proof
+of fit is not evidence of fit, so the model's pre-bound region stops being claimed replayable,
+mirroring the degradation contract's own posture for a missing state structure (`state.md`
+§"The degradation contract") applied here to a missing proof instead. `Within` and
+`NoDeclaredBound` record nothing — an honoured bound, or a source with no bound to honour, is not
+news, and recording one anyway would train operators to ignore the diagnostic that matters. This
+totality is itself the no-silent-under-read property: every verdict this fold can produce lands in
+exactly one of refusal, recorded downgrade, or silence, so no path can compute a smaller answer
+without one of the first two having fired.
+
 ### Algebraic discriminants (the raw facts, not the ladder)
 
 This spec owns the **discriminants** — is-monoid, needs-inverse, decomposable, value-vs-order-monotone — as static properties of the combiner algebra in the SQL. They are raw facts: `SUM`/`COUNT` are commutative monoids that are also groups (invertible); `MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR` are monoids that are **not** groups (a contribution cannot be un-seen); `AVG`/variance/approx-distinct are decomposable into a richer monoid element; `MEDIAN`/`MODE`/exact-`COUNT(DISTINCT)` are holistic. `MIN`/`MAX`/`EXISTS` are value-monotone (the value moves one way); `MAX_BY` is order-monotone (a semilattice fold whose presented value may switch). The **ordering** of these facts into a ladder, and the maintainable-vs-delegated cutoff, are a maintenance consequence and live in `incremental_models.md` — this spec states only which discriminant each combiner has. The concrete state shape a `decomposable` combiner decomposes into, and how the key-addressed profile stores and hides it, is catalogued in `incremental_shapes.md` §"Decomposed state (rung 2) in keyed models" — this spec proves only the discriminant, never a state layout.

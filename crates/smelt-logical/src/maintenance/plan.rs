@@ -34,6 +34,14 @@ pub struct MaintenancePlan {
     /// block, or a locality refusal (in which case the plan is
     /// [`locality_refused_plan`]'s no-cells shape instead).
     pub key_locality: Option<KeyLocality>,
+    /// Every recorded retention downgrade (`retention::retention_outcomes`'s
+    /// `UnprovableWithin` half, `model_properties.md` §"Reach versus
+    /// retained history") — plan-level, not per-cell, since the verdict is a
+    /// property of the model against a source, not of any one cell (the
+    /// same rationale `fingerprint_projections` shares across every cell).
+    /// Empty for a model that declares no `retention:`-bearing sources, or
+    /// whose reach was proven to fit every one it does.
+    pub retention_downgrades: Vec<RetentionDowngrade>,
 }
 
 impl MaintenancePlan {
@@ -94,6 +102,7 @@ pub fn unsupported_grain_plan(grain: &str) -> MaintenancePlan {
             tracking_plan: UNSUPPORTED_GRAIN_TRACKING_PLAN.to_string(),
         }],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 
@@ -109,6 +118,7 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::LocalityNotEstablished { message }],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 
@@ -123,6 +133,7 @@ pub fn succession_refused_plan(
         cells: Vec::new(),
         refusals: vec![Refusal::SuccessionNotRecognized { reason }],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 
@@ -139,6 +150,7 @@ pub fn recurrence_mismatch_plan(message: String) -> MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::KeyedRecurrenceDeclarationMismatch { message }],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 
@@ -151,6 +163,7 @@ pub fn identity_not_derivable_plan(message: String) -> MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::IdentityNotDerivable { message }],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 

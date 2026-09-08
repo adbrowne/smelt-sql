@@ -67,6 +67,7 @@ fn report_for_with_overrides(
             cells: vec![cell],
             refusals: vec![],
             key_locality: None,
+            retention_downgrades: Vec::new(),
         },
         // `base_cell`'s group is `{tier}` (`ColumnGroup::name()` derives
         // the display name from `columns`), matching the single column

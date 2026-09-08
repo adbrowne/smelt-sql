@@ -19,10 +19,7 @@ use smelt_core::config::{
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
 use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
-use smelt_logical::maintenance::derive::{
-    derive_maintenance_plan_with_referential_integrity, FoldSpec, ModelInputs,
-    SourceReferentialIntegrity,
-};
+use smelt_logical::maintenance::derive::{FoldSpec, ModelInputs, SourceReferentialIntegrity};
 use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
 use smelt_logical::maintenance::locality::{
@@ -130,11 +127,12 @@ pub use facts_and_fold::{derive_fold_spec, effective_scan_bounds, source_facts};
 pub use plan::{derive_model_maintenance_plan, derive_model_maintenance_plan_with_edges};
 pub use plan_helpers::{
     build_key_recurrences, build_source_facts, build_source_referential_integrity,
-    build_succession_context, cell_column_group_violations, single_clocked_source_granularity,
+    build_source_retentions, build_succession_context, cell_column_group_violations,
+    single_clocked_source_granularity,
 };
 pub use refusal_diag::{
     diagnostic_for_refusal, ContractStateRefusalDiagnostic, MaintenancePlanDiagnostics,
-    MaintenanceRefusal, StateDowngradeDiagnostic, WritePinDiagnostic,
+    MaintenanceRefusal, RetentionDowngradeDiagnostic, StateDowngradeDiagnostic, WritePinDiagnostic,
 };
 pub use write_pin::{
     backend_dialect_for, backend_write_capabilities_for, keyed_fold_effective_override,

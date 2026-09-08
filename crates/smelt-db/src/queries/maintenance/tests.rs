@@ -1088,3 +1088,167 @@ fn declared_grain_models_are_unchanged() {
     .expect("grain: key model must derive a plan");
     assert!(!key_result.plan.cells.is_empty());
 }
+
+/// A `SourceInfo` declaring `timeseries:` and `retention:` — the shape
+/// `retention_reach.rs`'s `derive_retention_verdicts` needs a real proof
+/// against, resolved end-to-end through `maintenance_plan_diagnostics`
+/// (`docs/specs/model_properties.md` §"Reach versus retained history").
+fn source_info_with_retention(retention: &str) -> SourceInfo {
+    SourceInfo {
+        path: std::path::PathBuf::from("/tmp/events.yml"),
+        address_segments: vec!["sources".to_string(), "events".to_string()],
+        columns: vec![],
+        description: None,
+        name_override: None,
+        tags: vec![],
+        timeseries: Some(smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        }),
+        mutation_profile: Some(smelt_core::sources::SourceMutationProfile::from_kind(
+            SourceMutationKind::AppendOnly,
+        )),
+        source_lateness: None,
+        watermark: None,
+        unique_key: None,
+        retention: Some(smelt_core::config::DataLatency::parse(retention).unwrap()),
+        referential_integrity: None,
+    }
+}
+
+fn retention_partition_metadata() -> ModelMetadata {
+    ModelMetadata {
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(ConfigGrain::Partition),
+        timeseries: Some(smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        }),
+        ..Default::default()
+    }
+}
+
+/// A 30-day lookback over a source retained for only 7 days projects to
+/// `SourceRetentionExceeded` at `Error` severity, naming both intervals
+/// (`docs/specs/model_properties.md` §"Reach versus retained history").
+#[test]
+fn retention_refusal_maps_to_source_retention_exceeded_error() {
+    let sql = "SELECT event_date, COUNT(*) AS n FROM smelt.sources.events \
+               WHERE event_date >= CURRENT_DATE - INTERVAL '30 days' GROUP BY event_date";
+    let metadata = retention_partition_metadata();
+    let source_refs = vec![(
+        "events".to_string(),
+        Some(source_info_with_retention("7 days")),
+    )];
+    let diags = maintenance_plan_diagnostics(
+        sql,
+        "main.events_daily",
+        &metadata,
+        &source_refs,
+        None,
+        &[],
+        &[],
+        smelt_core::config::WarehouseTables::default(),
+        &[],
+        None,
+        None,
+    );
+    assert_eq!(diags.refusals.len(), 1, "{:?}", diags.refusals);
+    let (severity, code, message) = diagnostic_for_refusal(&diags.refusals[0])
+        .expect("SourceRetentionExceeded must map to a real diagnostic");
+    assert_eq!(
+        severity,
+        crate::diagnostics_types::DiagnosticSeverity::Error
+    );
+    assert_eq!(
+        code,
+        crate::diagnostics_types::DiagnosticCode::SourceRetentionExceeded
+    );
+    assert!(message.contains("2592000"), "message: {message}"); // 30 days
+    assert!(message.contains("604800"), "message: {message}"); // 7 days
+    assert!(
+        diags.retention_downgrades.is_empty(),
+        "{:?}",
+        diags.retention_downgrades
+    );
+}
+
+/// A reach the unified derivation cannot bound at all (an unbounded window)
+/// against a declared `retention:` records a Warning-level
+/// `SourceRetentionDowngraded`, never an Error — and the model still derives
+/// cells, since a downgrade is not a refusal
+/// (`docs/specs/sources.md` §Semantics 5).
+#[test]
+fn retention_downgrade_surfaces_as_a_warning_never_an_error() {
+    let sql = "SELECT event_date, \
+               SUM(amount) OVER (PARTITION BY event_date ORDER BY event_date \
+                   RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running \
+               FROM smelt.sources.events";
+    let metadata = retention_partition_metadata();
+    let source_refs = vec![(
+        "events".to_string(),
+        Some(source_info_with_retention("45 days")),
+    )];
+    let diags = maintenance_plan_diagnostics(
+        sql,
+        "main.events_daily",
+        &metadata,
+        &source_refs,
+        None,
+        &[],
+        &[],
+        smelt_core::config::WarehouseTables::default(),
+        &[],
+        None,
+        None,
+    );
+    assert!(
+        diags
+            .refusals
+            .iter()
+            .all(|r| !matches!(r, MaintenanceRefusal::SourceRetentionExceeded { .. })),
+        "{:?}",
+        diags.refusals
+    );
+    assert_eq!(
+        diags.retention_downgrades.len(),
+        1,
+        "{:?}",
+        diags.retention_downgrades
+    );
+    assert_eq!(diags.retention_downgrades[0].source, "events");
+    assert_eq!(diags.retention_downgrades[0].retained_secs, 45 * 86400);
+
+    let sources = vec![SourceFacts {
+        name: "events".to_string(),
+        mutation: PlanMutationProfile::AppendOnly,
+        partition_col: Some("event_date".to_string()),
+        unique_key: vec![],
+        allow_full_scan: false,
+    }];
+    let result = derive_model_maintenance_plan(
+        sql,
+        "main.events_daily",
+        &metadata,
+        &sources,
+        &std::collections::HashSet::new(),
+        None,
+        &[],
+        &[],
+        &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+        None,
+        None,
+        &source_refs,
+    )
+    .expect("a downgrade must not block plan derivation");
+    assert!(
+        !result.plan.cells.is_empty(),
+        "a downgrade is not a refusal — the model must still derive cells"
+    );
+}

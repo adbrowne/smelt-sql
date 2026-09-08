@@ -361,6 +361,7 @@ fn choice_rs_execution_semantics_unchanged() {
         }],
         refusals: vec![],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     };
     let trigger = Trigger::UpstreamMutation {
         source: "users".to_string(),

@@ -931,6 +931,21 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             })
             .accumulate(db);
         }
+        for downgrade in &plan_diags.retention_downgrades {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "SourceRetentionDowngraded: the required reach into '{}' could not be \
+                     proven to fit inside its {}s retained bound — {}; this model's pre-bound \
+                     region is no longer claimed replayable",
+                    downgrade.source, downgrade.retained_secs, downgrade.reason
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::SourceRetentionDowngraded),
+                data: None,
+            })
+            .accumulate(db);
+        }
         for advisory in &plan_diags.succession_advisories {
             let smelt_logical::analysis::succession::SuccessionAdvisory::PreFilterNegatesFlag {
                 column,

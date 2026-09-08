@@ -90,6 +90,15 @@ pub enum MaintenanceRefusal {
     SuccessionNotRecognized {
         reason: smelt_logical::analysis::succession::NotSuccessionReason,
     },
+    /// `SourceRetentionExceeded` — a model's derived required reach into a
+    /// declared-`retention:` source is proven to exceed the source's
+    /// retained bound (`docs/specs/model_properties.md` §"Reach versus
+    /// retained history").
+    SourceRetentionExceeded {
+        source: String,
+        required_lookback_secs: u64,
+        retained_secs: u64,
+    },
 }
 
 /// The `(severity, code, message)` a `MaintenanceRefusal` of this shape
@@ -264,6 +273,20 @@ pub fn diagnostic_for_refusal(
                 format!("{code:?}: {detail}"),
             )
         }
+        MaintenanceRefusal::SourceRetentionExceeded {
+            source,
+            required_lookback_secs,
+            retained_secs,
+        } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::SourceRetentionExceeded,
+            format!(
+                "maintenance over '{source}' requires {required_lookback_secs}s of history but \
+                 only {retained_secs}s is retained — a recompute reaching past the retained \
+                 bound would silently rebuild from partial input \
+                 (docs/specs/sources.md §\"Retention refusal\")",
+            ),
+        ),
     })
 }
 
@@ -300,6 +323,19 @@ pub struct StateDowngradeDiagnostic {
     /// (`write_pin_diagnostics`'s own one-per-cell posture).
     pub backend: String,
     /// [`smelt_logical::maintenance::availability::StateDowngrade::reason`].
+    pub reason: String,
+}
+
+/// One recorded retention downgrade
+/// ([`smelt_logical::maintenance::RetentionDowngrade`]), rendered for
+/// `SourceRetentionDowngraded` (`docs/specs/sources.md` §Semantics 5). Salsa-
+/// safe (`PartialEq`) projection — mirrors [`StateDowngradeDiagnostic`]'s own
+/// reason for existing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionDowngradeDiagnostic {
+    pub source: String,
+    pub retained_secs: u64,
+    /// Rendered from [`smelt_logical::analysis::retention_reach::UnprovableReason`].
     pub reason: String,
 }
 
@@ -365,4 +401,10 @@ pub struct MaintenancePlanDiagnostics {
     /// `file_diagnostics`, alongside the `state_downgrades` loop. Never
     /// changes admission.
     pub succession_advisories: Vec<smelt_logical::analysis::succession::SuccessionAdvisory>,
+    /// Every recorded retention downgrade
+    /// (`smelt_logical::maintenance::MaintenancePlan::retention_downgrades`,
+    /// `docs/specs/model_properties.md` §"Reach versus retained history") —
+    /// folded into a `SourceRetentionDowngraded` Warning diagnostic per
+    /// source (`docs/specs/sources.md` §Semantics 5).
+    pub retention_downgrades: Vec<RetentionDowngradeDiagnostic>,
 }

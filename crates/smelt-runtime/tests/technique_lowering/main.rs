@@ -124,6 +124,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
         }],
         refusals: vec![],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 
@@ -137,6 +138,7 @@ fn refused_plan(source: &str) -> MaintenancePlan {
             why: "derived scan is unbounded".to_string(),
         }],
         key_locality: None,
+        retention_downgrades: Vec::new(),
     }
 }
 

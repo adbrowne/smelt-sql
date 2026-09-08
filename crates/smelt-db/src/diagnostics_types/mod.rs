@@ -1141,6 +1141,24 @@ pub enum DiagnosticCode {
     /// `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the
     /// scope, or a model resembling no admitted grain.
     SuccessionPatternUnrecognized,
+
+    /// Emitted (Error) when a model's derived required reach into a
+    /// declared-`retention:` source is proven to exceed the source's
+    /// retained bound (`docs/specs/model_properties.md` §"Reach versus
+    /// retained history", `docs/specs/sources.md` §Semantics 5 "Retention
+    /// refusal") — a recompute reaching past the retained bound would
+    /// silently rebuild from partial input. Names the source, the required
+    /// reach, and the retained bound. Anchored at the model SQL body start.
+    SourceRetentionExceeded,
+    /// Emitted (Warning) when a model's derived required reach into a
+    /// declared-`retention:` source could not be *proven* to fit inside the
+    /// bound (an unbounded or otherwise underivable reach,
+    /// `docs/specs/model_properties.md` §"Reach versus retained history"'s
+    /// `UnprovableWithin` verdict) — admitted, but the model's pre-bound
+    /// region stops being claimed replayable. Names the source, the
+    /// retained bound, and why the reach was unprovable. Anchored at the
+    /// model SQL body start.
+    SourceRetentionDowngraded,
 }
 
 /// Structured metadata attached to diagnostics for code actions

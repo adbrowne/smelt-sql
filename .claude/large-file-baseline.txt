@@ -29,14 +29,14 @@ crates/smelt-datagen/src/config.rs 1354
 crates/smelt-datagen/src/generic_parquet.rs 2305
 crates/smelt-datagen/src/generic.rs 1506
 crates/smelt-datagen/tests/example_web_analytics.rs 2946
-crates/smelt-db/src/diagnostics_types/mod.rs 1211
-crates/smelt-db/src/file_check.rs 1333
+crates/smelt-db/src/diagnostics_types/mod.rs 1229
+crates/smelt-db/src/file_check.rs 1348
 crates/smelt-db/src/function_body_check.rs 4470
 crates/smelt-db/src/loader.rs 1869
 crates/smelt-db/src/queries/check_types.rs 1171
 crates/smelt-db/src/queries/function_diagnostics.rs 2595
 crates/smelt-db/src/queries/loader.rs 1082
-crates/smelt-db/src/queries/maintenance/tests.rs 1090
+crates/smelt-db/src/queries/maintenance/tests.rs 1254
 crates/smelt-db/src/queries/project.rs 4137
 crates/smelt-db/src/queries/schema.rs 2124
 crates/smelt-db/src/tests.rs 6071
@@ -75,7 +75,7 @@ crates/smelt-logical/tests/emit_statements.rs 1710
 crates/smelt-logical/tests/keyed_families.rs 1309
 crates/smelt-logical/tests/maintenance_grouping.rs 1072
 crates/smelt-lsp/src/backend/hover_impl.rs 1072
-crates/smelt-lsp/src/backend/mod.rs 1295
+crates/smelt-lsp/src/backend/mod.rs 1297
 crates/smelt-lsp/src/backend/rename_impl.rs 1173
 crates/smelt-lsp/src/hover.rs 3032
 crates/smelt-lsp/src/tests.rs 2828

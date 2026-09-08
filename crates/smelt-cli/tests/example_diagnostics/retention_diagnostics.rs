@@ -1,9 +1,12 @@
 //! `examples/broken/models/sources/retention_*.yml` fixtures each produce
 //! exactly one `MalformedSource` diagnostic, and no other `examples/broken`
-//! file regresses.
+//! file regresses. `models/retention_exceeded.sql` (a well-formed
+//! `retention: '7 days'` source read with a 30-day lookback) produces
+//! exactly one `SourceRetentionExceeded`.
 //!
 //! Spec: `docs/specs/sources.md` §"Retention refusal", §"Diagnostic codes".
-//! Plan: `docs/outcomes/20260906-trimmed-history-sources/phases/02-plan.md`.
+//! Plan: `docs/outcomes/20260906-trimmed-history-sources/phases/02-plan.md`,
+//! `phases/04-plan.md`.
 
 use crate::support::*;
 
@@ -119,5 +122,98 @@ fn broken_workspace_retention_fixtures() {
             .iter()
             .map(|d| format!("{}: {}", d.path.display(), d.diagnostic.message))
             .collect::<Vec<_>>()
+    );
+}
+
+/// Phase 4 TDD: `examples/broken/models/retention_exceeded.sql` reaches 30
+/// days back into `sources/retention_exceeded_events.yml`'s well-formed
+/// `retention: '7 days'` — refuses with exactly one `SourceRetentionExceeded`
+/// diagnostic, and no other file in the shared `examples/broken/` workspace
+/// carries that code (`docs/specs/model_properties.md` §"Reach versus
+/// retained history").
+#[test]
+fn broken_retention_exceeded_example_reports_the_named_code() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, DiagnosticCode, Workspace};
+
+    let expected_file = "models/retention_exceeded.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/broken");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel.replace('\\', "/").ends_with(expected_file);
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if d.code != Some(DiagnosticCode::SourceRetentionExceeded) {
+                continue;
+            }
+            if is_target {
+                target.push(d.clone());
+            } else {
+                other.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if d.0.code != Some(DiagnosticCode::SourceRetentionExceeded) {
+                continue;
+            }
+            if is_target {
+                target.push(d.0.clone());
+            } else {
+                other.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "expected zero SourceRetentionExceeded diagnostics from files other than \
+         '{expected_file}', got {}:\n  {}",
+        other.len(),
+        other
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        target.len(),
+        1,
+        "expected exactly one SourceRetentionExceeded diagnostic from '{expected_file}', got {}:\n  {}",
+        target.len(),
+        target
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
     );
 }
