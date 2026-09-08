@@ -186,13 +186,21 @@ pub fn key_expr_for_columns(columns: &[String]) -> String {
 /// columns to digest and which key columns identify a row; this emitter
 /// only builds the SQL.
 ///
-/// `dialect` is accepted for signature symmetry with every other emitter in
-/// this module; only the DuckDB shape is built today (`sha256()` is a
-/// DuckDB built-in scalar function) — a Spark digest-select variant is
-/// unbuilt, matching this phase's DuckDB-only sidecar scope. The runtime
-/// caller (`smelt_runtime::maintenance_driver`) gates on the backend's
-/// dialect before ever reaching this function, so a Spark target fails
-/// loud at that call site rather than being handed DuckDB-flavored SQL.
+/// `dialect` selects the digest expression's shape via
+/// [`row_fingerprint_expr`] — DuckDB's `sha256(...)`, GoogleSQL's
+/// `TO_HEX(SHA256(...))` (its `SHA256` returns `BYTES`), or Spark's
+/// `sha256(...)` over a `STRING` cast. The rest of the emitted statement —
+/// `delta_key`, from [`key_expr_for_columns`] — is still DuckDB-shaped
+/// (`CAST(... AS VARCHAR)`, which GoogleSQL has no such type for at all);
+/// see that function's own doc comment and
+/// `docs/outcomes/20260906-bigquery-correctness/phases/02-plan.md` for that
+/// residue, not fixed here. The runtime caller
+/// (`smelt_runtime::maintenance_driver`) gates on the backend's
+/// `supports_fingerprint_sidecar` capability before ever reaching this
+/// function today, so a non-DuckDB target does not yet reach the
+/// still-DuckDB-shaped `delta_key` half in practice
+/// (`docs/outcomes/20260906-bigquery-correctness/outcome.md`'s decision
+/// log, phase 1).
 ///
 /// # Panics
 /// Panics if `source_key` or `digest_columns` is empty — a caller with no
@@ -202,7 +210,7 @@ pub fn emit_fingerprint_digest_select(
     source_table: &str,
     source_key: &[String],
     digest_columns: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> String {
     assert!(
         !source_key.is_empty(),
@@ -213,7 +221,7 @@ pub fn emit_fingerprint_digest_select(
         "emit_fingerprint_digest_select requires a non-empty digest column set for {source_table}"
     );
     let key_expr = key_expr_for_columns(source_key);
-    let digest_expr = row_fingerprint_expr(digest_columns, MaintenanceDialect::DuckDb);
+    let digest_expr = row_fingerprint_expr(digest_columns, dialect);
     format!("SELECT {key_expr} AS delta_key, {digest_expr} AS delta_digest FROM {source_table}")
 }
 
@@ -568,6 +576,94 @@ mod fingerprint_sidecar_tests {
              VARCHAR)) END), sha256(CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier \
              AS VARCHAR)) END))) AS delta_digest"
         ));
+    }
+
+    #[test]
+    fn digest_select_uses_duckdb_hash_spelling_on_duckdb() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(sql.contains("sha256("));
+        assert!(sql.contains("CAST(name AS VARCHAR)"));
+    }
+
+    /// **Red before phase 1's fix**: `emit_fingerprint_digest_select`
+    /// ignored its `dialect` parameter and always built DuckDB's `sha256`
+    /// spelling for the digest, so a BigQuery caller received SQL GoogleSQL
+    /// cannot run for the row-content hash (`SHA256` returns `BYTES` there,
+    /// so it needs hex-encoding before it can feed a `STRING_AGG`). The
+    /// `delta_key` half (`CAST(... AS VARCHAR)`) stays DuckDB-shaped by
+    /// design — that residue is phase 2's, not this one's — so this test
+    /// only pins the `delta_digest` expression's own outer wrapping.
+    #[test]
+    fn digest_select_uses_googlesql_hash_spelling_on_bigquery() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(sql.contains("TO_HEX(SHA256("));
+        assert!(sql.ends_with("AS delta_digest FROM raw.dim_users"));
+        assert!(sql.contains("TO_HEX(SHA256(sha256(CASE WHEN name IS NULL"));
+    }
+
+    #[test]
+    fn digest_select_uses_spark_string_cast_on_spark() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::Spark,
+        );
+        assert!(sql.contains("sha256("));
+        assert!(sql.contains("CAST(name AS STRING)"));
+    }
+
+    /// Pins the invariant that makes the phase-1 defect unrepeatable: the
+    /// emitter never re-authors the hash shape itself, it only ever
+    /// delegates to [`row_fingerprint_expr`] for the caller's own dialect.
+    #[test]
+    fn digest_select_matches_row_fingerprint_expr_for_every_dialect() {
+        let digest_columns = vec!["name".to_string(), "tier".to_string()];
+        for dialect in [
+            MaintenanceDialect::DuckDb,
+            MaintenanceDialect::Spark,
+            MaintenanceDialect::BigQuery,
+        ] {
+            let sql = emit_fingerprint_digest_select(
+                "raw.dim_users",
+                &["user_id".to_string()],
+                &digest_columns,
+                dialect,
+            );
+            let expected_digest_expr = row_fingerprint_expr(&digest_columns, dialect);
+            let expected_suffix =
+                format!("{expected_digest_expr} AS delta_digest FROM raw.dim_users");
+            assert!(
+                sql.ends_with(&expected_suffix),
+                "dialect {dialect:?}: expected suffix {expected_suffix:?} in {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sidecar_diff_inherits_the_callers_dialect() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            "smelt_state.fingerprint_sidecar",
+            "raw.dim_users",
+            "proj-1",
+            "consumer.model",
+            "stamp-1",
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(sql.contains("TO_HEX(SHA256("));
     }
 
     /// Regression for the NULL-vs-empty-string digest collision (the first

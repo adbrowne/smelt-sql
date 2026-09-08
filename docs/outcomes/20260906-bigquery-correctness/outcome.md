@@ -71,7 +71,7 @@ difference is either fixed or registered with a reason — never tolerated silen
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | planned |
+| 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | done |
 | 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | pending |
 | 3 | Harvest: read the spine's findings handoff and rewrite the remaining phases from it, moving anything not reached by a spine model to Out of scope with its rationale | pending |
 | 4 | (written by phase 3) | pending |
@@ -80,6 +80,26 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 7 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 1 implementation): **the fixed path is not reachable on a live
+  `mutable_snapshot` run today.** `crates/smelt-dialect/src/dialect.rs` declares
+  `supports_fingerprint_sidecar: true` only for DuckDB (line 218; `spark()`/
+  `spark_delta()`/`spark_parquet()` and `bigquery()` all declare `false`, lines 260, 295,
+  354 in the file as read for this phase). Every runtime entry point in
+  `crates/smelt-runtime/src/maintenance_driver/sidecar.rs` —
+  `diff_fingerprint_sidecar_changed_keys` (line 133),
+  `refresh_fingerprint_sidecar` (line 242), `diff_repair_group_sidecar_changed_keys`
+  (line 389), and `refresh_repair_group_sidecar` (line 493) — checks
+  `backend.capabilities().supports_fingerprint_sidecar` and returns
+  `BackendError::unsupported` before ever calling `emit_fingerprint_digest_select` or
+  `emit_repair_group_digest_select`. So today a BigQuery (or Spark) target never reaches
+  the previously-wrong DuckDB-hardcoded digest SQL at all — the bug was latent, not
+  live-hit. It would become reachable the moment `bigquery()`'s (or a Spark variant's)
+  `supports_fingerprint_sidecar` flips to `true`, which is presumably future work this
+  outcome's punch-list (harvested in phase 3) or a follow-on outcome would drive. The fix
+  still lands now, unconditionally, per criterion 1 and the outcome's framing — it removes
+  a landmine ahead of that capability ever being turned on, rather than waiting for a
+  spine model to trip it.
 
 - 2026-09-08 (phase 1 planning): **reshape — a new row 2 for the remaining dialect-blind
   fingerprint SQL.** Reading the emitter for criterion 1 surfaced two siblings with the
