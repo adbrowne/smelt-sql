@@ -62,12 +62,35 @@ visible in the run report.
 | 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | done |
 | 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | done |
 | 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | done |
-| 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
+| 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | planned |
 | 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
 | 6 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
 | 7 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 4 planning): **five design calls settled, no reshape.** (a) The
+  `command:` **placeholder grammar** is a closed set — `{run_date}` and `{run_end}`,
+  substituted per argv element, `{{`/`}}` escaping to literal braces; an unknown `{name}`
+  is rejected at *declaration* time (`MalformedExternalStep`, so the LSP shows it) rather
+  than at run time, and a placeholder the run has no value for is `ExternalStepNotInvocable`.
+  Closed rather than open (no arbitrary env interpolation) because the step's contract is
+  "smelt never parses the command" — a substitution set smelt cannot enumerate could not be
+  validated fail-loud. (b) **A dry run refuses**, per §Semantics 12 as landed in phase 1: a
+  preview whose plan decisions are derived from frontiers the step has not advanced is
+  exactly "proceeding against a possibly-stale table" in the plan-derivation sense. The
+  consequence is real and accepted — the UI's plan-preview endpoint refuses on a workspace
+  whose selection reaches a step — and `smelt explain` (phase 5) is named in the spec as the
+  non-refusing preview surface for a step. (c) The "environment that cannot execute" leg is
+  one `ExecuteRequest.invoke_external_steps` field defaulting true, **not** a new CLI flag:
+  embedders (UI) opt out, the CLI surface stays unchanged until a user actually needs it.
+  (d) **Required steps run in one sequential pass before the model loop**, not interleaved
+  into `execution_waves` — ordering ahead of every consumer is then structural rather than
+  scheduled, and no wave logic changes. (e) §Semantics 10 (**a step's success advances the
+  produced sources' frontier**) needs **no code**: there is no recorded source-frontier state
+  to advance — a source's frontier is derived from its landed data on the next consuming
+  read — so the guarantee holds by construction. Recorded here rather than given a phase row.
+  Rows 5-7 unchanged; nothing left the outcome.
 
 - 2026-09-08 (phase 3 implementation): **shipped as planned, no reshape.** `DependencyGraph`
   gained `add_external_steps`/`select_nodes`/`steps_required_by`; `select_models` is now a
