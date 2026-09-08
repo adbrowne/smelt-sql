@@ -78,7 +78,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | done |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | done |
 | 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | done |
-| 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | planned |
+| 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | done |
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
 | 9 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
 | 10 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
@@ -108,6 +108,18 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 - 2026-09-09 (phase 6 implement): **gate on `plan.refresh == RefreshStrategy::Incremental`, not `plan.incremental.is_some()`** — the plan's own task 4 named the latter, but it is false for exactly the runs this gate must catch: `build_model_plans`' window-resolution fallback sets `plan.incremental: None` whenever `request.full_refresh` is requested with no explicit `--start`/`--end` (an ordinary `--full-refresh` invocation), collapsing the model to the "full-refresh arm" the way a `materialized_view` model already does by construction. Discovered red (first landing let every full-refresh run through with no gate at all, no error); `plan.refresh` is refresh-strategy-derived and untouched by window resolution, matching that field's own doc comment.
 - 2026-09-09 (phase 6 implement): `request.rebuild` (`smelt rebuild`) does not itself license a whole-table recompute — only `request.allow_full_refresh` (`Explicit`) or `force_full_refresh` (`Forced`, smelt-internal) do. An upstream-closure `smelt rebuild` over a model with stored output and a retained source still needs `--allow-full-refresh`, consistent with reusing that one flag as the sole operator override.
 - 2026-09-09 (phase 6 implement): audited every `--full-refresh` invocation over `examples/github_activity` (`github_activity_oracle.rs`, `github_activity_replay.rs`) — every one stages a fresh workspace/db, so every one is a first build (auto-licensed); no fixture changes were needed.
+- 2026-09-09 (phase 7 implement): confirmed the composed-upstream candidate pool is unreachable
+  at this call site (task 5) — `derive_model_retention_plan` builds `source_refs` from
+  `model_file.refs` matched against `source_infos` alone (no Salsa `db`/`workspace`), so a ref
+  to an upstream *model* never matches and is silently absent, regardless of grain. Left
+  uncovered; recorded as a phase-8 candidate row in `phases/07-summary.md` rather than plumbed
+  here (adding db/workspace access to this call site is not the "cheap" branch task 5 offered).
+- 2026-09-09 (phase 7 implement): the integration fixture's keyed model carries **no** lookback
+  construct — `grain: key` forbids window functions and a self-join of its own driving source,
+  eliminating both constructs a bounded nonzero reach could come from. Used the identity case
+  (`required_lookback: 0`) instead; `retention_refusals_at_age` still refuses on window age
+  alone once it exceeds the retained bound, so this is a real instance of the rolling
+  re-evaluation over a keyed model, not a weakened substitute for one.
 - 2026-09-09 (phase 6 planning): **table reshaped — new row 7 for the keyed-grain
   granularity gap the phase-5 summary surfaced.** `derive_model_retention_plan` passes
   `driving_source_granularity: None`, so a `grain: key` model that declares its own

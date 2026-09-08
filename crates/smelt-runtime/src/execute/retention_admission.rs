@@ -71,10 +71,21 @@ pub(crate) fn window_age(window_start: Option<NaiveDate>, run_clock: NaiveDate) 
 /// derivation (`cargo test -p smelt-runtime --test availability_seam`'s
 /// structural gate). `StateAvailability::all()` since this call never reads
 /// `plan.cells`/`state_downgrade` — none of the fields this call has no use
-/// for (`explicitly_mutable`, `driving_source_granularity`,
-/// `key_recurrences`, deployed-schema facts, referential integrity) reach
-/// the retention fold in `smelt-logical`, which is posed against the
-/// model's own SQL and its declared `retention:` sources alone.
+/// for (`explicitly_mutable`, `key_recurrences`, deployed-schema facts,
+/// referential integrity) reach the retention fold in `smelt-logical`,
+/// which is posed against the model's own SQL and its declared
+/// `retention:` sources alone. `driving_source_granularity` DOES reach the
+/// retention fold indirectly: `establish_locality`'s granularity-equality
+/// precondition gates the whole plan (including `retention_reaches`) behind
+/// `Refusal::LocalityNotEstablished` for a `timeseries:`-bearing model, so
+/// it must be resolved here the same way `smelt-db`'s
+/// `maintenance_refs/plan.rs` (the diagnostics path this derivation must
+/// agree with) resolves it: `single_clocked_granularity` over the
+/// unconditional declared-source candidate pool, never
+/// `clamp_locality.rs`'s `grain: key`-gated form (that form additionally
+/// folds in composed-upstream-model candidates this call site does not
+/// have — see the doc comment on the composed-upstream gap this leaves,
+/// tracked for phase 8).
 pub(crate) fn derive_model_retention_plan(
     model_file: &smelt_core::ModelFile,
     source_infos: &[smelt_core::sources::SourceInfo],
@@ -85,13 +96,19 @@ pub(crate) fn derive_model_retention_plan(
     let (sources, _) = super::key_addressed::build_maint_source_facts(model_file, source_infos);
     let source_refs =
         crate::maintenance_driver::build_succession_source_refs(model_file, source_infos);
+    let clocked_granularities = source_refs
+        .iter()
+        .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()))
+        .map(|t| t.granularity);
+    let driving_source_granularity =
+        smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     let result = crate::maintenance_availability::derive_resolved(
         &sql,
         &table,
         metadata,
         &sources,
         &std::collections::HashSet::new(),
-        None,
+        driving_source_granularity,
         &[],
         &[],
         &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
@@ -282,5 +299,185 @@ mod tests {
         assert_eq!(err.source, "silver.events");
         assert_eq!(err.required_lookback, Seconds::days(67));
         assert_eq!(err.retained, Seconds::days(45));
+    }
+
+    // ---- `driving_source_granularity` resolution at this call site
+    // (`docs/outcomes/20260906-trimmed-history-sources/phases/07-plan.md`
+    // tests 1-3) — staged real files through `ModelDiscovery`/
+    // `discover_source_infos` (no backend needed) rather than hand-built
+    // `ModelFile`/`SourceInfo` literals, so the `refs`/`address_segments`
+    // wiring `derive_model_retention_plan` actually reads is exercised the
+    // same way a real project produces it.
+
+    fn stage_source(dir: &std::path::Path, name: &str, granularity: &str, retention: bool) {
+        std::fs::create_dir_all(dir.join("models/sources")).unwrap();
+        let retention_line = if retention {
+            "retention: '45 days'\n"
+        } else {
+            ""
+        };
+        let yml = format!(
+            "description: Test source.\ncolumns:\n  - name: device_id\n    type: INTEGER\n  \
+             - name: event_date\n    type: DATE\n  - name: amount\n    type: DOUBLE\n\
+             timeseries:\n  event_time_column: event_date\n  partition_column: event_date\n  \
+             granularity: {granularity}\nmutation_profile:\n  kind: append_only\n{retention_line}"
+        );
+        std::fs::write(dir.join(format!("models/sources/{name}.yml")), yml).unwrap();
+    }
+
+    fn discover(
+        dir: &std::path::Path,
+        model_name: &str,
+    ) -> (smelt_core::ModelFile, Vec<smelt_core::sources::SourceInfo>) {
+        let paths = vec!["models".to_string()];
+        let source_infos = smelt_core::discover_source_infos(dir, &paths);
+        let models = smelt_core::ModelDiscovery::new(dir.to_path_buf(), paths)
+            .discover_models()
+            .expect("discover_models");
+        let model = models
+            .into_iter()
+            .find(|m| m.name == model_name)
+            .unwrap_or_else(|| panic!("model '{model_name}' not discovered"));
+        (model, source_infos)
+    }
+
+    /// Test 1: a `grain: key` model whose own `timeseries:` block clears
+    /// route 1 (key-embedded — `event_date` is both the `partition_column`
+    /// and a `unique_key`/`GROUP BY` column) over one clocked,
+    /// `retention:`-bearing source reaches the retention fold: the derived
+    /// plan carries a non-empty `retention_reaches` and no
+    /// `Refusal::LocalityNotEstablished`. RED before this phase's fix
+    /// (`driving_source_granularity: None` fails `establish_locality`'s
+    /// granularity-equality precondition, so the plan comes back
+    /// `locality_refused_plan` — empty reaches — before the retention fold
+    /// ever runs).
+    #[test]
+    fn keyed_model_with_timeseries_reaches_the_retention_fold() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        stage_source(tmp.path(), "events", "day", true);
+        let model_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
+---
+SELECT device_id, event_date, SUM(amount) AS total_amount
+FROM smelt.sources.events
+GROUP BY 1, 2
+"#;
+        std::fs::create_dir_all(tmp.path().join("models")).unwrap();
+        std::fs::write(tmp.path().join("models/keyed.sql"), model_sql).unwrap();
+
+        let (model, source_infos) = discover(tmp.path(), "keyed");
+        let plan = derive_model_retention_plan(&model, &source_infos)
+            .expect("refresh: incremental with metadata must derive a plan");
+
+        assert!(
+            !plan.retention_reaches.is_empty(),
+            "the retention fold must run and record a bounded reach: {plan:?}"
+        );
+        assert!(
+            !plan.refusals.iter().any(|r| matches!(
+                r,
+                smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
+            )),
+            "an admissible route-1 model must not be refused for locality: {:?}",
+            plan.refusals
+        );
+    }
+
+    /// Test 2: two referenced clocked sources of different granularities
+    /// leave the resolution `None` (ambiguous) — the shared
+    /// `single_clocked_granularity` "exactly one else `None`" rule is used
+    /// here, not a bespoke re-derivation that might pick one arbitrarily.
+    #[test]
+    fn two_clocked_sources_leave_the_granularity_undecided() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        stage_source(tmp.path(), "events_day", "day", true);
+        stage_source(tmp.path(), "events_week", "week", false);
+        let model_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      events_day:
+        allow_full_scan: true
+      events_week:
+        allow_full_scan: true
+---
+SELECT d.device_id, d.event_date, SUM(d.amount) AS total_amount
+FROM smelt.sources.events_day d
+JOIN smelt.sources.events_week w ON w.device_id = d.device_id
+GROUP BY 1, 2
+"#;
+        std::fs::create_dir_all(tmp.path().join("models")).unwrap();
+        std::fs::write(tmp.path().join("models/keyed.sql"), model_sql).unwrap();
+
+        let (model, source_infos) = discover(tmp.path(), "keyed");
+        let clocked_granularities =
+            crate::maintenance_driver::build_succession_source_refs(&model, &source_infos)
+                .iter()
+                .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()))
+                .map(|t| t.granularity)
+                .collect::<Vec<_>>();
+        assert_eq!(clocked_granularities.len(), 2);
+        assert_eq!(
+            smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities),
+            None,
+            "two differently-granular clocked candidates must leave resolution undecided"
+        );
+    }
+
+    /// Test 3 (regression pin): a `grain: partition` model derives the same
+    /// `retention_reaches` before and after this change — the granularity
+    /// resolution added to `derive_model_retention_plan` only ever
+    /// contributes a *value*, it does not alter partition-grain plan
+    /// derivation, which never consulted `driving_source_granularity`.
+    #[test]
+    fn partition_grain_derivation_is_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        stage_source(tmp.path(), "events", "day", true);
+        let model_sql = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT event_date,
+       SUM(amount) OVER (PARTITION BY event_date ORDER BY event_date
+           RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) AS total_amount
+FROM smelt.sources.events
+"#;
+        std::fs::create_dir_all(tmp.path().join("models")).unwrap();
+        std::fs::write(tmp.path().join("models/agg.sql"), model_sql).unwrap();
+
+        let (model, source_infos) = discover(tmp.path(), "agg");
+        let plan = derive_model_retention_plan(&model, &source_infos)
+            .expect("refresh: incremental with metadata must derive a plan");
+
+        assert_eq!(plan.retention_reaches.len(), 1);
+        assert_eq!(plan.retention_reaches[0].source, "events");
+        assert_eq!(
+            plan.retention_reaches[0].required_lookback,
+            Seconds::days(7)
+        );
+        assert_eq!(plan.retention_reaches[0].retained, Seconds::days(45));
     }
 }

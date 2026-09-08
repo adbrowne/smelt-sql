@@ -78,6 +78,8 @@ fn stage_project(project_dir: &Path, db_path: &Path) {
     // Retention-bearing source: `sources.events`, bound at 45 days.
     let source_yml = r#"description: Raw events.
 columns:
+  - name: device_id
+    type: INTEGER
   - name: event_date
     type: DATE
   - name: amount
@@ -140,6 +142,43 @@ FROM smelt.sources.events
 "#;
     std::fs::write(project_dir.join("models/unbounded.sql"), unbounded_sql).unwrap();
 
+    // `keyed_agg`: a `grain: key` model over the same source, route 1
+    // (key-embedded — `event_date` is both the model's own `timeseries.
+    // partition_column` and a `unique_key`/`GROUP BY` column). The SQL
+    // carries no lookback construct — `grain: key` forbids window functions
+    // (`KeyedForbidsWindowFunctions`) and a self-join of its own driving
+    // source (`KeyedMultipleDrivingSources`), the two constructs a bounded
+    // reach could otherwise come from — so `required_lookback` derives to
+    // zero (route 1's identity case, mirroring `locality_route1_slice_
+    // pruning.rs`'s fixture). That is still enough to prove the rolling
+    // re-evaluation: `retention_refusals_at_age` ages `required_lookback`
+    // by the run's own window age, so a backfill window old enough exceeds
+    // the retained bound on age alone
+    // (`docs/outcomes/20260906-trimmed-history-sources/phases/07-plan.md`
+    // tests 4-5).
+    let keyed_agg_sql = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
+---
+SELECT
+    device_id,
+    event_date,
+    SUM(amount) AS total_amount
+FROM smelt.sources.events
+GROUP BY 1, 2
+"#;
+    std::fs::write(project_dir.join("models/keyed_agg.sql"), keyed_agg_sql).unwrap();
+
     let smelt_yml = format!(
         "name: retention_admission_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n",
         db = db_path.display()
@@ -154,10 +193,10 @@ fn seed_events(db_path: &Path) -> anyhow::Result<()> {
         CREATE SCHEMA IF NOT EXISTS main;
         CREATE OR REPLACE TABLE main.sources_events AS
         SELECT * FROM (VALUES
-            (DATE '2026-01-01', 10.0),
-            (DATE '2026-01-02', 5.0),
-            (DATE '2026-01-03', 7.0)
-        ) AS t(event_date, amount);
+            (1, DATE '2026-01-01', 10.0),
+            (1, DATE '2026-01-02', 5.0),
+            (1, DATE '2026-01-03', 7.0)
+        ) AS t(device_id, event_date, amount);
         "#,
     )?;
     Ok(())
@@ -385,5 +424,103 @@ async fn the_retention_downgrade_is_reported_once_per_run() {
     assert!(
         warnings[0].contains("events"),
         "the warning must name the source: {warnings:?}"
+    );
+}
+
+/// Phase 7 test 4: a `grain: key` model (route 1, key-embedded) whose reach
+/// ages past the source's retained bound refuses before any statement
+/// executes — the same rolling re-evaluation `agg` (a `grain: partition`
+/// model) already gets, now also reached by a keyed model with its own
+/// `timeseries:` block. RED before phase 7's fix: `derive_model_retention_
+/// plan` passed `driving_source_granularity: None`, so `establish_locality`
+/// refused the plan before the retention fold ever ran, and the run
+/// silently proceeded.
+#[tokio::test]
+async fn a_keyed_model_backfill_older_than_retention_refuses() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_project(&project_dir, &db_path);
+    seed_events(&db_path).expect("seed events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    let result = run(
+        "run-keyed-backfill",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        &smelt_runtime::NoOpReporter,
+        vec!["keyed_agg".to_string()],
+        Some("2026-06-01"),
+        Some("2026-06-02"),
+    )
+    .await;
+
+    let err = result.expect_err("a keyed model's aged backfill window must refuse");
+    let message = err.to_string();
+    assert!(
+        message.contains("SourceRetentionExceeded"),
+        "error must name the SourceRetentionExceeded refusal: {message}"
+    );
+    assert!(
+        message.contains("events"),
+        "error must name the exceeding source: {message}"
+    );
+    assert!(
+        !table_exists(&db_path, "keyed_agg"),
+        "a refused model's target table must never be created"
+    );
+}
+
+/// Phase 7 test 5: a forward-only run over the same keyed model still
+/// succeeds — age zero never refuses, so the newly-plumbed granularity does
+/// not introduce a false refusal at steady state.
+#[tokio::test]
+async fn a_forward_only_run_over_the_keyed_model_still_succeeds() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_project(&project_dir, &db_path);
+    seed_events(&db_path).expect("seed events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    // Unlike `agg` (`grain: partition`), a keyed model's window-forward run
+    // shape always requires an explicit event-time window
+    // (`docs/specs/incremental_shapes.md` §"The key grain") — there is no
+    // bare forward-only invocation to test. "Age zero" here means a window
+    // anchored at today's date, computed at test-run time rather than
+    // hardcoded, so this fixture never goes stale.
+    let today = chrono::Utc::now().date_naive();
+    let start = (today - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let end = today.format("%Y-%m-%d").to_string();
+
+    let result = run(
+        "run-keyed-forward",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        &smelt_runtime::NoOpReporter,
+        vec!["keyed_agg".to_string()],
+        Some(&start),
+        Some(&end),
+    )
+    .await;
+
+    result.expect("a forward-only run over a keyed model must not be refused");
+    assert!(
+        table_exists(&db_path, "keyed_agg"),
+        "a successful run must create the model's target table"
     );
 }
