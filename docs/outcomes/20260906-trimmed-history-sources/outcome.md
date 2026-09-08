@@ -71,12 +71,49 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | done |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | done |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | done |
-| 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | pending |
-| 7 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
-| 8 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
-| 9 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
+| 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | planned |
+| 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | pending |
+| 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
+| 9 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
+| 10 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-09 (phase 6 planning): **table reshaped — new row 7 for the keyed-grain
+  granularity gap the phase-5 summary surfaced.** `derive_model_retention_plan` passes
+  `driving_source_granularity: None`, so a `grain: key` model that declares its own
+  `timeseries:` can have `establish_locality` refuse and return `locality_refused_plan`
+  (empty `retention_reaches`/`retention_downgrades`) *before* the retention fold in
+  `derive/plan.rs` ever runs — verified against
+  `crates/smelt-db/src/queries/maintenance/plan.rs`'s early returns, not assumed. That is a
+  silent skip of the rolling re-evaluation for a whole model shape, i.e. exactly the silent
+  under-read criterion 4 forbids, so it gets a row rather than leaving the outcome. It is
+  *not* folded into phase 6, because phase 6's own gate is deliberately built to be immune
+  to it (below) and the fix touches a different seam (fact plumbing at the runtime call
+  site, not the full-refresh decision). Rows 7-9 shift to 8-10.
+- 2026-09-09 (phase 6 planning): **the full-refresh gate reads the model's declared
+  `retention:` sources directly, not the maintenance plan's derived reach.** A whole-table
+  recompute reaches past *every* finite bound by definition, so there is nothing to derive:
+  the input is the set of sources the model reads that declare a bound. This keeps the gate
+  total across grains and immune to the phase-5 short-circuit above, and it stays inside
+  maintenance-plan purity — reading a declaration is not deriving a composition property,
+  and no reach is re-derived anywhere.
+- 2026-09-09 (phase 6 planning): **who is refused and who is licensed.** A *user-requested*
+  whole-table recompute (`--full-refresh`, `smelt rebuild`) over a model with stored state
+  and at least one declared-`retention:` source is refused (`SourceRetentionExceeded`) —
+  the stored table is the answer of record over departed history (phase 1's quantifier
+  decision), and overwriting it with a partial re-derivation is the unrecoverable move.
+  Three cases are licensed instead, each with a recorded downgrade rather than silence:
+  a first build (no stored state to destroy — refusing would make the model unbuildable
+  forever), a smelt-*forced* full refresh (schema evolution / definition delta — smelt had
+  no alternative, so refusing would wedge the model), and an explicit
+  `--allow-full-refresh`. Reusing the existing `--allow-full-refresh` rather than minting a
+  second flag was chosen because the flag already means exactly "yes, I accept destroying
+  and rebuilding this table"; the objection that its existing schema-migration users would
+  get a trimmed rebuild they did not ask about is answered by the licensed path being
+  *recorded and reported*, never silent. Non-incremental (`table`/`view`) models are out of
+  the gate: they are recomputed from scratch every run by construction, hold no answer of
+  record accumulated across runs, and refusing them would make them unrunnable.
 
 - 2026-09-09 (phase 5 implement): **`derive_model_retention_plan` must call `maintenance_availability::derive_resolved`, not `smelt_db::queries::maintenance::derive_model_maintenance_plan` directly** — `cargo test -p smelt-runtime --test availability_seam`'s structural gate enforces exactly one call site for the raw derivation in `smelt-runtime`; `StateAvailability::all()` is passed since retention derivation never reads `plan.cells`/availability. Discovered red on first landing, fixed before green.
 - 2026-09-09 (phase 5 implement): the runtime fixtures derive their bounded/unbounded reach from a `RANGE BETWEEN ... PRECEDING` window frame, not a `WHERE col >= CURRENT_DATE - INTERVAL '...'` predicate — `CURRENT_DATE` type-checks as `UndeclaredColumn` in the current dialect surface (confirmed against `examples/broken/models/retention_exceeded.sql`, which carries the same diagnostic, just unfiltered by that fixture's own narrower test), which trips `execute_project`'s pre-execution diagnostics gate. Orthogonal to retention; the window-frame pattern is the one phase 3's own unit tests already use.
