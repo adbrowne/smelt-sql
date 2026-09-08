@@ -1,7 +1,7 @@
 # Outcome: An externally-produced relation is a node in smelt's DAG
 
 **Created:** 2026-09-06
-**Status:** queued
+**Status:** active
 **Driver:** outcome loop (`.claude/outcome-backlog`)
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"Black-box steps in the DAG", §Open questions 2
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/models.md`; `docs/specs/model_selection.md`; `docs/specs/run_state.md`; `docs/specs/diagnostics.md`
@@ -59,11 +59,35 @@ visible in the run report.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | pending |
-| 2 | (written by phase 1's planner from the spine's requirements) | pending |
+| 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | planned |
+| 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | pending |
+| 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | pending |
+| 4 | Invocation on the run path — order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
+| 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
+| 6 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
+| 7 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
 
+- 2026-09-08 (phase 1 planning): **decided — a distinct declaration kind, not a `produced_by:`
+  key on a source.** Reasoning, from evidence the spine actually produced rather than from the
+  scaffold's guess: (a) `scripts/bq-dogfood-loader.sh` populates **two** relations
+  (`raw.github_events` and `raw.github_events_arrival`) in one invocation, which the scaffold
+  named as the shape a per-source key cannot express — a key on each source would duplicate the
+  producer identifier and let the two copies drift, and smelt's graph would carry two nodes for
+  one invocation; (b) the source YAML grammar is shared verbatim with seed sidecars
+  (`docs/specs/seeds.md`), so a key that is meaningful on exactly one of the two overloads a
+  grammar the resolver already disambiguates by a sibling-`.csv` rule; (c) the direction chosen
+  — the step names the sources it `produces:`, sources stay untouched — makes "at most one
+  producing step per source" a single validation over the step set, and adding a step needs no
+  edit to any source. Conversely the source keeps the whole contract for *what* is produced
+  (schema, world-facts, and `mutation_profile.key_recurrence`, which already carries the
+  handoff's requirement (c)); the step carries only *who* produces it, *how* it is invoked, and
+  its cadence (requirements (a) and (b)). Written up in phase 1's spec delta.
+- 2026-09-08 (phase 1 planning): **phase table reshaped** from the scaffold's placeholder row 2
+  into rows 2-7, derived from `docs/handoffs/2026-09-08-github-activity-findings.md`
+  §"Requirements handed to `20260906-external-dag-steps`" and this outcome's success criteria —
+  one row per criterion 2-6 plus a close-out. Nothing left the outcome.
 - 2026-09-08 (bigquery-dogfood-spine phase 15): **the interim findings handoff now
   exists** at `docs/handoffs/2026-09-08-github-activity-findings.md`, covering the
   DuckDB half only ("Requirements handed to `20260906-external-dag-steps`" section) — the
