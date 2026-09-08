@@ -87,13 +87,31 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | done |
 | 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | done |
 | 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | done |
-| 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
+| 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | planned |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | pending |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 6 planning): **no reshape; the fix is scan-side and clamped to the existing
+  outer envelope.** Reading `compute_calendar_windows` confirmed the row's diagnosis and pinned the
+  mechanism: the Form-B relation has *two* inversions — a write-side one (run window → output window
+  `[start − after, end + before)`, implemented, applied once per invocation) and a scan-side one (to
+  write partitions `[bs, be)` the scan must cover driving dates `[bs − before, be + after)`, never
+  implemented). A single-chunk invocation covers the scan side incidentally because its batch bounds
+  *are* the output-window bounds; every interior boundary loses it. The fix folds the skew into the
+  per-batch filter but clamps it to the invocation's existing outer scan envelope, so single-chunk
+  literals stay byte-identical and no existing statement-parity fixture moves — the narrower choice,
+  taken deliberately: whether the outermost chunk should also read past the run window's trailing edge
+  is a data-availability question this defect does not raise. Both specs already assert the correct
+  rule ("each sized from its own chunk's reach"; scan "relative to the derived output window"), so the
+  spec delta is a clarifying sentence per file naming the skew inversion and the property it buys —
+  output invariant under chunk count. The integer axis needs no change (nonzero skew is already refused
+  fail-closed there). Phase 7's `marts_daily_active_contributors` entry is expected to *shift* under
+  this fix (its upstream now writes fuller sessions), so phase 6 re-measures and re-registers it
+  without fixing it.
 
 - 2026-09-08 (phase 5 implementation): **the enrichment-keyed cell is live;
   `github_activity`'s stale-row count reaches zero.** `resolve_live_column_
