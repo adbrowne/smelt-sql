@@ -118,7 +118,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | blocked |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
-| 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | planned |
+| 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
 | 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | pending |
 | 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
 | 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
@@ -128,6 +128,19 @@ exists — so the live run is a test of the *backend*, not of the models.
 
 ## Decision log
 
+- 2026-09-08 (phase 9 implement): **the loader's own retention bound (45 days,
+  `partition_expiration_days`) is a different number from the pre-existing
+  `retention: '90 days'` field already declared on both
+  `models/sources/raw/github_events{,_arrival}.yml`.** That field's own comment claims it
+  "matches the loader's own N-day trim (criterion 3)" — written before this phase measured
+  anything. `retention:` is parsed into `smelt-core`'s `SourceDefinition` today but consumed
+  by no maintenance logic (grep confirmed: no reader outside test fixtures) — it is inert,
+  scaffolding for `20260906-trimmed-history-sources`, which owns making it a real smelt
+  feature. Left uncorrected here (out of this phase's task list, and this outcome's own
+  "Out of scope" assigns the trimmed-history bound as a *smelt feature* to that other
+  outcome) — but the comment's claim is now false and should be fixed by whichever outcome
+  next touches those two files, to avoid a future reader trusting the 90 rather than the
+  45 that `scripts/bq-dogfood-loader.sh --emit-ddl` and `README.md` actually declare.
 - 2026-09-08 (phase 9 plan): **reshape — the loader phase is split into an authoring half
   the loop can do and a deploy half it cannot; old 10–14 become 11–15.** As written, phase 9
   bundled "reproduce `sample.sql` verbatim" (pure text/SQL authoring, no cloud) with "land it

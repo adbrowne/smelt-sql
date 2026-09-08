@@ -46,6 +46,36 @@ Three properties of the data worth knowing before reading any output:
   prefix would silently drop a repository the moment it was renamed, corrupting exactly
   the rename history this pipeline exists to model.
 
+## The BigQuery loader
+
+`scripts/bq-dogfood-loader.sh` is **external to smelt** — smelt orders the run, it does
+not author the load — and is at-least-once by construction, matching
+`raw.github_events`'s declared `mutation_profile`. It never restates `sample.sql`'s
+projection or filter: it *derives* the load SQL from that file, splicing in only the
+`_TABLE_SUFFIX` day range, so a future re-pin of `sample.sql` (e.g. phase 5's `payload`
+column) cannot silently drift out of step with what actually lands in BigQuery.
+
+```bash
+scripts/bq-dogfood-loader.sh --emit-ddl                        # raw.github_events{,_arrival} DDL
+scripts/bq-dogfood-loader.sh --emit-sql --date 2026-08-06       # one day's load SQL
+```
+
+Both modes touch no network and need no `bq`/`gcloud` on `PATH` — they only read
+`sample.sql` and this file and print SQL, so they are checked per-PR with no warehouse
+(`crates/smelt-cli/tests/github_activity_loader.rs`). Each day's load appends the real
+day's rows plus a deterministic redelivery of the previous day's — the same rule
+`run_incremental.py` plays back on DuckDB, so the two legs cannot silently diverge either.
+
+Retention: `partition_expiration_days = 45` on both `raw.github_events` and
+`raw.github_events_arrival`. Why 45: the fixture only spans the pinned 30-day range, and
+45 leaves headroom for a late backfill without trimming rows the DuckDB leg still expects
+to see. This bounds the *table's* partitions; the dataset's own default table expiration
+stays unset (criterion 1) — the two are independent BigQuery knobs.
+
+Deploying this script against the dogfood project, scheduling it, and measuring cost per
+run is phase 10 (human-gated: needs the provisioned project) — nothing here executes
+against BigQuery yet.
+
 ## The DuckDB leg
 
 `examples/github_activity/` runs four models against DuckDB with no warehouse and no
