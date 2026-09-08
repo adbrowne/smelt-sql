@@ -528,3 +528,22 @@ statement_parity`, and `cargo test -p smelt-cli --test maintenance_conformance` 
 files' externally observable behaviour (compile+execute parity, per-family statement emission, and
 the incremental/full-refresh equivalence invariant), so a split that keeps all three green is safe
 by construction.
+
+## `smelt list --format json` hard-fails on example workspaces with root-level utility scripts (flagged 2026-09-07, external-dag-steps phase 7; confirmed pre-existing at close-out, phase 9)
+
+`smelt list --format json` raises `ListError::ParseErrors` on `examples/github_activity`,
+`examples/web_analytics`, and `examples/retail_analytics` alike: `load_workspace` discovers
+root-level utility scripts (e.g. `sample.sql`, `setup_sources.sql`) as SQL models project-wide,
+and `smelt list` treats a parse error anywhere in the discovered set as fatal rather than scoped
+to the selected models. Reproduces with no external-step changes present (verified via a
+temporary stash), so it is unrelated to that outcome. Two candidate fixes, neither attempted:
+scope `ListError::ParseErrors` to the selected set, or give `load_workspace` callers a way to
+exclude non-model root SQL from discovery. Until fixed, prefer `smelt explain --json` for a
+machine-readable node listing over these workspaces.
+
+## `concepts/incremental-equivalence.md` missing from docs-site nav (flagged 2026-09-07, external-dag-steps phase 9)
+
+`cd docs-site && uv run mkdocs build --strict` reports `docs-site/docs/concepts/incremental-equivalence.md`
+exists but is not referenced in `mkdocs.yml`'s `nav:`. Pre-existing, unrelated to external steps.
+Someone should either add it to the nav under the appropriate concepts section, or delete it if
+its content has been superseded elsewhere.

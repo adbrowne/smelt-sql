@@ -306,3 +306,52 @@ projection_dialect_invariance`; `smelt-maintenance-testkit --test googlesql_rend
 - `crates/smelt-cli/tests/github_activity_oracle.rs` — `DIVERGENCE_REGISTRY` (the
   machine-checked source of truth for the five divergences' exact predicates).
 - `examples/github_activity/README.md` — "Trusting the numbers", "The BigQuery loader".
+
+## Findings handed back from 20260906-external-dag-steps (2026-09-08)
+
+`docs/outcomes/20260906-external-dag-steps` closed its own phase 9 by verifying all seven
+success criteria's evidence at HEAD (see that outcome's `phases/09-summary.md` for the full
+criterion → evidence table) and hands the following back for the spine's blocked
+live-BigQuery phases to pick up:
+
+**(a) The loader contract as it actually shipped.** The GitHub-activity day-loader is no
+longer three drifting copies — it is one script,
+`examples/github_activity/load_day.sh`, declared as a black-box step by
+`examples/github_activity/models/sources/raw/github_loader.yml`'s `external_step:` block,
+producing both `raw.github_events` and `raw.github_events_arrival`. It is idempotent per
+day via its own `main._loader_days` ledger (a day already loaded is a no-op), and is
+invoked by `smelt run`/`smelt build` whenever a run selects a model reached from either
+produced source — the run orders the step ahead of its consumers and fails the run (naming
+the step, downstream models left unbuilt) on a non-zero exit. When the spine's live-BigQuery
+phases (10-14) stand this pipeline up against the dogfood project, this is the step that
+must actually execute the `bq query`/`gcloud` invocation named in `command:` — smelt orders
+and invokes it but never authors or inspects its SQL.
+
+**(b) `smelt list --format json` hard-fails on all three example workspaces, pre-existing,
+unrelated to external steps.** `ListError::ParseErrors` fires on `examples/github_activity`,
+`examples/web_analytics`, and `examples/retail_analytics` alike: `load_workspace` discovers
+root-level utility scripts (`sample.sql`, `setup_sources.sql`) as SQL models project-wide,
+and `smelt list` treats a parse error anywhere in the discovered set as fatal rather than
+scoped to the selected models. Verified pre-existing (reproduces with this outcome's changes
+stashed out). Two candidate fixes, neither attempted here: scope `ListError::ParseErrors` to
+the selected set, or give `load_workspace` callers a way to exclude non-model root SQL from
+discovery. Recorded in `docs/TODO.md`. The spine's live-run phases should use
+`smelt explain --json` (unaffected) rather than `smelt list --format json` if they need a
+machine-readable node listing before this is fixed.
+
+**(c) A dry run, or any embedder setting `invoke_external_steps: false`, refuses rather than
+runs stale.** `ExecuteRequest::invoke_external_steps` defaults to `true` (a live `smelt
+run`/`smelt build` invokes steps normally); setting it `false`, or `dry_run: true`, makes a
+run that reaches a step refuse with a named diagnostic instead of reading a possibly-stale
+produced table. The spine's live-BigQuery phases will hit this refusal the moment they preview
+a plan (e.g. `--dry-run`) before actually loading `raw.github_events` — that is by design, not
+a bug: the whole point of the black-box-step contract is that smelt will not read a source a
+step produces without either running the step or being told explicitly it is safe not to.
+
+**(d) The UI plan-preview opt-out named in phase 4's planning decision log was never built.**
+`smelt-ui/src/run_manager.rs::to_runtime_request` always sets `invoke_external_steps: true`
+because it only drives the live-run path today — no UI call site sets it `false`. If a UI
+plan-preview endpoint is built later (for the spine's dogfood-project UI work or otherwise),
+it must set `invoke_external_steps: false` (or `dry_run: true`, which also refuses) to avoid
+silently invoking a step — for example, a `bq query` against the dogfood project — from what
+looks like a read-only preview action.

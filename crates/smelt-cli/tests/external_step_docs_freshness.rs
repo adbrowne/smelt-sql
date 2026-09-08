@@ -234,6 +234,20 @@ fn extract_relative_markdown_links(text: &str) -> Vec<String> {
     out
 }
 
+#[test]
+fn explain_reference_mentions_external_steps() {
+    let text = fs::read_to_string(docs_site_dir().join("reference/cli.md")).unwrap();
+    assert!(
+        text.contains("smelt explain <external step>") || text.contains("external step"),
+        "reference/cli.md's `smelt explain` material never names external steps, \
+         though `smelt explain <step>` is spec'd in docs/specs/cli.md §\"smelt explain <external step>\""
+    );
+    assert!(
+        text.contains("guide/external-steps.md"),
+        "reference/cli.md's external-step explain material should link to guide/external-steps.md"
+    );
+}
+
 #[allow(dead_code)]
 fn all_docs_files() -> Vec<PathBuf> {
     let mut out = Vec::new();

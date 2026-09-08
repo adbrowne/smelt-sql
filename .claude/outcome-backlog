@@ -21,7 +21,6 @@ docs/outcomes/20260906-bigquery-dogfood-spine
 # A phase needing live BigQuery or the spine's handoff must emit <<PHASE_BLOCKED>>
 # rather than skip green.
 docs/outcomes/20260906-bigquery-correctness
-docs/outcomes/20260906-external-dag-steps
 docs/outcomes/20260906-trimmed-history-sources
 
 # --- human-gated, deliberately not listed ---
@@ -33,6 +32,7 @@ docs/outcomes/20260906-trimmed-history-sources
 #   (ruling R6). Not loop work; see its phases/08-summary.md.
 
 # --- done ---
+docs/outcomes/20260906-external-dag-steps
 docs/outcomes/20260906-scd2-keyed-succession
 docs/outcomes/20260904-programme-hygiene
 docs/outcomes/20260904-state-residency

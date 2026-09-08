@@ -1,7 +1,7 @@
 # Outcome: An externally-produced relation is a node in smelt's DAG
 
 **Created:** 2026-09-06
-**Status:** active
+**Status:** done
 **Driver:** outcome loop (`.claude/outcome-backlog`)
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"Black-box steps in the DAG", §Open questions 2
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/models.md`; `docs/specs/model_selection.md`; `docs/specs/run_state.md`; `docs/specs/diagnostics.md`
@@ -71,9 +71,23 @@ visible in the run report.
 | 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | done |
 | 7 | Fixture — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics, and actually runs it: one extracted day-loader program, invoked by `smelt run`, with the replay/oracle drivers rewired onto it and the `duckdb` CLI provisioned in CI | done |
 | 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | done |
-| 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | planned |
+| 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | done |
 
 ## Decision log
+
+- 2026-09-08 (phase 9 close-out): **all seven criteria met — outcome done.** Every criterion
+  was re-run at HEAD against a named gate rather than trusted from a summary (see
+  `phases/09-summary.md`'s criterion → evidence table): spec (criterion 1), diagnostics
+  catalogue + broken fixtures (2), DAG/selector membership (3), invocation + refusal legs (4),
+  explain text/JSON + `cli_docs_coverage` (5), fixture + docs freshness including the new
+  `explain_reference_mentions_external_steps` gate that closes phase 8's one asymmetry (6),
+  and `verify-phase.sh` + `execute_parity` + the hardening/large-file ratchets, both bumps
+  traced to phase 5/6 sign-off notes with no untraceable movement (7). Findings appended to
+  `docs/handoffs/2026-09-08-github-activity-findings.md` §"Findings handed back from
+  20260906-external-dag-steps" for the spine's blocked live-BigQuery phases; the two residues
+  unrelated to this outcome (`smelt list --format json`'s `ListError::ParseErrors` scoping bug,
+  `concepts/incremental-equivalence.md` missing from the docs-site nav) recorded in
+  `docs/TODO.md` rather than growing a phase row here.
 
 - 2026-09-08 (phase 9 planning): **no reshape — the phase table is final.** Row 9 is the
   close-out and every other row is `done`; nothing phase 8's summary surfaced serves a success
