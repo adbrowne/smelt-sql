@@ -90,10 +90,33 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | done |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | done |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | done |
-| 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
+| 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | planned |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 9 planning): **no reshape, and no block — the two failures are already
+  characterised AND fixed in the repo record, so phase 9 is offline forensics plus the gate that
+  makes the characterisation durable.** Criterion 6 reads as open only because this outcome's row
+  9 inherited the 2026-08-16 handoff's "uncharacterised" wording. The record since disagrees:
+  `diamond_propagation_suffices_on_bigquery` is `WHERE id % 2 = 0` reaching GoogleSQL unlowered
+  (`400 Syntax error: Expected ")" but got "%"`, measured live 2026-08-19), fixed by `7a2eb89d0`
+  (`%`→`MOD`) plus `af972abe0` (`^`→`POWER`, the worse silent-wrong-number sibling found chasing
+  it); `composed_keyed_pool_upholds_equivalence_on_bigquery` had no mechanism of its own and was
+  collateral from three already-closed gaps (`INSERT *` in the keyed-fold MERGE `0178e6bd4`, the
+  `DROP` object-type mismatch `d84320a44`, the hand-rolled `FROM (VALUES …)` row set
+  `e028596e3`/`aee113753`), confirmed live in the 2026-08-19 sweep. Both then passed the
+  whole-sweep measurements of 2026-08-21 (21/21, 2190.85s) and 2026-08-22 (22 cases, 621.61s
+  concurrent). So the phase does not need the live leg and must not emit `<<PHASE_BLOCKED>>`
+  under criterion 7. What it does need is the durable half, which does not exist: the diamond
+  mechanism is gated at the printer (`modulo_lowering`, `power_lowering`) but nothing ties the
+  *testkit's own rendered recipe bodies* to those lowerings, which is exactly the seam that let a
+  `%` reach a live warehouse in the first place — hence the new `googlesql_render` gate over
+  every `DagBody` and the composed pool's rendered bodies, with a non-vacuity control in phase
+  8's shape. The one genuinely unrunnable item — re-confirming green at today's HEAD, after
+  phases 1-8 touched maintenance emitters — is recorded as a dated, named debt in the spec and
+  the handoff rather than skipped green; it belongs to the spine's blocked live half. Row 10 is
+  unchanged.
 
 - 2026-09-08 (phase 8 implementation): **fail-closed proof landed as planned; criterion
   5's cross-target half registered nothing because the spine never ran live BigQuery.**
