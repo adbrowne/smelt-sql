@@ -142,10 +142,9 @@ fn compare_databases(incr_db: &Path, full_db: &Path) -> Result<Vec<RelationDiff>
 /// (`silver_repo_naming`, `silver_actor_naming`) compare exactly equal.
 /// `DIVERGENCE_REGISTRY` is currently empty (all four root causes fixed, not
 /// registered — phase 7 of `docs/outcomes/20260906-bigquery-correctness`
-/// fixed the last one), so no variant is constructed today; kept for the
-/// next divergence this registry finds rather than deleted along with its
-/// last user.
-#[allow(dead_code)]
+/// fixed the last one), so no variant is constructed by the registry today;
+/// phase 8's `check_bound_*` tests construct it locally to keep the
+/// `MonotoneDivergence` arm and both `Side` variants live.
 enum Bound {
     /// One side of the pair is always at or ahead of the other on
     /// `monotone_columns` (`behind_side` names which side is never allowed
@@ -161,10 +160,9 @@ enum Bound {
 
 /// Which side of a [`Bound::MonotoneDivergence`] is never allowed to lead.
 /// Neither variant has a current registry entry (`DIVERGENCE_REGISTRY` is
-/// empty — see [`Bound`]'s doc comment) but `check_bound` still dispatches
-/// on both, kept for the next divergence this registry finds rather than
-/// deleting a still-live match arm.
-#[allow(dead_code)]
+/// empty — see [`Bound`]'s doc comment); phase 8's `check_bound_*` tests
+/// construct both variants locally to keep `check_bound`'s dispatch on both
+/// arms live.
 #[derive(PartialEq, Eq)]
 enum Side {
     Incremental,
@@ -248,7 +246,17 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
 /// still runs and still fails closed on a genuine unregistered mismatch —
 /// it is not a name lookup into this (now-empty) slice, it queries every
 /// materialised relation directly, so an empty `DIVERGENCE_REGISTRY` does
-/// not make it vacuous.
+/// not make it vacuous. Proven, not just asserted in prose: phase 8's
+/// `assert_matches_oracle_fails_closed_on_an_empty_registry` drives the
+/// registry-consulting comparator itself (not `compare_databases`) over a
+/// perturbed relation and checks it reports the mismatch;
+/// `check_bound_accepts_a_holding_bound`, `check_bound_rejects_a_leading_side`
+/// and `check_bound_rejects_divergence_outside_the_licensed_columns` exercise
+/// `check_bound`'s `MonotoneDivergence` arm and both `Side` variants, which an
+/// empty registry otherwise leaves with no live test; and
+/// `no_relation_diverges_unexplained` names criterion 5's "count of
+/// unexplained differences is zero" as a direct assertion over the full
+/// 30-day fixture, not left to the generic sweep's silence.
 const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[];
 
 /// A registry entry's bound, dispatched on [`Bound`]'s shape.
@@ -509,25 +517,28 @@ fn full_only_count(incr_db: &Path, full_db: &Path, relation: &str) -> i64 {
 }
 
 /// Compare `incr_db` against `full_db`: every relation must be zero-diff, or
-/// registered with a bound that holds. Panics naming the offending relation
-/// otherwise.
-fn assert_matches_oracle(incr_db: &Path, full_db: &Path, window_label: &str) {
+/// registered with a bound that holds. `Err` names the offending relation
+/// rather than panicking, so the registry-consulting comparator itself
+/// (not just [`compare_databases`]) can be driven from a test that expects
+/// the mismatch (phase 8's `assert_matches_oracle_fails_closed_on_an_empty_
+/// registry`) without unwinding.
+fn check_matches_oracle(incr_db: &Path, full_db: &Path, window_label: &str) -> Result<(), String> {
     let diffs = compare_databases(incr_db, full_db)
-        .unwrap_or_else(|e| panic!("window {window_label}: coverage failure: {e}"));
+        .map_err(|e| format!("window {window_label}: coverage failure: {e}"))?;
     for diff in diffs {
         if let Some(entry) = DIVERGENCE_REGISTRY
             .iter()
             .find(|e| e.relation == diff.relation)
         {
             if let Err(msg) = check_bound(incr_db, full_db, entry) {
-                panic!(
+                return Err(format!(
                     "window {window_label}: registered divergence bound violated for `{}` \
                      (registered reason: {}): {msg}",
                     entry.relation, entry.reason
-                );
+                ));
             }
         } else if diff.incr_only != 0 || diff.full_only != 0 {
-            panic!(
+            return Err(format!(
                 "window {window_label}: unregistered divergence in `{}` \
                  (incr_only={}, full_only={})\nincremental-only sample: {:?}\n\
                  oracle-only sample: {:?}",
@@ -536,8 +547,17 @@ fn assert_matches_oracle(incr_db: &Path, full_db: &Path, window_label: &str) {
                 diff.full_only,
                 diff.incr_only_sample,
                 diff.full_only_sample
-            );
+            ));
         }
+    }
+    Ok(())
+}
+
+/// Panicking wrapper over [`check_matches_oracle`] — every existing caller
+/// stays on this, so no current test's behaviour moves.
+fn assert_matches_oracle(incr_db: &Path, full_db: &Path, window_label: &str) {
+    if let Err(msg) = check_matches_oracle(incr_db, full_db, window_label) {
+        panic!("{msg}");
     }
 }
 
@@ -820,10 +840,16 @@ fn marts_daily_active_contributors_matches_the_full_refresh_oracle() {
     );
 }
 
-/// Test 4: negative control on the comparator itself. Perturb one row of an
-/// unregistered relation and assert the comparison reports it.
-#[test]
-fn an_unregistered_divergence_fails() {
+/// Stages a one-day incremental replay and a one-day `--full-refresh` oracle
+/// over identical loaded rows, then perturbs one `gold_repo_dim` row's
+/// `current_repo_name` in the oracle leg (appending `_x`, which is always
+/// lexicographically greater than the original — a standard string
+/// comparison never orders a string before one of its own proper prefixes —
+/// so the oracle leg is the one left leading on this column). Shared by
+/// [`an_unregistered_divergence_fails`] and phase 8's registry fail-closed
+/// tests, which all need the same perturbed pair; returns the `TempDir` so
+/// the caller keeps both databases alive.
+fn perturbed_one_day_pair() -> (TempDir, PathBuf, PathBuf) {
     let tmp = TempDir::new().expect("tempdir");
     let (workspace, db, sample) = stage_workspace(&tmp.path().join("a"));
     create_empty_raw_table(&db, &sample);
@@ -862,6 +888,15 @@ fn an_unregistered_divergence_fails() {
         ),
     );
 
+    (tmp, db, db2)
+}
+
+/// Test 4: negative control on the comparator itself. Perturb one row of an
+/// unregistered relation and assert the comparison reports it.
+#[test]
+fn an_unregistered_divergence_fails() {
+    let (_tmp, db, db2) = perturbed_one_day_pair();
+
     let diffs = compare_databases(&db, &db2).expect("coverage matches");
     let gold_repo_dim = diffs
         .iter()
@@ -874,12 +909,153 @@ fn an_unregistered_divergence_fails() {
     );
 }
 
+/// Test 1 (phase 8): the registry-consulting comparator itself — not just
+/// [`compare_databases`] — reports a genuine unregistered divergence. Today
+/// `DIVERGENCE_REGISTRY` is empty, so this is also the only live coverage of
+/// [`check_matches_oracle`]'s unregistered-divergence branch.
+#[test]
+fn assert_matches_oracle_fails_closed_on_an_empty_registry() {
+    assert!(
+        DIVERGENCE_REGISTRY.is_empty(),
+        "this test's assertions assume an empty registry — see the DIVERGENCE_REGISTRY \
+         doc comment for what changes once an entry is added"
+    );
+    let (_tmp, db, db2) = perturbed_one_day_pair();
+
+    let err = check_matches_oracle(&db, &db2, "day0")
+        .expect_err("expected the perturbed gold_repo_dim row to be reported as a divergence");
+    assert!(
+        err.contains("gold_repo_dim"),
+        "expected the offending relation to be named: {err}"
+    );
+    assert!(
+        err.contains("unregistered divergence"),
+        "expected the unregistered-divergence branch, not the registered-bound branch: {err}"
+    );
+}
+
+/// Test 2 (phase 8): a [`Bound::MonotoneDivergence`] holds when the side it
+/// licenses to be behind (`Side::Incremental` — the incremental leg here,
+/// since [`perturbed_one_day_pair`] leaves the oracle leg leading on
+/// `current_repo_name`) is in fact the side that never leads.
+#[test]
+fn check_bound_accepts_a_holding_bound() {
+    let (_tmp, db, db2) = perturbed_one_day_pair();
+    let entry = DivergenceEntry {
+        relation: "gold_repo_dim",
+        reason: "test-local: incremental leg genuinely behind on current_repo_name",
+        bound: Bound::MonotoneDivergence {
+            key_col: "repo_id",
+            exact_columns: &["first_seen_at"],
+            monotone_columns: &["current_repo_name"],
+            behind_side: Side::Incremental,
+        },
+    };
+    check_bound(&db, &db2, &entry)
+        .expect("the incremental leg never leads on current_repo_name; the bound should hold");
+}
+
+/// Test 3 (phase 8): the same bound with `behind_side` flipped to the side
+/// that is actually leading (`Side::Oracle`) is rejected, naming the column.
+#[test]
+fn check_bound_rejects_a_leading_side() {
+    let (_tmp, db, db2) = perturbed_one_day_pair();
+    let entry = DivergenceEntry {
+        relation: "gold_repo_dim",
+        reason: "test-local: oracle leg wrongly licensed to lead",
+        bound: Bound::MonotoneDivergence {
+            key_col: "repo_id",
+            exact_columns: &["first_seen_at"],
+            monotone_columns: &["current_repo_name"],
+            behind_side: Side::Oracle,
+        },
+    };
+    let err = check_bound(&db, &db2, &entry)
+        .expect_err("the oracle leg leads on current_repo_name; behind_side: Oracle forbids that");
+    assert!(
+        err.contains("current_repo_name"),
+        "expected the leading column to be named: {err}"
+    );
+}
+
+/// Test 4 (phase 8): a bound never blanket-licenses a relation — moving the
+/// diverging column into `exact_columns` (instead of `monotone_columns`)
+/// rejects it too, since exact-match licenses no divergence at all.
+#[test]
+fn check_bound_rejects_divergence_outside_the_licensed_columns() {
+    let (_tmp, db, db2) = perturbed_one_day_pair();
+    let entry = DivergenceEntry {
+        relation: "gold_repo_dim",
+        reason: "test-local: current_repo_name wrongly licensed via exact match",
+        bound: Bound::MonotoneDivergence {
+            key_col: "repo_id",
+            exact_columns: &["first_seen_at", "current_repo_name"],
+            monotone_columns: &[],
+            behind_side: Side::Incremental,
+        },
+    };
+    let err = check_bound(&db, &db2, &entry).expect_err(
+        "current_repo_name differs between legs and exact_columns licenses no divergence",
+    );
+    assert!(
+        err.contains("current_repo_name"),
+        "expected the unlicensed column to be named: {err}"
+    );
+}
+
+/// Test 5 (phase 8): criterion 5's "count of unexplained differences is
+/// zero" asserted directly, in one named test, over the full 30-day
+/// fixture — not left to be derived from the generic sweep's silence.
+#[test]
+fn no_relation_diverges_unexplained() {
+    assert!(
+        DIVERGENCE_REGISTRY.is_empty(),
+        "this test's zero-unexplained-count claim assumes an empty registry"
+    );
+    let pair = full_replay_pair();
+    let diffs = compare_databases(&pair.incr_db, &pair.full_db)
+        .unwrap_or_else(|e| panic!("coverage failure: {e}"));
+    for diff in &diffs {
+        assert_eq!(
+            (diff.incr_only, diff.full_only),
+            (0, 0),
+            "relation `{}` diverges unexplained (incr_only={}, full_only={}) though \
+             DIVERGENCE_REGISTRY is empty — criterion 5's zero-unexplained-count claim is \
+             false",
+            diff.relation,
+            diff.incr_only,
+            diff.full_only
+        );
+    }
+}
+
 /// Test 5: two-sided ratchet on the registry itself, mirroring
 /// `dialect_audit`'s ledger — a registry entry naming a relation that no
-/// longer diverges fails, telling the reader to delete it.
+/// longer diverges fails, telling the reader to delete it. On an empty
+/// registry (today) that loop is vacuous by construction, so this test also
+/// requires [`no_relation_diverges_unexplained`]'s condition directly: an
+/// empty `DIVERGENCE_REGISTRY` is a claim that nothing diverges, not an
+/// omission this ratchet is silent about either way.
 #[test]
 fn registry_entries_are_all_live() {
     let pair = full_replay_pair();
+    if DIVERGENCE_REGISTRY.is_empty() {
+        let diffs = compare_databases(&pair.incr_db, &pair.full_db)
+            .unwrap_or_else(|e| panic!("coverage failure: {e}"));
+        for diff in &diffs {
+            assert_eq!(
+                (diff.incr_only, diff.full_only),
+                (0, 0),
+                "DIVERGENCE_REGISTRY is empty, but relation `{}` diverges (incr_only={}, \
+                 full_only={}) — an empty registry claims nothing diverges, not licence for \
+                 this ratchet to be a no-op",
+                diff.relation,
+                diff.incr_only,
+                diff.full_only
+            );
+        }
+        return;
+    }
     for entry in DIVERGENCE_REGISTRY {
         let extra = full_only_count(&pair.incr_db, &pair.full_db, entry.relation);
         assert!(

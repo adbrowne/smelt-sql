@@ -138,7 +138,17 @@ remains for it.
 **`DIVERGENCE_REGISTRY` is now empty** — all four root causes are fixed, not registered.
 `an_unregistered_divergence_fails` still enforces exact equality on any future genuine
 divergence directly against every materialised relation, not via a lookup into this
-(now-empty) registry, so it does not pass vacuously.
+(now-empty) registry, so it does not pass vacuously. This is checked, not just asserted:
+`docs/outcomes/20260906-bigquery-correctness/phases/08-plan.md` added
+`assert_matches_oracle_fails_closed_on_an_empty_registry` (drives the
+registry-consulting comparator itself over a perturbed relation and checks it reports
+the mismatch), `check_bound_accepts_a_holding_bound` /
+`check_bound_rejects_a_leading_side` / `check_bound_rejects_divergence_outside_the_
+licensed_columns` (exercise `check_bound`'s `MonotoneDivergence` arm and both `Side`
+variants, otherwise dead on an empty registry), and `no_relation_diverges_unexplained`
+(names the zero-unexplained-count claim directly over the full 30-day fixture). An empty
+`DIVERGENCE_REGISTRY` table here means "measured and found nothing to register," not
+"never measured."
 
 ## Latent, unmeasured
 
