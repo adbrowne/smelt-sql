@@ -71,7 +71,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | done |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | done |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | done |
-| 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | planned |
+| 6 | Whole-table recompute against a trimmed source: a full refresh reaches past every finite bound, so it refuses (or is licensed) rather than silently rebuilding a smaller table | done |
 | 7 | Keyed-grain coverage: plumb the driving-source granularity into the run-time retention derivation so a `grain: key` model's plan cannot short-circuit past the retention fold | pending |
 | 8 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
 | 9 | Explain and docs: `smelt explain` renders bound vs. required reach (text and `--json`); docs-site page for the declaration, refusal and degradation; `cli_docs_coverage` green | pending |
@@ -79,6 +79,9 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 ## Decision log
 
+- 2026-09-09 (phase 6 implement): **gate on `plan.refresh == RefreshStrategy::Incremental`, not `plan.incremental.is_some()`** — the plan's own task 4 named the latter, but it is false for exactly the runs this gate must catch: `build_model_plans`' window-resolution fallback sets `plan.incremental: None` whenever `request.full_refresh` is requested with no explicit `--start`/`--end` (an ordinary `--full-refresh` invocation), collapsing the model to the "full-refresh arm" the way a `materialized_view` model already does by construction. Discovered red (first landing let every full-refresh run through with no gate at all, no error); `plan.refresh` is refresh-strategy-derived and untouched by window resolution, matching that field's own doc comment.
+- 2026-09-09 (phase 6 implement): `request.rebuild` (`smelt rebuild`) does not itself license a whole-table recompute — only `request.allow_full_refresh` (`Explicit`) or `force_full_refresh` (`Forced`, smelt-internal) do. An upstream-closure `smelt rebuild` over a model with stored output and a retained source still needs `--allow-full-refresh`, consistent with reusing that one flag as the sole operator override.
+- 2026-09-09 (phase 6 implement): audited every `--full-refresh` invocation over `examples/github_activity` (`github_activity_oracle.rs`, `github_activity_replay.rs`) — every one stages a fresh workspace/db, so every one is a first build (auto-licensed); no fixture changes were needed.
 - 2026-09-09 (phase 6 planning): **table reshaped — new row 7 for the keyed-grain
   granularity gap the phase-5 summary surfaced.** `derive_model_retention_plan` passes
   `driving_source_granularity: None`, so a `grain: key` model that declares its own

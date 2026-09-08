@@ -1371,6 +1371,53 @@ pub async fn execute_project(
             }
         }
 
+        // ── Whole-table-recompute retention gate (`docs/specs/sources.md`
+        // §Semantics 5 "Retention refusal") ───────────────────────────────
+        // A whole-table recompute reaches past every finite `retention:`
+        // bound by construction, so it is decided from the model's declared
+        // sources directly rather than a derived reach — placed here,
+        // immediately after `force_full_refresh` has finished settling
+        // (every gate above that can set it has already run) and before the
+        // keyed dispatch below, so the smelt-forced case is visible to the
+        // license and no data statement has yet executed for this model.
+        // Non-incremental (`table`/`view`) models are outside the gate:
+        // recomputed from scratch every run by construction, they hold no
+        // answer of record for a recompute to destroy. Gated on `plan.refresh`
+        // rather than `plan.incremental.is_some()`: a whole-table
+        // `--full-refresh` with no explicit window collapses `plan.incremental`
+        // to `None` (`build_model_plans`' own window-resolution fallback) for
+        // exactly the runs this gate must catch, so `plan.incremental` cannot
+        // be the signal for "is this an incremental model" here.
+        if plan.refresh == smelt_core::config::RefreshStrategy::Incremental {
+            let full_refresh_run = request.full_refresh || request.rebuild || force_full_refresh;
+            if full_refresh_run {
+                let license = if request.allow_full_refresh {
+                    smelt_logical::maintenance::FullRefreshLicense::Explicit
+                } else if force_full_refresh {
+                    smelt_logical::maintenance::FullRefreshLicense::Forced
+                } else {
+                    smelt_logical::maintenance::FullRefreshLicense::None
+                };
+                let stored_state = backend
+                    .table_exists(schema, &plan.model_file.db_name_owned())
+                    .await
+                    .unwrap_or(false);
+                match crate::execute::retention_admission::check_full_refresh_retention(
+                    &plan.model_file,
+                    source_infos,
+                    stored_state,
+                    license,
+                ) {
+                    Ok(warnings) => {
+                        for warning in &warnings {
+                            reporter.maintenance_warning(run_id, &plan.name, warning);
+                        }
+                    }
+                    Err(err) => return Err(anyhow::anyhow!(err)),
+                }
+            }
+        }
+
         // Keyed dispatch — handled separately from the incremental /
         // full-refresh branches because it has its own per-partition merge
         // loop (see `smelt_runtime::cumulative` and

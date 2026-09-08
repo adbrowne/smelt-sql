@@ -279,6 +279,14 @@ struct RebuildArgs {
     /// Use this only as a temporary escape hatch while fixing the model SQL.
     #[arg(long = "allow-downgrade")]
     allow_downgrade: bool,
+
+    /// License a whole-table recompute over a model whose source declares a
+    /// `retention:` bound, when the model's target already has stored
+    /// output (otherwise refused — `docs/specs/sources.md` §Semantics 5
+    /// "Retention refusal"). The recompute proceeds but loses replayability
+    /// for the source's retained region, reported once as a warning.
+    #[arg(long = "allow-full-refresh")]
+    allow_full_refresh: bool,
 }
 
 #[derive(Parser)]
@@ -417,6 +425,14 @@ struct BuildArgs {
     /// as the positional argument.
     #[arg(long = "include-upstreams", requires = "period")]
     include_upstreams: bool,
+
+    /// License a whole-table recompute over a model whose source declares a
+    /// `retention:` bound, when the model's target already has stored
+    /// output (otherwise refused — `docs/specs/sources.md` §Semantics 5
+    /// "Retention refusal"). The recompute proceeds but loses replayability
+    /// for the source's retained region, reported once as a warning.
+    #[arg(long = "allow-full-refresh")]
+    allow_full_refresh: bool,
 }
 
 #[derive(Parser)]

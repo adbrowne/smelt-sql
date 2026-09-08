@@ -53,8 +53,9 @@ pub use plan::{
 };
 pub use refusal::{refusal_code, Refusal};
 pub use retention::{
-    retention_outcomes, retention_reaches, retention_refusals_at_age, run_window_age,
-    RetentionDowngrade, RetentionReach, SourceRetentions,
+    full_refresh_retention_verdict, retention_outcomes, retention_reaches,
+    retention_refusals_at_age, run_window_age, FullRefreshLicense, FullRefreshRetention,
+    RetainedSource, RetentionDowngrade, RetentionReach, SourceRetentions,
 };
 pub use types::{
     cell_trigger_address, ColumnGroup, Corner, Grain, KeyDiscovery, KeyScope, MutationProfile,

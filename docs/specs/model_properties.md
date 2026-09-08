@@ -171,6 +171,11 @@ totality is itself the no-silent-under-read property: every verdict this fold ca
 exactly one of refusal, recorded downgrade, or silence, so no path can compute a smaller answer
 without one of the first two having fired.
 
+A whole-table recompute is decided differently: its reach into every source is unbounded by
+construction, so there is no `RetentionVerdict` to fold — the decision is read directly from the
+model's declared `retention:` sources rather than derived from this walk (`sources.md` §Semantics
+5 "Retention refusal").
+
 ### Algebraic discriminants (the raw facts, not the ladder)
 
 This spec owns the **discriminants** — is-monoid, needs-inverse, decomposable, value-vs-order-monotone — as static properties of the combiner algebra in the SQL. They are raw facts: `SUM`/`COUNT` are commutative monoids that are also groups (invertible); `MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR` are monoids that are **not** groups (a contribution cannot be un-seen); `AVG`/variance/approx-distinct are decomposable into a richer monoid element; `MEDIAN`/`MODE`/exact-`COUNT(DISTINCT)` are holistic. `MIN`/`MAX`/`EXISTS` are value-monotone (the value moves one way); `MAX_BY` is order-monotone (a semilattice fold whose presented value may switch). The **ordering** of these facts into a ladder, and the maintainable-vs-delegated cutoff, are a maintenance consequence and live in `incremental_models.md` — this spec states only which discriminant each combiner has. The concrete state shape a `decomposable` combiner decomposes into, and how the key-addressed profile stores and hides it, is catalogued in `incremental_shapes.md` §"Decomposed state (rung 2) in keyed models" — this spec proves only the discriminant, never a state layout.

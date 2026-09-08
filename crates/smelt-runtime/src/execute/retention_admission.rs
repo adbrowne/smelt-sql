@@ -12,7 +12,8 @@
 use chrono::NaiveDate;
 
 use smelt_logical::maintenance::{
-    retention_refusals_at_age, run_window_age, MaintenancePlan, Refusal,
+    full_refresh_retention_verdict, retention_refusals_at_age, run_window_age, FullRefreshLicense,
+    FullRefreshRetention, MaintenancePlan, Refusal, RetainedSource, SourceRetentions,
 };
 use smelt_logical::Seconds;
 
@@ -129,6 +130,101 @@ pub(crate) fn check_retention_admission(
             "retention_refusals_at_age only ever produces SourceRetentionExceeded, got {other:?}"
         ),
         None => Ok(()),
+    }
+}
+
+/// The bare source name → declared `retention:` world-fact map for
+/// `model_file`'s own refs — the same ref → bare-name mapping
+/// [`super::key_addressed::build_maint_source_facts`] performs, duplicated
+/// here rather than exposed as a third return value from that function
+/// since only the whole-table-recompute gate needs it. Delegates the
+/// map-building itself to [`smelt_db::queries::maintenance::
+/// build_source_retentions`] rather than re-deriving it a second way.
+pub(crate) fn model_source_retentions(
+    model_file: &smelt_core::ModelFile,
+    source_infos: &[smelt_core::sources::SourceInfo],
+) -> SourceRetentions {
+    let refs: Vec<(String, Option<smelt_core::sources::SourceInfo>)> = model_file
+        .refs
+        .iter()
+        .filter_map(|r| {
+            let segs = r.smelt_ref.to_path();
+            let info = source_infos.iter().find(|s| s.address_segments == segs)?;
+            let bare = match segs.split_first() {
+                Some((first, rest)) if first == "sources" => rest.join("."),
+                _ => segs.join("."),
+            };
+            Some((bare, Some(info.clone())))
+        })
+        .collect();
+    smelt_db::queries::maintenance::build_source_retentions(&refs)
+}
+
+/// A whole-table recompute over `sources` refuses because stored output
+/// already exists and no license was given
+/// (`docs/specs/sources.md` §Semantics 5 "Retention refusal"). Unlike
+/// [`RetentionAdmissionError`] (an aged backfill window), there is no
+/// look-back to report — a whole-table recompute's reach is unbounded by
+/// construction, so the error names only the retained sources at stake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullRefreshRetentionError {
+    pub sources: Vec<RetainedSource>,
+}
+
+impl std::fmt::Display for FullRefreshRetentionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<String> = self
+            .sources
+            .iter()
+            .map(|s| format!("'{}' (retains {} seconds)", s.source, s.retained.0))
+            .collect();
+        write!(
+            f,
+            "SourceRetentionExceeded: a whole-table recompute reaches past every finite bound, \
+             but stored output already exists and no license was given for: {}",
+            names.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for FullRefreshRetentionError {}
+
+/// Render one [`RetainedSource`] a licensed whole-table recompute loses
+/// replayability over as the reporter-warning message text
+/// (`docs/specs/sources.md` §Semantics 5 "Retention refusal" — never
+/// silent).
+pub(crate) fn full_refresh_loss_warning_message(loss: &RetainedSource) -> String {
+    format!(
+        "SourceRetentionDowngraded: whole-table recompute over '{}' reaches past its {} second \
+         retention bound — its retained region is no longer claimed replayable",
+        loss.source, loss.retained.0
+    )
+}
+
+/// The whole-table-recompute retention gate
+/// (`docs/specs/sources.md` §Semantics 5 "Retention refusal"): reads
+/// `model_file`'s declared `retention:` sources directly (never a derived
+/// reach — a whole-table recompute's reach is unbounded by construction),
+/// and folds `stored_state`/`license` onto
+/// [`smelt_logical::maintenance::full_refresh_retention_verdict`]. Returns
+/// the licensed-path warning messages to report (empty when nothing is at
+/// stake), or the refusal naming every source at stake.
+pub(crate) fn check_full_refresh_retention(
+    model_file: &smelt_core::ModelFile,
+    source_infos: &[smelt_core::sources::SourceInfo],
+    stored_state: bool,
+    license: FullRefreshLicense,
+) -> Result<Vec<String>, FullRefreshRetentionError> {
+    let retentions = model_source_retentions(model_file, source_infos);
+    match full_refresh_retention_verdict(&retentions, stored_state, license) {
+        FullRefreshRetention::Admit => Ok(Vec::new()),
+        FullRefreshRetention::Licensed { losses } => Ok(losses
+            .iter()
+            .map(full_refresh_loss_warning_message)
+            .collect()),
+        FullRefreshRetention::Refuse { losses } => {
+            Err(FullRefreshRetentionError { sources: losses })
+        }
     }
 }
 

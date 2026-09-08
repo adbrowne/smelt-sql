@@ -163,6 +163,198 @@ pub fn run_window_age(window_start: NaiveDate, now: NaiveDate) -> Seconds {
     Seconds(days as u64 * 86400)
 }
 
+/// One declared-`retention:` source a whole-table recompute would lose
+/// replayability over — the source name and its retained bound, read
+/// straight from [`SourceRetentions`] rather than derived from any reach
+/// (`docs/specs/model_properties.md` §"Reach versus retained history": a
+/// whole-table recompute's reach is unbounded by construction, so there is
+/// no verdict to fold).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedSource {
+    pub source: String,
+    pub retained: Seconds,
+}
+
+/// What licenses a whole-table recompute over a model with stored output,
+/// despite it reaching past every retained source's bound
+/// (`docs/specs/sources.md` §Semantics 5 "Retention refusal"). `None` is an
+/// ordinary user-requested `--full-refresh`/`smelt rebuild` with no
+/// override — the case that refuses when stored output exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullRefreshLicense {
+    None,
+    /// An explicit operator override (`--allow-full-refresh`).
+    Explicit,
+    /// smelt itself forced the full refresh (e.g. a schema-evolution path
+    /// with no `ALTER`-based migration) — refusing would wedge the model.
+    Forced,
+}
+
+/// The verdict a whole-table recompute's retention gate produces — total
+/// over every `(retention present? × stored state? × license)` combination
+/// (`full_refresh_retention_verdict`'s own totality test, the no-silent-
+/// under-read property applied to the whole-table case).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullRefreshRetention {
+    /// No declared-`retention:` source is at stake — nothing to decide.
+    Admit,
+    /// Licensed (first build, a smelt-forced refresh, or an explicit
+    /// override) — the recompute proceeds, but loses replayability for
+    /// every named source's retained region. Never silent: the caller
+    /// reports `losses` rather than discarding them.
+    Licensed { losses: Vec<RetainedSource> },
+    /// Refused: stored output already exists, reaches past a declared
+    /// bound, and no license was given. The `SourceRetentionExceeded`
+    /// diagnostic, naming `losses`.
+    Refuse { losses: Vec<RetainedSource> },
+}
+
+/// The pure, total decision behind the whole-table-recompute retention gate
+/// (`docs/specs/sources.md` §Semantics 5 "Retention refusal"). `retentions`
+/// is the model's declared `retention:` sources (read directly, never a
+/// derived reach — a whole-table recompute's reach is unbounded by
+/// construction). `stored_state` is whether the model's target already
+/// holds output a recompute would overwrite; `false` only for a first
+/// build, which is always licensed since there is nothing to destroy.
+///
+/// Empty `retentions` always admits regardless of `stored_state`/`license` —
+/// there is no retained history at stake. Otherwise: no stored state, or an
+/// explicit/forced license, licenses the recompute with a recorded loss;
+/// stored state with no license refuses.
+pub fn full_refresh_retention_verdict(
+    retentions: &SourceRetentions,
+    stored_state: bool,
+    license: FullRefreshLicense,
+) -> FullRefreshRetention {
+    if retentions.is_empty() {
+        return FullRefreshRetention::Admit;
+    }
+    let losses: Vec<RetainedSource> = retentions
+        .iter()
+        .map(|(source, latency)| RetainedSource {
+            source: source.clone(),
+            retained: Seconds(latency.seconds),
+        })
+        .collect();
+    match (stored_state, license) {
+        (true, FullRefreshLicense::None) => FullRefreshRetention::Refuse { losses },
+        _ => FullRefreshRetention::Licensed { losses },
+    }
+}
+
+#[cfg(test)]
+mod full_refresh_tests {
+    use super::*;
+
+    fn retentions_with(source: &str, days: u64) -> SourceRetentions {
+        let mut m = SourceRetentions::new();
+        m.insert(
+            source.to_string(),
+            smelt_core::config::DataLatency {
+                seconds: days * 86400,
+                display: format!("{days} days"),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn no_declared_retention_admits_a_full_refresh() {
+        let retentions = SourceRetentions::new();
+        assert_eq!(
+            full_refresh_retention_verdict(&retentions, true, FullRefreshLicense::None),
+            FullRefreshRetention::Admit
+        );
+    }
+
+    #[test]
+    fn a_full_refresh_over_a_retained_source_with_stored_state_refuses() {
+        let retentions = retentions_with("silver.events", 45);
+        let verdict = full_refresh_retention_verdict(&retentions, true, FullRefreshLicense::None);
+        match verdict {
+            FullRefreshRetention::Refuse { losses } => {
+                assert_eq!(
+                    losses,
+                    vec![RetainedSource {
+                        source: "silver.events".to_string(),
+                        retained: Seconds::days(45),
+                    }]
+                );
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_explicit_license_records_the_loss_instead_of_refusing() {
+        let retentions = retentions_with("silver.events", 45);
+        let verdict =
+            full_refresh_retention_verdict(&retentions, true, FullRefreshLicense::Explicit);
+        match verdict {
+            FullRefreshRetention::Licensed { losses } => {
+                assert_eq!(losses.len(), 1);
+                assert_eq!(losses[0].source, "silver.events");
+            }
+            other => panic!("expected Licensed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_first_build_is_licensed_not_refused() {
+        let retentions = retentions_with("silver.events", 45);
+        let verdict = full_refresh_retention_verdict(&retentions, false, FullRefreshLicense::None);
+        assert!(
+            matches!(verdict, FullRefreshRetention::Licensed { .. }),
+            "expected Licensed, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_smelt_forced_full_refresh_is_licensed_never_refused() {
+        let retentions = retentions_with("silver.events", 45);
+        let verdict = full_refresh_retention_verdict(&retentions, true, FullRefreshLicense::Forced);
+        assert!(
+            matches!(verdict, FullRefreshRetention::Licensed { .. }),
+            "expected Licensed, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn every_input_lands_in_exactly_one_verdict() {
+        let empty = SourceRetentions::new();
+        let one = retentions_with("silver.events", 45);
+        for retentions in [&empty, &one] {
+            for stored_state in [false, true] {
+                for license in [
+                    FullRefreshLicense::None,
+                    FullRefreshLicense::Explicit,
+                    FullRefreshLicense::Forced,
+                ] {
+                    let verdict = full_refresh_retention_verdict(retentions, stored_state, license);
+                    let expected_shape = if retentions.is_empty() {
+                        "Admit"
+                    } else if stored_state && matches!(license, FullRefreshLicense::None) {
+                        "Refuse"
+                    } else {
+                        "Licensed"
+                    };
+                    let actual_shape = match verdict {
+                        FullRefreshRetention::Admit => "Admit",
+                        FullRefreshRetention::Licensed { .. } => "Licensed",
+                        FullRefreshRetention::Refuse { .. } => "Refuse",
+                    };
+                    assert_eq!(
+                        actual_shape,
+                        expected_shape,
+                        "retentions.is_empty()={} stored_state={stored_state} license={license:?}",
+                        retentions.is_empty()
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod rolling_tests {
     use super::*;
