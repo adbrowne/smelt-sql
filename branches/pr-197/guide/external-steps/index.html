@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/reference/sources-yml/">
+        <link rel="canonical" href="https://smeltsql.com/guide/external-steps/">
       
       
-        <link rel="prev" href="../smelt-yml/">
+        <link rel="prev" href="../sources/">
       
       
-        <link rel="next" href="../timeseries/">
+        <link rel="next" href="../materializations/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Sources Configuration - smelt</title>
+        <title>External Steps - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#source-yaml-reference" class="md-skip">
+        <a href="#external-steps" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Sources Configuration
+              External Steps
             
           </span>
         </div>
@@ -308,11 +308,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../guide/sql-models/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../sql-models/" class="md-tabs__link">
           
   
   
@@ -358,13 +360,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../cli/" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../reference/cli/" class="md-tabs__link">
           
   
   
@@ -1158,28 +1158,31 @@
       
   
   
+    
   
   
+  
     
     
     
     
+      
+        
+        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
-        
-          
-          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
             
   
   
@@ -1197,7 +1200,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_5">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1215,7 +1218,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/sql-models/" class="md-nav__link">
+      <a href="../sql-models/" class="md-nav__link">
         
   
   
@@ -1243,7 +1246,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/pipe-syntax/" class="md-nav__link">
+      <a href="../pipe-syntax/" class="md-nav__link">
         
   
   
@@ -1271,7 +1274,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/sources/" class="md-nav__link">
+      <a href="../sources/" class="md-nav__link">
         
   
   
@@ -1296,10 +1299,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../guide/external-steps/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    External Steps
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1315,6 +1345,103 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#declaring-a-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Declaring a step
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-run_date-run_end-placeholders" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The {run_date} / {run_end} placeholders
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-smelt-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What smelt guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-smelt-does-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What smelt does not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure modes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-a-step-vs-an-out-of-band-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use a step vs. an out-of-band pipeline
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#further-reading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Further reading
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1327,7 +1454,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/materializations/" class="md-nav__link">
+      <a href="../materializations/" class="md-nav__link">
         
   
   
@@ -1355,7 +1482,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/incremental-models/" class="md-nav__link">
+      <a href="../incremental-models/" class="md-nav__link">
         
   
   
@@ -1383,7 +1510,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/scd2-succession/" class="md-nav__link">
+      <a href="../scd2-succession/" class="md-nav__link">
         
   
   
@@ -1411,7 +1538,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/schema-evolution/" class="md-nav__link">
+      <a href="../schema-evolution/" class="md-nav__link">
         
   
   
@@ -1439,7 +1566,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/migrations/" class="md-nav__link">
+      <a href="../migrations/" class="md-nav__link">
         
   
   
@@ -1467,7 +1594,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/seeds/" class="md-nav__link">
+      <a href="../seeds/" class="md-nav__link">
         
   
   
@@ -1495,7 +1622,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/datagen/" class="md-nav__link">
+      <a href="../datagen/" class="md-nav__link">
         
   
   
@@ -1523,7 +1650,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/model-selection/" class="md-nav__link">
+      <a href="../model-selection/" class="md-nav__link">
         
   
   
@@ -1551,7 +1678,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/python-models/" class="md-nav__link">
+      <a href="../python-models/" class="md-nav__link">
         
   
   
@@ -1579,7 +1706,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/functions/" class="md-nav__link">
+      <a href="../functions/" class="md-nav__link">
         
   
   
@@ -1607,7 +1734,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/testing/" class="md-nav__link">
+      <a href="../testing/" class="md-nav__link">
         
   
   
@@ -1635,7 +1762,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/targets/" class="md-nav__link">
+      <a href="../targets/" class="md-nav__link">
         
   
   
@@ -1663,7 +1790,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/deployment/" class="md-nav__link">
+      <a href="../deployment/" class="md-nav__link">
         
   
   
@@ -1691,7 +1818,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/ci/" class="md-nav__link">
+      <a href="../ci/" class="md-nav__link">
         
   
   
@@ -1719,7 +1846,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/orchestration/" class="md-nav__link">
+      <a href="../orchestration/" class="md-nav__link">
         
   
   
@@ -1747,7 +1874,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/web-ui/" class="md-nav__link">
+      <a href="../web-ui/" class="md-nav__link">
         
   
   
@@ -1775,7 +1902,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/model-diagnostics/" class="md-nav__link">
+      <a href="../model-diagnostics/" class="md-nav__link">
         
   
   
@@ -1803,7 +1930,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/editor-setup/" class="md-nav__link">
+      <a href="../editor-setup/" class="md-nav__link">
         
   
   
@@ -1831,7 +1958,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/editor-features/" class="md-nav__link">
+      <a href="../editor-features/" class="md-nav__link">
         
   
   
@@ -2238,31 +2365,28 @@
       
   
   
-    
   
   
-  
     
     
     
     
-      
-        
-        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
         
           
-          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
             
   
   
@@ -2280,7 +2404,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_7">
             <span class="md-nav__icon md-icon"></span>
             
@@ -2298,7 +2422,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../cli/" class="md-nav__link">
+      <a href="../../reference/cli/" class="md-nav__link">
         
   
   
@@ -2326,7 +2450,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../smelt-yml/" class="md-nav__link">
+      <a href="../../reference/smelt-yml/" class="md-nav__link">
         
   
   
@@ -2351,37 +2475,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Sources Configuration
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../reference/sources-yml/" class="md-nav__link">
         
   
   
@@ -2397,120 +2494,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#file-placement-and-addressing" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        File placement and addressing
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#top-level-keys" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Top-level keys
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#column-keys" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Column keys
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#complete-example" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Complete example
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#with-name-override" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        With name: override
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#mutation-profile" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Mutation profile
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Mutation profile">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#the-external_step-block" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The external_step: block
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#supported-types" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Supported types
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -2523,7 +2506,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../timeseries/" class="md-nav__link">
+      <a href="../../reference/timeseries/" class="md-nav__link">
         
   
   
@@ -2551,7 +2534,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../cumulative-aggregate/" class="md-nav__link">
+      <a href="../../reference/cumulative-aggregate/" class="md-nav__link">
         
   
   
@@ -2579,7 +2562,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../state/" class="md-nav__link">
+      <a href="../../reference/state/" class="md-nav__link">
         
   
   
@@ -2607,7 +2590,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../diagnostics/" class="md-nav__link">
+      <a href="../../reference/diagnostics/" class="md-nav__link">
         
   
   
@@ -2635,7 +2618,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../smelt-explain/" class="md-nav__link">
+      <a href="../../reference/smelt-explain/" class="md-nav__link">
         
   
   
@@ -2663,7 +2646,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../language/" class="md-nav__link">
+      <a href="../../reference/language/" class="md-nav__link">
         
   
   
@@ -2835,10 +2818,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#file-placement-and-addressing" class="md-nav__link">
+  <a href="#declaring-a-step" class="md-nav__link">
     <span class="md-ellipsis">
       
-        File placement and addressing
+        Declaring a step
       
     </span>
   </a>
@@ -2846,10 +2829,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#top-level-keys" class="md-nav__link">
+  <a href="#the-run_date-run_end-placeholders" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Top-level keys
+        The {run_date} / {run_end} placeholders
       
     </span>
   </a>
@@ -2857,10 +2840,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#column-keys" class="md-nav__link">
+  <a href="#what-smelt-guarantees" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Column keys
+        What smelt guarantees
       
     </span>
   </a>
@@ -2868,10 +2851,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#complete-example" class="md-nav__link">
+  <a href="#what-smelt-does-not-do" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Complete example
+        What smelt does not do
       
     </span>
   </a>
@@ -2879,10 +2862,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#with-name-override" class="md-nav__link">
+  <a href="#failure-modes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        With name: override
+        Failure modes
       
     </span>
   </a>
@@ -2890,38 +2873,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#mutation-profile" class="md-nav__link">
+  <a href="#when-to-use-a-step-vs-an-out-of-band-pipeline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Mutation profile
+        When to use a step vs. an out-of-band pipeline
       
     </span>
   </a>
-  
-    <nav class="md-nav" aria-label="Mutation profile">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#the-external_step-block" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The external_step: block
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#supported-types" class="md-nav__link">
+  <a href="#further-reading" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Supported types
+        Further reading
       
     </span>
   </a>
@@ -2945,7 +2911,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/reference/sources-yml.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/external-steps.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2953,298 +2919,147 @@
   
 
 
-<h1 id="source-yaml-reference">Source YAML Reference<a class="headerlink" href="#source-yaml-reference" title="Permanent link">&para;</a></h1>
-<p>Each source is declared as a single <code>.yml</code> file placed under any directory listed in <code>paths:</code> in <code>smelt.yml</code>. The file must not share its stem with a sibling <code>.csv</code> (that would make it a seed sidecar instead).</p>
-<h2 id="file-placement-and-addressing">File placement and addressing<a class="headerlink" href="#file-placement-and-addressing" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>File on disk (with <code>paths: ["models"]</code>)</th>
-<th>Address</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>models/sources/raw/users.yml</code></td>
-<td><code>smelt.sources.raw.users</code></td>
-</tr>
-<tr>
-<td><code>models/external/api/orders.yml</code></td>
-<td><code>smelt.external.api.orders</code></td>
-</tr>
-</tbody>
-</table>
-<p>The address follows universal path addressing: the scan-root prefix (<code>models/</code>) is stripped, the directory path and stem become the address segments.</p>
-<p>A <code>smelt.sources.&lt;path&gt;</code> reference always resolves under the sources namespace; a model whose name happens to collide with a leaf segment does not shadow the source.</p>
-<h2 id="top-level-keys">Top-level keys<a class="headerlink" href="#top-level-keys" title="Permanent link">&para;</a></h2>
+<h1 id="external-steps">External Steps<a class="headerlink" href="#external-steps" title="Permanent link">&para;</a></h1>
+<p>Some relations aren't computed by a smelt model — they're landed by a program you run
+outside SQL entirely: a loader script pulling from an API, a batch export from another
+system, a one-off ETL job. That program's output is still a table your models depend on,
+and smelt needs to know when it has to run <em>before</em> those models can.</p>
+<p>An <strong>external step</strong> declares that dependency explicitly. It's a node in smelt's DAG —
+discovered, ordered, and invoked like any other project entity — but smelt never authors
+or inspects what it runs. The declaration is the entire contract: what sources the step
+produces, how to invoke it, and how often it's expected to run.</p>
+<h2 id="declaring-a-step">Declaring a step<a class="headerlink" href="#declaring-a-step" title="Permanent link">&para;</a></h2>
+<p>A step is a <code>.yml</code> file, placed anywhere under <code>paths:</code> like any other project file,
+carrying a top-level <code>external_step:</code> block:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># models/sources/raw/github_loader.yml</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nt">external_step</span><span class="p">:</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="no">Loads the previous two UTC days of githubarchive.day events into</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="no">raw.github_events and its one-day redelivery arm.</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="nt">produces</span><span class="p">:</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt.sources.raw.github_events</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt.sources.raw.github_events_arrival</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">  </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;bash&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;scripts/bq-dogfood-loader.sh&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--date&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;{run_date}&quot;</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">  </span><span class="nt">cadence</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;1</span><span class="nv"> </span><span class="s">day&#39;</span>
+</code></pre></div>
+<p>The presence of <code>external_step:</code> at the top level makes this file a <strong>step</strong>, never a
+source — it declares no <code>columns:</code>. The sources it produces are declared exactly as any
+other source, in their own <code>.yml</code> files with their own <code>columns:</code>, <code>timeseries:</code>, and
+mutation profile; having a step behind them changes nothing about their shape.</p>
 <table>
 <thead>
 <tr>
 <th>Key</th>
 <th>Required</th>
-<th>Default</th>
-<th>Meaning</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>description</code></td>
-<td>no</td>
-<td>absent</td>
-<td>Free-text description of the table, surfaced in LSP hover.</td>
-</tr>
-<tr>
-<td><code>columns</code></td>
-<td><strong>yes</strong></td>
-<td>—</td>
-<td>Column declarations. Required; a source without <code>columns:</code> has no contract to type-check.</td>
-</tr>
-<tr>
-<td><code>name</code></td>
-<td>no</td>
-<td>derived</td>
-<td>Override the database-side name. Must be a <code>&lt;schema&gt;.&lt;table&gt;</code> literal. When absent, defaults to <code>&lt;target_schema&gt;.&lt;address-path-joined-by-_&gt;</code>.</td>
-</tr>
-<tr>
-<td><code>materialization</code></td>
-<td><strong>forbidden</strong></td>
-<td>—</td>
-<td>Not allowed. Sources are externally managed. Produces a hard error.</td>
-</tr>
-<tr>
-<td><code>timeseries</code></td>
-<td>no</td>
-<td>absent</td>
-<td>Declares the source's time dimension (<code>event_time_column</code>, <code>partition_column</code>, <code>granularity</code>) — same shape as a model's <code>timeseries:</code> block. See <a href="../timeseries/">Timeseries reference</a>.</td>
-</tr>
-<tr>
-<td><code>unique_key</code></td>
-<td>no</td>
-<td>absent</td>
-<td>Identity column(s) — a string or list. Required alongside <code>referential_integrity</code> (a subset of it), and consumed as the once-write/functional-dependency identity a downstream <code>grain: key</code> model's <a href="../timeseries/#interaction-with-grain-key">key temporal locality</a> can key off.</td>
-</tr>
-<tr>
-<td><code>mutation_profile</code></td>
-<td>no</td>
-<td>absent (treated as unclocked/worst-case)</td>
-<td>How this source's underlying data changes over time — <code>append_only</code>, <code>mutable_snapshot</code>, or <code>change_feed</code>, bare-string or structured (see <a href="#mutation-profile">Mutation profile</a> below).</td>
-</tr>
-<tr>
-<td><code>source_lateness</code></td>
-<td>no</td>
-<td>absent</td>
-<td>Interval (e.g. <code>'2 hours'</code>) declaring how far behind "now" this source's data may lag; folded into a downstream model's read window.</td>
-</tr>
-<tr>
-<td><code>referential_integrity</code></td>
-<td>no</td>
-<td>absent</td>
-<td>Column(s) — a subset of <code>unique_key</code> — guaranteed to have a matching row for every value a consuming model's inner-join enrichment reads by. Narrows an enrichment <code>MERGE</code>'s recompute to a point lookup on the changed key(s); re-checked every run, never trusted silently. See <a href="../../guide/sources/#declaring-referential-integrity">Declaring referential integrity</a>.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="column-keys">Column keys<a class="headerlink" href="#column-keys" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>Key</th>
-<th>Required</th>
-<th>Default</th>
-<th>Meaning</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>name</code></td>
-<td>yes</td>
-<td>—</td>
-<td>Column name as it appears in the database.</td>
-</tr>
-<tr>
-<td><code>type</code></td>
-<td>yes</td>
-<td>—</td>
-<td>smelt <code>DataType</code> — see <a href="#supported-types">Supported types</a>.</td>
-</tr>
-<tr>
-<td><code>nullable</code></td>
-<td>no</td>
-<td><code>true</code></td>
-<td>Whether the column may contain NULL. <code>nullable: false</code> is a guarantee that type inference carries downstream. When the column appears on the null-supplying side of an outer join (<code>LEFT JOIN</code> right side, <code>RIGHT JOIN</code> left side, either side of <code>FULL JOIN</code>), inference overrides the declared guarantee and marks the column nullable in the join's output scope.</td>
-</tr>
-<tr>
-<td><code>description</code></td>
-<td>no</td>
-<td>absent</td>
-<td>Free-text description, surfaced in LSP hover.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="complete-example">Complete example<a class="headerlink" href="#complete-example" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># models/sources/raw/users.yml</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Raw user dimension; populated nightly by the CDC pipeline.</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="nt">columns</span><span class="p">:</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">user_id</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">INTEGER</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="nt">nullable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Surrogate key.</span>
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">user_name</span>
-<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">VARCHAR</span>
-<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">signup_date</span>
-<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">DATE</span>
-</code></pre></div>
-<h2 id="with-name-override">With <code>name:</code> override<a class="headerlink" href="#with-name-override" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># models/sources/raw/users.yml</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">warehouse.users_v2</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Canonical user table; external name differs from workspace path.</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="nt">columns</span><span class="p">:</span>
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">user_id</span>
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">INTEGER</span>
-<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="nt">nullable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
-<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">user_name</span>
-<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">VARCHAR</span>
-</code></pre></div>
-<p>With <code>name: warehouse.users_v2</code>, smelt emits <code>FROM warehouse.users_v2</code> in compiled SQL instead of the default <code>&lt;target_schema&gt;.sources_raw_users</code>.</p>
-<h2 id="mutation-profile">Mutation profile<a class="headerlink" href="#mutation-profile" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">mutation_profile</span><span class="p">:</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">append_only</span><span class="w">          </span><span class="c1"># append_only | mutable_snapshot | change_feed</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="nt">lateness</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;3</span><span class="nv"> </span><span class="s">days&#39;</span><span class="w">         </span><span class="c1"># append_only only</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span><span class="nt">redelivery</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">at_least_once</span><span class="w">  </span><span class="c1"># append_only only</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">  </span><span class="nt">key_recurrence</span><span class="p">:</span><span class="w">            </span><span class="c1"># any kind</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">    </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">event_id</span><span class="p p-Indicator">]</span>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">    </span><span class="nt">window</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;3</span><span class="nv"> </span><span class="s">days&#39;</span>
-</code></pre></div>
-<p><code>mutation_profile</code> accepts a bare string (<code>mutation_profile: change_feed</code>) as shorthand for <code>{ kind: change_feed }</code>, or the structured block above for <code>kind:</code> plus sub-facts scoped to it:</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Applies to <code>kind:</code></th>
-<th>Meaning</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>kind</code></td>
-<td>any</td>
-<td><code>append_only</code>, <code>mutable_snapshot</code>, or <code>change_feed</code>.</td>
-</tr>
-<tr>
-<td><code>lateness</code></td>
-<td><code>append_only</code></td>
-<td>How late a row for an already-passed partition may still arrive.</td>
-</tr>
-<tr>
-<td><code>redelivery</code></td>
-<td><code>append_only</code></td>
-<td>Redelivery posture — e.g. <code>at_least_once</code> for a feed that may redeliver a row identically.</td>
-</tr>
-<tr>
-<td><code>retractions</code>, <code>ordered</code>, <code>delta_identity</code></td>
-<td><code>change_feed</code></td>
-<td>Feed-shape facts describing how the change feed itself is structured.</td>
-</tr>
-<tr>
-<td><code>key_recurrence.key</code> / <code>key_recurrence.window</code></td>
-<td>any</td>
-<td>The declared <strong>recurrence bound</strong>: every pair of rows sharing the named key(s) lies within <code>window</code> of each other on the event-time axis. This is route 3 (recurrence-bounded) of a downstream <code>grain: key</code> model's <a href="../timeseries/#interaction-with-grain-key">key temporal locality</a> — a checked declaration, not a proof: violations fail the consuming run transactionally (<code>KeyedRecurrenceBoundViolated</code>) rather than silently producing a wrong answer. See the <a href="../../examples/web-analytics/deduplication/">deduplication tutorial</a> for a worked example.</td>
-</tr>
-</tbody>
-</table>
-<p>Declaring <code>mutation_profile: mutable_snapshot</code> derives a mutation-maintenance cell for a model that reads this source whether or not the source is also clocked (<code>timeseries:</code> declared) — a late correction to an already-processed row is maintained either way, not only for an unclocked lookup. An <code>append_only</code> source read by an aggregate gets one too: a late-arriving append into an already-written region still changes the stored aggregate, so that region is maintained rather than left stale. Either case may have no statically derivable scan bound, refusing loudly (<code>MaintenanceScanUnbounded</code>) until <code>maintenance.scan_bounds.per_source.&lt;name&gt;.allow_full_scan</code> accepts the full-table cost.</p>
-<h3 id="the-external_step-block">The <code>external_step:</code> block<a class="headerlink" href="#the-external_step-block" title="Permanent link">&para;</a></h3>
-<p>A relation landed by a program smelt itself invokes — rather than an out-of-band pipeline
-smelt has no visibility into — is declared as an <strong>external step</strong>: a <code>.yml</code> file carrying
-a top-level <code>external_step:</code> block instead of <code>columns:</code>. The presence of <code>external_step:</code>
-makes the file a step, never a source; <code>columns:</code> is <strong>forbidden</strong> alongside it on the
-same file (<code>MalformedExternalStep</code>). See <a href="../../guide/external-steps/">External Steps</a> for
-the full guide.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># models/sources/raw/github_loader.yml</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nt">external_step</span><span class="p">:</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Loads the previous UTC day of GitHub events.</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nt">produces</span><span class="p">:</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt.sources.raw.github_events</span>
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;bash&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;scripts/loader.sh&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--date&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;{run_date}&quot;</span><span class="p p-Indicator">]</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span><span class="nt">cadence</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;1</span><span class="nv"> </span><span class="s">day&#39;</span>
-</code></pre></div>
-<table>
-<thead>
-<tr>
-<th>Key</th>
-<th>Required</th>
-<th>Default</th>
 <th>Meaning</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>produces</code></td>
-<td><strong>yes</strong></td>
-<td>—</td>
-<td>Non-empty list of source addresses (<code>smelt.&lt;path&gt;</code> form) this step populates. Every entry must resolve to a declared source; a source may be named by at most one step in the workspace.</td>
+<td>yes</td>
+<td>Non-empty list of source addresses (<code>smelt.&lt;path&gt;</code> form) this step populates. Every entry must resolve to a declared source, and a source may be named by at most one step in the workspace.</td>
 </tr>
 <tr>
 <td><code>command</code></td>
-<td><strong>yes</strong></td>
-<td>—</td>
-<td>Argv list smelt invokes as the step's program. Never parsed or type-checked — an opaque external command, run and observed only by its exit code.</td>
+<td>yes</td>
+<td>Argv list smelt invokes as the step's program. Opaque to smelt — never parsed or type-checked, just run and observed by its exit code.</td>
 </tr>
 <tr>
 <td><code>cadence</code></td>
 <td>no</td>
-<td>absent</td>
-<td>How often the producer intends to run (an interval, e.g. <code>'1 day'</code>). Describes the producer's schedule, distinct from <code>mutation_profile.lateness</code>.</td>
+<td>How often the producer intends to run, e.g. <code>'1 day'</code>. Describes the <em>producer's</em> schedule, distinct from a source's own <code>mutation_profile.lateness</code>, which describes how far behind the clock a landed row can be.</td>
 </tr>
 <tr>
 <td><code>description</code></td>
 <td>no</td>
-<td>absent</td>
 <td>Free-text description, surfaced in LSP hover and <code>smelt explain</code>.</td>
 </tr>
 </tbody>
 </table>
-<p><code>command:</code>'s argv accepts the closed placeholder grammar <code>{run_date}</code>/<code>{run_end}</code> (the run
-window's start and exclusive end, ISO <code>YYYY-MM-DD</code>); <code>{{</code>/<code>}}</code> escape to literal
-<code>{</code>/<code>}</code>. Any other <code>{name}</code> is <code>MalformedExternalStep</code> at declaration time.</p>
-<h2 id="supported-types">Supported types<a class="headerlink" href="#supported-types" title="Permanent link">&para;</a></h2>
+<h2 id="the-run_date-run_end-placeholders">The <code>{run_date}</code> / <code>{run_end}</code> placeholders<a class="headerlink" href="#the-run_date-run_end-placeholders" title="Permanent link">&para;</a></h2>
+<p><code>command:</code>'s argv is opaque to smelt except for one closed substitution grammar, applied
+per-argv-element before spawning:</p>
+<ul>
+<li><code>{run_date}</code> — the run window's start, ISO <code>YYYY-MM-DD</code>.</li>
+<li><code>{run_end}</code> — the run window's exclusive end, same form.</li>
+<li><code>{{</code> and <code>}}</code> escape to literal <code>{</code> and <code>}</code>.</li>
+</ul>
+<p>Any other <code>{name}</code> in an argv element is rejected at declaration time
+(<code>MalformedExternalStep</code>) — caught by the LSP and by <code>smelt list</code>/<code>smelt run</code>'s pre-flight
+parse, never deferred to the run that first reaches the step.</p>
+<h2 id="what-smelt-guarantees">What smelt guarantees<a class="headerlink" href="#what-smelt-guarantees" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>DAG ordering.</strong> A run that selects a model downstream of a step's produced sources
+  runs the step first, ahead of every consumer.</li>
+<li><strong>Invocation.</strong> When the run reaches the step, smelt spawns <code>command:</code> with the
+  placeholders substituted for the run's actual window.</li>
+<li><strong>Failure propagation.</strong> A non-zero exit is a run failure, naming the step and its exit
+  code; every model downstream of the sources it produces is left unbuilt.</li>
+<li><strong>Reporting.</strong> The run report and manifest record every step a run invoked
+  (<code>command</code>, <code>produces</code>, and duration); <code>smelt explain</code> renders a step's declaration.</li>
+<li><strong>Selection.</strong> <code>smelt list</code>, the DAG/graph surfaces, and model selection
+  (<code>+model</code>-style upstream expansion, direct addressing) reach a step through the same
+  selectors as any other node.</li>
+</ul>
+<h2 id="what-smelt-does-not-do">What smelt does not do<a class="headerlink" href="#what-smelt-does-not-do" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Authorship.</strong> smelt never writes, generates, or reviews the external program. The
+  loader script is yours to write and maintain — see
+  <code>examples/github_activity/load_day.sh</code> for a worked example that carries its own
+  bookkeeping.</li>
+<li><strong>Parsing or type-checking the command.</strong> <code>command:</code>'s argv is an opaque string list;
+  smelt does not parse it, does not type-check it, and does not know what the program
+  inside it does beyond its exit code.</li>
+<li><strong>Retries.</strong> A failed step is a run failure like any other — smelt applies no retry
+  policy beyond whatever the run's own invocation policy already provides. The step
+  itself owns any internal retry logic it needs.</li>
+<li><strong>Idempotence.</strong> smelt does not guarantee, and does not verify, that running the step
+  twice for the same window produces the same result. If the step needs to be safe to
+  re-run (for example, after a partial failure), that safety is the step's own
+  responsibility to build in.</li>
+</ul>
+<h2 id="failure-modes">Failure modes<a class="headerlink" href="#failure-modes" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
 <tr>
-<th>Type</th>
-<th>Description</th>
+<th>Situation</th>
+<th>What happens</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>INTEGER</code></td>
-<td>64-bit signed integer</td>
+<td><code>external_step:</code> is malformed — <code>produces:</code> missing/empty, an entry that doesn't resolve to a declared source, <code>columns:</code> present alongside <code>external_step:</code>, a malformed <code>command:</code>, an unrecognised <code>{name}</code> placeholder, or a malformed <code>cadence:</code></td>
+<td><code>MalformedExternalStep</code> — caught at declaration time by the LSP and by <code>smelt list</code>/<code>smelt run</code>'s pre-flight parse, before any run starts.</td>
 </tr>
 <tr>
-<td><code>DECIMAL(p,s)</code></td>
-<td>Fixed-point decimal, precision <code>p</code>, scale <code>s</code></td>
+<td>A run reaches a step but cannot invoke it — no <code>command:</code> resolvable in the environment, a dry run, or an environment that categorically cannot execute external commands</td>
+<td><code>ExternalStepNotInvocable</code> — the run refuses rather than proceeding against a possibly-stale table.</td>
 </tr>
 <tr>
-<td><code>DOUBLE</code></td>
-<td>64-bit floating point</td>
-</tr>
-<tr>
-<td><code>BOOLEAN</code></td>
-<td>True/false</td>
-</tr>
-<tr>
-<td><code>DATE</code></td>
-<td>Calendar date (<code>YYYY-MM-DD</code>)</td>
-</tr>
-<tr>
-<td><code>TIMESTAMP</code></td>
-<td>Date and time without time zone</td>
-</tr>
-<tr>
-<td><code>VARCHAR</code></td>
-<td>Variable-length string</td>
+<td>The step's <code>command:</code> exits non-zero</td>
+<td><code>ExternalStepFailed</code> — the run fails, naming the step and its exit code; every model downstream of its produced sources is left unbuilt.</td>
 </tr>
 </tbody>
 </table>
+<p><code>smelt explain &lt;step&gt;</code> is the one non-refusing preview surface: it prints the step's
+declared <code>produces:</code>, its literal (unsubstituted) <code>command:</code> argv, its cadence and
+description, and the models that directly consume its produced sources — without ever
+spawning the command.</p>
+<h2 id="when-to-use-a-step-vs-an-out-of-band-pipeline">When to use a step vs. an out-of-band pipeline<a class="headerlink" href="#when-to-use-a-step-vs-an-out-of-band-pipeline" title="Permanent link">&para;</a></h2>
+<p>Reach for an external step when the loader is something a run needs to have happened
+before it can trust the sources it reads — smelt should order it, fail the run loudly if
+it fails, and show it in <code>smelt list</code>/<code>smelt explain</code>. If the loading pipeline runs on its
+own schedule, independent of any smelt run, and the source's freshness is just something
+models tolerate (via <code>mutation_profile</code>/<code>source_lateness</code>), a plain source declaration
+with no step behind it is the better fit — you gain nothing from smelt invoking a program
+whose completion your run doesn't actually need to wait on.</p>
+<h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../../reference/sources-yml/#the-external_step-block">Source YAML Reference</a> for the
+  full <code>external_step:</code> key table</li>
+<li><a href="../sources/">Sources</a> for how the sources a step produces are declared</li>
+</ul>
 
 
 
