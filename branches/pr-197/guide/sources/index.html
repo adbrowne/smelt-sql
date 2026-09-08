@@ -1411,6 +1411,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#bounded-history-retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bounded history (retention:)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#loading-source-data" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2928,6 +2939,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#bounded-history-retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bounded history (retention:)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#loading-source-data" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3073,20 +3095,55 @@
 </code></pre></div>
 <p><code>referential_integrity:</code> names the column(s) a consuming model's equi-join reads that are guaranteed present — every value a fact table joins on this dimension by is guaranteed to have a matching row here. When declared (as a subset of <code>unique_key:</code>, which must also be declared), a model that enriches through a bare inner join on that column no longer needs to be rewritten as a <code>LEFT JOIN</code> to prove it preserves every driving row.</p>
 <p>This is a narrowing declaration, not a hint: every consuming run re-checks it over the region it touched (the row count out of the join must equal the row count into it), and a violation — a fact row whose key has no match in the dimension, disproving the declaration — fails the run loudly rather than silently trusting stale metadata. Declare it only when you can back the guarantee (e.g. the dimension is populated ahead of the fact table, or a foreign-key constraint enforces it upstream).</p>
+<h2 id="bounded-history-retention">Bounded history (<code>retention:</code>)<a class="headerlink" href="#bounded-history-retention" title="Permanent link">&para;</a></h2>
+<p>Some sources don't keep their full history forever — a BigQuery table with
+<code>partition_expiration_days</code>, or a Delta table under a retention job, drops old partitions on a
+rolling schedule. Declaring that bound lets smelt refuse or flag a maintenance plan that reaches
+further back than the source can actually still answer for, instead of silently rebuilding from
+whatever happens to survive:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># models/sources/raw/events.yml</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Raw events; the warehouse expires partitions after 45 days.</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="nt">timeseries</span><span class="p">:</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">  </span><span class="nt">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">event_ts</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">  </span><span class="nt">partition_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">event_date</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">  </span><span class="nt">granularity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="nt">retention</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;45</span><span class="nv"> </span><span class="s">days&#39;</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="nt">columns</span><span class="p">:</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> name</span><span class="p">:</span><span class="w"> </span><span class="nv">event_id</span><span class="p p-Indicator">,</span><span class="nt"> type</span><span class="p">:</span><span class="w"> </span><span class="nv">BIGINT</span><span class="p p-Indicator">,</span><span class="nt"> nullable</span><span class="p">:</span><span class="w"> </span><span class="nv">false</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> name</span><span class="p">:</span><span class="w"> </span><span class="nv">event_ts</span><span class="p p-Indicator">,</span><span class="nt"> type</span><span class="p">:</span><span class="w"> </span><span class="nv">TIMESTAMP</span><span class="p p-Indicator">,</span><span class="nt"> nullable</span><span class="p">:</span><span class="w"> </span><span class="nv">false</span><span class="w"> </span><span class="p p-Indicator">}</span>
+</code></pre></div>
+<p><code>retention:</code> requires <code>timeseries:</code> on the same source — a bound with nothing clocked has no
+reach to compare it against, and declaring one without the other is refused at parse time
+(<code>MalformedSource</code>), as is an unparseable or zero-length interval. The bound is <strong>rolling</strong>: it
+is anchored to the current run and advances with it, so a model that was admissible last month
+can stop being admissible this month with no change to its SQL — smelt re-evaluates admission
+against the bound in effect on every run, not the one in effect when the model was authored.</p>
+<p>At plan time, a model whose derived required reach into a <code>retention:</code> source is <em>proven</em> to
+exceed the bound refuses (<code>SourceRetentionExceeded</code>) rather than silently recomputing over a
+shorter window than it asked for. A reach that cannot be proven to fit — an unbounded cumulative
+aggregation, or a shape the analyzer can't classify — is admitted but recorded as a downgrade
+(<code>SourceRetentionDowngraded</code>): the model still runs, but its pre-bound region stops being claimed
+replayable. A whole-table recompute (<code>--full-refresh</code>, <code>smelt rebuild</code>) reaches past every finite
+bound by construction, so it is refused outright when stored output already exists, and licensed
+with a recorded downgrade only for a first build, a smelt-forced full refresh, or an explicit
+operator override. <code>smelt explain &lt;model&gt;</code> renders the bound against the required reach for every
+declared-<code>retention:</code> source — see <a href="../../reference/smelt-explain/#retention-reach">Retention reach</a>.</p>
+<p>Absent <code>retention:</code>, a source is trusted fully replayable — the common case for a warehouse table
+that never expires partitions.</p>
 <h2 id="loading-source-data">Loading source data<a class="headerlink" href="#loading-source-data" title="Permanent link">&para;</a></h2>
 <p>By default, sources are loaded outside the smelt pipeline — you are responsible for ensuring the source tables exist in your target database before running models that depend on them.</p>
 <p>The exception is a source whose loader smelt itself invokes as a <strong>declared external step</strong>: a program smelt orders ahead of every model that reads the sources it produces, runs as part of the pipeline, and fails the run loudly if it fails. This is opt-in per source — see <a href="../external-steps/">External Steps</a> for the declaration, what smelt guarantees, and what stays the loader's own responsibility.</p>
 <h2 id="project-structure">Project structure<a class="headerlink" href="#project-structure" title="Permanent link">&para;</a></h2>
 <p>Source YAML files live alongside other models under your <code>paths:</code> directories. A typical layout:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>models/
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>  sources/
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>    raw/
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>      users.yml
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>      events.yml
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>      transactions.yml
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>  staging/
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    stg_users.sql
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>    stg_events.sql
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>models/
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>  sources/
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>    raw/
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>      users.yml
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>      events.yml
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>      transactions.yml
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>  staging/
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>    stg_users.sql
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>    stg_events.sql
 </code></pre></div>
 <h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
 <ul>

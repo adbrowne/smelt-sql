@@ -2604,6 +2604,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#source-retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Source retention
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#succession-grain" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2925,6 +2936,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#source-retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Source retention
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#succession-grain" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3077,6 +3099,35 @@ compile time, smelt refuses rather than guess — guessing wrong here would sile
 <p><strong>Fix</strong>: Give the operands a resolvable type — for example, by declaring the upstream column's type
 or wrapping the operand in an explicit <code>CAST</code> — or rewrite the expression as a typed <code>FLOOR(a / b)</code>
 or <code>DIV(a, b)</code> call.</p>
+<h2 id="source-retention">Source retention<a class="headerlink" href="#source-retention" title="Permanent link">&para;</a></h2>
+<p>A source may declare a rolling <code>retention:</code> bound (<code>../guide/sources.md#bounded-history-retention</code>).
+smelt reasons about a model's required reach into that source against the declared bound, and
+either refuses or records a downgrade — never silently computes over less history than the model
+asked for. Full semantics: <a href="https://github.com/brownie/smelt/blob/main/docs/specs/sources.md"><code>docs/specs/sources.md</code>
+§"Retention refusal"</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Severity</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SourceRetentionExceeded</code></td>
+<td>Error</td>
+<td>A model's derived required reach into a declared-<code>retention:</code> source is proven to exceed the source's retained bound, or a whole-table recompute over a declared-<code>retention:</code> source is attempted with stored output already present and no license.</td>
+</tr>
+<tr>
+<td><code>SourceRetentionDowngraded</code></td>
+<td>Warning</td>
+<td>A model's derived required reach into a declared-<code>retention:</code> source could not be proven to fit inside the bound (an unbounded or otherwise underivable reach) — admitted, but the model's pre-bound region stops being claimed replayable.</td>
+</tr>
+</tbody>
+</table>
+<p><code>smelt explain &lt;model&gt;</code> renders both the bound and the required reach for every declared-<code>retention:</code>
+source under <code>Retention:</code> (<code>--json</code>: the <code>retention</code> array) — see <a href="../smelt-explain/"><code>smelt explain</code></a>.</p>
 <h2 id="succession-grain">Succession grain<a class="headerlink" href="#succession-grain" title="Permanent link">&para;</a></h2>
 <p>The <a href="../../guide/scd2-succession/">succession grain</a> is recognised from a model's SQL shape, never
 declared — every rejection below names the offending clause and a fix rather than falling back to
