@@ -455,14 +455,12 @@ fn every_window_deep_sweep() {
     ];
 
     let tmp = TempDir::new().expect("tempdir");
-    let (incr_workspace, incr_db, incr_sample) = stage_workspace(&tmp.path().join("incremental"));
-    create_empty_raw_table(&incr_db, &incr_sample);
+    let (incr_workspace, incr_db, _incr_sample) = stage_workspace(&tmp.path().join("incremental"));
 
-    let mut prev: Option<&str> = None;
     for (idx, day) in FIXTURE_DAYS.iter().enumerate() {
-        load_day(&incr_db, &incr_sample, day, prev);
+        // No pre-load: `models/sources/raw/github_loader.yml`'s declared
+        // external step loads the day itself, invoked by `smelt run`.
         smelt_run(&incr_workspace, day, &day_after(day), &[]);
-        prev = Some(day);
 
         let (oracle_workspace, oracle_db, oracle_sample) =
             stage_workspace(&tmp.path().join(format!("oracle-{idx}")));
@@ -632,14 +630,12 @@ fn full_replay_pair() -> &'static FullReplayPair {
 #[test]
 fn every_window_matches_the_full_refresh_oracle() {
     let tmp = TempDir::new().expect("tempdir");
-    let (incr_workspace, incr_db, incr_sample) = stage_workspace(&tmp.path().join("incremental"));
-    create_empty_raw_table(&incr_db, &incr_sample);
+    let (incr_workspace, incr_db, _incr_sample) = stage_workspace(&tmp.path().join("incremental"));
 
-    let mut prev: Option<&str> = None;
     for (idx, day) in FIXTURE_DAYS.iter().enumerate() {
-        load_day(&incr_db, &incr_sample, day, prev);
+        // No pre-load: `models/sources/raw/github_loader.yml`'s declared
+        // external step loads the day itself, invoked by `smelt run`.
         smelt_run(&incr_workspace, day, &day_after(day), &[]);
-        prev = Some(day);
 
         let is_final = idx == FIXTURE_DAYS.len() - 1;
         if is_final {

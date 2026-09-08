@@ -8,7 +8,8 @@
 //! SQL — so "verbatim" is a gate, not a hope.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+use tempfile::TempDir;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -293,5 +294,210 @@ fn loader_script_is_shellcheck_clean() {
         out.status.success(),
         "shellcheck findings:\n{}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests for `examples/github_activity/load_day.sh` — the DuckDB-native day
+// loader, declared as an external step
+// (`models/sources/raw/github_loader.yml`) and invoked by `smelt run` on the
+// run path (phase 7 of `docs/outcomes/20260906-external-dag-steps`). Distinct
+// from `bq-dogfood-loader.sh` above: that script derives BigQuery load SQL
+// and never touches a database; this one loads directly into a real DuckDB
+// database and is exercised by spawning it, not by inspecting emitted SQL.
+// ---------------------------------------------------------------------------
+
+fn day_loader_script() -> PathBuf {
+    repo_root().join("examples/github_activity/load_day.sh")
+}
+
+fn day_loader_sample_parquet() -> PathBuf {
+    repo_root().join("examples/github_activity/seeds/github_events_sample.parquet")
+}
+
+fn run_day_loader(database: &Path, date: &str) -> Output {
+    Command::new("bash")
+        .arg(day_loader_script())
+        .args(["--date", date, "--database"])
+        .arg(database)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn load_day.sh: {e}"))
+}
+
+fn duckdb_scalar(database: &Path, sql: &str) -> i64 {
+    let out = Command::new("duckdb")
+        .arg(database)
+        .args(["-json", "-c", sql])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn duckdb: {e}"));
+    assert!(
+        out.status.success(),
+        "duckdb query failed: {}\nsql: {sql}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let rows: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("invalid JSON: {e}\n{stdout}"));
+    rows[0]
+        .as_object()
+        .and_then(|obj| obj.values().next())
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| panic!("expected one scalar column in query result: {rows}"))
+}
+
+/// Test 1: running `load_day.sh --date D` twice against one database yields
+/// the same row counts in both relations as running it once — the per-day
+/// ledger (`main._loader_days`) makes the load idempotent, required because
+/// a run may legitimately invoke the step more than once for the same day.
+#[test]
+fn load_day_script_is_idempotent() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("dev.duckdb");
+
+    let out = run_day_loader(&db, "2026-08-06");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let events_once = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events",
+    );
+    let arrival_once = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events_arrival",
+    );
+
+    let out = run_day_loader(&db, "2026-08-06");
+    assert!(
+        out.status.success(),
+        "second invocation should also exit 0 (idempotent skip); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let events_twice = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events",
+    );
+    let arrival_twice = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events_arrival",
+    );
+
+    assert_eq!(
+        events_once, events_twice,
+        "re-running the same day must not duplicate rows"
+    );
+    assert_eq!(
+        arrival_once, arrival_twice,
+        "re-running the same day must not duplicate rows"
+    );
+    assert!(
+        events_once > 0,
+        "the first invocation should have loaded some rows"
+    );
+}
+
+/// Test 2: after days D and D+1, the event-time relation carries the 2%
+/// D-slice a second time under its original `created_at`, and the arrival
+/// relation carries those same ids stamped `ingested_date = D+1`.
+#[test]
+fn load_day_script_redelivers_the_previous_day() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("dev.duckdb");
+
+    let out = run_day_loader(&db, "2026-08-05");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run_day_loader(&db, "2026-08-06");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let sample = day_loader_sample_parquet();
+    let real_day05 = duckdb_scalar(
+        &db,
+        &format!(
+            "SELECT count(*) AS c FROM read_parquet('{}') \
+             WHERE CAST(created_at AS DATE) = DATE '2026-08-05'",
+            sample.display()
+        ),
+    );
+    let expected_redelivered = duckdb_scalar(
+        &db,
+        &format!(
+            "SELECT count(*) AS c FROM read_parquet('{}') \
+             WHERE CAST(created_at AS DATE) = DATE '2026-08-05' \
+             AND MOD(CAST(id AS BIGINT), 50) = 0",
+            sample.display()
+        ),
+    );
+    assert!(
+        expected_redelivered > 0,
+        "the fixture must carry a redeliverable slice for 08-05"
+    );
+
+    // The redelivered rows keep their original `created_at` (day 05), so
+    // they land in the *same* date group as the real day-05 rows — the
+    // event-time relation's day-05 count is the real total plus the
+    // redelivered slice, a second physical (duplicate-id) copy.
+    let events_day05 = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events \
+         WHERE CAST(created_at AS DATE) = DATE '2026-08-05'",
+    );
+    assert_eq!(
+        events_day05,
+        real_day05 + expected_redelivered,
+        "the event-time relation's day-05 rows must be the real total plus the day-06 \
+         redelivery of the same date (byte-identical id and created_at)"
+    );
+
+    let arrival_redelivered_on_open_partition = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events_arrival \
+         WHERE ingested_date = DATE '2026-08-06' \
+         AND CAST(created_at AS DATE) = DATE '2026-08-05'",
+    );
+    assert_eq!(
+        arrival_redelivered_on_open_partition, expected_redelivered,
+        "the arrival relation must carry the redelivered day-05 ids stamped ingested_date=2026-08-06"
+    );
+}
+
+/// Test 3: a fresh database needs no `setup_sources.sql` pre-pass for the
+/// step to succeed — `load_day.sh` creates both raw tables itself when
+/// absent.
+#[test]
+fn load_day_script_creates_the_raw_tables_when_absent() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("dev.duckdb");
+    assert!(!db.exists());
+
+    let out = run_day_loader(&db, "2026-08-05");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(db.exists());
+
+    let events = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events",
+    );
+    let arrival = duckdb_scalar(
+        &db,
+        "SELECT count(*) AS c FROM main.sources_raw_github_events_arrival",
+    );
+    assert!(events > 0, "expected rows to be loaded on first invocation");
+    assert_eq!(
+        events, arrival,
+        "both relations should carry the same day-05 rows"
     );
 }

@@ -82,13 +82,27 @@ against BigQuery yet.
 credentials: `bronze.events` (a typed passthrough of the source), `silver.events_deduped`
 (dedup on `id`), `silver.actor_sessions` (30-minute-gap sessionization per actor, ported
 from `examples/web_analytics/functions/sessionize.sql`), and
-`marts.daily_active_contributors`. `setup_sources.sql` creates the empty
-`raw.github_events` table; `run_incremental.py` replays the fixture day by day, redelivering
-the previous day's slice as described above, and finishes with `smelt test`:
+`marts.daily_active_contributors`. `run_incremental.py` replays the fixture day by day and
+finishes with `smelt test`:
 
 ```bash
 python3 examples/github_activity/run_incremental.py
 ```
+
+Unlike the BigQuery loader above, **the DuckDB leg's day loader is itself a node in
+smelt's DAG**, not something the driver script invokes directly:
+`models/sources/raw/github_loader.yml` declares `load_day.sh` as an `external_step:`
+producing both `raw.github_events` and `raw.github_events_arrival`
+(`docs/specs/sources.md` §"Externally-produced sources (black-box steps)"). `smelt run`
+orders the step ahead of every model that reads either source and invokes it with
+`--date {run_date}` — smelt orders and invokes the load, it does not author it. The one
+implementation is why the incremental replay (`run_incremental.py`, driving `smelt run`
+day by day) and the full-refresh oracle (`crates/smelt-cli/tests/github_activity_oracle.rs`,
+staging many days directly) can share it without drifting apart: `load_day.sh` carries its
+own per-day ledger (`main._loader_days`) and is idempotent per day, since a run may
+legitimately invoke it more than once for the same day (the oracle stages a day directly
+before `--full-refresh` also reaches the step, and a multi-region run invokes
+`execute_project` — and therefore the step — once per region).
 
 `silver.events_deduped` is `grain: key` with `timeseries: { partition_column:
 first_seen_date }` — the composed key-addressed-and-time-partitioned shape

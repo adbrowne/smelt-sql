@@ -30,8 +30,8 @@ use tempfile::TempDir;
 
 mod github_activity_support;
 use github_activity_support::{
-    create_empty_raw_table, duckdb_exec, duckdb_scalar_i64, load_day, replay_days, smelt_bin,
-    smelt_run, stage_workspace, FIXTURE_DAYS,
+    create_empty_raw_table, day_after, duckdb_exec, duckdb_scalar_i64, load_day, replay_days,
+    smelt_bin, smelt_run, stage_workspace, FIXTURE_DAYS,
 };
 
 fn smelt_run_expect_failure(workspace: &Path, start: &str, end: &str) -> String {
@@ -725,5 +725,67 @@ fn repo_leaderboard_top_repo_is_the_bot_repo() {
     assert_eq!(
         top_events, 1_750,
         "expected the fixture's measured top event count"
+    );
+}
+
+/// Criterion 3/4 on a real fixture, not a synthetic scaffold: a staged
+/// workspace with **no** pre-loaded rows — no `load_day.sh` call, no
+/// `create_empty_raw_table` — ends with the first fixture day's rows in
+/// both raw sources and `bronze.events` built, because `smelt run` itself
+/// invokes `models/sources/raw/github_loader.yml`'s declared external step
+/// ahead of every model that reads either source
+/// (`docs/outcomes/20260906-external-dag-steps/phases/07-plan.md` task 4).
+#[test]
+fn smelt_run_invokes_the_loader_step() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, _sample) = stage_workspace(tmp.path());
+
+    let day = FIXTURE_DAYS[0];
+    smelt_run(&workspace, day, &day_after(day), &[]);
+
+    let raw_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.sources_raw_github_events");
+    let bronze_rows = duckdb_scalar_i64(&db, "SELECT count(*) FROM main.bronze_events");
+    assert!(
+        raw_rows > 0,
+        "smelt run should have driven the loader step, populating raw.github_events"
+    );
+    assert_eq!(
+        raw_rows, bronze_rows,
+        "bronze.events is a passthrough of the source the step loaded"
+    );
+}
+
+/// Criterion 4 on a real fixture: replacing `load_day.sh` with an `exit 3`
+/// stub makes `smelt run` fail non-zero, naming the step, with no model
+/// relation created (`docs/outcomes/20260906-external-dag-steps/phases/
+/// 07-plan.md` task 4).
+#[test]
+fn loader_step_failure_leaves_downstream_unbuilt() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, _sample) = stage_workspace(tmp.path());
+    std::fs::write(
+        workspace.join("load_day.sh"),
+        "#!/usr/bin/env bash\nexit 3\n",
+    )
+    .expect("overwrite load_day.sh with a failing stub");
+
+    let day = FIXTURE_DAYS[0];
+    let output = smelt_run_expect_failure(&workspace, day, &day_after(day));
+    assert!(
+        output.contains("sources.raw.github_loader") || output.contains("ExternalStepFailed"),
+        "expected the run failure to name the failing step:\n{output}"
+    );
+
+    let conn = duckdb::Connection::open(&db).unwrap_or_else(|e| panic!("open {db:?}: {e}"));
+    let table_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'bronze_events'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query information_schema.tables");
+    assert_eq!(
+        table_count, 0,
+        "bronze.events must not be built when its upstream loader step fails"
     );
 }

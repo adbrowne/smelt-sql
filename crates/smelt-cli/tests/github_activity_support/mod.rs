@@ -82,41 +82,42 @@ pub fn create_empty_raw_table(db: &Path, sample: &Path) {
     );
 }
 
-/// Append day `day`'s real rows, plus (unless `first_day`) a 2% redelivered
-/// slice of `day - 1`'s rows, into both the event-time and
-/// arrival-partitioned relations — mirrors `run_incremental.py::load_day`.
-pub fn load_day(db: &Path, sample: &Path, day: &str, prev: Option<&str>) {
-    let redelivery = match prev {
-        Some(p) => format!(
-            "UNION ALL SELECT * FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{p}' \
-             AND MOD(CAST(id AS BIGINT), 50) = 0",
-            sample.display()
-        ),
-        None => String::new(),
-    };
-    let redelivery_arrival = match prev {
-        Some(p) => format!(
-            "UNION ALL SELECT *, DATE '{day}' AS ingested_date FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{p}' \
-             AND MOD(CAST(id AS BIGINT), 50) = 0",
-            sample.display()
-        ),
-        None => String::new(),
-    };
-    duckdb_exec(
-        db,
-        &format!(
-            "INSERT INTO main.sources_raw_github_events \
-             SELECT * FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{day}' {redelivery}; \
-             INSERT INTO main.sources_raw_github_events_arrival \
-             SELECT *, DATE '{day}' AS ingested_date FROM read_parquet('{}') \
-             WHERE CAST(created_at AS DATE) = DATE '{day}' {redelivery_arrival};",
-            sample.display(),
-            sample.display()
-        ),
-    );
+/// Append day `day`'s real rows, plus a 2% redelivered slice of `day - 1`'s
+/// rows, into both the event-time and arrival-partitioned relations, by
+/// invoking `load_day.sh` — the same external-step program
+/// `models/sources/raw/github_loader.yml` declares and `smelt run` invokes
+/// on the run path. `prev` is unused: the script computes the previous day
+/// itself via a SQL interval, so a day at the start of the fixture range
+/// (with no D-1 rows in the sample) needs no special case; kept in the
+/// signature so call sites (many, across `github_activity_replay.rs` and
+/// `github_activity_oracle.rs`) are unchanged.
+pub fn load_day(db: &Path, _sample: &Path, day: &str, _prev: Option<&str>) {
+    if Command::new("duckdb").arg("--version").output().is_err() {
+        panic!(
+            "the `duckdb` CLI is not on PATH — required by \
+             examples/github_activity/load_day.sh; provision it via \
+             `mise run setup-duckdb` or the `setup-duckdb` GitHub Action"
+        );
+    }
+    let workspace = db
+        .parent()
+        .and_then(Path::parent)
+        .expect("db path is <workspace>/target/dev.duckdb");
+    let script = workspace.join("load_day.sh");
+    let out = Command::new("bash")
+        .arg(&script)
+        .args(["--date", day, "--database"])
+        .arg(db)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {script:?}: {e}"));
+    if !out.status.success() {
+        panic!(
+            "load_day.sh --date {day} failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
 }
 
 pub fn smelt_run(workspace: &Path, start: &str, end: &str, extra_args: &[&str]) {
@@ -179,12 +180,14 @@ pub fn day_after(day: &str) -> String {
         .to_string()
 }
 
-pub fn replay_days(workspace: &Path, db: &Path, sample: &Path, days: &[&str]) {
-    create_empty_raw_table(db, sample);
-    let mut prev: Option<&str> = None;
+/// Drive the incremental replay leg: one `smelt run` per day, with **no**
+/// pre-load — `models/sources/raw/github_loader.yml`'s declared external
+/// step (`load_day.sh`) is what loads each day, invoked by `smelt run`
+/// itself ahead of every model that reads either raw source. `db`/`sample`
+/// are unused (the step creates the raw tables itself when absent); kept in
+/// the signature so call sites are unchanged.
+pub fn replay_days(workspace: &Path, _db: &Path, _sample: &Path, days: &[&str]) {
     for day in days {
-        load_day(db, sample, day, prev);
         smelt_run(workspace, day, &day_after(day), &[]);
-        prev = Some(day);
     }
 }

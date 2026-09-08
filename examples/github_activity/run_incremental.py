@@ -8,20 +8,23 @@ script does, in order:
 
   1. Wipe target/dev.duckdb and create the empty `raw.github_events` table
      via setup_sources.sql.
-  2. Loop day-by-day across the fixture's 30-day range. Each day D's load
-     appends two things to the source: the real rows whose `created_at`
-     falls on day D, and a deterministic 2% redelivery of day D-1's rows
+  2. Loop day-by-day across the fixture's 30-day range, invoking `smelt run
+     --event-time-start D --event-time-end D+1`. The day's load itself is no
+     longer this script's job: `models/sources/raw/github_loader.yml`
+     declares `load_day.sh` as an external step producing both raw sources,
+     and `smelt run` orders and invokes it ahead of every model that reads
+     them (`docs/specs/sources.md` §"Externally-produced sources (black-box
+     steps)"). Each day D's load appends the real rows whose `created_at`
+     falls on day D, plus a deterministic 2% redelivery of day D-1's rows
      (`MOD(CAST(id AS BIGINT), 50) = 0`) — the loader's declared at-least-once
-     behaviour (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/
-     02-plan.md` §"Redelivery is not free"). GitHub Archive itself carries no
-     duplicate event ids, so without this the dedup model would never see a
-     duplicate.
-  3. After each day's load, invoke `smelt run --event-time-start D
-     --event-time-end D+1`.
-  4. Finish with `smelt test`.
+     behaviour. GitHub Archive itself carries no duplicate event ids, so
+     without this the dedup model would never see a duplicate.
+  3. Finish with `smelt test`.
 
 Per-iteration output is one structured line; a final summary block reports
-the total redelivered-row count observed, so it is a number in run output
+the total redelivered-row count observed (computed directly against the
+committed parquet fixture with the loader's own predicate, since the load
+itself now happens inside `smelt run`), so it is a number in run output
 rather than a bare "passed".
 
 Requires `smelt` and `duckdb` on PATH; Python 3.9+.
@@ -94,48 +97,12 @@ def setup_sources(db: Path) -> None:
         sys.exit(proc.returncode)
 
 
-def load_day(db: Path, day: date, first_day: bool) -> int:
-    """Append day `day`'s real rows plus (unless first_day) a redelivered
-    slice of `day - 1`'s rows, into both the event-time and arrival-
-    partitioned relations. Returns the number of redelivered rows."""
+def redelivered_count(db: Path, day: date) -> int:
+    """Count of day `day - 1`'s rows load_day.sh redelivers into day `day`'s
+    load — the loader's own predicate, computed directly against the
+    committed parquet fixture (the load itself happens inside `smelt run`,
+    driven by the declared external step, not by this script)."""
     prev = day - timedelta(days=1)
-    redelivery_clause = (
-        f"UNION ALL SELECT * FROM read_parquet('{SAMPLE_PARQUET}') "
-        f"WHERE CAST(created_at AS DATE) = DATE '{prev.isoformat()}' "
-        f"AND MOD(CAST(id AS BIGINT), {REDELIVERY_MODULUS}) = 0"
-        if not first_day
-        else ""
-    )
-    redelivery_clause_arrival = (
-        f"UNION ALL SELECT *, DATE '{day.isoformat()}' AS ingested_date "
-        f"FROM read_parquet('{SAMPLE_PARQUET}') "
-        f"WHERE CAST(created_at AS DATE) = DATE '{prev.isoformat()}' "
-        f"AND MOD(CAST(id AS BIGINT), {REDELIVERY_MODULUS}) = 0"
-        if not first_day
-        else ""
-    )
-    sql = (
-        f"INSERT INTO main.sources_raw_github_events "
-        f"SELECT * FROM read_parquet('{SAMPLE_PARQUET}') "
-        f"WHERE CAST(created_at AS DATE) = DATE '{day.isoformat()}' "
-        f"{redelivery_clause};"
-        # Arrival-partitioned twin: same rows (real day D plus the same
-        # redelivered slice of D-1), all stamped `ingested_date = D` — so the
-        # redelivered rows land in the *open* partition here, unlike the
-        # event-time relation above where they land in a *closed* one.
-        f"INSERT INTO main.sources_raw_github_events_arrival "
-        f"SELECT *, DATE '{day.isoformat()}' AS ingested_date "
-        f"FROM read_parquet('{SAMPLE_PARQUET}') "
-        f"WHERE CAST(created_at AS DATE) = DATE '{day.isoformat()}' "
-        f"{redelivery_clause_arrival};"
-    )
-    proc = subprocess.run(["duckdb", str(db), "-c", sql], capture_output=True, text=True)
-    if proc.returncode != 0:
-        sys.stderr.write(f"\n[FAIL] duckdb load_day({day}) exited {proc.returncode}\n")
-        sys.stderr.write(f"  stderr:\n{proc.stderr}\n")
-        sys.exit(proc.returncode)
-    if first_day:
-        return 0
     return query_scalar(
         db,
         f"SELECT count(*) FROM read_parquet('{SAMPLE_PARQUET}') "
@@ -185,11 +152,11 @@ def main() -> int:
     total_redelivered = 0
     loop_t0 = time.monotonic()
     for idx, day in enumerate(days, start=1):
-        redelivered = load_day(db, day, first_day=(idx == 1))
-        total_redelivered += redelivered
         t0 = time.monotonic()
         smelt_run_window(day, day + timedelta(days=1))
         elapsed = time.monotonic() - t0
+        redelivered = redelivered_count(db, day)
+        total_redelivered += redelivered
         print(
             f"[day {idx:>2}/{len(days)}] {day.isoformat()}  "
             f"redelivered={redelivered}  smelt run {elapsed:.2f}s"

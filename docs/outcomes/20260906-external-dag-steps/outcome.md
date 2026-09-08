@@ -65,12 +65,45 @@ visible in the run report.
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | done |
 | 5 | Run-path reporting — `RunReporter` gains step start/completed/failed callbacks, the CLI renders them, and the run manifest/report artifact records every step a run invoked (spec delta in `run_state.md`) | done |
 | 6 | `smelt explain` — the whole-project text and `--json` output carry external steps as nodes, and `smelt explain <step>` renders what it produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | done |
-| 7 | Fixture — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics, and actually runs it: one extracted day-loader program, invoked by `smelt run`, with the replay/oracle drivers rewired onto it and the `duckdb` CLI provisioned in CI | planned |
+| 7 | Fixture — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics, and actually runs it: one extracted day-loader program, invoked by `smelt run`, with the replay/oracle drivers rewired onto it and the `duckdb` CLI provisioned in CI | done |
 | 8 | Docs — docs-site page covering the declaration, the contract and the failure modes, cross-linked from the sources guide/reference and added to the nav | pending |
 | 9 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
 
+- 2026-09-08 (phase 7 implementation): **shipped as planned, no reshape. One
+  new discovery, unrelated to external steps, deferred rather than fixed.**
+  `examples/github_activity/load_day.sh` is the single day-loader
+  implementation, idempotent per day via `main._loader_days` (a day already
+  recorded is a no-op), with the previous-day 2% redelivery expressed as a
+  SQL interval (`DATE '{d}' - INTERVAL 1 DAY`) rather than shell date
+  arithmetic — a day at the start of the fixture range needs no special
+  case, since the redelivery predicate simply matches zero rows.
+  `models/sources/raw/github_loader.yml` declares it, producing both raw
+  sources. `run_incremental.py`'s `load_day` became `redelivered_count`
+  (a post-run read against the parquet fixture, since the load itself now
+  happens inside `smelt run`); `github_activity_support::load_day` now
+  shells out to the same script (call sites unchanged); `replay_days` and
+  the two gated oracle incremental loops (`every_window_matches_the_full_
+  refresh_oracle`, `every_window_deep_sweep`) dropped their manual pre-load,
+  relying on the step; the oracle's direct multi-day staging loops
+  (building the full-refresh comparison side) were left untouched, per the
+  plan. `.github/actions/setup-duckdb/action.yml` and `mise run setup-duckdb`
+  now also install the `duckdb` CLI. All 9 planned tests pass, plus the full
+  existing `github_activity_replay`/`github_activity_oracle` suites (37
+  tests) unaffected. **Discovery**: `smelt list --format json` hard-fails
+  with `ListError::ParseErrors` on `examples/github_activity` (and
+  identically on `examples/web_analytics` and `examples/retail_analytics`) —
+  `crates/smelt-cli/src/commands/list.rs` treats every project-wide-
+  discovered SQL file's parse errors as fatal, not just the selected set,
+  and root-level utility scripts (`sample.sql`, `setup_sources.sql`) aren't
+  valid smelt models. Pre-existing, reproduced identically without any of
+  this phase's changes (verified via a temporary stash), unrelated to
+  external steps. Test 6 (`github_activity_declares_its_loader_step`) uses
+  `smelt explain --json` instead, which — like `smelt run` — only compiles
+  what selection reaches. Left for whoever next touches `smelt list`: either
+  scope `ListError::ParseErrors` to the selected set, or give `load_workspace`
+  callers a way to exclude non-model root SQL from the project-wide walk.
 - 2026-09-08 (phase 7 planning): **reshape — the old row 7 is split in two**, and the fixture
   half grew a real design. Split rationale: "declare the step in the fixture" and "write the
   docs-site page" share no code, no gate and no failure mode, exactly like the phase-5 split;
