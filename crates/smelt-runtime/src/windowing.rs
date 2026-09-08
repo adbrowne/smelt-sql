@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{Datelike, Duration, NaiveDate};
+use tracing::warn;
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, PartitionGrainConfig};
@@ -192,6 +193,65 @@ pub struct IncrementalWindows {
     /// eligible reads this field directly rather than re-deriving it from the
     /// SQL a second time.
     pub skew: Skew,
+}
+
+impl IncrementalWindows {
+    /// The batch tiling envelope — `(first.partition_start, last.partition_end)`
+    /// across `batches`, or `None` for an empty batch list. This is the
+    /// model's own derived output window for this invocation (`docs/specs/
+    /// model_transforms.md` §Semantics "The derived output window propagates
+    /// within a run."): what a downstream reading this model verbatim widens
+    /// its own requested window by, via [`widen_run_window_for_upstream_outputs`].
+    pub fn output_window(&self) -> Option<(PartitionPoint, PartitionPoint)> {
+        let first = self.batches.first()?;
+        let last = self.batches.last()?;
+        Some((first.partition_start, last.partition_end))
+    }
+}
+
+/// Widen `requested` to cover every in-run upstream's derived output window
+/// (`docs/specs/model_transforms.md` §Semantics "The derived output window
+/// propagates within a run."): a model's run window is the union of the
+/// requested run window and the derived output window of every upstream
+/// maintained model selected in the same invocation, aligned outward to
+/// `granularity` so [`validate_run_window_against_partition_grid`] still
+/// accepts the result. An upstream window on a different [`PartitionAxis`]
+/// than `requested` contributes nothing — points of different axes are
+/// never mixed — and is logged rather than silently dropped. An upstream
+/// window already inside `requested` (the common zero-skew case) leaves it
+/// byte-identical.
+pub fn widen_run_window_for_upstream_outputs(
+    requested: (PartitionPoint, PartitionPoint),
+    upstream_outputs: &[(PartitionPoint, PartitionPoint)],
+    granularity: &Granularity,
+) -> (PartitionPoint, PartitionPoint) {
+    let (mut start, mut end) = requested;
+    let axis = start.axis();
+    for (u_start, u_end) in upstream_outputs {
+        if u_start.axis() != axis {
+            warn!(
+                "upstream output window ({u_start}, {u_end}) is on a different partition axis \
+                 ({:?}) than the downstream's requested window ({:?}); not propagated",
+                u_start.axis(),
+                axis,
+            );
+            continue;
+        }
+        if *u_start < start {
+            start = *u_start;
+        }
+        if *u_end > end {
+            end = *u_end;
+        }
+    }
+
+    match (start, end) {
+        (PartitionPoint::Date(s), PartitionPoint::Date(e)) => (
+            PartitionPoint::Date(align_output_start(s, granularity)),
+            PartitionPoint::Date(align_output_end(e, granularity)),
+        ),
+        other => other,
+    }
 }
 
 /// Warn when a single FullyBatchSafe batch spans more than this many

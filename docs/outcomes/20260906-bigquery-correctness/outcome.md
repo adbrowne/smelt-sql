@@ -88,13 +88,29 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | done |
 | 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | done |
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | done |
-| 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | planned |
+| 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | done |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | pending |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
 
+- 2026-09-08 (phase 7 implementation): **the mechanism worked on the first try; the tutorial
+  freshness gate did not move.** Task 1's inspection confirmed the plan's diagnosis exactly
+  (the clocked cell already exists; the run-window widening was the missing piece), so
+  `IncrementalWindows::output_window()`, the pure `widen_run_window_for_upstream_outputs`
+  helper, and threading both through `build_model_plans` (recording each model's output
+  window in a map keyed by name, consulted by name via `refs` before the `frozen_horizon`
+  clamp) closed `marts_daily_active_contributors`'s divergence on the first run of the full
+  30-day oracle — no second-attempt fix was needed, unlike phases 3 and 6.
+  `cargo test -p smelt-cli --test tutorial_freshness --features duckdb` passed unmodified
+  (no regeneration needed): the web-analytics tutorial's directive commands apparently never
+  select a Form-B upstream and its Form-A downstream together in one invocation the way the
+  plan's task 8 anticipated, so the widening never triggers there. `DIVERGENCE_REGISTRY` is
+  now empty; `findings_handoff_names_no_unknown_relation`'s "claimed non-empty" assertion had
+  to be loosened to accept an empty table when the registry itself is empty (a fixed-in-phase
+  consequence of the registry emptying now rather than in phase 8, not a new mechanism) — see
+  `phases/07-summary.md`.
 - 2026-09-08 (phase 7 planning): **no reshape of the phase order; row 8 reworded, and the
   handoff's open question is answered inside phase 7 rather than by a row of its own.**
   Reading the code settled punch-list item 4's mechanism: the edge from `silver.actor_sessions`

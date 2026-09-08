@@ -1633,6 +1633,12 @@ source dirties the **whole model** for every mutation-sensitive consumer — nev
 no-op (the cell was only admitted under `allow_full_scan`, so the full-table run is a declared
 cost).
 
+The same reflection an explicit landed delta gets above (`[a, b)` → `[a − after, b + before)`)
+is applied to an ordinary windowed run's in-run upstream output windows too
+(`model_transforms.md` §Semantics "The derived output window propagates within a run."), so
+the two entry points agree on which downstream partitions a Form-B upstream's self-rebase
+dirties.
+
 **Backward resolution — what must exist.** Given a target model and period `[s, e)` (aligned
 outward to the target's grain), walking the ancestor sub-DAG in reverse topological order and
 applying each edge's clamp directly — `[s, e)` requires upstream `[s − before, e + after)` —

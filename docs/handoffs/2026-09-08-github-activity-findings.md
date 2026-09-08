@@ -87,11 +87,26 @@ number is traceable to one of those.
    aggregate has no rebase of its own and never revisits an already-written partition, so
    it never learns when `actor_sessions`'s own (correct) Form-B rebase rewrites an earlier
    partition. `total_events` is frozen at first-write time — a strict subset of the
-   oracle. A third instance of the same missing-repair-edge shape as root cause 2's, but
-   triggered by an ordinary self-rebase rather than a renamed dimension
-   (`phases/08-summary.md`).
+   oracle. Not a missing-repair-edge shape like root cause 2's, despite the earlier
+   resemblance: the maintenance cell for this edge already exists (it is clocked, so
+   `append_model_edge_cells`' existing clock route derives it) — the gap is that no run
+   ever dispatches that cell over the partitions the upstream actually rewrote, because
+   `build_model_plans` gave every model the invocation's requested run window verbatim,
+   never learning that a Form-B upstream selected in the same run rebased a wider window
+   (`phases/08-summary.md`; mechanism confirmed by inspection in
+   `docs/outcomes/20260906-bigquery-correctness/phases/07-plan.md`).
 
-## The one registered divergence
+   **Fixed** by `docs/outcomes/20260906-bigquery-correctness/phases/07-plan.md`: a model's
+   run window is now the union of the requested window and the derived output window of
+   every upstream maintained model selected in the same invocation
+   (`docs/specs/model_transforms.md` §Semantics "The derived output window propagates
+   within a run."), applied in `build_model_plans` before the `frozen_horizon` clamp. A
+   `[D, D+1)` run over `marts.daily_active_contributors` now widens to
+   `actor_sessions`'s own rebased `[D-1, D+2)` output window, so the mart re-runs over the
+   same partitions the upstream rewrote and the two legs compare exactly equal —
+   no `DIVERGENCE_REGISTRY` entry remains for it.
+
+## The registered divergences
 
 Root cause 1 (`silver_repo_naming` / `silver_actor_naming`) is **fixed**, not registered:
 `docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md` folded
@@ -113,13 +128,17 @@ skew into every interior chunk's source-scan pushdown (`derive_batch_filtered_sq
 `scan_range` parameter), so the two legs now compare exactly equal on this relation too —
 no `DIVERGENCE_REGISTRY` entry remains for it.
 
-| Relation | Bound | Root cause | Defect or fixture artifact |
-|---|---|---|---|
-| `marts_daily_active_contributors` | `MonotoneDivergence` (incremental behind on `total_events`) | 4 | Smelt defect (missing repair edge) |
+Root cause 4 (`marts_daily_active_contributors`) is also **fixed**, not registered:
+`docs/outcomes/20260906-bigquery-correctness/phases/07-plan.md` widens a downstream
+model's run window to cover every in-run upstream's derived output window, so a run
+touching `actor_sessions`'s rebased partitions also re-runs this mart over them — the two
+legs now compare exactly equal on this relation too — no `DIVERGENCE_REGISTRY` entry
+remains for it.
 
-(Full predicate parameters — key columns, exact-match columns — live in
-`crates/smelt-cli/tests/github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`, not restated
-here to avoid a second copy drifting from the registry.)
+**`DIVERGENCE_REGISTRY` is now empty** — all four root causes are fixed, not registered.
+`an_unregistered_divergence_fails` still enforces exact equality on any future genuine
+divergence directly against every materialised relation, not via a lookup into this
+(now-empty) registry, so it does not pass vacuously.
 
 ## Latent, unmeasured
 

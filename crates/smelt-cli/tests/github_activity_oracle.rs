@@ -140,6 +140,12 @@ fn compare_databases(incr_db: &Path, full_db: &Path) -> Result<Vec<RelationDiff>
 /// (`docs/outcomes/20260906-bigquery-correctness/phases/03-plan.md`) once
 /// `emit_succession_full_rebuild`'s own fold made its two entries
 /// (`silver_repo_naming`, `silver_actor_naming`) compare exactly equal.
+/// `DIVERGENCE_REGISTRY` is currently empty (all four root causes fixed, not
+/// registered — phase 7 of `docs/outcomes/20260906-bigquery-correctness`
+/// fixed the last one), so no variant is constructed today; kept for the
+/// next divergence this registry finds rather than deleted along with its
+/// last user.
+#[allow(dead_code)]
 enum Bound {
     /// One side of the pair is always at or ahead of the other on
     /// `monotone_columns` (`behind_side` names which side is never allowed
@@ -154,14 +160,14 @@ enum Bound {
 }
 
 /// Which side of a [`Bound::MonotoneDivergence`] is never allowed to lead.
-/// `Oracle` has no current registry entry (phase 6 de-registered the one
-/// that used it, `silver_actor_sessions`) but `check_bound` still dispatches
-/// on it — kept for the next oracle-behind divergence this registry finds,
-/// rather than deleting a still-live match arm.
+/// Neither variant has a current registry entry (`DIVERGENCE_REGISTRY` is
+/// empty — see [`Bound`]'s doc comment) but `check_bound` still dispatches
+/// on both, kept for the next divergence this registry finds rather than
+/// deleting a still-live match arm.
+#[allow(dead_code)]
 #[derive(PartialEq, Eq)]
 enum Side {
     Incremental,
-    #[allow(dead_code)]
     Oracle,
 }
 
@@ -219,38 +225,31 @@ const ENRICHED_OTHER_COLUMNS: &[&str] = &[
 /// is derived, never assumed"), so the two legs now compare exactly equal —
 /// see `silver_actor_sessions_matches_the_full_refresh_oracle` below.
 ///
-/// `marts_daily_active_contributors`'s entry is a **fourth** root cause,
-/// direction reversed from `silver_actor_sessions`'s — measured, not
-/// assumed, after the first attempt at registering it (as "downstream of the
-/// sessions undercount") failed `succession_divergence_is_exactly_tied_row_
-/// multiplicity` with the incremental leg BEHIND, the opposite direction.
-/// This mart is Form A relative to `silver.actor_sessions` (its own
-/// `partition_column` is `session_start_date`, the exact column it reads,
-/// no skew), so it has no rebase of its own and (by design) never revisits
-/// an already-written partition. But `actor_sessions`'s *own* Form-B rebase
-/// legitimately rewrites an earlier day's partition once forward data
-/// arrives (that rebase is what makes `silver_actor_sessions`'s own
-/// incremental leg correct) — and nothing propagates that upstream rewrite
-/// to this downstream aggregate: a missing-repair-edge gap, the same shape
-/// as `gold_events_enriched`'s, but triggered by a Form-B model's ordinary
-/// self-rebase rather than a renamed dimension. So this mart's incremental
-/// `total_events` for a partition is frozen at whatever `actor_sessions`
-/// looked like on the day it was first written — a **subset** of the
-/// oracle's fully-formed session data, confined to `total_events` (measured:
-/// `total_sessions`/`distinct_actors` always match exactly). Owner:
-/// `docs/outcomes/20260906-bigquery-correctness`.
-const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[DivergenceEntry {
-    relation: "marts_daily_active_contributors",
-    reason: "no repair edge from silver_actor_sessions's own Form-B rebase to this Form-A \
-                  downstream aggregate: total_events is frozen at first-write time, a subset \
-                  of the oracle's fully-formed session data — see this const's doc comment",
-    bound: Bound::MonotoneDivergence {
-        key_col: "session_start_date",
-        exact_columns: &["total_sessions", "distinct_actors"],
-        monotone_columns: &["total_events"],
-        behind_side: Side::Incremental,
-    },
-}];
+/// `marts_daily_active_contributors` no longer has an entry here: its
+/// divergence was a **fourth** root cause, direction reversed from
+/// `silver_actor_sessions`'s — this mart is Form A relative to
+/// `silver.actor_sessions` (its own `partition_column` is
+/// `session_start_date`, the exact column it reads, no skew of its own), so
+/// it never revisited an already-written partition once
+/// `actor_sessions`'s *own* Form-B rebase legitimately rewrote an earlier
+/// day's partition: a missing-repair-edge gap, the same shape as
+/// `gold_events_enriched`'s, but triggered by a Form-B model's ordinary
+/// self-rebase rather than a renamed dimension. Phase 7 of
+/// `docs/outcomes/20260906-bigquery-correctness` fixes the propagation
+/// itself rather than adding a repair edge: `build_model_plans` now widens a
+/// model's own run window to cover the derived output window of every
+/// in-run upstream (`docs/specs/model_transforms.md` §Semantics "The
+/// derived output window propagates within a run."), so a run that rebases
+/// `actor_sessions`'s partition also re-runs this mart over that same
+/// rebased window, and the two legs now compare exactly equal — see
+/// `marts_daily_active_contributors_matches_the_full_refresh_oracle` below.
+///
+/// **The registry is now empty.** [`an_unregistered_divergence_fails`]
+/// still runs and still fails closed on a genuine unregistered mismatch —
+/// it is not a name lookup into this (now-empty) slice, it queries every
+/// materialised relation directly, so an empty `DIVERGENCE_REGISTRY` does
+/// not make it vacuous.
+const DIVERGENCE_REGISTRY: &[DivergenceEntry] = &[];
 
 /// A registry entry's bound, dispatched on [`Bound`]'s shape.
 fn check_bound(incr_db: &Path, full_db: &Path, entry: &DivergenceEntry) -> Result<(), String> {
@@ -782,6 +781,45 @@ fn silver_actor_sessions_matches_the_full_refresh_oracle() {
     );
 }
 
+/// Test 8 (phase 7, `docs/outcomes/20260906-bigquery-correctness`): with
+/// `build_model_plans` widening a downstream's run window to cover every
+/// in-run upstream's derived output window (`docs/specs/model_transforms.md`
+/// §Semantics "The derived output window propagates within a run."), a run
+/// that rebases `actor_sessions`'s partitions also re-runs this Form-A mart
+/// over the same rebased window, so `total_events` no longer freezes at
+/// first-write time — replaces the `MonotoneDivergence` bound this const's
+/// doc comment used to name. With no registry entry for this relation,
+/// `assert_matches_oracle`'s own unregistered-divergence sweep (exercised by
+/// `every_window_matches_the_full_refresh_oracle`) already enforces exact
+/// equality on every window; this test names the invariant directly, once,
+/// over the full 30-day fixture.
+#[test]
+fn marts_daily_active_contributors_matches_the_full_refresh_oracle() {
+    let pair = full_replay_pair();
+    let conn = attached_conn(&pair.incr_db, &pair.full_db);
+
+    check_key_sets_equal(
+        &conn,
+        "marts_daily_active_contributors",
+        "session_start_date",
+    )
+    .expect(
+        "marts_daily_active_contributors must have identical session_start_date key sets \
+             on both legs",
+    );
+    check_columns_match_exactly(
+        &conn,
+        "marts_daily_active_contributors",
+        "session_start_date",
+        &["total_sessions", "distinct_actors", "total_events"],
+    )
+    .expect(
+        "marts_daily_active_contributors must match the full-refresh oracle on every column, \
+         including total_events, now that a downstream's run window widens to cover its \
+         Form-B upstream's rebased output window (phase 7)",
+    );
+}
+
 /// Test 4: negative control on the comparator itself. Perturb one row of an
 /// unregistered relation and assert the comparison reports it.
 #[test]
@@ -896,14 +934,22 @@ fn every_registry_entry_is_named_in_the_findings_handoff() {
 /// Test 7 (phase 15, reverse direction): every relation the handoff's
 /// divergence table claims is registered actually resolves to a
 /// `DIVERGENCE_REGISTRY` entry, so a renamed or retired entry cannot leave a
-/// stale row in the document.
+/// stale row in the document. `DIVERGENCE_REGISTRY` is now empty (phase 7 of
+/// `docs/outcomes/20260906-bigquery-correctness` fixed the fourth and final
+/// root cause rather than registering it), so the handoff's own divergence
+/// table is expected to claim nothing either — the reverse-direction check
+/// becomes "the doc claims no stale registered relation."
 #[test]
 fn findings_handoff_names_no_unknown_relation() {
     let claimed = handoff_claimed_relations();
-    assert!(
-        !claimed.is_empty(),
-        "expected the findings handoff's divergence table to name at least one relation"
-    );
+    if DIVERGENCE_REGISTRY.is_empty() {
+        assert!(
+            claimed.is_empty(),
+            "DIVERGENCE_REGISTRY is empty, but the findings handoff's divergence table still \
+             claims relation(s) {claimed:?} as registered — stale table row"
+        );
+        return;
+    }
     for relation in &claimed {
         assert!(
             DIVERGENCE_REGISTRY.iter().any(|e| e.relation == relation),

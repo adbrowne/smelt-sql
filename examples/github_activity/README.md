@@ -182,48 +182,40 @@ phase 5), not an oversight.
 `crates/smelt-cli/tests/github_activity_oracle.rs` compares every materialised relation
 between the incremental replay and a full-refresh oracle over the identical loaded rows —
 row-for-row, not by row count, and via a comparator that discovers the relation set from
-the databases themselves rather than a hardcoded model list. A difference is either zero or
-matches one of five bounded `DIVERGENCE_REGISTRY` entries, each checked, not merely
-asserted:
+the databases themselves rather than a hardcoded model list. This pipeline originally
+surfaced four measured root causes, each traced to a real smelt defect rather than a
+fixture artifact, all now fixed by `docs/outcomes/20260906-bigquery-correctness` — the
+two legs compare exactly equal on every relation and `DIVERGENCE_REGISTRY` is empty:
 
 - `silver.repo_naming` / `silver.actor_naming` — a redelivered duplicate or same-second tie
-  folds to one presented row on the incremental leg but survives on the full-refresh leg
-  (`FoldEquality`: the incremental relation has zero rows the oracle lacks, and the oracle
-  folds to precisely one row per `(key, clock)` group).
-- `gold.events_enriched` — the "genuine derivation gap" above means a written row's
-  `current_repo_name` is frozen forever once `id` is MERGEd in; measured over the full
-  30-day fixture, this does **not** self-heal (an earlier note in this file claiming it did
-  was wrong — see the outcome's decision log) — the stale-row count only grows. The checked
-  bound (`StaleButHistoricallyValid`) is non-fabrication, not convergence: every stale value
-  is some name the repo genuinely held at an earlier point, never an invented one, and no
-  other column or row ever differs.
-- `silver.actor_sessions` / `marts.daily_active_contributors` — a fourth and fifth
-  divergence class, found by this phase's `every_window_deep_sweep` and not anticipated by
-  the plan that wrote the first three: `compute_calendar_windows`
-  (`crates/smelt-runtime/src/windowing.rs`) rebases a Form-B partition column's forward
-  reach only at the two outer edges of a single multi-day invocation, never at an interior
-  chunk boundary, so **the full-refresh oracle itself under-counts** a cross-midnight
-  session inside a wide `--full-refresh` — the incremental leg is correct here
-  (`MonotoneDivergence`, oracle side). The downstream mart inherits a *different* gap on top
-  of that: it has no rebase of its own and never revisits an already-written partition, so
-  its `total_events` is frozen at first-write time and is a strict subset of what the
-  (eventually-correct) upstream session data would give — `MonotoneDivergence`, incremental
-  side this time, the one entry in the registry where the two legs disagree on which side is
-  "ahead" for the opposite reason.
+  folded to one presented row on the incremental leg but survived on the full-refresh leg.
+  Fixed by folding `emit_succession_full_rebuild`'s presented rebuild on `(key_cols,
+  clock_col)`, the same addressing the incremental patch loop's `MERGE ... ON` clause uses.
+- `gold.events_enriched` — a renamed repo never refreshed `current_repo_name` on
+  already-written rows through any tracked technique; the stale-row count only grew.
+  Fixed by a new enrichment-keyed maintenance route addressed by the join key the
+  downstream itself carries, dispatched once per run over the model's unwindowed output.
+- `silver.actor_sessions` — `compute_calendar_windows` rebased a Form-B partition column's
+  forward reach only at the two outer edges of a single multi-day invocation, never at an
+  interior chunk boundary, so **the full-refresh oracle itself under-counted** a
+  cross-midnight session inside a wide `--full-refresh`. Fixed by folding the skew into
+  every interior chunk's own source-scan pushdown.
+- `marts.daily_active_contributors` — this Form-A downstream of `silver.actor_sessions` has
+  no rebase of its own and never revisited an already-written partition, so it never
+  learned when its upstream's own (correct) Form-B rebase rewrote an earlier partition;
+  `total_events` froze at first-write time. Fixed by widening a model's run window to cover
+  the derived output window of every upstream maintained model selected in the same
+  invocation (`docs/specs/model_transforms.md` §Semantics "The derived output window
+  propagates within a run.").
 
 The comparator, discovery, and registry-liveness machinery are exercised and green
 (`oracle_comparison_covers_every_materialised_relation`, `an_unregistered_divergence_fails`,
-`succession_divergence_is_exactly_tied_row_multiplicity`, `registry_entries_are_all_live`,
-`enrichment_staleness_is_confined_to_the_enriched_column`,
-`enrichment_staleness_is_never_a_fabricated_value`). The centrepiece test,
-`every_window_matches_the_full_refresh_oracle`, checks after **every** one of the 30
-incremental windows (measured at 108s for the full sweep, well under the 5-minute budget)
-and is green. All four measured root causes are handed to
-`docs/outcomes/20260906-bigquery-correctness` as criterion-8 findings — this pipeline
-characterises and bounds them, it does not fix them.
+`succession_divergence_is_exactly_tied_row_multiplicity`, `registry_entries_are_all_live`).
+The centrepiece test, `every_window_matches_the_full_refresh_oracle`, checks after **every**
+one of the 30 incremental windows (measured at ~110s for the full sweep, well under the
+5-minute budget) and is green.
 
-The interim, DuckDB-half writeup of these findings — the four root causes, the five
-registered divergences, and the requirements handed to the three downstream feature
-outcomes — is banked at
+The interim, DuckDB-half writeup of these findings — the four root causes and the
+requirements handed to the two downstream feature outcomes — is banked at
 `docs/handoffs/2026-09-08-github-activity-findings.md`. It is interim: the live-BigQuery
 half lands in phase 16 of `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`.
