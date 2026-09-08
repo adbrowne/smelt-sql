@@ -4,6 +4,31 @@ use crate::SyntaxKind;
 use crate::SyntaxKind::*;
 use rowan::TextRange;
 
+/// Trims a node's raw source text for verbatim printing, but keeps a
+/// trailing line comment's terminating newline intact.
+///
+/// A `--` line comment only ends at `\n`/EOF (`lexer::consume_comment`); a
+/// `/* */` block comment is self-terminating. Blindly trimming trailing
+/// whitespace strips that newline whenever the span's last token is a line
+/// comment, so whatever the printer concatenates next (a keyword, a
+/// separator) is silently swallowed into the comment on re-parse — see the
+/// `round_trip` fuzz regression this guards (`SELECT x --c\nHAVING ...`
+/// printed without the newline merges `HAVING ...` into the comment).
+pub(crate) fn trim_source_text(node: &SyntaxNode) -> String {
+    let trimmed = node.text().to_string().trim().to_string();
+    let ends_in_open_line_comment = node
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() != WHITESPACE)
+        .last()
+        .is_some_and(|t| t.kind() == COMMENT && t.text().starts_with("--"));
+    if ends_in_open_line_comment {
+        format!("{trimmed}\n")
+    } else {
+        trimmed
+    }
+}
+
 /// Root file node
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct File(SyntaxNode);
@@ -1074,7 +1099,7 @@ impl PassingClause {
     /// node is absent (error-recovery case).
     pub fn body_text(&self) -> Option<String> {
         let body_node = self.0.children().find(|n| n.kind() == PASSING_BODY)?;
-        Some(body_node.text().to_string().trim().to_string())
+        Some(trim_source_text(&body_node))
     }
 
     /// The expression AST node inside the `PASSING_BODY`. Returns `None` when
@@ -1416,7 +1441,7 @@ impl SelectItem {
             .find(|c| Expr::cast(c.clone()).is_some())?;
         // Trivia between the expression and a following `AS`/alias falls inside
         // the node's range; the alias is printed with its own separator.
-        Some(node.text().to_string().trim().to_string())
+        Some(trim_source_text(&node))
     }
 
     /// Get the alias if present (explicit `AS alias` or implicit `expr alias`)
