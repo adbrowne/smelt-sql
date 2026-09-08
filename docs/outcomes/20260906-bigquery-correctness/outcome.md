@@ -91,9 +91,30 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | done |
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | done |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | done |
-| 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
+| 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | planned |
 
 ## Decision log
+
+- 2026-09-08 (phase 10 planning): **no reshape; row 10 is the last row and its "move the
+  ratchets down" clause resolves to *hold*, with the reason written into the baseline
+  file.** Measured at HEAD: `cargo test -p smelt-db --test dialect_audit` is 61/61 green,
+  so `the_coverage_table_matches_the_registry` already passes (the regeneration is a
+  no-op to be confirmed, not a pending edit) and `gap_count_ratchet` already matches
+  `dialect_gaps_bigquery 42`. That count cannot fall here: every fix phases 1-9 landed was
+  in `smelt-logical`'s maintenance emitters, not in `BuiltinRegistry`, and giving the 42
+  no-verdict entries verdicts speculatively is forbidden by criterion 2 and already
+  recorded under Out of scope. Criterion 4's "fall or hold; neither is raised" is therefore
+  satisfied by holding, and the phase's job is to make that legible rather than to move a
+  number. Two pieces of real work remain and are in the phase: (a) criterion 3 is still
+  short one gate — the defect class this outcome opened on (an emitter taking a `dialect`
+  parameter and hardcoding `MaintenanceDialect::DuckDb` anyway) is held only by per-emitter
+  unit tests, so a *new* emitter could reintroduce it silently; a structural scan over
+  `crates/smelt-logical/src/maintenance/` with a planted-needle non-vacuity control closes
+  that. (b) `handoff_claimed_relations()` in `github_activity_oracle.rs` scans the whole
+  handoff for any `` | ` ``-leading row, which phase 9's summary flagged as a false-positive
+  trap — and phase 10 must itself append a close-out section to that handoff, so scoping
+  the scan to the divergence table is required work, not cleanup. Issue #179 gets a
+  comment, not a close: its 42 entries are untouched.
 
 - 2026-09-08 (phase 9 implementation): **the plan's citation table verified exactly as
   written; the durable half is now landed and no live re-run is needed.** All six commits
