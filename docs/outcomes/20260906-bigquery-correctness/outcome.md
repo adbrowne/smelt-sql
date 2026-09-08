@@ -89,11 +89,29 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | done |
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | done |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | done |
-| 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | pending |
+| 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | planned |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 8 planning): **no reshape; row 8's content is now the fail-closed
+  proof, and criterion 5's cross-target half is answered rather than left open.** Phases
+  3-7 fixed all five registered divergences instead of promoting any, so
+  `DIVERGENCE_REGISTRY` is empty and criterion 5's "unexplained count zero" holds — but
+  three of the registry's own gates (`succession_divergence_is_exactly_tied_row_
+  multiplicity`, `registry_entries_are_all_live`, `every_registry_entry_is_named_in_the_
+  findings_handoff`) now iterate an empty slice and pass by construction, and neither
+  `check_bound`'s `MonotoneDivergence` arm nor `assert_matches_oracle`'s unregistered
+  branch has any live test: the existing negative control
+  (`an_unregistered_divergence_fails`) stops at `compare_databases` and never reaches the
+  registry-consulting comparator. Phase 8 is therefore exactly that proof, plus one
+  directly-named zero-unexplained-count assertion. The **cross-target** reading of
+  criterion 5 (the spine's criterion 6 is DuckDB-vs-BigQuery dual-target parity) has no
+  residual work: the spine is `blocked` with its live-BigQuery half never run, so it
+  registered no dual-target divergence at all — already covered by this outcome's Out of
+  scope bullet on BigQuery-only defects, and recorded again by phase 8's task 9 so
+  criterion 5 does not read as half-checked. Rows 9 and 10 are unchanged.
 
 - 2026-09-08 (phase 7 implementation): **the mechanism worked on the first try; the tutorial
   freshness gate did not move.** Task 1's inspection confirmed the plan's diagnosis exactly
