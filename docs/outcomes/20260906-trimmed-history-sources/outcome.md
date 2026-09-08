@@ -68,7 +68,7 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 |---|-------|--------|
 | 1 | Settle and spec the equivalence-invariant quantifier for a trimmed source (retained history vs. all history), with reasoning — this decides the rest | done |
 | 2 | The rolling-retention declaration: spec + `smelt-core` parse/validation of a moving bound, malformed forms refused with a named `DiagnosticCode` and an `examples/broken/` fixture | done |
-| 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | pending |
+| 3 | Reach vs. retention in the composition walk: `analysis/walk.rs` produces the required-look-back vs. retained-bound verdict, no ad hoc scan; `walk_coverage` green | planned |
 | 4 | Refuse or degrade, never silent: wire the verdict to a named refusal or a recorded downgrade through the degradation contract, plus the no-silent-under-read test | pending |
 | 5 | The bound moving is an event: admission re-evaluated against the current bound on every run, with a test that advances the bound under a previously-admissible model | pending |
 | 6 | Conformance: a trimmed-retention `SourceRecipe` in `smelt-maintenance-testkit` whose bound advances between run steps, driven through `maintenance_conformance` against the phase-1 oracle | pending |
@@ -76,6 +76,20 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 | 8 | Close-out: verify every success criterion's evidence at HEAD, all gates green, ratchets unmoved | pending |
 
 ## Decision log
+
+- 2026-09-09 (phase 3 planning): **the verdict is a fold over the walk's output, in a new
+  module, not a new transfer function.** The required look-back the criterion names is
+  already the composition walk's own product (`derive_model_bounds`'s `BoundResult`, walked
+  via `QueryTree` in `analysis/source_bounds.rs` — `analysis/walk.rs` named in criterion 3
+  is now the `analysis/walk/` module). So the comparison needs no second walk: it is a pure
+  map over that verdict against `BoundContext`'s declared retention, and it inherits series
+  composition (stacked frames *add*) for free — a test pins exactly that, since a whole-text
+  max-merge would under-derive the reach and wrongly admit. It lands in a new
+  `analysis/retention_reach.rs` rather than inside `source_bounds.rs`, which sits at its
+  3367-line large-file ratchet baseline. The verdict also carries a `window_age` term
+  (`required_lookback = before + window_age`) so the rolling re-evaluation phase 5 needs is
+  built in from the start rather than retrofitted. Phase table unchanged — the phase-2
+  summary surfaced no work needing a new row.
 
 - 2026-09-09 (phase 2 implement): **an inert retention in `examples/timeseries` was
   removed, not made well-formed.** `examples/timeseries/models/sources/raw/events.yml`
