@@ -79,14 +79,40 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | done |
 | 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | done |
 | 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | done |
-| 4 | Punch-list 2 — the missing `UpstreamMutation(gold.repo_dim)` cell for a `grain: partition` downstream reading a clockless keyed dimension: a new route in `append_model_edge_cells`, or a refusal surfaced at `run`/`build` rather than only `explain` | pending |
-| 5 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
-| 6 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phase 4's mechanism already covers it | pending |
-| 7 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
-| 8 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
-| 9 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
+| 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | planned |
+| 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | pending |
+| 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
+| 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | pending |
+| 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each entry fixed, or promoted to a reasoned permanent entry naming the engines and the construct; unexplained count zero | pending |
+| 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | pending |
+| 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 4 planning): **reshape — punch-list item 2 splits into a derivation
+  phase (4) and a run-path phase (5); old rows 5-9 shift to 6-10.** Reading the code for the
+  missing `UpstreamMutation(gold.repo_dim)` cell showed the work is two separable layers, not
+  one. (a) *Derivation*: `append_model_edge_cells` today offers a clockless `KeyedUpsert` edge
+  only the key-addressed `PerGroupRecompute` route, whose two discovery legs (upstream-keyed,
+  grain-over-upstream) both need the DOWNSTREAM's grain to resolve against the upstream
+  relation — impossible for a `grain: partition` downstream like `gold.events_enriched`. But
+  the shape is not a per-group recompute at all: it is the value-enrichment shape
+  (`Technique::ColumnScopedMerge`) smelt already derives for a declared `mutation_profile:
+  mutable_snapshot` dimension, and its write addressing is the *join* key carried in the
+  downstream's own output (`repo_id`), which IS discoverable. So the fix is a third,
+  enrichment-keyed route — parity between a mutable-snapshot source dimension and a clockless
+  keyed model dimension — not a widening of the existing two. (b) *Run path*: the runtime's
+  live-cell resolver (`resolve_live_column_scoped_cell` →
+  `maintenance_availability::derive_resolved`) calls the source-only
+  `derive_model_maintenance_plan`, never `..._with_edges`, so it cannot see a model edge at
+  all; the mutation gate and the dimension-`unique_key` lookup likewise search `source_infos`
+  only. Making the derived cell actually dispatch is its own chunk of work with its own gate
+  (the `github_activity` stale-row count reaching zero). Neither half is deferred out of the
+  outcome — both are rows. The row's "or a refusal surfaced at `run`/`build`" alternative is
+  kept as well, not instead: phase 4 also gives `Refusal::RepairKeysNotDiscoverable` a real
+  `DiagnosticCode` (its catalogue row in `docs/specs/diagnostics.md` already exists with no
+  variant behind it), so the fail-closed leg that survives the new route is loud at
+  `build`/`run` rather than visible only through `smelt explain --json`.
 
 - 2026-09-08 (phase 3 implementation): **the plan's `MAX`-per-column fold was insufficient;
   fixed to a `ROW_NUMBER()`-ranked whole-row pick instead.** Running the full 30-day
