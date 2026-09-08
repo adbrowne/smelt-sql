@@ -22,7 +22,7 @@ crates/smelt-cli/tests/resume.rs 1057
 crates/smelt-cli/tests/since_upstream.rs 1274
 crates/smelt-core/src/config.rs 3909
 crates/smelt-core/src/discovery.rs 1090
-crates/smelt-core/src/graph.rs 1333
+crates/smelt-core/src/graph.rs 1501
 crates/smelt-core/src/metadata.rs 3652
 crates/smelt-core/src/sources.rs 1297
 crates/smelt-datagen/src/config.rs 1354
@@ -37,7 +37,7 @@ crates/smelt-db/src/queries/check_types.rs 1171
 crates/smelt-db/src/queries/function_diagnostics.rs 2595
 crates/smelt-db/src/queries/loader.rs 1082
 crates/smelt-db/src/queries/maintenance/tests.rs 1090
-crates/smelt-db/src/queries/project.rs 4118
+crates/smelt-db/src/queries/project.rs 4137
 crates/smelt-db/src/queries/schema.rs 2124
 crates/smelt-db/src/tests.rs 6071
 crates/smelt-db/src/type_inference/binary.rs 1246

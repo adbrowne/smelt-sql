@@ -31,7 +31,7 @@ owners: [andrew]
 | `smelt type [model]` | Show model function signature (offline) |
 | `smelt status [model]` | Show incremental interval coverage and gaps |
 | `smelt history [model]` | Show past run records |
-| `smelt list` | List discovered project entities (models, seeds, sources, tests, checks) with kind and materialization (offline) |
+| `smelt list` | List discovered project entities (models, seeds, sources, external steps, tests, checks) with kind and materialization (offline) |
 | `smelt clean` | Remove build artifacts under `target/` (compiled docs, catalog output); never touches state (`.smelt/`) or the target database |
 | `smelt explain` | Output model graph as JSON for orchestrators |
 | `smelt bakeoff <model>` | Measure per-cell technique cost against a replayed window of real data; `--pin` emits the winning choice |
@@ -534,7 +534,7 @@ The cwd-derived scope is informational at command start and does not change mid-
 
 ### `smelt list` — enumerate discovered entities
 
-`smelt list` prints every entity `smelt` discovers in the project — models, seeds, sources, tests, and checks — one per line, in canonical `smelt.<path>` form (§"Canonical-display rule"), alongside its kind and, for models, its materialization. `smelt list` is **offline**: it performs discovery and parsing only, the same project-wide scan `smelt explain` uses, and makes no database connection. It accepts the same `--select`/`--exclude` selector flags as `smelt run`/`smelt build` (`model_selection.md`) to narrow the listed set, and respects `--scope` for shorthand selector arguments exactly as every other command does.
+`smelt list` prints every entity `smelt` discovers in the project — models, seeds, sources, external steps, tests, and checks — one per line, in canonical `smelt.<path>` form (§"Canonical-display rule"), alongside its kind and, for models, its materialization. `smelt list` is **offline**: it performs discovery and parsing only, the same project-wide scan `smelt explain` uses, and makes no database connection. It accepts the same `--select`/`--exclude` selector flags as `smelt run`/`smelt build` (`model_selection.md`) to narrow the listed set, and respects `--scope` for shorthand selector arguments exactly as every other command does. An external step is listed with kind `external_step` and, in `--json` output, a `produces` array naming the source addresses it produces (`sources.md` §"Externally-produced sources (black-box steps)"). Unlike seeds and sources (always listed in full), a step is narrowed by `--select`/`--exclude` through the same selector pass as models (`model_selection.md` §"Selection methods") — a step reached by `+consumer`'s upstream expansion, or directly named, is listed; one that is not is omitted.
 
 ### `smelt clean` — remove build artifacts
 

@@ -6,6 +6,7 @@
 //! `ModelDiscovery::compute_address_segments` / seed/source discovery.
 
 use smelt_core::discovery::{ModelFile, ModelKind};
+use smelt_core::external_step::ExternalStepInfo;
 use smelt_core::model_id::ModelId;
 use smelt_core::resolver::{resolve_address_map, EntityRefKind};
 use smelt_core::seeds::SeedInfo;
@@ -58,9 +59,39 @@ fn make_source(segments: &[&str], path: &str) -> SourceInfo {
     }
 }
 
+fn make_step(segments: &[&str], path: &str) -> ExternalStepInfo {
+    ExternalStepInfo {
+        path: PathBuf::from(path),
+        address_segments: segments.iter().map(|s| s.to_string()).collect(),
+        description: None,
+        produces: vec![],
+        command: vec!["true".to_string()],
+        cadence: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BUG-002: cross-kind address collisions
 // ---------------------------------------------------------------------------
+
+/// A SQL model and an external step claiming the same address → one
+/// collision, with both kinds named (phase 3 — DAG membership).
+#[test]
+fn step_address_colliding_with_a_model_is_a_collision() {
+    let models = vec![make_model("loader", &["loader"], "models/loader.sql")];
+    let steps = vec![make_step(&["loader"], "models/loader.yml")];
+
+    let (_map, collisions) = resolve_address_map(&models, &[], &[], &steps);
+
+    assert_eq!(
+        collisions.len(),
+        1,
+        "expected one collision, got: {collisions:#?}"
+    );
+    assert_eq!(collisions[0].address, vec!["loader".to_string()]);
+    assert_eq!(collisions[0].first.kind, EntityRefKind::SqlModel);
+    assert_eq!(collisions[0].second.kind, EntityRefKind::ExternalStep);
+}
 
 /// A SQL model and a seed claiming the same address → one collision.
 /// Repro: `models/dup.sql` + `models/dup.csv` (architecture.md canonical case).
@@ -69,7 +100,7 @@ fn model_vs_seed_collision_is_detected() {
     let models = vec![make_model("dup", &["dup"], "models/dup.sql")];
     let seeds = vec![make_seed("dup", &["dup"], "models/dup.csv")];
 
-    let (_map, collisions) = resolve_address_map(&models, &seeds, &[]);
+    let (_map, collisions) = resolve_address_map(&models, &seeds, &[], &[]);
 
     assert_eq!(
         collisions.len(),
@@ -92,7 +123,7 @@ fn model_vs_source_collision_is_detected() {
     )];
     let sources = vec![make_source(&["raw", "events"], "models/raw/events.yml")];
 
-    let (_map, collisions) = resolve_address_map(&models, &[], &sources);
+    let (_map, collisions) = resolve_address_map(&models, &[], &sources, &[]);
 
     assert_eq!(
         collisions.len(),
@@ -115,7 +146,7 @@ fn cross_paths_seed_collision_is_detected() {
         make_seed("users", &["users"], "fixtures/users.csv"),
     ];
 
-    let (_map, collisions) = resolve_address_map(&[], &seeds, &[]);
+    let (_map, collisions) = resolve_address_map(&[], &seeds, &[], &[]);
 
     assert_eq!(
         collisions.len(),
@@ -147,7 +178,7 @@ fn within_file_section_collision_is_detected() {
         make_model("dup", &["dup"], "models/multi.sql::dup_b"),
     ];
 
-    let (_map, collisions) = resolve_address_map(&models, &[], &[]);
+    let (_map, collisions) = resolve_address_map(&models, &[], &[], &[]);
 
     assert_eq!(
         collisions.len(),
@@ -171,7 +202,7 @@ fn subdirectory_gives_distinct_address_no_collision() {
         make_model("users", &["archive", "users"], "models/archive/users.sql"),
     ];
 
-    let (map, collisions) = resolve_address_map(&models, &[], &[]);
+    let (map, collisions) = resolve_address_map(&models, &[], &[], &[]);
 
     assert!(
         collisions.is_empty(),
@@ -185,7 +216,7 @@ fn subdirectory_gives_distinct_address_no_collision() {
 /// Empty inputs produce an empty map and no collisions.
 #[test]
 fn empty_inputs_produce_empty_output() {
-    let (map, collisions) = resolve_address_map(&[], &[], &[]);
+    let (map, collisions) = resolve_address_map(&[], &[], &[], &[]);
     assert!(map.is_empty());
     assert!(collisions.is_empty());
 }
@@ -199,7 +230,7 @@ fn entities_with_empty_segments_are_skipped() {
         make_model("a", &[], "models/a2.sql"), // also empty — would collide if registered
     ];
 
-    let (map, collisions) = resolve_address_map(&models, &[], &[]);
+    let (map, collisions) = resolve_address_map(&models, &[], &[], &[]);
 
     assert!(
         collisions.is_empty(),
@@ -229,7 +260,7 @@ fn multiple_distinct_entities_no_collision() {
         "models/sources/external/api.yml",
     )];
 
-    let (map, collisions) = resolve_address_map(&models, &seeds, &sources);
+    let (map, collisions) = resolve_address_map(&models, &seeds, &sources, &[]);
 
     assert!(
         collisions.is_empty(),

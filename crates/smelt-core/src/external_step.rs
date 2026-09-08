@@ -229,10 +229,11 @@ pub fn discover_external_steps(project_dir: &Path, paths: &[String]) -> Vec<Exte
 /// Discover every external-step candidate file that **fails** to parse,
 /// paired with its [`ExternalStepError`]. Sorted by path for deterministic
 /// diagnostic ordering.
-pub fn discover_external_step_errors(
-    project_dir: &Path,
-    _paths: &[String],
-) -> Vec<(PathBuf, ExternalStepError)> {
+///
+/// Unlike `discover_source_errors`, candidate discovery here needs no
+/// scan-root list — `candidate_external_step_yaml_files` classifies by
+/// content, not by address — so this takes only `project_dir`.
+pub fn discover_external_step_errors(project_dir: &Path) -> Vec<(PathBuf, ExternalStepError)> {
     let mut errors: Vec<(PathBuf, ExternalStepError)> = Vec::new();
 
     for file_path in candidate_external_step_yaml_files(project_dir) {

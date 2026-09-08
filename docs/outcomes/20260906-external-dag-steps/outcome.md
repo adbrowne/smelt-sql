@@ -61,13 +61,20 @@ visible in the run report.
 |---|-------|--------|
 | 1 | Decide the declaration shape (`produced_by:` on a source vs. a distinct kind) with reasoning in the decision log, then land the spec delta in `docs/specs/sources.md` | done |
 | 2 | Parse and validate the step declaration in `smelt-core` — discovery, discriminator, `produces:`/`command:`/cadence, one named `DiagnosticCode` per malformed form with `examples/broken/` fixtures, catalogue rows in `docs/specs/diagnostics.md` | done |
-| 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | planned |
+| 3 | DAG membership — the step is a graph node with an edge to each source it produces; `smelt list`, the graph/DAG surfaces and model selection reach it through the same selectors as any node | done |
 | 4 | Invocation on the run path — decide and spec the `command:` placeholder-substitution grammar (`{run_date}`), order the step ahead of its consumers, invoke it, propagate a non-zero exit as a run failure naming the step with downstream models unbuilt, and refuse (named code) when the run may not invoke it | pending |
 | 5 | Reporting — the run report and `smelt explain` (text and `--json`) render what the step produces, how it is invoked, and that smelt does not author it; `cli_docs_coverage` green | pending |
 | 6 | Fixture and docs — `examples/github_activity/` declares its loader as a step producing both raw sources at zero diagnostics; docs-site page covering the declaration, the contract and the failure modes | pending |
 | 7 | Close-out — verify each success criterion's evidence at HEAD, hold the ratchets, hand findings back to `20260906-bigquery-dogfood-spine` | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 3 implementation): **shipped as planned, no reshape.** `DependencyGraph`
+  gained `add_external_steps`/`select_nodes`/`steps_required_by`; `select_models` is now a
+  thin wrapper over `select_nodes(..).models`, confirmed byte-identical with/without steps
+  registered. `smelt list` narrows external steps by `--select`/`--exclude` (unlike
+  seeds/sources, which stay always-listed-in-full) and emits `produces` in `--json`. See
+  `phases/03-summary.md`.
 
 - 2026-09-08 (phase 3 planning): **two design calls settled, no reshape.** (a) `ExternalStep`
   **does** participate in `resolve_address_map` (the question `phases/02-summary.md` left open):

@@ -12,7 +12,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use smelt_db::{project_source_diagnostics, Database, DiagnosticCode};
+use smelt_db::{
+    project_source_diagnostics, resolve_node_path, resolve_ref_path, Database, DiagnosticCode,
+};
 use tempfile::TempDir;
 
 fn make_workspace(tmp: &TempDir) -> (Database, smelt_db::ProjectInput) {
@@ -105,4 +107,64 @@ fn duplicate_producer_yields_source_producer_conflict() {
         matches[0].path, expected,
         "conflict should be anchored at the later-sorted step"
     );
+}
+
+/// `resolve_node_path` (ref resolution ∪ external steps) resolves a step's
+/// own address as a node, even though `resolve_ref_path` never does — the
+/// two-seam split (`model_selection.md` §"Constraints & Invariants" — a step
+/// is a selectable node but never a `smelt.ref()` target).
+#[test]
+fn resolve_node_path_resolves_a_step() {
+    let tmp = TempDir::new().unwrap();
+    let (mut db, _project) = make_workspace(&tmp);
+    let root = tmp.path();
+
+    fs::create_dir_all(root.join("models/sources")).unwrap();
+    fs::write(
+        root.join("models/sources/raw_events.yml"),
+        "columns:\n  - name: id\n    type: INTEGER\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models/loader.yml"),
+        "external_step:\n  produces:\n    - smelt.sources.raw_events\n  command: [\"bash\", \"loader.sh\"]\n",
+    )
+    .unwrap();
+
+    let workspace = db.workspace();
+    let path = vec!["loader".to_string()];
+
+    assert!(
+        resolve_ref_path(&db, workspace, path.clone()).is_none(),
+        "a step is not a smelt.ref() target — resolve_ref_path must stay step-free"
+    );
+    assert!(
+        resolve_node_path(&db, workspace, path),
+        "resolve_node_path must resolve a step's own address"
+    );
+}
+
+/// A SQL `smelt.ref()` naming a step's address is not a step reference — it
+/// fails `UndefinedModelRef` via `resolve_ref_path`, since a model reads the
+/// source a step produces, never the step itself.
+#[test]
+fn sql_ref_to_a_step_is_undefined() {
+    let tmp = TempDir::new().unwrap();
+    let (mut db, _project) = make_workspace(&tmp);
+    let root = tmp.path();
+
+    fs::create_dir_all(root.join("models/sources")).unwrap();
+    fs::write(
+        root.join("models/sources/raw_events.yml"),
+        "columns:\n  - name: id\n    type: INTEGER\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models/loader.yml"),
+        "external_step:\n  produces:\n    - smelt.sources.raw_events\n  command: [\"bash\", \"loader.sh\"]\n",
+    )
+    .unwrap();
+
+    let workspace = db.workspace();
+    assert!(resolve_ref_path(&db, workspace, vec!["loader".to_string()]).is_none());
 }

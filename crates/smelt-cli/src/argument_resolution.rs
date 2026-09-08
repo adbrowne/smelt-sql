@@ -174,7 +174,8 @@ fn strip_smelt_prefix(path: &str) -> &str {
 ///      scope narrowing (spec §"Cross-scope full paths").
 ///    - No scope: only `[arg]`.
 /// 3. Resolve each candidate against the workspace via
-///    [`smelt_db::resolve_ref_path`]. First match wins.
+///    [`smelt_db::resolve_node_path`] (ref resolution ∪ external steps).
+///    First match wins.
 /// 4. No candidate resolves → "not found" diagnostic with hints via
 ///    [`smelt_db::leaf_did_you_mean`].
 /// 5. No scope + bare leaf + multiple entities have that leaf → "ambiguous".
@@ -214,9 +215,12 @@ pub fn resolve_argument(
         vec![arg_segs.iter().map(|s| s.to_string()).collect()]
     };
 
-    // Resolve each candidate — first hit wins
+    // Resolve each candidate — first hit wins. `resolve_node_path` extends
+    // `resolve_ref_path` with external steps: a step is selector-addressable
+    // (`model_selection.md` §"Selection methods") even though it is never a
+    // `smelt.ref()` target.
     for candidate in &candidates {
-        if smelt_db::resolve_ref_path(db, workspace, candidate.clone()).is_some() {
+        if smelt_db::resolve_node_path(db, workspace, candidate.clone()) {
             return Ok(candidate.join("."));
         }
     }

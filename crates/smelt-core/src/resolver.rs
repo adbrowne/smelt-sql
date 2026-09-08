@@ -276,6 +276,8 @@ pub enum EntityRefKind {
     Seed,
     /// A source YAML file.
     Source,
+    /// An external-step YAML file.
+    ExternalStep,
 }
 
 /// A reference to a discovered workspace entity with enough information to
@@ -319,6 +321,7 @@ pub fn resolve_address_map(
     sql_files: &[ModelFile],
     seeds: &[SeedInfo],
     sources: &[SourceInfo],
+    external_steps: &[crate::external_step::ExternalStepInfo],
 ) -> (HashMap<String, EntityRef>, Vec<AddressCollision>) {
     let mut map: HashMap<String, EntityRef> = HashMap::new();
     let mut collisions: Vec<AddressCollision> = Vec::new();
@@ -378,6 +381,15 @@ pub fn resolve_address_map(
             EntityRefKind::Source,
             source.path.clone(),
             source.address_segments.clone(),
+        );
+    }
+    for step in external_steps {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::ExternalStep,
+            step.path.clone(),
+            step.address_segments.clone(),
         );
     }
 
@@ -726,6 +738,7 @@ mod tests {
         let (_, addr_collisions) = resolve_address_map(
             std::slice::from_ref(&fn_file),
             std::slice::from_ref(&seed),
+            &[],
             &[],
         );
         assert!(

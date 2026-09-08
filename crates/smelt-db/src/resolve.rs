@@ -212,6 +212,31 @@ pub fn resolve_ref_path(
     None
 }
 
+/// Resolve a path tuple against the workspace, extending [`resolve_ref_path`]
+/// with external steps: `resolve_node_path` = `resolve_ref_path` ∪ steps.
+///
+/// Node resolution is a distinct seam from ref resolution
+/// (`docs/specs/model_selection.md` §"Selection methods", `docs/specs/sources.md`
+/// §"Externally-produced sources (black-box steps)"): a step is a selectable
+/// node (CLI argument/selector resolution) but never a `smelt.ref()` target, so
+/// [`resolve_ref_path`] stays step-free — a SQL ref to a step's address keeps
+/// failing `UndefinedModelRef` — and this function is the CLI-argument-only
+/// superset.
+pub fn resolve_node_path(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    path: Vec<String>,
+) -> bool {
+    if resolve_ref_path(db, workspace, path.clone()).is_some() {
+        return true;
+    }
+    workspace.projects(db).iter().copied().any(|project| {
+        crate::queries::project::project_external_steps(db, project)
+            .iter()
+            .any(|step| step.address_segments == path)
+    })
+}
+
 /// Compute the path tuple for a SQL file relative to its project root,
 /// stripping the matching `config.paths` scan-root prefix if one applies.
 ///

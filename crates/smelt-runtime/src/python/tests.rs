@@ -173,7 +173,7 @@ fn python_sql_address_collision_is_duplicate_address() {
     };
 
     let all_models = vec![sql_model, python_model];
-    let (_map, collisions) = resolve_address_map(&all_models, &[], &[]);
+    let (_map, collisions) = resolve_address_map(&all_models, &[], &[], &[]);
     assert_eq!(
         collisions.len(),
         1,

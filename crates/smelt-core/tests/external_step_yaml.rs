@@ -415,7 +415,7 @@ external_step:
     assert_eq!(errors[0].0, dir.join("step_b.yml"));
 
     // No parse errors: both step files are individually well-formed.
-    let parse_errors = discover_external_step_errors(&root, &["models".to_string()]);
+    let parse_errors = discover_external_step_errors(&root);
     assert!(
         parse_errors.is_empty(),
         "expected zero parse errors: {parse_errors:?}"
