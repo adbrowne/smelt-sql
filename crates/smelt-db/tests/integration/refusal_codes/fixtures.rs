@@ -92,6 +92,16 @@ pub(super) fn refusal_with_db_counterpart() -> Vec<(Refusal, MaintenanceRefusal)
             },
         ),
         (
+            Refusal::RepairKeysNotDiscoverable {
+                source: "s".to_string(),
+                why: "w".to_string(),
+            },
+            MaintenanceRefusal::RepairKeysNotDiscoverable {
+                source: "s".to_string(),
+                why: "w".to_string(),
+            },
+        ),
+        (
             Refusal::KeyedRetractableContribution {
                 source: "s".to_string(),
                 columns: vec!["c".to_string()],
@@ -139,7 +149,7 @@ fn succession_pairs() -> Vec<(Refusal, MaintenanceRefusal)> {
     .collect()
 }
 
-/// The three `Refusal` variants with no `MaintenanceRefusal` counterpart at
+/// The two `Refusal` variants with no `MaintenanceRefusal` counterpart at
 /// all — `smelt-db/src/queries/maintenance.rs` filters them to `None`
 /// before a `MaintenanceRefusal` is ever constructed, so there is no
 /// `diagnostic_for_refusal` call to make for them; `refusal_code` must
@@ -148,10 +158,6 @@ pub(super) fn refusals_with_no_db_counterpart() -> Vec<Refusal> {
     vec![
         Refusal::ReachNotDerivable {
             edge: "e".to_string(),
-            why: "w".to_string(),
-        },
-        Refusal::RepairKeysNotDiscoverable {
-            source: "s".to_string(),
             why: "w".to_string(),
         },
         Refusal::RepairSliceUnbounded {

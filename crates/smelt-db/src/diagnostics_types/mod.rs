@@ -901,6 +901,15 @@ pub enum DiagnosticCode {
     /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
     /// start.
     MaintenanceScanUnbounded,
+    /// Emitted (Error) when the repair family's affected-key obligation (P7,
+    /// `model_properties.md` §"Affected-key discovery") could not resolve a
+    /// finite key set for a source's delta over an upstream maintained-model
+    /// edge — no key-addressed route admits, and the enrichment-keyed route
+    /// either found no eligible column group, an unbounded scan with no
+    /// declared `allow_full_scan`, or a join key the downstream does not
+    /// itself project (`docs/specs/incremental_models.md` §"Upstream model
+    /// edges"). Anchored at the model SQL body start.
+    MaintenanceRepairKeysNotDiscoverable,
     /// Emitted (Error) when a model's definition-change `Trigger::
     /// ColumnAdded` names a column that occupies a row-membership/identity
     /// (skeleton) position — a grain change, never a column backfill

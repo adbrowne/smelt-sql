@@ -50,6 +50,7 @@ fn keyed_edge(name: &str, keys: &[&str]) -> ModelEdge {
         output_shape: Some(OutputDelta::KeyedUpsert {
             keys: keys.iter().map(|s| s.to_string()).collect(),
         }),
+        allow_full_scan: false,
     }
 }
 

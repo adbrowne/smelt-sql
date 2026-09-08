@@ -75,6 +75,14 @@ pub enum MaintenanceRefusal {
         columns: Vec<String>,
         why: String,
     },
+    /// `MaintenanceRepairKeysNotDiscoverable` — an upstream model edge's
+    /// affected-key discovery (both key-addressed routes, then the
+    /// enrichment-keyed route) could not resolve a finite key set
+    /// (`incremental_models.md` §"Upstream model edges").
+    RepairKeysNotDiscoverable {
+        source: String,
+        why: String,
+    },
     /// One of ten `Succession*` codes, 1:1 with the classifier's
     /// `NotSuccessionReason` (`docs/specs/diagnostics.md` §"Succession
     /// grain") — an undeclared-grain `refresh: incremental` model's SQL did
@@ -208,6 +216,14 @@ pub fn diagnostic_for_refusal(
                  column(s) {}: {why} — use `refresh: materialized_view`, or compose the \
                  enrichment as a separate model",
                 columns.join(", "),
+            ),
+        ),
+        MaintenanceRefusal::RepairKeysNotDiscoverable { source, why } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenanceRepairKeysNotDiscoverable,
+            format!(
+                "maintenance repair over '{source}' cannot resolve a finite affected-key set: \
+                 {why}",
             ),
         ),
         MaintenanceRefusal::SuccessionNotRecognized { reason } => {

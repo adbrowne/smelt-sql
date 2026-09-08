@@ -382,6 +382,7 @@ fn derive_clamp_and_locality_pass(
                         clock_col_aliases,
                         unique_key,
                         output_shape,
+                        allow_full_scan: false,
                     });
                 } else {
                     // A `full`-mode or view upstream delivers no incremental

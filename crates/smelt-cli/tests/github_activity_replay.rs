@@ -560,15 +560,17 @@ fn events_enriched_renamed_repo_carries_current_name() {
 
 /// Test: the `{current_repo_name}` `UpstreamMutation(gold.repo_dim)` cell's
 /// resolved verdict, characterised exactly as `smelt explain --json`
-/// produces it — not forced to `ColumnScopedMerge`. Measured (`docs/outcomes/
-/// 20260906-bigquery-dogfood-spine/phases/04-plan.md` decision log): `gold.
-/// repo_dim` is a clockless upstream MODEL feeding a `grain: partition`
-/// downstream, a combination `append_model_edge_cells`'s key-addressed route
-/// cannot admit (it needs the DOWNSTREAM's own declared `unique_key`, which a
-/// `grain: partition` output has none of by construction) — so NO cell is
-/// derived for it at all; instead a `RepairKeysNotDiscoverable` refusal names
-/// it. This is a criterion-8 finding (`phases/04-summary.md`), not fixed
-/// here.
+/// produces it. `gold.repo_dim` is a clockless upstream MODEL feeding a
+/// `grain: partition` downstream — a combination `append_model_edge_cells`'s
+/// key-addressed route cannot admit (it needs the DOWNSTREAM's own declared
+/// `unique_key`, which a `grain: partition` output has none of by
+/// construction) — but the enrichment-keyed route now admits it instead: the
+/// `LEFT JOIN ... ON f.repo_id = dim.repo_id` matches `gold.repo_dim`'s own
+/// declared `unique_key`, `current_repo_name` is a pure value-enrichment
+/// read (never in row-admission position), and `events_enriched`'s own
+/// `maintenance.scan_bounds.per_source.gold.repo_dim.allow_full_scan: true`
+/// accepts the full-table merge
+/// (`docs/outcomes/20260906-bigquery-correctness/phases/04-plan.md`).
 #[test]
 fn events_enriched_dimension_mutation_cell_technique() {
     let tmp = TempDir::new().expect("tempdir");
@@ -582,26 +584,27 @@ fn events_enriched_dimension_mutation_cell_technique() {
             .unwrap_or("")
             .contains("gold.repo_dim")
     });
-    assert!(
-        repo_dim_cell.is_none(),
-        "expected NO cell to be derived for gold.repo_dim (see this test's doc \
-         comment) — found one instead, meaning the derivation gap this test \
-         characterises has been closed; update the test and this model's \
-         header comment to describe the new (presumably ColumnScopedMerge) \
-         verdict rather than deleting this assertion: {repo_dim_cell:?}"
+    let repo_dim_cell = repo_dim_cell
+        .unwrap_or_else(|| panic!("expected a cell derived for gold.repo_dim: {cells:?}"));
+    assert_eq!(
+        repo_dim_cell["technique"].as_str(),
+        Some("ColumnScopedMerge"),
+        "expected the enrichment-keyed route's ColumnScopedMerge technique: {repo_dim_cell:?}"
+    );
+    assert_eq!(
+        repo_dim_cell["group"].as_str(),
+        Some("{current_repo_name}"),
+        "expected the cell's group to name only the edge-provenanced column: {repo_dim_cell:?}"
     );
 
     let refusals = json["refusals"].as_array().expect("refusals array");
     let repo_dim_refusal = refusals
         .iter()
         .find(|r| r["text"].as_str().unwrap_or("").contains("gold.repo_dim"));
-    assert_eq!(
-        repo_dim_refusal.and_then(|r| r["text"].as_str()),
-        Some(
-            "RepairKeysNotDiscoverable { source: \"gold.repo_dim\", why: \"model has no \
-             proven grain and no declared unique key\" }"
-        ),
-        "expected the exact characterised refusal text for gold.repo_dim: {refusals:?}"
+    assert!(
+        repo_dim_refusal.is_none(),
+        "expected no refusal naming gold.repo_dim now that the enrichment-keyed route \
+         admits a cell for it: {refusals:?}"
     );
 }
 

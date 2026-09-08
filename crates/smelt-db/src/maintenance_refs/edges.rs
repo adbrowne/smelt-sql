@@ -231,6 +231,7 @@ fn ref_model_edge(
         clock_col_aliases,
         unique_key,
         output_shape,
+        allow_full_scan: false,
     })
 }
 

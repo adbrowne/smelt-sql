@@ -97,6 +97,7 @@ pub(crate) fn model_edges_for(
             clock_col_aliases,
             unique_key,
             output_shape,
+            allow_full_scan: false,
         });
     }
     edges

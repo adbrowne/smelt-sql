@@ -162,6 +162,16 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         let group_key = match key_scope.discovery {
             KeyDiscovery::UpstreamKeyed => upstream_keys.clone(),
             KeyDiscovery::DownstreamGrainOverUpstream => key_scope.keys.clone(),
+            // Unreachable: the guard above already skipped every cell whose
+            // `technique` is not `PerGroupRecompute` — the enrichment-keyed
+            // route only ever produces a `ColumnScopedMerge` cell.
+            KeyDiscovery::EnrichmentKeyed => {
+                bail!(
+                    "MaintenanceKeyAddressedEdgeMissing: an EnrichmentKeyed key_scope reached the \
+                     PerGroupRecompute key-addressed driver — internal inconsistency, this \
+                     discovery route never derives a PerGroupRecompute cell"
+                )
+            }
         };
         let comparability = model_property_vector(sql, &JoinContext::new())
             .map(|v| v.comparability)
@@ -275,6 +285,17 @@ pub async fn resolve_key_addressed_affected_keys(
         }
         KeyDiscovery::DownstreamGrainOverUpstream => {
             repair_keys_literal_select(&changed_keys, dialect)
+        }
+        // Unreachable via this function today: `resolve_live_key_addressed_model_edge_cell`
+        // only ever returns a cell whose `key_scope.discovery` is one of the
+        // two key-addressed routes above (the enrichment-keyed route
+        // produces a `ColumnScopedMerge` cell, never reaching this helper).
+        KeyDiscovery::EnrichmentKeyed => {
+            return Err(BackendError::unsupported(
+                backend.dialect().name(),
+                "enrichment-keyed model-edge affected-key discovery has no key-addressed \
+                 affected-keys select — its run path is separate scope",
+            ))
         }
     };
     Ok((changed_keys, affected_keys_select))

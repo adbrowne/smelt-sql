@@ -65,6 +65,7 @@ fn model_edges() -> Vec<ModelEdge> {
             clock_col_aliases: vec![],
             unique_key: vec!["event_id".to_string()],
             output_shape: None,
+            allow_full_scan: false,
         },
         ModelEdge {
             name: "silver.sessions".to_string(),
@@ -72,6 +73,7 @@ fn model_edges() -> Vec<ModelEdge> {
             clock_col_aliases: vec![],
             unique_key: vec!["device_id".to_string()],
             output_shape: None,
+            allow_full_scan: false,
         },
     ]
 }

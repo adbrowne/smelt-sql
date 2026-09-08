@@ -137,5 +137,6 @@ fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 mod column_added_and_keyed;
 mod deployed_schema_world_fact_module;
+mod model_edge_enrichment;
 mod scan_bounds_and_grain;
 mod status_and_contract;

@@ -42,6 +42,7 @@ fn clocked_edge() -> ModelEdge {
         clock_col_aliases: vec![],
         unique_key: vec![],
         output_shape: None,
+        allow_full_scan: false,
     }
 }
 
@@ -52,6 +53,7 @@ fn clockless_edge() -> ModelEdge {
         clock_col_aliases: vec![],
         unique_key: vec![],
         output_shape: None,
+        allow_full_scan: false,
     }
 }
 

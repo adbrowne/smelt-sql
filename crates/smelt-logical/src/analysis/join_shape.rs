@@ -204,6 +204,77 @@ fn collect_equality_columns(
     }
 }
 
+/// The column name on the OTHER side of each top-level ANDed equality in
+/// `condition` where one side qualifies to `alias`/`base_name` — the local
+/// (non-enrichment) columns the join keys on, resolved against the
+/// downstream's own relation rather than the enrichment side
+/// [`equality_columns_for_table`] resolves. Mirrors that function's own
+/// `AND`-recursion and `USING`-clause handling exactly (a `USING` clause
+/// names the same column on both sides by construction, so the local and
+/// enrichment column sets coincide there).
+pub(crate) fn local_equality_columns_against(
+    condition: &JoinCondition,
+    alias: Option<&str>,
+    base_name: Option<&str>,
+) -> Vec<String> {
+    if condition.is_using() {
+        return condition.using_columns();
+    }
+    let Some(on_expr) = condition.on_expression() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_local_equality_columns(&on_expr, alias, base_name, &mut out);
+    out
+}
+
+fn collect_local_equality_columns(
+    expr: &Expr,
+    alias: Option<&str>,
+    base_name: Option<&str>,
+    out: &mut Vec<String>,
+) {
+    let Some(bin) =
+        smelt_parser::BinaryExpr::cast(expr.syntax().clone()).or_else(|| expr.as_binary())
+    else {
+        return;
+    };
+    let Some(op) = bin.operator() else {
+        return;
+    };
+    if op.eq_ignore_ascii_case("AND") {
+        if let Some(left) = bin.left() {
+            collect_local_equality_columns(&left, alias, base_name, out);
+        }
+        if let Some(right) = bin.right() {
+            collect_local_equality_columns(&right, alias, base_name, out);
+        }
+        return;
+    }
+    if op != "=" {
+        return;
+    }
+    let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
+        return;
+    };
+    let is_edge_side = |side: &Expr| -> bool {
+        side.as_column_ref()
+            .is_some_and(|col_ref| match col_ref.qualifier() {
+                Some(q) => Some(q) == alias || Some(q) == base_name,
+                None => false,
+            })
+    };
+    if is_edge_side(&left) {
+        if let Some(col_ref) = right.as_column_ref() {
+            out.push(col_ref.name().to_string());
+        }
+    } else if is_edge_side(&right) {
+        if let Some(col_ref) = left.as_column_ref() {
+            out.push(col_ref.name().to_string());
+        }
+    }
+}
+
 /// The verdict of composing fan-out with the downstream combiner's algebraic
 /// discriminants: does this join's per-key contribution fold into the target
 /// without needing an inverse (a monotone fold), or must it be refused.

@@ -140,14 +140,13 @@ pub enum Refusal {
 /// `refusal_code_names_are_real_variants` test, to parse to a real
 /// `DiagnosticCode` variant and to equal the code
 /// `smelt-db/src/queries/maintenance.rs`/`smelt-db/src/lib.rs` actually emit
-/// for that refusal shape. Three variants (`ReachNotDerivable`,
-/// `RepairKeysNotDiscoverable`, `RepairSliceUnbounded`) raise no diagnostic
-/// through the ordinary pipeline today — `smelt-db/src/queries/maintenance.rs`
-/// maps all three to `None` (no `DiagnosticCode` variant yet; see its own
-/// doc comments) — so this returns `None` for them too, rather than naming a
-/// code the pipeline can never actually produce. Whether these three deserve
-/// their own `DiagnosticCode` entries is open (`docs/specs/property_diff.md`
-/// §Known Divergences).
+/// for that refusal shape. Two variants (`ReachNotDerivable`,
+/// `RepairSliceUnbounded`) raise no diagnostic through the ordinary pipeline
+/// today — `smelt-db/src/queries/maintenance.rs` maps both to `None` (no
+/// `DiagnosticCode` variant yet; see its own doc comments) — so this returns
+/// `None` for them too, rather than naming a code the pipeline can never
+/// actually produce. Whether these two deserve their own `DiagnosticCode`
+/// entries is open (`docs/specs/property_diff.md` §Known Divergences).
 pub fn refusal_code(refusal: &Refusal) -> Option<&'static str> {
     match refusal {
         Refusal::SkeletonChanged { .. } => Some("MaintenanceSkeletonChanged"),
@@ -162,7 +161,7 @@ pub fn refusal_code(refusal: &Refusal) -> Option<&'static str> {
         Refusal::KeyedRecurrenceDeclarationMismatch { .. } => {
             Some("KeyedRecurrenceDeclarationMismatch")
         }
-        Refusal::RepairKeysNotDiscoverable { .. } => None,
+        Refusal::RepairKeysNotDiscoverable { .. } => Some("MaintenanceRepairKeysNotDiscoverable"),
         Refusal::RepairSliceUnbounded { .. } => None,
         Refusal::DefinitionChangeNotBackfillable { .. } => {
             Some("MaintenanceColumnAddNotBackfillable")
@@ -201,11 +200,7 @@ mod refusal_code_tests {
     /// here is a compile error, not a silent gap (ruling R2).
     #[test]
     fn every_refusal_is_classified() {
-        let none_variants = [
-            "ReachNotDerivable",
-            "RepairKeysNotDiscoverable",
-            "RepairSliceUnbounded",
-        ];
+        let none_variants = ["ReachNotDerivable", "RepairSliceUnbounded"];
         let sample: Vec<Refusal> = vec![
             Refusal::SkeletonChanged {
                 column: "c".to_string(),

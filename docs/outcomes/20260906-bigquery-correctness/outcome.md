@@ -79,7 +79,7 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 1 | The unconditional fix: thread `dialect` through `emit_fingerprint_digest_select` to `row_fingerprint_expr`, per-dialect unit tests, and answer in the decision log whether the path is reachable on a live `mutable_snapshot` run | done |
 | 2 | The rest of the dialect-blind fingerprint SQL: `key_expr_for_columns`' hardcoded `CAST(... AS VARCHAR)` and `emit_repair_group_digest_select`'s DuckDB-only `bit_xor(hash(...))` + `VARCHAR` cast — fix per-dialect or refuse loudly, with the capability gate held by a test | done |
 | 3 | Punch-list 1 — `emit_succession_full_rebuild` folds on `(key_cols, clock_col)` with a per-column aggregate over the model's own output schema, and runs the clock-tie probe it has never run; closes the `silver_repo_naming` / `silver_actor_naming` divergence | done |
-| 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | planned |
+| 4 | Punch-list 2a — derive the missing `UpstreamMutation(gold.repo_dim)` cell: a new **enrichment-keyed** route in `append_model_edge_cells` for a clockless keyed upstream read in value-enrichment position by a partition-addressed downstream, plus a real `MaintenanceRepairKeysNotDiscoverable` diagnostic so the remaining fail-closed leg is loud at `build`/`run` rather than only `explain` | done |
 | 5 | Punch-list 2b — make that cell live on the run path: thread model edges into `resolve_live_column_scoped_cell`/`maintenance_availability::derive_resolved` and the mutation gate, so `gold.events_enriched`'s already-written `current_repo_name` heals and the `github_activity` stale-row count reaches zero | pending |
 | 6 | Punch-list 3 — `compute_calendar_windows`' interior-chunk-boundary forward-reach loss for Form-B models, which makes the full-refresh oracle itself undercount a cross-midnight session | pending |
 | 7 | Punch-list 4 — the missing repair edge from a Form-B model's own self-rebase to a Form-A downstream aggregate that reads it verbatim; first check whether phases 4-5's mechanism already covers it | pending |
@@ -88,6 +88,24 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-08 (phase 4 implementation): **found, did not fix, a pre-existing LSP-diagnostics
+  gap for every model-edge refusal.** `smelt-db`'s LSP-facing `maintenance_plan` Salsa query
+  (`maintenance_plan_diagnostics`, what `file_diagnostics()` calls) is wired to the
+  source-only `derive_model_maintenance_plan`, never `..._with_edges` — so no model-edge
+  refusal (not just the new `RepairKeysNotDiscoverable`; `ReachNotDerivable` has the
+  identical, already-documented gap) has ever reached `file_diagnostics()`/the editor; only
+  `smelt explain` (`maintenance_plan_report`) sees them. Phase 4's own diagnostics test was
+  rewritten against `plan_for` (the `explain` query) with the gap named inline rather than
+  silently expanding this phase to also thread edges into the LSP query — see
+  `phases/04-summary.md` "For the next planner" for the follow-up.
+- 2026-09-08 (phase 4 implementation): **the enrichment-keyed route needed a guard the plan
+  didn't spell out — restricted to an actual JOIN.** Without checking that the edge resolves
+  via `enrichment_join_clause` at all, the route also fired for a plain `FROM smelt.<edge>`
+  driving relation (no join, i.e. the edge IS the sole source) — not value enrichment at all —
+  and broke `keyed_model_edge.rs::consumer_not_carrying_upstream_keys_is_refused` (a `ScanUnbounded`
+  refusal instead of the expected `RepairKeysNotDiscoverable`). Fixed by returning `Ok(None)`
+  early when the edge is not resolvable as an enrichment join; full workspace gate green after.
 
 - 2026-09-08 (phase 4 planning): **reshape — punch-list item 2 splits into a derivation
   phase (4) and a run-path phase (5); old rows 5-9 shift to 6-10.** Reading the code for the

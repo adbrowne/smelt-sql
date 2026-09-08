@@ -1533,6 +1533,26 @@ downstream's own grain — a `grain: partition` downstream takes it in place of 
 window-forward batch loop for that run, because the cell's bounded read is the affected key
 set and has no partition-interval axis to compose with a run window.
 
+When neither discovery route resolves the downstream's grain against the upstream relation, a
+third, **enrichment-keyed** route is attempted before the edge is refused: a clockless
+`keyed upsert` upstream joined in **value-enrichment position** — a join whose `ON`/`USING`
+equality matches the upstream's own declared `unique_key`, contributing payload columns the
+downstream `SELECT`s, never a row-admission read that governs which rows exist — by a
+partition-addressed downstream contributes a `Trigger::UpstreamMutation` cell with
+`Technique::ColumnScopedMerge` over the edge-provenanced column group (the columns the shared
+mutation-sensitivity walk, §"Per-column mutation-sensitivity / column provenance", attributes
+to the edge, excluding any group the SAME walk also marks membership-sensitive to it — a
+row-admission read stays with the recompute family, never a column-scoped merge). The cell is
+addressed by the join key columns the downstream itself projects in its own output — not by the
+downstream's grain, which this route poses no question about at all. This route's own scan is
+never partition-bounded (`PartitionLocal::No`: a value rename scatters across every output
+partition, not a bounded interval), so it requires the edge's own declared
+`maintenance.scan_bounds.per_source.<edge>.allow_full_scan`; absent that declaration the edge
+refuses `MaintenanceScanUnbounded` instead. This route is attempted only after both key-addressed
+routes decline — `MaintenanceRepairKeysNotDiscoverable` now fires only when all three routes
+decline (no enrichment join is even resolvable against the edge, or the join's own key columns
+are not projected by the downstream's `SELECT` list).
+
 A key-addressed cell's affected-key set is discovered from the **group-grain fingerprint
 sidecar diff** over the upstream's own output table (§"The repair family" — "Obligation 7 over
 a `mutable_snapshot` source"): a clockless keyed upstream is, from the consumer's own view,

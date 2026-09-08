@@ -476,11 +476,32 @@ pub fn derive_model_maintenance_plan_with_edges(
             .map(|t| t.partition_column.as_str()),
         _ => None,
     };
+    // The enrichment-keyed route (`append_model_edge_cells`'s third,
+    // clockless-`KeyedUpsert` discovery leg) needs each edge's own declared
+    // `allow_full_scan` acceptance — a fact of THIS downstream's own
+    // `maintenance.scan_bounds`, not of the upstream edge itself, so it is
+    // populated here rather than at `ModelEdge` construction time (every
+    // other construction site keeps the fail-closed `false` default).
+    let model_scan_bounds = metadata
+        .maintenance
+        .as_ref()
+        .and_then(|m| m.scan_bounds.as_ref());
+    let model_edges_with_scan_bounds: Vec<smelt_logical::maintenance::derive::ModelEdge> =
+        model_edges
+            .iter()
+            .cloned()
+            .map(|mut edge| {
+                let (allow_full_scan, _require, _on_violation) =
+                    effective_scan_bounds(&edge.name, model_scan_bounds, None);
+                edge.allow_full_scan = allow_full_scan;
+                edge
+            })
+            .collect();
     smelt_logical::maintenance::derive::append_model_edge_cells(
         &mut result.plan,
         sql,
         output_partition_col,
-        model_edges,
+        &model_edges_with_scan_bounds,
         metadata.unique_key.as_deref().unwrap_or(&[]),
         sources,
         source_referential_integrity,

@@ -862,6 +862,10 @@ pub fn build_maintenance_plan_report(
                             "keyed at the downstream's own grain, projected over the upstream \
                              relation"
                         }
+                        smelt_logical::maintenance::KeyDiscovery::EnrichmentKeyed => {
+                            "value-enrichment merge keyed by the join key the downstream itself \
+                             projects"
+                        }
                     };
                     let _ = writeln!(
                         out,

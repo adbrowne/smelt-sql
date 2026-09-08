@@ -165,6 +165,7 @@ fn region_path_unchanged_without_overrides() {
         clock_col_aliases: vec![],
         unique_key: vec![],
         output_shape: None,
+        allow_full_scan: false,
     }];
     let edge_strategy = resolve_incremental_strategy(
         edge_sql,

@@ -1860,6 +1860,7 @@ impl EnrichmentEdgeRecipe {
                 clock_col_aliases: vec![],
                 unique_key: vec!["event_id".to_string()],
                 output_shape: None,
+                allow_full_scan: false,
             },
             smelt_logical::maintenance::derive::ModelEdge {
                 name: self.joined_source().to_string(),
@@ -1867,6 +1868,7 @@ impl EnrichmentEdgeRecipe {
                 clock_col_aliases: vec![],
                 unique_key: vec!["device_id".to_string()],
                 output_shape: None,
+                allow_full_scan: false,
             },
         ]
     }

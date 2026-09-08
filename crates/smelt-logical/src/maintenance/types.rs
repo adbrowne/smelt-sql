@@ -388,4 +388,17 @@ pub enum KeyDiscovery {
     /// over the upstream relation, and the diff's own changed-key set is
     /// the downstream's affected-key set with no forward projection.
     DownstreamGrainOverUpstream,
+    /// The **enrichment-keyed** route
+    /// ([`crate::maintenance::derive::model_edge::admit_enrichment_keyed_merge`],
+    /// `docs/specs/incremental_models.md` §"Upstream model edges"): the
+    /// upstream is joined for value enrichment, not row admission, and
+    /// `keys` names the join key the downstream itself projects (not a
+    /// change-feed identity or the downstream's grain). Addresses a
+    /// `Technique::ColumnScopedMerge` cell, never a
+    /// `Technique::PerGroupRecompute` one — the key-addressed run driver
+    /// (`smelt-runtime::maintenance_driver::key_addressed`) never dispatches
+    /// a cell carrying this variant; its own execution path is separate
+    /// scope (`docs/outcomes/20260906-bigquery-correctness/phases/
+    /// 04-plan.md`'s run-path follow-up).
+    EnrichmentKeyed,
 }

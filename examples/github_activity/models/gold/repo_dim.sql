@@ -28,10 +28,10 @@ maintenance:
 -- `keyed_upsert` over `["repo_id"]` either way, but the plain aggregate
 -- form is kept for legibility. This model's own classification is not the
 -- one that matters for `events_enriched`'s enrichment cell, though — see
--- `gold/events_enriched.sql`'s header comment for the actual finding
--- (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/04-summary.md`):
--- the refusal traces to `events_enriched`'s own `grain: partition`, not to
--- anything about how this model's shape is derived.
+-- `gold/events_enriched.sql`'s header comment for how the enrichment-keyed
+-- route (`docs/specs/incremental_models.md` §"Upstream model edges")
+-- addresses that cell by this model's own declared `unique_key`
+-- (`repo_id`), not by its `delta_signature`.
 SELECT
     repo_id,
     MAX(repo_name) FILTER (WHERE is_current) AS current_repo_name,

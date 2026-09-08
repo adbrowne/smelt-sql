@@ -1,10 +1,11 @@
 # Large-file ratchet baseline
-# Updated: 2026-09-08 — bumped crates/smelt-runtime/src/execute/project/mod.rs
-# (4690 -> 4691) for docs/outcomes/20260906-bigquery-correctness phase 3:
-# threading a `probe_policy_for_model(...)` argument through the
-# `rebuild_succession_state` call site added one line — mechanical
-# signature-threading, not new structure. `github_activity_oracle.rs` and
-# `fingerprint.rs` shrank incidentally (unrelated `cargo fmt` reflow).
+# Updated: 2026-09-08 — bumped explain.rs, diagnostics_types/mod.rs,
+# smelt-lsp/backend/mod.rs, maintenance-testkit/recipe.rs, and
+# key_addressed_model_edge_lowering.rs by 1-4 lines each for
+# docs/outcomes/20260906-bigquery-correctness phase 4: exhaustive-match arms
+# and doc comments for the new enrichment-keyed model-edge route and its
+# `MaintenanceRepairKeysNotDiscoverable` diagnostic. Mechanical additions,
+# not new structure. Sign-off: implementer, phase 4.
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -15,7 +16,7 @@
 #
 crates/smelt-backend-duckdb/src/lib.rs 1902
 crates/smelt-cli/src/commands/explain.rs 1163
-crates/smelt-cli/src/explain.rs 2519
+crates/smelt-cli/src/explain.rs 2523
 crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1439
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
@@ -34,7 +35,7 @@ crates/smelt-datagen/src/config.rs 1354
 crates/smelt-datagen/src/generic_parquet.rs 2305
 crates/smelt-datagen/src/generic.rs 1506
 crates/smelt-datagen/tests/example_web_analytics.rs 2946
-crates/smelt-db/src/diagnostics_types/mod.rs 1191
+crates/smelt-db/src/diagnostics_types/mod.rs 1200
 crates/smelt-db/src/file_check.rs 1333
 crates/smelt-db/src/function_body_check.rs 4470
 crates/smelt-db/src/loader.rs 1869
@@ -80,7 +81,7 @@ crates/smelt-logical/tests/emit_statements.rs 1710
 crates/smelt-logical/tests/keyed_families.rs 1309
 crates/smelt-logical/tests/maintenance_grouping.rs 1072
 crates/smelt-lsp/src/backend/hover_impl.rs 1072
-crates/smelt-lsp/src/backend/mod.rs 1292
+crates/smelt-lsp/src/backend/mod.rs 1293
 crates/smelt-lsp/src/backend/rename_impl.rs 1173
 crates/smelt-lsp/src/hover.rs 3032
 crates/smelt-lsp/src/tests.rs 2828
@@ -88,7 +89,7 @@ crates/smelt-lsp/tests/e2e.rs 1406
 crates/smelt-lsp/tests/example_workspaces.rs 1485
 crates/smelt-lsp/tests/integration.rs 4810
 crates/smelt-maintenance-testkit/src/link_c_harness.rs 1025
-crates/smelt-maintenance-testkit/src/recipe.rs 2316
+crates/smelt-maintenance-testkit/src/recipe.rs 2318
 crates/smelt-maintenance-testkit/src/render.rs 1376
 crates/smelt-maintenance-testkit/src/s_tracker.rs 1148
 crates/smelt-parser/src/ast.rs 5328
@@ -108,7 +109,7 @@ crates/smelt-runtime/src/transformer.rs 1174
 crates/smelt-runtime/src/windowing.rs 1173
 crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1059
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
-crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1145
+crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1146
 crates/smelt-runtime/tests/observed_delta.rs 1331
 crates/smelt-runtime/tests/repair_lowering.rs 1568
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
