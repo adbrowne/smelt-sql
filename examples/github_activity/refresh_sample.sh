@@ -10,7 +10,8 @@
 # loader must land exactly these rows, or the dual-target parity check compares
 # two different populations.
 #
-# Scan cost at the pinned 30-day range: ~6.3 GB, about US$0.03.
+# Scan cost at the pinned 30-day range: ~12 GB, about US$0.06 (the
+# `payload` projection, not the day range, is what dominates it).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -27,7 +28,7 @@ bash "$repo/scripts/bq-dogfood-export.sh" "$here/sample.sql" "$raw"
 duckdb -c "COPY (
   SELECT id, type,
          to_timestamp(created_at) AT TIME ZONE 'UTC' AS created_at,
-         actor_id, actor_login, repo_id, repo_name, org_id, public
+         actor_id, actor_login, repo_id, repo_name, org_id, public, payload
   FROM read_json_auto('${raw}')
   ORDER BY created_at, id
 ) TO '${out}' (FORMAT PARQUET, COMPRESSION ZSTD);"

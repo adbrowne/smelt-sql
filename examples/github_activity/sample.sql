@@ -15,8 +15,12 @@
 --   * The sample is `MOD(repo.id, 1000) = 0`: `repo.id` is stable under rename,
 --     where a `repo.name` prefix would silently drop a repo the moment it was
 --     renamed — corrupting exactly the rename history the succession work needs.
---   * `payload` is deliberately not projected. BigQuery bills bytes scanned, so
---     the column projection, not the sample filter, is what keeps the bill down.
+--   * `payload` is projected as the raw JSON string the archive stores. It is
+--     the single most expensive column in the table, and BigQuery bills bytes
+--     scanned — the column projection, not the sample filter, is what governs
+--     the bill, so nothing else is added speculatively. The typed silver
+--     fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`)
+--     extracts from it; without it those models have no subject.
 SELECT
   id,
   type,
@@ -26,7 +30,8 @@ SELECT
   repo.id     AS repo_id,
   repo.name   AS repo_name,
   org.id      AS org_id,
-  public
+  public,
+  payload
 FROM `githubarchive.day.2026*`
 WHERE _TABLE_SUFFIX BETWEEN '0805' AND '0903'
   AND MOD(repo.id, 1000) = 0
