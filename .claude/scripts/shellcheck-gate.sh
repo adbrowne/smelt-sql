@@ -31,11 +31,20 @@ cd "${REPO_ROOT}" || exit 1
 
 SEVERITY="${SHELLCHECK_SEVERITY:-warning}"
 
-if ! command -v shellcheck >/dev/null 2>&1; then
+# Resolve the binary rather than requiring the caller to be inside a
+# mise-managed shell. CLAUDE.md documents `bash .claude/scripts/verify-phase.sh`
+# as the gate's invocation, and a bare PATH carries no mise shims — so
+# insisting on `mise exec --` would make the documented command fail for a
+# reason with nothing to do with the code under test.
+SHELLCHECK="$(command -v shellcheck 2>/dev/null || true)"
+if [ -z "$SHELLCHECK" ] && command -v mise >/dev/null 2>&1; then
+  SHELLCHECK="$(mise which shellcheck 2>/dev/null || true)"
+fi
+if [ -z "$SHELLCHECK" ]; then
   # Fail rather than skip. A silently-skipped lint gate is a hole that reads
   # exactly like a pass — the same failure mode as an unset DUCKDB_LIB_DIR.
-  echo "shellcheck not found. Install it with: mise install" >&2
-  echo "(it is pinned in mise.toml's [tools])" >&2
+  echo "shellcheck not found on PATH, and mise could not resolve it either." >&2
+  echo "It is pinned in mise.toml's [tools] — run: mise install" >&2
   exit 2
 fi
 
@@ -50,7 +59,7 @@ if [ "${#targets[@]}" -eq 0 ]; then
   exit 1
 fi
 
-if shellcheck -S "${SEVERITY}" -f gcc "${targets[@]}"; then
+if "$SHELLCHECK" -S "${SEVERITY}" -f gcc "${targets[@]}"; then
   echo "PASS  shellcheck (${#targets[@]} scripts, severity ${SEVERITY}, zero findings)"
   exit 0
 else
