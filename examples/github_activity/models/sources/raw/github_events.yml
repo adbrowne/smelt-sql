@@ -3,6 +3,19 @@ description: >
   table by an external, at-least-once loader (`docs/outcomes/
   20260906-bigquery-dogfood-spine/outcome.md`). smelt does not author the
   load; this declaration is the contract the loader is trusted against.
+# Target-aware `name:` override (`docs/specs/sources.md` §"Target-aware
+# `name:` override`). Without this, the default mapping
+# `<target_schema>.<address_segments.join("_")>` would resolve this source
+# to `smelt_dogfood.sources_raw_github_events` on the `bigquery` target, but
+# phase 10's loader landed the physical table at `smelt_dogfood.github_events`
+# (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/10-summary.md`,
+# finding 1). This is a real, first-class smelt mechanism — not a
+# hand-substitution stopgap — so it is the correct fix, not a placeholder for
+# one. `dev` is intentionally absent from the map: it falls back to the
+# default mapping (`main.sources_raw_github_events`), matching the local
+# DuckDB fixture's own table name.
+name:
+  bigquery: smelt_dogfood.github_events
 mutation_profile:
   kind: append_only
   # GitHub Archive publishes hourly shard files; an event minted near an hour

@@ -131,14 +131,56 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
 | 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | done |
-| 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
-| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
-| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
-| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
+| 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | done |
+| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | blocked |
+| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | blocked |
+| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | blocked |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | pending |
 
 ## Decision log
+
+- 2026-09-10 (phase 11, first live BigQuery run): **the pipeline stops at
+  `silver.events_deduped`, on a hard capability gap that is not BigQuery-specific.**
+  `bronze.events` and the first write of the succession/dedup models succeeded against
+  `smelt_dogfood`; then
+  `crates/smelt-runtime/src/maintenance_driver/driver.rs` refuses with
+  `Feature not supported by BigQuery: observed-delta recording for a change-suppressed
+  keyed fold (T5)`. The check is `backend.dialect() != SqlDialect::DuckDB`, unconditional
+  — so **Spark is equally affected**, and the gap is "the ledger substrate is DuckDB-only"
+  rather than anything about BigQuery. Because `events_deduped` sits upstream of the whole
+  model set, nothing in `gold/` or `marts/` ran at all. Criterion 5 is therefore **not**
+  met and cannot be until that gap is closed; phases 12-14 inherit the block.
+
+  Verified rather than taken on report: the `bail!` is where the summary says it is, and
+  it is reached whenever a keyed merge suppresses a no-op write on a second-or-later batch.
+  The right shape of fix is arguably not a fix at all but a **downgrade path** — smelt
+  already has `MaintenanceStateDowngraded` for ledger-requiring techniques, and this refuses
+  hard where that mechanism would have degraded gracefully and said so.
+
+  **Phase 10's finding 1 is properly resolved, not papered over.** The `raw.` → real-dataset
+  mapping turned out to be spec'd surface already: the target-aware `name:` override
+  (`docs/specs/sources.md`), so both source YAMLs now carry a per-target `name:` pointing at
+  the loader's physical tables. The manual `sed` of phase 10 is retired. Cost of the whole
+  run: **94 MB billed, ~US$0.0005**.
+
+- 2026-09-10 (phase 11): **adding a second target silently re-pointed the entire project,
+  and that is filed as a finding rather than absorbed.** `default_target` falls back to the
+  **alphabetically-first** target when `target:` is unset, and `bigquery` sorts before
+  `dev` — so merely declaring the new target moved every no-`--target` invocation onto a
+  dialect with no transactional merge ledger, silently downgrading `ColumnScopedMerge` to
+  `PerGroupRecompute` project-wide. Nothing announced it; it surfaced only as three
+  unrelated `github_activity_replay` failures. A config edit that changes the execution
+  backend for a whole project should not be inferable from sort order. `target: dev` is
+  pinned in this example as the local fix, and the general problem is finding 4 for
+  `bigquery-correctness`.
+
+  Two test gates legitimately stopped being zero-diagnostics workspaces, because declaring
+  a second backend makes `MaintenanceStateDowngraded` fire for real: the downgrade is
+  computed against the union of every declared target. Both were changed to assert the
+  **exact** expected diagnostic set one-to-one rather than to widen a tolerance — a
+  workspace that starts emitting an unlisted diagnostic, or stops emitting a listed one,
+  still fails.
 
 - 2026-09-10 (phase 10, executed live): **the loader is deployed and criterion 3 is met;
   the run cost less than a cent and found a schema drift before it spent anything.**
@@ -754,6 +796,29 @@ exists — so the live run is a test of the *backend*, not of the models.
   centrepiece per-window sweep is blocked on this finding.
 
 ## Blocked
+
+- 2026-09-10 — **phases 12, 13 and 14: the T5 capability gap stops the pipeline before
+  they have anything to run on.** Phase 11 got `bronze.events` and the first write of the
+  silver succession/dedup models onto BigQuery, then hit an unconditional refusal in
+  `crates/smelt-runtime/src/maintenance_driver/driver.rs`: `observed-delta recording for a
+  change-suppressed keyed fold (T5)` is implemented for DuckDB only
+  (`backend.dialect() != SqlDialect::DuckDB` → `bail!`). `silver.events_deduped` is upstream
+  of the entire model set, so `gold/` and `marts/` never materialise on BigQuery at all.
+
+  That makes phase 12 (three consecutive incremental windows) impossible — there is no
+  completed first run to be incremental *from* — and phases 13 (dual-target parity) and 14
+  (both-target oracle) have no BigQuery side to compare. Marking them `blocked` rather
+  than leaving them `pending` so the state reflects the gate honestly.
+
+  **What unblocks them:** a BigQuery realisation of the observed-delta bookkeeping, or —
+  more likely the right design — an explicit downgrade path parallel to the
+  `MaintenanceStateDowngraded` mechanism that already exists for ledger-requiring
+  techniques, so the run degrades and says so instead of refusing. That work belongs to
+  `docs/outcomes/20260906-bigquery-correctness` (this outcome's "Out of scope" assigns
+  fixes there), and it is not BigQuery-specific: the same check refuses on Spark.
+
+  Phase 16 (extend the handoff with live findings) stays `pending` — phase 11 produced
+  real live findings and they can be banked without the rest of the run.
 
 - 2026-09-09 -- **partially lifted: human action 1 of 2 is done.** A human minted the
   `bigquery-auth.sh` token, so the fixture re-pin below has happened and phase 5 is back in

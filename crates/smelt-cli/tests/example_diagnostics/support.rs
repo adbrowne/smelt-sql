@@ -176,6 +176,71 @@ pub(crate) fn check_workspace_no_diagnostics(example_dir: &str) {
     );
 }
 
+/// Like [`check_workspace_no_diagnostics`], but for a workspace that
+/// legitimately declares more than one backend target and therefore
+/// legitimately surfaces `MaintenanceStateDowngraded` warnings: that
+/// diagnostic is deliberately computed against the union of every declared
+/// target's backend type (`crates/smelt-db/src/queries/maintenance/
+/// diagnostics.rs`'s "Checked against every declared backend" comment; a
+/// project has no single declared default target at analysis time), so
+/// declaring a `bigquery` target alongside `dev` for a project that uses
+/// `grain: key`/succession techniques whose ledger structures are DuckDB-only
+/// (`crates/smelt-logical/src/maintenance/availability/state_structure.rs::
+/// realisable_state_structures`) is expected to surface a downgrade warning
+/// per affected cell, not a bug to chase away by omission. `expected_messages`
+/// must match the emitted diagnostics' `message` field exactly, one-to-one
+/// (order-independent) — a workspace that starts emitting a diagnostic this
+/// list doesn't name, or stops emitting one it does, fails loudly rather than
+/// silently passing or silently accumulating more expected warnings than the
+/// project actually has.
+pub(crate) fn check_workspace_diagnostics_are_exactly(
+    example_dir: &str,
+    expected_messages: &[&str],
+) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut all_messages: Vec<String> = Vec::new();
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            all_messages.push(d.message.clone());
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            all_messages.push(d.0.message.clone());
+        }
+    }
+    all_messages.sort();
+    let mut expected: Vec<String> = expected_messages.iter().map(|s| s.to_string()).collect();
+    expected.sort();
+
+    assert_eq!(
+        all_messages, expected,
+        "diagnostics for {} no longer match the expected set — a workspace that legitimately \
+         declares more than one backend target must keep this list in sync with what it \
+         actually emits, not widen it speculatively",
+        example_dir
+    );
+}
+
 /// Helper: loads `example_dir` as a workspace, then checks diagnostics for the
 /// one file whose relative path ends with `expected_file`.  Asserts:
 ///   1. Exactly one Phase A diagnostic fires for that file (codes in

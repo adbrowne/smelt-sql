@@ -2,10 +2,32 @@ name: github_activity
 version: 1
 paths:
   - models
+# Explicit default: without this, adding the `bigquery` target below would
+# silently become the CLI/LSP's no-`--target` default the moment it sorted
+# alphabetically ahead of `dev` (`smelt-runtime/src/profile.rs`'s
+# `default_target` falls back to the alphabetically-first target name when
+# `target:` is unset) — flipping every no-`--target` test and tool invocation
+# onto a dialect with no transactional merge ledger. Pin it explicitly so
+# `dev` (DuckDB) stays the default; `bigquery` is only ever selected via
+# `--target bigquery`.
+target: dev
 targets:
   dev:
     type: duckdb
     database: target/dev.duckdb
     schema: main
+  bigquery:
+    # The long-lived dogfood dataset (`docs/outcomes/
+    # 20260906-bigquery-dogfood-spine/outcome.md`), NOT the ephemeral
+    # per-run integration-suite dataset. `smelt_dogfood` is populated
+    # out-of-band by `scripts/bq-dogfood-loader.sh` (phase 10); this
+    # target's job is to compile+run the model set against it, not to load
+    # it. See `scripts/bq-dogfood-env.sh` for the credentials this target
+    # needs at runtime.
+    type: bigquery
+    project: smelt-bq-test-20260816
+    dataset: smelt_dogfood
+    location: US
+    schema: smelt_dogfood
 default_materialization: view
 unstable_schema: true

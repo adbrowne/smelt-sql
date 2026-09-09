@@ -41,9 +41,38 @@ fn web_analytics_no_diagnostics() {
     check_workspace_no_diagnostics("examples/web_analytics");
 }
 
+/// `examples/github_activity` deliberately declares both a `dev` (DuckDB) and
+/// a `bigquery` target (`docs/outcomes/20260906-bigquery-dogfood-spine/
+/// phases/11-summary.md`), so `MaintenanceStateDowngraded` legitimately fires
+/// for every `grain: key`/succession cell whose ledger structure is
+/// DuckDB-only — see `check_workspace_diagnostics_are_exactly`'s doc comment.
 #[test]
 fn github_activity_no_diagnostics() {
-    check_workspace_no_diagnostics("examples/github_activity");
+    check_workspace_diagnostics_are_exactly(
+        "examples/github_activity",
+        &[
+            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } \
+             downgraded from SuccessionPatch to its recompute-family equivalent — \
+             SuccessionPatch requires the tombstone ledger, which is unavailable for this \
+             project; downgraded to DeleteInsert, the cheapest recompute-family technique \
+             that preserves the equivalence invariant",
+            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } \
+             downgraded from KeyedFold to its recompute-family equivalent — KeyedFold \
+             requires the reconciliation ledger (frontier record), which is unavailable for \
+             this project; downgraded to PerGroupRecompute, the cheapest recompute-family \
+             technique that preserves the equivalence invariant",
+            "MaintenanceStateDowngraded: cell UpstreamMutation { source: \"raw.github_events\" \
+             } downgraded from ColumnScopedMerge to its recompute-family equivalent — \
+             ColumnScopedMerge requires the transactional merge ledger, which is unavailable \
+             for this project; downgraded to PerGroupRecompute, the cheapest recompute-family \
+             technique that preserves the equivalence invariant",
+            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events_arrival\" } \
+             downgraded from SuccessionPatch to its recompute-family equivalent — \
+             SuccessionPatch requires the tombstone ledger, which is unavailable for this \
+             project; downgraded to DeleteInsert, the cheapest recompute-family technique \
+             that preserves the equivalence invariant",
+        ],
+    );
 }
 
 #[test]

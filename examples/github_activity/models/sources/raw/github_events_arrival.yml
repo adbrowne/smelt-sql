@@ -9,6 +9,11 @@ description: >
   `raw.github_events`'s table: two declarations over one relation would key
   two differently-partitioned fingerprint sidecars onto the same physical
   table, which is untested and not what this phase exists to test.
+# See `github_events.yml`'s identical note: the `bigquery` target's physical
+# table is `smelt_dogfood.github_events_arrival` (phase 10's loader), not the
+# default-mapped `smelt_dogfood.sources_raw_github_events_arrival`.
+name:
+  bigquery: smelt_dogfood.github_events_arrival
 mutation_profile:
   kind: append_only
   lateness: '6 hours'
