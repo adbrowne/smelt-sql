@@ -2,8 +2,9 @@
 #
 # Standard per-phase verification gate, bundled into ONE tool call.
 #
-# Runs the four checks every phase must pass (fmt, clippy, workspace tests,
-# example diagnostics) and prints ONLY failures plus a one-line PASS/FAIL
+# Runs the five checks every phase must pass (fmt, clippy, shell lint,
+# workspace tests, example diagnostics) and prints ONLY failures plus a
+# one-line PASS/FAIL
 # summary per gate. Full output of a failing gate is truncated to its tail —
 # the failure context is at the end for cargo tooling.
 #
@@ -13,9 +14,10 @@
 # pre-truncated output keeps the transcript small.
 #
 # Usage:
-#   bash .claude/scripts/verify-phase.sh            # all four gates
+#   bash .claude/scripts/verify-phase.sh            # all five gates
 #   bash .claude/scripts/verify-phase.sh --fast     # skip the full `cargo test`
-#                                                   # (fmt + clippy + example_diagnostics)
+#                                                   # (fmt + clippy + shellcheck
+#                                                   #  + example_diagnostics)
 #
 # Exit code: 0 = all gates green; 1 = at least one gate failed.
 
@@ -43,6 +45,7 @@ run_gate() {
 
 run_gate "cargo fmt --check"            cargo fmt --all -- --check
 run_gate "cargo clippy (zero warnings, both feature sets)" bash .claude/scripts/clippy-gate.sh
+run_gate "shellcheck (scripts/, .claude/scripts/)" bash .claude/scripts/shellcheck-gate.sh
 if [ "$FAST" -eq 0 ]; then
   run_gate "cargo test (workspace)"     cargo test --quiet
 fi

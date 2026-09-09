@@ -1,3 +1,4 @@
+# shellcheck shell=bash  # sourced, not executed — no shebang by design
 # spark-env.sh — source this (`source scripts/spark-env.sh`) to point smelt's
 # Spark integration tests at the local Spark Connect server started by
 # scripts/spark-up.sh.

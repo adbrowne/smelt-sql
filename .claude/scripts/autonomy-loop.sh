@@ -162,6 +162,7 @@ SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
 # the loop swaps back into remediation mode — set PROMPT="$REMEDIATION_PROMPT"
 # is not CLI-reachable, so to use it either re-point the default below or copy
 # .claude/diag-parity-prompt.txt. Kept inline so the contract isn't lost.
+# shellcheck disable=SC2034  # unused by design; an operator swaps it into PROMPT (see above)
 REMEDIATION_PROMPT="Resume the active autonomy loop with fresh context.
 
 STRUCTURE. The work is two-level. \`.claude/active-plan\` names a \`master_plan\` (the top-level feature backlog) and an \`active_subplan\` (the focused remediation plan the loop is currently working). You work the ACTIVE SUB-PLAN phase by phase; you only touch the master when the sub-plan is exhausted (see ROLL-UP).
@@ -191,7 +192,7 @@ PROMPT="${PROMPT:-$(cat "${SCRIPT_DIR}/../sweep-loop-prompt.txt")}"
 # human look at the time.
 ITER_COST_WARN="${ITER_COST_WARN:-15}"
 
-cd "${REPO_ROOT}"
+cd "${REPO_ROOT}" || exit 1
 
 # Pre-extract the next unit of work from the registry + status tables so the
 # agent doesn't have to read the whole master plan (~45KB) + sub-plan just to

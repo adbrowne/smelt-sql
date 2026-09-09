@@ -46,6 +46,12 @@ jobs:
         # so CI and local can't drift into linting different feature sets.
         run: bash .claude/scripts/clippy-gate.sh
 
+      - name: Shell lint
+        # Same shared-script reasoning as clippy above. shellcheck comes from
+        # mise's [tools] pin, so this step fails loudly if it is missing rather
+        # than skipping green.
+        run: bash .claude/scripts/shellcheck-gate.sh
+
       - name: Gated conformance twin compile check
         # smelt-maintenance-testkit's families/ module only compiles under
         # spark/bigquery; nothing else in this Lint job type-checks it, so it

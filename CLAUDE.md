@@ -195,15 +195,23 @@ cargo fmt --all -- --check
 # a local pass cannot diverge from CI.
 mise run clippy          # or: bash .claude/scripts/clippy-gate.sh
 
+# Shell lint. scripts/ and .claude/scripts/ are clean at `warning` severity and
+# the gate is zero-findings with no ratchet: a new finding fails immediately.
+# Where the code is right, say so inline with
+# `# shellcheck disable=SCxxxx  # <reason>` rather than lowering the severity.
+# shellcheck is pinned in mise.toml's [tools], so the gate fails rather than
+# skipping green when it is missing.
+mise run shellcheck      # or: bash .claude/scripts/shellcheck-gate.sh
+
 # Run tests
 mise run test          # or: cargo test
 
 # Verify example workspaces have no LSP diagnostics
 cargo test -p smelt-cli --test example_diagnostics
 
-# Standard pre-commit gate, bundled into ONE command (fmt + clippy + tests +
-# example_diagnostics, failures-only output). Prefer this over running the
-# four commands separately — it keeps agent transcripts small.
+# Standard pre-commit gate, bundled into ONE command (fmt + clippy + shellcheck
+# + tests + example_diagnostics, failures-only output). Prefer this over running
+# the five commands separately — it keeps agent transcripts small.
 mise run verify          # or: bash .claude/scripts/verify-phase.sh
 mise run verify-fast     # skips the full cargo test
 

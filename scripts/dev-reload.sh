@@ -34,7 +34,7 @@ fi
 
 # 4. Find IPC socket
 if [[ -z "${VSCODE_IPC_HOOK_CLI:-}" ]]; then
-    SOCK=$(ls -t /run/user/$(id -u)/vscode-ipc-*.sock 2>/dev/null | head -1)
+    SOCK=$(ls -t "/run/user/$(id -u)"/vscode-ipc-*.sock 2>/dev/null | head -1)
     if [[ -z "$SOCK" ]]; then
         echo "Error: No VSCode IPC socket found." >&2
         echo "Run this from a VSCode integrated terminal, or set VSCODE_IPC_HOOK_CLI." >&2

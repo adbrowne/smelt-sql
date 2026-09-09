@@ -1,6 +1,11 @@
 [tools]
 rust = "1.95"
 node = "24"
+# shellcheck backs the shell-lint gate in verify-phase.sh. Unlike the Cloud SDK
+# (a task, not a tool, because 200MB in seven CI jobs that never use it is
+# waste), this is ~1MB and every job that runs the gate needs it — so a
+# [tools] pin is right and the gate can fail rather than skip green.
+shellcheck = "0.11"
 
 [env]
 # DUCKDB_LIB_DIR mirrors the manual setup snippet in CLAUDE.md's "Build and
@@ -34,6 +39,10 @@ run = "bash .claude/scripts/verify-phase.sh"
 [tasks.verify-fast]
 description = "verify, skipping the full cargo test run"
 run = "bash .claude/scripts/verify-phase.sh --fast"
+
+[tasks.shellcheck]
+description = "Shell lint gate (scripts/ and .claude/scripts/, warning severity)"
+run = "bash .claude/scripts/shellcheck-gate.sh"
 
 [tasks.clippy]
 description = "Clippy gate (both CI feature sets)"
