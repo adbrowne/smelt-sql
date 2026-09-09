@@ -31,18 +31,28 @@ exists — so the live run is a test of the *backend*, not of the models.
 
 ## Success criteria (checkable)
 
-1. **Provisioned.** A dedicated GCP project (not `smelt-bq-test-20260816`) with a dataset
-   carrying **no** default table expiration, a budget alert, and a documented monthly cap.
-   `docs/research/20260816-bigquery-backend.md`'s provisioning decisions are followed
-   except where this outcome's decision log records a departure.
-2. **Reachable, and only here.** `bq`/`gcloud` are usable from a session against the
-   dogfood project via ADC impersonating a dogfood-scoped service account, so the
-   credential reaches this project and no other — demonstrated, not assumed: a call
-   against a different project of the human's is refused. This requires removing the
-   `gcloud`/`bq` entries from the checked-in `deny` list in `.claude/settings.json` (deny
-   beats allow, so `settings.local.json` cannot do it). `smelt-bq-test-20260816`'s
-   isolation is untouched: the `scripts/bigquery-*.sh` denials and
-   `Read(//home/andrew/.config/gcloud-smelt-bq/**)` stay.
+1. **Provisioned.** A dataset carrying **no** default table expiration, under a budget
+   alert with a documented monthly cap. It lives in the existing `smelt-bq-test-20260816`
+   project as a *new* dataset (`smelt_dogfood`, US, cap US$25/month) alongside the
+   untouched `smelt_test`: the property this outcome needs is a dataset whose tables do not
+   expire, and `defaultTableExpirationMs` is a dataset property, so a second project buys
+   nothing the second dataset does not. `docs/research/20260816-bigquery-backend.md`'s
+   provisioning decisions are followed except where this outcome's decision log records a
+   departure — and the reuse itself is one such departure, with its accepted costs
+   enumerated in the 2026-09-09 decision-log entry and in `phases/07-plan.md` §D0.
+2. **Reachable, and only this project.** `bq`/`gcloud` are usable from a session against
+   the dogfood dataset via ADC impersonating a `smelt-dogfood@` service account, so the
+   credential reaches this project and no other — demonstrated, not assumed: a call against
+   a different project of the human's is refused. Because `roles/bigquery.jobUser` is
+   project-scoped, reachability necessarily extends to `smelt_test` as well; that is an
+   accepted cost of criterion 1's reuse, not a scoping failure, and a call against
+   `smelt_test` succeeding is the *expected* result rather than a gate failure. The
+   blanket `gcloud`/`bq` entries this criterion once required removing from
+   `.claude/settings.json` turned out never to be present in this worktree, so the list is
+   verified rather than edited. `smelt-bq-test@`'s own credential isolation is untouched
+   and is where the real boundary sits: its gpg-encrypted key in a separate
+   `CLOUDSDK_CONFIG`, the `scripts/bigquery-*.sh` denials, and
+   `Read(//home/andrew/.config/gcloud-smelt-bq/**)` all stay.
 3. **Loader.** One scheduled query (or `bq query` step) populates `raw.github_events` from
    `githubarchive.day.2026*`, reproducing `examples/github_activity/sample.sql`
    **verbatim** — same projection, same `MOD(repo.id, 1000) = 0` filter, same
@@ -117,7 +127,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | done |
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | done |
-| 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
+| 7 | Open the dogfood dataset in the existing project: `smelt_dogfood` with no table expiry, budget raised to US$25, `smelt-dogfood@` service account reached by ADC impersonation, and the `SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS` guard — leaving `smelt_test` and `smelt-bq-test@`'s isolation intact | blocked |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
 | 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | blocked |
@@ -129,6 +139,40 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | blocked |
 
 ## Decision log
+
+- 2026-09-09 (human decision): **reuse `smelt-bq-test-20260816` rather than provisioning a
+  dedicated dogfood project; criterion 1 amended accordingly.** Criterion 1 originally
+  forbade this project by name. That was over-fitted: the property the outcome needs is a
+  dataset whose tables do not expire, and `defaultTableExpirationMs` is a *dataset*
+  property, so `smelt_test`'s fatal 24h expiry is escaped by adding `smelt_dogfood`
+  beside it rather than by adding a project. Accepted costs, each real and each chosen
+  rather than overlooked: a shared bill, so phase 10 must measure cost per run from each
+  load job's own `totalBytesProcessed` rather than the project total (the more honest
+  measurement anyway); no delete-the-project teardown; the budget cap rises from US$5 to
+  **US$25/month**, which loosens the guardrail over the test suites sharing the project;
+  and session reachability extends to `smelt_test`, because `roles/bigquery.jobUser` is
+  project-scoped and cannot be narrowed to one dataset. What reuse does **not** cost is the
+  property the credential design was actually built for — the blast radius that mattered
+  was ADC carrying Andrew's whole Google Cloud identity, and a `smelt-dogfood@` service
+  account scoped to one project still refuses every other one, so criterion 2's
+  demonstration is unchanged and `smelt-bq-test@`'s gpg-encrypted key, separate
+  `CLOUDSDK_CONFIG` and `Read`-denied config directory are untouched. Phases 10-14 and 16
+  are unaffected in substance; phase 7 loses its project-creation half and is rewritten.
+
+- 2026-09-09 (phase 7 plan): **a table-expiration trap is closed explicitly rather than
+  left to an undocumented mitigation, and the earlier statement of it was too strong.**
+  `scripts/bigquery-env.sh:31` sets `SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS` unconditionally
+  (2h default) and `python/smelt/bigquery_adapter.py:152` stamps it onto the dataset it
+  creates; a dogfood run must source that script for `PYTHONPATH`. First reading was that
+  every dogfood table would therefore expire two hours after being written. Corrected on
+  inspection: the adapter calls `create_dataset(..., exists_ok=True)`, which does not
+  modify a dataset that already exists, so once `smelt_dogfood` is created with no default
+  expiration the env var never reaches it. The trap bites only a dataset the adapter
+  creates itself — which is exactly what happens the first time anyone points the pipeline
+  at a fresh dataset name. That mitigation is real but load-bearing and undocumented, and
+  the failure it guards destroys history a day later while looking like nothing at the
+  time, so phase 7 both unsets the variable on the dogfood path and reads the live
+  dataset's `defaultTableExpirationMs` back from the API in its gate.
 
 - 2026-09-09 (phase 5, implement): **the fan-out landed clean — zero divergence, no new
   finding.** The four models entered `github_activity_oracle`'s per-window sweep
@@ -650,14 +694,16 @@ exists — so the live run is a test of the *backend*, not of the models.
      key, then `bash examples/github_activity/refresh_sample.sh` against a `sample.sql`
      re-pinned to project `payload` (~12 GB scanned, ~US$0.06, already accepted in the
      decision log). Everything after the committed fixture is ordinary loop work.
-  2. **Phase 7 tasks 1-5** -- create the dogfood GCP project, link billing, enable
-     `bigquery.googleapis.com` and `billingbudgets.googleapis.com`, create the no-expiry
-     dataset and the budget alert, create `smelt-dogfood@<PROJECT>.iam.gserviceaccount.com`
-     with `bigquery.jobUser` + dataset `WRITER`, grant `roles/iam.serviceAccountTokenCreator`
-     on it to the human account, and run the impersonating `gcloud auth
-     application-default login --impersonate-service-account=...`. That single act unblocks
-     phase 7's own gate and then 10-14 and 16 in order; the loader they deploy is already
-     written and tested.
+  2. **Phase 7 tasks 1-5, as rewritten for reuse on 2026-09-09** -- no project creation and
+     no billing link, because the project already exists. Enable
+     `billingbudgets.googleapis.com` if it is not on, create dataset `smelt_dogfood` (US, no
+     `defaultTableExpirationMs`), raise the budget to US$25/month, create
+     `smelt-dogfood@smelt-bq-test-20260816.iam.gserviceaccount.com` with `bigquery.jobUser`
+     + `WRITER` on that one dataset (carrying `smelt-bq-test@`'s existing ACL entries
+     forward), grant `roles/iam.serviceAccountTokenCreator` on it to the human account, and
+     run the impersonating `gcloud auth application-default login
+     --impersonate-service-account=...`. That single act unblocks phase 7's own gate and
+     then 10-14 and 16 in order; the loader they deploy is already written and tested.
 
   **How to resume:** flip this file's `**Status:**` back to `in progress` after either human
   action -- the loop will pick the outcome up again from the first `blocked` row that the
