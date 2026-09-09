@@ -1,7 +1,7 @@
 # Outcome: The GitHub-activity pipeline runs on BigQuery and DuckDB, and the numbers agree
 
 **Created:** 2026-09-06
-**Status:** blocked
+**Status:** in progress
 **Driver:** split. Phases 2–4, 6, 8 and 9 are loop-grindable (no warehouse, no credentials)
 and this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
 BigQuery token for one fixture regeneration (see "## Blocked"); phases 7, 10–14 and 16 are
@@ -115,8 +115,8 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | done |
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | done |
 | 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
-| 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | blocked |
-| 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | blocked |
+| 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | in progress |
+| 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | done |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
@@ -129,6 +129,29 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | blocked |
 
 ## Decision log
+
+- 2026-09-09 (phase 5, token-gated half): **the `payload` re-pin is population-identical,
+  and it cost twice the estimate.** A human minted a `bigquery-auth.sh` token, `sample.sql`
+  was re-pinned to project `payload` (the raw JSON string, nothing else added
+  speculatively), and `refresh_sample.sh` regenerated the fixture: 64,313 rows, 5.8 MB
+  Parquet, up from 1.1 MB. Two things worth pinning down rather than assuming:
+  (a) the nine pre-existing columns are row-for-row equal to the previous committed fixture
+  in **both** directions (`EXCEPT ALL`, 0 and 0), so the fan-out is purely additive and no
+  existing model's numbers — or the phase 8 divergence registry bounds measured over
+  them — are disturbed by the re-pin; (b) BigQuery billed **24.3 GB, ~US$0.12**, double
+  the ~12 GB / US$0.06 this log estimated on 2026-09-08, because `payload` dominates the
+  scan by more than the estimate assumed. The 5.8 MB fixture is far inside the size that
+  would have triggered the standing "shorten the day range rather than narrow the payload"
+  instruction, so the pinned 30-day `_TABLE_SUFFIX` range is unchanged. The loader's
+  byte-identity gate (`github_activity_loader`) passes unmodified with `payload` in the
+  projection — the derivation from `sample.sql` carried it through with no edit.
+
+- 2026-09-09 (bookkeeping): **phase 6 corrected from `blocked` to `done`.** Its own
+  "## Blocked" entry has said "Resolved by phase 8" since 2026-09-08 — the centrepiece
+  `every_window_matches_the_full_refresh_oracle` is un-`#[ignore]`d and green over all 30
+  windows — but the phases table was never updated to match, leaving a row that read as
+  outstanding work when its subject was finished. No work was done for this; the row was
+  wrong, not the phase.
 
 - 2026-09-08 (terminal): **outcome marked `blocked` rather than `done`.** Judged the success
   criteria against the phase summaries: the DuckDB leg is substantially delivered and its
@@ -582,6 +605,12 @@ exists — so the live run is a test of the *backend*, not of the models.
 
 ## Blocked
 
+- 2026-09-09 -- **partially lifted: human action 1 of 2 is done.** A human minted the
+  `bigquery-auth.sh` token, so the fixture re-pin below has happened and phase 5 is back in
+  flight; the outcome's `**Status:**` is `in progress` again. Human action 2 -- provisioning
+  the dogfood GCP project (phase 7 tasks 1-5) -- is untouched and still gates phases 7,
+  10-14 and 16. The entry below stands for everything except its phase 5 clause.
+
 - 2026-09-08 -- **the outcome as a whole: every remaining phase needs cloud identity that
   does not exist.** With phases 1-4, 8, 9 and 15 `done`, no workable row is left: 5, 6, 7,
   10-14 and 16 are all `blocked`, and every one of them is gated on a human minting a
@@ -727,7 +756,12 @@ exists — so the live run is a test of the *backend*, not of the models.
      `examples/github_activity/README.md` "genuine derivation gap" note) surfacing earlier than
      expected, and fold the root-cause work into that outcome instead of this one.
 
-- 2026-09-08 — **phase 5 (`payload` re-pin + typed silver fan-out).** Needs a live
+- 2026-09-08 — **phase 5 (`payload` re-pin + typed silver fan-out).**
+  **Lifted 2026-09-09** — the token was minted and the fixture regenerated and committed
+  (see the decision log's 2026-09-09 entry: population-identical on the nine pre-existing
+  columns, 24.3 GB billed). The rest of the phase is ordinary work and is in flight. Left
+  below for the record of what the gate was.
+  Needs a live
   BigQuery credential: `bash scripts/bigquery-auth.sh`, which prompts a human for the
   passphrase protecting the encrypted service-account key and mints a 1-hour token. What a
   human must do: mint the token, then run `bash examples/github_activity/refresh_sample.sh`
