@@ -201,7 +201,8 @@ DATASET="smelt_dogfood"
 LOCATION="US"
 SA_NAME="smelt-dogfood"
 SA="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
-BUDGET_USD=25
+BUDGET_UNITS=25
+BUDGET_AMOUNT="25 (in the billing account's own currency)"
 
 # The dogfood path is ADC in the default config. An inherited CLOUDSDK_CONFIG
 # would silently provision into the test project's isolated config instead.
@@ -297,36 +298,72 @@ fi
 pause
 
 # ── 4 ─────────────────────────────────────────────────────────────────────
-stage "Raise the budget to US\$${BUDGET_USD}/month"
-say "The existing cap is US\$5, sized for short test suites. The dogfood runs"
-say "need more. This raises the cap for everything in the project — the"
-say "accepted cost of reusing it rather than provisioning a second project."
+stage "Set a project-scoped budget of ${BUDGET_AMOUNT}/month"
+say "This project had NO project-scoped budget before — only an account-wide"
+say "one covering everything on the billing account. A project-scoped budget"
+say "isolates dogfood spend so an alert names this pipeline, not the account."
+say ""
+warn "Two things this stage learned the hard way on 2026-09-10:"
+note "  * The budgets API goes through ADC, and by stage 6 ADC is the"
+note "    impersonated service account, which holds NO billing role. So this"
+note "    stage runs on YOUR access token over REST, never gcloud's ADC path."
+note "  * The amount must be in the BILLING ACCOUNT's own currency. Posting"
+note "    USD to an AUD account fails with a bare INVALID_ARGUMENT that names"
+note "    no field, which is a genuinely unpleasant thing to debug."
+say ""
+
 BILLING="$("$GCLOUD" billing projects describe "$PROJECT" \
           --format='value(billingAccountName)' 2>/dev/null | sed 's#billingAccounts/##' || true)"
 if [[ -z "$BILLING" ]]; then
   ask BILLING "Billing account ID (XXXXXX-XXXXXX-XXXXXX):"
 fi
-say "Billing account: $BILLING"
-existing="$("$GCLOUD" billing budgets list --billing-account="$BILLING" \
-           --filter="displayName~smelt" --format='value(name)' 2>/dev/null | head -n1 || true)"
-if [[ -n "$existing" ]]; then
-  say "Updating existing budget: ${existing##*/}"
-  if "$GCLOUD" billing budgets update "$existing" \
-       --billing-account="$BILLING" --budget-amount="${BUDGET_USD}USD" >/dev/null; then
-    say "budget now US\$${BUDGET_USD}/month"
+PROJECT_NUMBER="$("$GCLOUD" projects describe "$PROJECT" --format='value(projectNumber)')"
+say "Billing account: $BILLING   (project number: $PROJECT_NUMBER)"
+
+BUDGET_API="https://billingbudgets.googleapis.com/v1/billingAccounts/${BILLING}/budgets"
+# The human token, not ADC — see the warning above.
+budget_call() {
+  local method="$1" body="${2:-}"
+  local tok; tok="$("$GCLOUD" auth print-access-token)"
+  if [[ -n "$body" ]]; then
+    curl -sS -X "$method" -H "Authorization: Bearer ${tok}" \
+      -H "x-goog-user-project: ${PROJECT}" -H "Content-Type: application/json" \
+      -d "$body" "$BUDGET_API"
   else
-    warn "update failed"
-    SKIPPED+=("raise the budget to US\$${BUDGET_USD}")
+    curl -sS -H "Authorization: Bearer ${tok}" \
+      -H "x-goog-user-project: ${PROJECT}" "$BUDGET_API"
   fi
+}
+
+existing_budgets="$(budget_call GET)"
+CURRENCY="$(jq -r '[.budgets[]?.amount.specifiedAmount.currencyCode] | first // ""' \
+            <<<"$existing_budgets")"
+if [[ -z "$CURRENCY" ]]; then
+  say "No existing budget to read a currency from."
+  ask CURRENCY "Billing account currency (e.g. AUD, USD):"
+fi
+say "Billing account currency: ${BOLD}${CURRENCY}${RESET}"
+
+if jq -e --arg n "$PROJECT_NUMBER" \
+     '.budgets[]? | select(.budgetFilter.projects[]? == "projects/\($n)")' \
+     <<<"$existing_budgets" >/dev/null 2>&1; then
+  say "A project-scoped budget already exists — leaving it alone."
 else
-  if "$GCLOUD" billing budgets create --billing-account="$BILLING" \
-       --display-name="smelt-bq dogfood cap" --budget-amount="${BUDGET_USD}USD" \
-       --filter-projects="projects/${PROJECT}" >/dev/null; then
-    say "budget created at US\$${BUDGET_USD}/month"
-  else
-    warn "create failed — do it in the console"
+  body=$(jq -n --arg n "$PROJECT_NUMBER" --arg cur "$CURRENCY" --arg amt "$BUDGET_UNITS" \
+    '{displayName: "smelt-bq dogfood cap",
+      budgetFilter: {projects: ["projects/\($n)"], calendarPeriod: "MONTH",
+                     creditTypesTreatment: "EXCLUDE_ALL_CREDITS"},
+      amount: {specifiedAmount: {currencyCode: $cur, units: $amt}},
+      thresholdRules: [{thresholdPercent: 0.5, spendBasis: "CURRENT_SPEND"},
+                       {thresholdPercent: 0.9, spendBasis: "CURRENT_SPEND"},
+                       {thresholdPercent: 1.0, spendBasis: "CURRENT_SPEND"}]}')
+  resp="$(budget_call POST "$body")"
+  if jq -e '.error' <<<"$resp" >/dev/null 2>&1; then
+    warn "create failed: $(jq -r '.error.message' <<<"$resp" | head -c 200)"
     open_url "https://console.cloud.google.com/billing/budgets"
-    SKIPPED+=("create a US\$${BUDGET_USD} budget for ${PROJECT}")
+    SKIPPED+=("create a ${BUDGET_UNITS} ${CURRENCY} budget for ${PROJECT}")
+  else
+    say "budget created: $(jq -r '.displayName' <<<"$resp") — ${BUDGET_UNITS} ${CURRENCY}/month"
   fi
 fi
 note "A budget ALERTS. It does not hard-stop spend."
@@ -411,13 +448,32 @@ say "4. A DIFFERENT project of yours is refused."
 note "Reachability into smelt_test in THIS project is expected to SUCCEED —"
 note "bigquery.jobUser is project-scoped. That is the accepted cost of reuse,"
 note "not a scoping failure. What must fail is another project entirely."
+note "Probe with a JOB CREATION, not a dataset list. Listing datasets in a"
+note "project you cannot touch returns 200 with an EMPTY list — it reads as"
+note "access when it is nothing of the sort. jobs.create is the permission"
+note "that actually spends money and reads data, so that is what to test."
+PROBE_QUERY_BODY='{"configuration":{"query":{"query":"SELECT 1","useLegacySql":false}}}'
+probe_job() {
+  local proj="$1" tok
+  tok="$("$GCLOUD" auth application-default print-access-token)"
+  curl -sS -X POST -H "Authorization: Bearer ${tok}" -H "Content-Type: application/json" \
+    -d "$PROBE_QUERY_BODY" \
+    "${API}/projects/${proj}/jobs"
+}
+say "   positive control — a job in ${PROJECT} must SUCCEED:"
+if jq -e '.error' <<<"$(probe_job "$PROJECT")" >/dev/null 2>&1; then
+  warn "   refused in the dogfood project itself — the grant did not take."
+  SKIPPED+=("investigate: cannot create a job in ${PROJECT}")
+else
+  say "   job created"
+fi
 ask OTHER_PROJECT "Another project ID of yours to test against (Enter to skip):"
 if [[ -n "${OTHER_PROJECT:-}" ]]; then
-  if [[ "$(bq_status "projects/${OTHER_PROJECT}/datasets")" == "200" ]]; then
-    warn "   ${OTHER_PROJECT} was READABLE — impersonation is not scoping as intended."
-    SKIPPED+=("investigate: ${OTHER_PROJECT} is reachable under the dogfood credential")
+  if jq -e '.error' <<<"$(probe_job "$OTHER_PROJECT")" >/dev/null 2>&1; then
+    say "   refused in ${OTHER_PROJECT}, as it must be"
   else
-    say "   refused, as it must be"
+    warn "   A JOB RAN IN ${OTHER_PROJECT} — impersonation is not scoping as intended."
+    SKIPPED+=("investigate: ${OTHER_PROJECT} is reachable under the dogfood credential")
   fi
 else
   SKIPPED+=("run the cross-project refusal check (stage 7, step 4)")

@@ -97,6 +97,8 @@ dynamically). One-time setup in a fresh checkout:
 mise trust
 mise install          # installs the pinned rust/node/mold
 mise run setup-duckdb  # installs libduckdb.so v1.5.4 to ~/.local/lib/duckdb if not already present
+mise run setup-gcloud  # installs the Google Cloud SDK (gcloud, bq) if not already present —
+                       # only needed for the BigQuery paths; an SDK already on PATH is adopted
 ```
 After that, `DUCKDB_LIB_DIR`/`LD_LIBRARY_PATH` are set automatically in any shell mise
 manages (a mise-aware shell, or `mise exec -- <cmd>`). Without mise, set them by hand:

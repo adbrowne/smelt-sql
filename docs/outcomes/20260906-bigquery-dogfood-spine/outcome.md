@@ -127,18 +127,68 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
 | 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | done |
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | done |
-| 7 | Open the dogfood dataset in the existing project: `smelt_dogfood` with no table expiry, budget raised to US$25, `smelt-dogfood@` service account reached by ADC impersonation, and the `SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS` guard — leaving `smelt_test` and `smelt-bq-test@`'s isolation intact | blocked |
+| 7 | Open the dogfood dataset in the existing project: `smelt_dogfood` with no table expiry, a project-scoped AUD 25/month budget, `smelt-dogfood@` service account reached by ADC impersonation, and the `SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS` guard — leaving `smelt_test` and `smelt-bq-test@`'s isolation intact | done |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
-| 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | blocked |
-| 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | blocked |
-| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | blocked |
-| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | blocked |
-| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | blocked |
+| 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | pending |
+| 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
+| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
+| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
-| 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | blocked |
+| 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | pending |
 
 ## Decision log
+
+- 2026-09-10 (phase 7, executed): **provisioned and verified live; two of the plan's own
+  premises turned out to be wrong.** `smelt_dogfood` exists in `smelt-bq-test-20260816`
+  (US, `defaultTableExpirationMs` **absent**, read back from the API rather than inferred
+  from a successful create), `smelt-dogfood@` holds `bigquery.jobUser` at project scope
+  plus `WRITER` on that dataset only, and ADC is
+  `type: impersonated_service_account` targeting it. Criterion 2 is demonstrated:
+  a query job **created** in `smelt-bq-test-20260816`, and **refused** in both other
+  projects on the account (`bigquery.jobs.create` denied).
+
+  Two corrections that cost real time and are worth not rediscovering:
+
+  1. **A dataset list is not an access probe.** The first cross-project check used
+     `GET projects/<other>/datasets` and got **HTTP 200** from both of the human's other
+     projects — which reads as a scoping failure and is not one. The 200 carries an
+     *empty* list: the caller may call the endpoint and simply sees nothing. The probe
+     that actually answers the question is `POST .../jobs`, since `jobs.create` is the
+     permission that spends money and reads data. `scripts/bq-dogfood-provision.sh`'s
+     stage 7 now probes job creation, with a positive control in the dogfood project so a
+     blanket refusal cannot pass as a clean result.
+  2. **There was never a US$5 budget, and the account is AUD.** The US$5 figure came from
+     `bigquery-provision.sh`'s `create` invocation, which this project's own memory records
+     as never having been run (budgets need ADC; it was left a manual console step). The
+     account had exactly one budget — account-wide, **AUD 25**, no project filter. Posting
+     a **USD** budget to an AUD billing account fails with a bare `INVALID_ARGUMENT` naming
+     no field, which is a thoroughly unpleasant thing to debug. A project-scoped
+     **AUD 25/month** budget (`smelt-bq dogfood cap`, thresholds 50/90/100%) now exists.
+     The human's instruction was "$25"; AUD is the only currency the account accepts, so
+     that is what was created — flagged rather than silently converted.
+
+  Also settled: **D2 — `bq` works here** (BigQuery CLI 2.1.36, no pyOpenSSL failure), but
+  the dogfood path still speaks REST over `curl` like every other script in the repo. And
+  the budgets API is the one place that cannot: it goes through ADC, which by then is the
+  impersonated service account holding no billing role, so that stage runs on the human's
+  own access token with an `x-goog-user-project` header.
+
+- 2026-09-10 (phase 7, repo side): **tasks 6, 6a and 7 landed.** `scripts/bq-dogfood-env.sh`
+  is the dogfood entry point: it layers on `bigquery-env.sh` and then unsets
+  `SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS` and `SMELT_BQ_ACCESS_TOKEN`, and points
+  `SMELT_BQ_DATASET` at `smelt_dogfood`. Verified both ways rather than asserted — the
+  dogfood path reports `expiry=UNSET dataset=smelt_dogfood token=UNSET`, the test path
+  still reports `expiry=7200000 dataset=smelt_test`. The Cloud SDK is pinned as
+  `[tasks.setup-gcloud]` plus an `_.path` env entry (a bare `PATH =` key in `mise.toml` is
+  **silently ignored** — measured, `gcloud` stayed unresolvable under `mise exec` until it
+  was changed to `_.path`), and the resolver prints the not-yet-existent install location
+  rather than an empty string, because an empty PATH entry means the current directory.
+  Task 7 confirmed rather than edited: `.claude/settings.json`'s `deny` still carries only
+  the seven `scripts/bigquery-*.sh` self-target entries and
+  `Read(//home/andrew/.config/gcloud-smelt-bq/**)` — no blanket `gcloud`/`bq` deny has
+  reappeared, so the test project's credential isolation is intact and untouched.
 
 - 2026-09-09 (human decision): **reuse `smelt-bq-test-20260816` rather than provisioning a
   dedicated dogfood project; criterion 1 amended accordingly.** Criterion 1 originally
