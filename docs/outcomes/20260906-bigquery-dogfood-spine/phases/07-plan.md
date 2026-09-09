@@ -164,7 +164,17 @@ location on this box — would never have been matched by `Bash(bq *)` anyway.
 
 ## Tasks
 
-Human (you), in a shell — these spend money and create identities:
+Human (you), in a shell — these spend money and create identities. All five are
+scripted, idempotently and with the verification gate's checks built in, as
+`scripts/bq-dogfood-provision.sh`; run that rather than typing them by hand:
+
+```
+bash scripts/bq-dogfood-provision.sh
+```
+
+It runs in your **ordinary** gcloud config (unsetting any inherited
+`CLOUDSDK_CONFIG`), because the dogfood path is ADC in `~/.config/gcloud` while the test
+project's credentials stay in their isolated config. What it does, stage by stage:
 
 1. **Confirm rather than create.** The project and its billing link already exist.
    Confirm `bigquery.googleapis.com` is enabled (it is — the test suites run) and enable
