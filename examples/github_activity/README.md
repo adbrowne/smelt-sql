@@ -73,9 +73,14 @@ Retention: `partition_expiration_days = 45` on both `raw.github_events` and
 to see. This bounds the *table's* partitions; the dataset's own default table expiration
 stays unset (criterion 1) — the two are independent BigQuery knobs.
 
-Deploying this script against the dogfood project, scheduling it, and measuring cost per
-run is phase 10 (human-gated: needs the provisioned project) — nothing here executes
-against BigQuery yet.
+Deployed against the dogfood project's `smelt_dogfood` dataset (the script's own
+`raw.` names are the logical source name; a deploy resolves them to the live dataset, the
+same mapping DuckDB already makes for `schema: main`). A single day's load bills roughly
+3.5-3.7 GB (~US$0.02 at on-demand rates) across both `INSERT`s, growing slightly through
+the pinned range as GitHub Archive's own daily volume grows; at one run per day that
+extrapolates to well under a dollar a month, a small fraction of the project's budget.
+Scheduling the run (rather than invoking it by hand) is still outstanding — nothing here
+sets up a recurring trigger yet.
 
 ## The DuckDB leg
 

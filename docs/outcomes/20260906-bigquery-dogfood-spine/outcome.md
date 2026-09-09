@@ -130,7 +130,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 7 | Open the dogfood dataset in the existing project: `smelt_dogfood` with no table expiry, a project-scoped AUD 25/month budget, `smelt-dogfood@` service account reached by ADC impersonation, and the `SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS` guard — leaving `smelt_test` and `smelt-bq-test@`'s isolation intact | done |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
-| 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | pending |
+| 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | done |
 | 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | pending |
 | 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
@@ -139,6 +139,49 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | pending |
 
 ## Decision log
+
+- 2026-09-10 (phase 10, executed live): **the loader is deployed and criterion 3 is met;
+  the run cost less than a cent and found a schema drift before it spent anything.**
+  `smelt_dogfood.github_events` and `…_arrival` exist, day-partitioned on `created_at` and
+  `ingested_date` respectively, both with `partition_expiration_days = 45` — read back from
+  `tables.get` rather than inferred from the DDL text, and independently re-verified by the
+  orchestrator (`expirationMs = 3888000000`, table-level `expirationTime` **unset**, so
+  criterion 1's "no default table expiration" survives as a dataset-only property). Two
+  days loaded, 6,053 rows, `payload` non-null on every one.
+
+  **The drift, and why it was invisible.** `--emit-ddl` declared 9 columns while
+  `--emit-sql` selected 10: phase 5's `payload` re-pin landed after phase 9 wrote the DDL,
+  so `INSERT ... SELECT *` would have failed outright. Phase 9's suite proves the *INSERT
+  projection* matches `sample.sql` byte-for-byte but never checked the *DDL* against the
+  same source — a one-sided gate on a two-sided derivation. Closed by
+  `ddl_columns_match_the_sample_projection` (red-green: red against the pre-fix DDL). The
+  generalisable shape — several artifacts independently deriving a schema from one source
+  of truth with only one of them gated — is a criterion-8 finding.
+
+  **Cost, measured rather than estimated.** Every `githubarchive` scan was dry-run first.
+  Two loads billed 3.469 GB and 3.655 GB (~US$0.017–0.018 each at $5/TB); one run per day
+  extrapolates to **~US$0.53/month**, or ~US$0.91 using the heaviest day dry-run in the
+  pinned range as an upper bound. Against the AUD 25 budget that is noise, and BigQuery's
+  1 TiB/month free tier likely makes the realised bill zero at this volume. Note for phase
+  12: the two INSERT statements scan the base query independently, so the billed total is
+  roughly **double** the per-statement dry-run figure — the dry run is not the bill.
+
+  **One deliberate departure worth knowing.** The two days were loaded newest-first
+  (08-06 then 08-05), chosen from dry-run prices because archive volume trends upward
+  through the range; 08-07 priced at ~5.23 GB combined and was skipped under the phase's
+  own stop-threshold rather than run. A consequence: day-06's redelivery arm landed 2% of
+  day-05 *before* day-05's real rows, which is a genuinely different ordering from the
+  in-order case the tests exercise. It behaved correctly — 63 duplicate ids, exactly the
+  `MOD(id, 50) = 0` slice, and the arithmetic closes (3,201 + 63 = 3,264) — but nothing
+  gates two invocations in either order, which is the third criterion-8 finding.
+
+- 2026-09-10 (phase 10, orchestrator follow-up): **a skip-green test deleted rather than
+  repaired.** `loader_script_is_shellcheck_clean` linted one script and returned **green**
+  when shellcheck was absent — the failure mode that reads exactly like a pass, and the one
+  this repo's own fail-loud discipline exists to forbid. It is superseded on every axis by
+  `.claude/scripts/shellcheck-gate.sh` (all 62 scripts, fails rather than skips, runs in
+  `verify-phase.sh` and the CI Lint job, with shellcheck pinned in `mise.toml`'s `[tools]`
+  so it is always present to fail with). The loader suite is 11 tests, not 12.
 
 - 2026-09-10 (phase 7, executed): **provisioned and verified live; two of the plan's own
   premises turned out to be wrong.** `smelt_dogfood` exists in `smelt-bq-test-20260816`

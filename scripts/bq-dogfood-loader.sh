@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS \`raw.github_events\` (
   repo_id INT64,
   repo_name STRING,
   org_id INT64,
-  public BOOL
+  public BOOL,
+  payload STRING
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY repo_id
@@ -126,6 +127,7 @@ CREATE TABLE IF NOT EXISTS \`raw.github_events_arrival\` (
   repo_name STRING,
   org_id INT64,
   public BOOL,
+  payload STRING,
   ingested_date DATE
 )
 PARTITION BY ingested_date

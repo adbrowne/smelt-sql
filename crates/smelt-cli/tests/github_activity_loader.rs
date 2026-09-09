@@ -280,6 +280,95 @@ fn source_yaml_retention_matches_the_loader_expiration() {
     }
 }
 
+/// The DDL's column list must carry exactly the columns `sample.sql`
+/// projects, in the same order — this is what
+/// `INSERT INTO ... SELECT * FROM (<sample.sql-derived base query>)` actually
+/// requires. `sample.sql`'s own alias for a projected expression (`AS x`)
+/// names the column; a bare identifier names itself. This test fails
+/// against a DDL that has drifted out of step with a `sample.sql` re-pin
+/// (e.g. a column added to the projection but not to `--emit-ddl`).
+#[test]
+fn ddl_columns_match_the_sample_projection() {
+    let sample_lines = sample_body_lines();
+    // sample.sql's body is: "SELECT", then one projected column per line
+    // (each ending in a comma except the last), then a "FROM ..." line.
+    let from_idx = sample_lines
+        .iter()
+        .position(|l| l.starts_with("FROM "))
+        .expect("sample.sql has a FROM line");
+    let projection_lines = &sample_lines[1..from_idx];
+    let sample_columns: Vec<String> = projection_lines
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim().trim_end_matches(',');
+            if let Some((_, alias)) = trimmed.rsplit_once(" AS ") {
+                alias.trim().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect();
+    assert!(
+        !sample_columns.is_empty(),
+        "expected at least one projected column in sample.sql"
+    );
+
+    for (table, table_end_marker) in [
+        ("`raw.github_events`", "`raw.github_events_arrival`"),
+        ("`raw.github_events_arrival`", ""),
+    ] {
+        let out = run_loader(&["--emit-ddl"]);
+        assert!(out.status.success());
+        let ddl = String::from_utf8_lossy(&out.stdout).to_string();
+
+        let create_marker = format!("CREATE TABLE IF NOT EXISTS {table} (");
+        let start = ddl
+            .find(&create_marker)
+            .unwrap_or_else(|| panic!("DDL declares {table}:\n{ddl}"));
+        let body_start = start + create_marker.len();
+        let end = if table_end_marker.is_empty() {
+            ddl.len()
+        } else {
+            ddl.find(table_end_marker).unwrap_or(ddl.len())
+        };
+        let close_paren = ddl[body_start..end]
+            .find(")\nPARTITION BY")
+            .map(|p| body_start + p)
+            .unwrap_or_else(|| panic!("expected a closing ')\\nPARTITION BY' for {table}"));
+        let column_block = &ddl[body_start..close_paren];
+
+        let ddl_columns: Vec<String> = column_block
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                l.trim_end_matches(',')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(l)
+                    .to_string()
+            })
+            .collect();
+
+        // The arrival table carries one extra trailing column (ingested_date)
+        // not in sample.sql's own projection.
+        let expected: Vec<String> = if table.contains("arrival") {
+            let mut v = sample_columns.clone();
+            v.push("ingested_date".to_string());
+            v
+        } else {
+            sample_columns.clone()
+        };
+
+        assert_eq!(
+            ddl_columns, expected,
+            "{table}'s DDL column list must match sample.sql's projection \
+             (plus ingested_date on the arrival twin), since the loader does \
+             `INSERT INTO ... SELECT * FROM (<sample.sql-derived query>)`:\n{ddl}"
+        );
+    }
+}
+
 #[test]
 fn emit_sql_touches_no_cloud() {
     let stripped_path = std::env::var("PATH")
@@ -316,26 +405,14 @@ fn emit_sql_touches_no_cloud() {
     }
 }
 
-#[test]
-fn loader_script_is_shellcheck_clean() {
-    if Command::new("shellcheck")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("shellcheck not on PATH — skipping");
-        return;
-    }
-    let out = Command::new("shellcheck")
-        .arg(loader_script())
-        .output()
-        .expect("run shellcheck");
-    assert!(
-        out.status.success(),
-        "shellcheck findings:\n{}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-}
+// `loader_script_is_shellcheck_clean` used to live here. It is deleted rather
+// than kept, because it was strictly weaker than what replaced it: it lints one
+// script, and it RETURNS GREEN when shellcheck is absent — a hole that reads
+// exactly like a pass. `.claude/scripts/shellcheck-gate.sh` now lints every
+// script under `scripts/` and `.claude/scripts/` (this one included), fails
+// rather than skips when the tool is missing, and runs in both
+// `verify-phase.sh` and the CI Lint job. shellcheck is pinned in `mise.toml`'s
+// `[tools]` so it is always there to fail with.
 
 // ---------------------------------------------------------------------------
 // Tests for `examples/github_activity/load_day.sh` — the DuckDB-native day
