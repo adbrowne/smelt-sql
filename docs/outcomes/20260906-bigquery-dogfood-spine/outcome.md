@@ -115,7 +115,7 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 2 | `examples/github_activity/`: smelt.yml, the source declaration, and the four spine models, green end-to-end on DuckDB over the Parquet sample with zero diagnostics and wired into per-PR CI | done |
 | 3 | Succession on the real rename stream: `silver.repo_naming`, `silver.actor_naming` and `marts.naming_history`, exercising **both** partition postures and the redelivery-folds-once leg | done |
 | 4 | The payload-independent widening: `gold.repo_dim`, `gold.events_enriched` (the `LEFT JOIN`-against-a-`unique_key`-dimension shape), `gold.repo_activity_daily`, `marts.repo_leaderboard`, `marts.star_growth` | done |
-| 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | in progress |
+| 5 | Re-pin `sample.sql` with `payload`, regenerate the fixture, and build the typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) | done |
 | 6 | Trust the DuckDB numbers: full-refresh oracle vs incremental state across the whole widened model set, banked before any cloud spend | done |
 | 7 | Provision the dogfood project: dataset with no table expiry, budget alert and cap, ADC for the account, and remove `.claude/settings.json`'s `bq`/`gcloud` deny while leaving the test project's isolation intact — with a rationale note in the commit | blocked |
 | 8 | Settle the DuckDB half of criterion 7: characterise and bound `gold.events_enriched`'s per-window enrichment staleness, un-`#[ignore]` `every_window_matches_the_full_refresh_oracle`, and hand the derivation gap to `bigquery-correctness` | done |
@@ -129,6 +129,19 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | blocked |
 
 ## Decision log
+
+- 2026-09-09 (phase 5, implement): **the fan-out landed clean — zero divergence, no new
+  finding.** The four models entered `github_activity_oracle`'s per-window sweep
+  automatically (the comparator discovers relations from `information_schema`, so no test
+  file listed them) and matched the full-refresh oracle on all 30 windows;
+  `DIVERGENCE_REGISTRY` — emptied by `20260906-bigquery-correctness` phases 3-8 — stays
+  empty, and `docs/handoffs/2026-09-08-github-activity-findings.md` needs no fifth root
+  cause. Criterion 4 is now met in full on DuckDB. Two things worth carrying forward:
+  the archive's trimmed payload does **not** match GitHub's published event schema
+  (`PushEvent` has no `commits`/`size`, `pull_request` no `title`/`user`/`merged`), so
+  field lists were chosen by probing the fixture rather than the docs; and `ACTION` is a
+  DuckDB keyword in column-alias position, which is why the three action columns are
+  prefixed. Full write-up: `phases/05-summary.md`.
 
 - 2026-09-09 (phase 5, token-gated half): **the `payload` re-pin is population-identical,
   and it cost twice the estimate.** A human minted a `bigquery-auth.sh` token, `sample.sql`
