@@ -58,3 +58,11 @@ columns:
     type: BIGINT
   - name: public
     type: BOOLEAN
+  - name: payload
+    # Raw JSON string, unparsed (`sample.sql`'s own note on why it's
+    # projected this way). `silver.events_deduped` passes it through
+    # unmodified; the typed fan-out (`push_events`, `pr_events`,
+    # `issue_events`, `star_events`) extracts from it with
+    # `JSON_EXTRACT_TEXT` (`docs/outcomes/20260906-bigquery-dogfood-spine/
+    # outcome.md`).
+    type: VARCHAR

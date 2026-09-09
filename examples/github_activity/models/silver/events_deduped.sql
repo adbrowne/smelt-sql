@@ -46,6 +46,12 @@ maintenance:
 -- `event_date` and `first_seen_date` carry the same value: `first_seen_date`
 -- is this model's declared partition column; `event_date` is the name
 -- downstream consumers project (`silver.actor_sessions`).
+--
+-- `payload` passes through under `MIN`, the same fold every other column
+-- uses — a redelivered duplicate is byte-identical, so the raw JSON string
+-- converges the same way the typed columns do. It exists here only so the
+-- typed fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`)
+-- has one deduped relation to read instead of re-deriving dedup itself.
 SELECT
     id,
     MIN(type) AS type,
@@ -57,6 +63,7 @@ SELECT
     MIN(public) AS public,
     MIN(created_at) AS created_at,
     MIN(CAST(created_at AS DATE)) AS event_date,
-    MIN(CAST(created_at AS DATE)) AS first_seen_date
+    MIN(CAST(created_at AS DATE)) AS first_seen_date,
+    MIN(payload) AS payload
 FROM smelt.sources.raw.github_events
 GROUP BY id

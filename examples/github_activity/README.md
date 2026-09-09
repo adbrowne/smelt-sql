@@ -9,8 +9,9 @@ Outcome: `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`.
 ## The sample
 
 `sample.sql` is the contract. It selects a stable 0.1% slice of GitHub Archive —
-`MOD(repo.id, 1000) = 0`, 30 days, `payload` not projected — and **both legs must see
-exactly these rows**: the DuckDB leg reads the Parquet export of it, and the BigQuery
+`MOD(repo.id, 1000) = 0`, 30 days, `payload` projected as the raw JSON string the archive
+stores — and **both legs must see exactly these rows**: the DuckDB leg reads the Parquet
+export of it, and the BigQuery
 loader reproduces the same query into `raw.github_events`. Two targets over different
 populations are not comparable, so the parity check would be measuring nothing.
 
@@ -52,8 +53,8 @@ Three properties of the data worth knowing before reading any output:
 not author the load — and is at-least-once by construction, matching
 `raw.github_events`'s declared `mutation_profile`. It never restates `sample.sql`'s
 projection or filter: it *derives* the load SQL from that file, splicing in only the
-`_TABLE_SUFFIX` day range, so a future re-pin of `sample.sql` (e.g. phase 5's `payload`
-column) cannot silently drift out of step with what actually lands in BigQuery.
+`_TABLE_SUFFIX` day range, so a re-pin of `sample.sql` (the `payload` column landed this
+way) cannot silently drift out of step with what actually lands in BigQuery.
 
 ```bash
 scripts/bq-dogfood-loader.sh --emit-ddl                        # raw.github_events{,_arrival} DDL
@@ -186,12 +187,31 @@ characterised by `events_enriched_dimension_mutation_cell_technique` in
 `crates/smelt-cli/tests/github_activity_replay.rs`. This is a criterion-8 finding for
 `docs/outcomes/20260906-bigquery-correctness`, not fixed in this pipeline.
 
-The typed silver fan-out (`push_events`, `pr_events`, `issue_events`, `star_events`) needs
-`payload`, which needs a `sample.sql` re-pin and a human-minted BigQuery token — it is a
-separate, currently blocked phase (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`
-phase 5), not an oversight.
+## The typed silver fan-out
 
-## Trusting the numbers
+`silver.push_events`, `silver.pr_events`, `silver.issue_events` and `silver.star_events`
+extract typed fields out of `payload` — the raw JSON string `sample.sql` projects
+verbatim — for GitHub's four commonest event types. Each is a plain `WHERE type = `
+filter over `silver.events_deduped` (Form A relative to it: `event_date` is a passthrough
+of the exact column that model already computes), so none of the four needs a window
+function or `safety_overrides`. `silver.events_deduped` itself grew a `payload` column
+(folded under the same `MIN` every other column already uses — a redelivered duplicate is
+byte-identical, so it converges the same way) purely so the fan-out has one deduped
+relation to read instead of re-deriving dedup itself.
+
+Extraction uses `JSON_EXTRACT_TEXT`, the function-registry's canonical name
+(`crates/smelt-types/src/signatures/builtins/remaining.rs`): it emits as
+`JSON_EXTRACT_STRING` on DuckDB, `GET_JSON_OBJECT` on Spark and `JSON_VALUE` on BigQuery,
+and returns `Text` on every dialect, so a numeric field (`push_id`, `pr_number`,
+`pr_id`, `issue_number`) is `CAST` to its real type explicitly rather than inferred from
+the JSON. The field lists are deliberately small — each model exists to prove typed
+extraction from JSON works end to end, not to mirror the whole GitHub payload schema —
+and every field was confirmed present at 100% across its event type by probing the fixture
+directly (`duckdb ... json_keys(payload)`) rather than assumed from GitHub's public schema
+docs, which this trimmed BigQuery Archive payload does not fully match (no `commits` array
+on `PushEvent`, no `title`/`user`/`merged` on `pull_request`, for example).
+
+## Gold and marts
 
 `crates/smelt-cli/tests/github_activity_oracle.rs` compares every materialised relation
 between the incremental replay and a full-refresh oracle over the identical loaded rows —

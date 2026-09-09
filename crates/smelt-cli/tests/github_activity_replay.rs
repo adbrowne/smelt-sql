@@ -106,7 +106,7 @@ fn recurrence_bound_violation_fails_the_run() {
         &format!(
             "INSERT INTO main.sources_raw_github_events \
              SELECT id, type, created_at + INTERVAL '1 day', actor_id, actor_login, \
-                    repo_id, repo_name, org_id, public \
+                    repo_id, repo_name, org_id, public, payload \
              FROM read_parquet('{}') \
              WHERE CAST(created_at AS DATE) = DATE '2026-08-05' \
              LIMIT 1;",
@@ -787,5 +787,73 @@ fn loader_step_failure_leaves_downstream_unbuilt() {
     assert_eq!(
         table_count, 0,
         "bronze.events must not be built when its upstream loader step fails"
+    );
+}
+
+/// Test: each of the four typed fan-out models
+/// (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`)
+/// covers exactly the rows `silver.events_deduped` carries for its own
+/// `type` — no row dropped, none duplicated by the `WHERE type =` filter.
+#[test]
+fn typed_fan_out_covers_every_event_of_its_type() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    for (relation, event_type) in [
+        ("main.silver_push_events", "PushEvent"),
+        ("main.silver_pr_events", "PullRequestEvent"),
+        ("main.silver_issue_events", "IssuesEvent"),
+        ("main.silver_star_events", "WatchEvent"),
+    ] {
+        let fan_out_rows = duckdb_scalar_i64(&db, &format!("SELECT count(*) FROM {relation}"));
+        let deduped_rows = duckdb_scalar_i64(
+            &db,
+            &format!("SELECT count(*) FROM main.silver_events_deduped WHERE type = '{event_type}'"),
+        );
+        assert_eq!(
+            fan_out_rows, deduped_rows,
+            "{relation} must cover every {event_type} row in silver.events_deduped \
+             ({fan_out_rows} vs {deduped_rows})"
+        );
+    }
+}
+
+/// Test: `silver.push_events`' extracted fields are (a) populated for every
+/// row — the fixture measured every `PushEvent` payload key at 100% present
+/// (`push_events.sql`'s own comment) — and (b) round-trip a direct
+/// `JSON_EXTRACT_STRING` over the source `payload`, proving the
+/// `JSON_EXTRACT_TEXT` registry emission on DuckDB actually extracts the
+/// field it claims to, not just a non-NULL placeholder.
+#[test]
+fn push_events_extracts_typed_fields_from_payload() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (workspace, db, sample) = stage_workspace(tmp.path());
+    replay_days(&workspace, &db, &sample, FIXTURE_DAYS);
+
+    let missing = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM main.silver_push_events
+         WHERE push_id IS NULL OR git_ref IS NULL OR head_sha IS NULL
+            OR before_sha IS NULL",
+    );
+    assert_eq!(
+        missing, 0,
+        "every PushEvent payload field is present in the fixture"
+    );
+
+    let mismatched = duckdb_scalar_i64(
+        &db,
+        "SELECT count(*) FROM main.silver_push_events p
+         JOIN main.silver_events_deduped d USING (id)
+         WHERE p.git_ref != JSON_EXTRACT_STRING(d.payload, '$.ref')
+            OR p.head_sha != JSON_EXTRACT_STRING(d.payload, '$.head')
+            OR p.before_sha != JSON_EXTRACT_STRING(d.payload, '$.before')
+            OR p.push_id != CAST(JSON_EXTRACT_STRING(d.payload, '$.push_id') AS BIGINT)",
+    );
+    assert_eq!(
+        mismatched, 0,
+        "push_events' extracted columns must match a direct JSON_EXTRACT_STRING \
+         over the source payload"
     );
 }
