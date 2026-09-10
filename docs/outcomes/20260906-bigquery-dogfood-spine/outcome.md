@@ -140,6 +140,18 @@ exists — so the live run is a test of the *backend*, not of the models.
 
 ## Decision log
 
+- 2026-09-10 (post-phase-11, orchestrator): **the T5 block has an owner and an unblock
+  point.** `docs/outcomes/20260906-bigquery-correctness` reopened for it (its decision log
+  of the same date carries the analysis). The gap is narrower than phase 11 recorded: the
+  availability layer *claims* BigQuery realises `StateStructure::ObservedOutputDeltas`
+  while every emitter is DuckDB-only, so `resolve_availability` records no downgrade and
+  the driver `bail!`s instead. That outcome's **phase 11** reconciles the two layers and
+  turns the three `bail!` sites into recorded downgrades — at which point this outcome's
+  phases 12-14 become runnable on the coarser (but equivalence-preserving) downgraded
+  plan, without waiting for its phases 12-15 to give BigQuery a real ledger substrate.
+  Phases 12-14 stay `blocked` until then; the unblock is a code change elsewhere, not a
+  provisioning step here.
+
 - 2026-09-10 (phase 11, first live BigQuery run): **the pipeline stops at
   `silver.events_deduped`, on a hard capability gap that is not BigQuery-specific.**
   `bronze.events` and the first write of the succession/dedup models succeeded against

@@ -1,10 +1,15 @@
 # Outcome: Every defect the real pipeline hits on BigQuery is fixed, and DuckDB and BigQuery agree
 
 **Created:** 2026-09-06
-**Status:** done
-**Driver:** outcome loop (`.claude/outcome-backlog`)
+**Status:** in progress (reopened 2026-09-10)
+**Driver:** outcome loop (`.claude/outcome-backlog`). Phases 1-10 were loop-ground and are
+`done`. Of the reopening, phases 11-15 are loop-grindable — the emitters and the structural
+gate are provable offline, and phases 12-15 must prove their SQL by unit test and by
+`cargo check -p smelt-cli --features bigquery`, never by reaching a warehouse. Phase 16 is
+**human-gated**: it re-runs `examples/github_activity` live against the dogfood dataset, so
+it must emit `<<PHASE_BLOCKED>>` rather than attempt it.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D2), §"Sequencing: models first, punch-list second", §"Findings already banked"
-**Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Statement-level lowering", §"Output-schema type conformance", §"Cross-engine emission audit"; `docs/specs/architecture.md` §"Constraints & Invariants" item 14; `docs/reference/dialect-coverage.md`
+**Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Statement-level lowering", §"Output-schema type conformance", §"Cross-engine emission audit"; `docs/specs/architecture.md` §"Constraints & Invariants" item 14; `docs/reference/dialect-coverage.md`; `docs/specs/state.md` §"The state-structure inventory", §"The degradation contract"; `docs/specs/incremental_shapes.md` §"The transactional frontier write (merge ledger)", §"The tombstone ledger (hidden state)"; `docs/specs/incremental_models.md` §"The graph layer"
 
 ## The outcome
 
@@ -18,6 +23,17 @@ entries, techniques, grains and capability rows the spine's models genuinely hit
 built, and each one lands with its emission verdict, its ledger row, and its coverage in
 the published dialect table. Where DuckDB and BigQuery disagree on the same rows, the
 difference is either fixed or registered with a reason — never tolerated silently.
+
+The reopening (2026-09-10) adds the defect the spine's live run actually hit, which is a
+layering fault rather than a missing spelling: the availability layer claims BigQuery and
+Spark realise state structures whose only emitters are DuckDB's, so the run refuses where
+it should have downgraded and said so. The fix reconciles the two layers first and gates
+the reconciliation structurally, then gives BigQuery a real realisation of the ledger
+substrate — observed deltas, the merge and reconciliation ledgers, never-fold-twice, and
+the tombstone ledger — so the cross-target comparison weighs one plan on two engines
+instead of two plans. Spark's realisation is refused, not deferred: Delta has no
+cross-table transaction, and that absence is recorded in the spec rather than left to be
+rediscovered.
 
 ## Success criteria (checkable)
 
@@ -57,6 +73,23 @@ difference is either fixed or registered with a reason — never tolerated silen
    value leg is a manual sweep (`scripts/bigquery-dialect-audit.sh`) — a phase that needs
    it and cannot run it emits `<<PHASE_BLOCKED>>` rather than skipping green.
 
+8. **The plan layer and the run layer never disagree about state.** For every dialect,
+   `realisable_state_structures` names exactly the structures that dialect can actually
+   build: a structure it claims is realisable has emitters and a backend seam behind it,
+   and a structure it does not claim produces a *recorded* downgrade rather than a
+   `bail!`. Held structurally, not by inspection — every `dialect != SqlDialect::DuckDB`
+   guard under `crates/smelt-runtime/src/maintenance_driver/` must correspond to a
+   structure the availability layer declares unrealisable for that dialect, so flipping a
+   dialect's row on without deleting its guard fails, and deleting a guard without
+   backing it fails.
+9. **BigQuery runs the pipeline's real plan, not a coarsened one.** `examples/
+   github_activity` completes on the `bigquery` target with observed-delta recording, the
+   merge and reconciliation ledgers, the additive never-fold-twice refusal and the
+   tombstone ledger all realised — so the cross-target comparison of criterion 5 and the
+   spine's criterion 7 compare one plan on two engines rather than two plans. Where a
+   guarantee has no sound realisation on a dialect, that dialect's row says so and the
+   reason is in `docs/specs/state.md` — an honest absence, never a silent one.
+
 ## Out of scope
 
 - Building the 42 no-verdict BigQuery registry entries of issue #179 speculatively. Only
@@ -72,11 +105,21 @@ difference is either fixed or registered with a reason — never tolerated silen
   `ReachNotDerivable` included — reaches `file_diagnostics()`. It is an editor-surface gap
   that predates this outcome and is not a defect the real pipeline hits on BigQuery, so it
   serves none of the success criteria; it needs its own outcome.
-- **Any BigQuery-only emission defect not already in hand.** The spine is `blocked` with
-  its live-BigQuery half (its phase 16) never run, so its findings handoff is DuckDB-half
-  only and harvested no BigQuery-reached registry entry, technique, grain or capability
-  row. Building any would be speculation against issue #179, which criterion 2 forbids;
-  it stays on #179 and on the spine's resume.
+- **Any BigQuery-only *emission* defect not already in hand.** The spine's live half has
+  since run (its phase 11, 2026-09-10) and surfaced one hard stop — the T5 ledger-substrate
+  gap this reopening owns — but no new registry entry, grain or capability row. Building
+  any of issue #179's 42 no-verdict entries would still be speculation, which criterion 2
+  forbids; they stay on #179.
+- **The Spark realisation of the ledger substrate.** Delta gives per-table atomicity only
+  and has no cross-table transaction, so a Spark ledger write and its data write cannot be
+  made atomic and the never-fold-twice refusal has no sound Delta realisation without a
+  different soundness argument. Phase 11 corrects Spark's `realisable_state_structures`
+  row to say so and records the reason in `docs/specs/state.md`; phases 12-15 are
+  BigQuery-only. Spark's honest downgrade is in scope; Spark's realisation is not.
+- **Any change to what the downgraded plan computes.** A recorded downgrade already
+  preserves the equivalence invariant by construction (`recompute_equivalent`); this
+  outcome makes the downgrade *honest and then unnecessary* on BigQuery, and never widens
+  what a downgraded cell is allowed to do.
 
 ## Phases
 
@@ -92,8 +135,69 @@ difference is either fixed or registered with a reason — never tolerated silen
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | done |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | done |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | done |
+| 11 | Make the plan layer and the run layer agree before any new SQL: correct `realisable_state_structures`' BigQuery/Spark rows, express the observed-delta recording requirement in the availability layer so the three T5 `bail!` sites become recorded downgrades, and add the structural gate tying every `dialect != DuckDB` guard under `maintenance_driver/` to a structure declared unrealisable | pending |
+| 12 | Observed deltas on BigQuery: `ddl_bigquery` sidecar emitters plus a `record_observed_delta_with_write` override on a BigQuery multi-statement transaction; flip the row back on, which the phase-11 gate then forces the driver guard to be deleted for | pending |
+| 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | pending |
+| 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | pending |
+| 15 | Tombstone ledger on BigQuery, so the succession-patch technique runs live rather than downgrading to `DeleteInsert` | pending |
+| 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | pending |
 
 ## Decision log
+
+- 2026-09-10 (reopening): **the outcome reopens for the T5 gap, and the defect is not the
+  one the spine filed.** The spine recorded "BigQuery has no observed-delta bookkeeping".
+  The actual defect is a contradiction between two layers that are each internally
+  consistent: `crates/smelt-logical/src/maintenance/availability/state_structure.rs:23-26`
+  declares that BigQuery and Spark **do** realise `StateStructure::ObservedOutputDeltas`
+  ("every dialect realises the sidecar/output-delta structures, which have no per-dialect
+  builder gate"), while every writer of that structure is `smelt_state::ddl_duckdb` behind
+  a hard `bail!` on any non-DuckDB dialect — `maintenance_driver/driver.rs:636`,
+  `column_scoped.rs:357`, `membership/execute.rs:57`. Believing the structure available,
+  `resolve_availability` records no downgrade, and the run dies where the *merge ledger*
+  block twelve lines above (`driver.rs:610`) — correctly declared unrealisable — skips with
+  a `tracing::debug!` and lets the cell's own `state_downgrade` be the user-visible
+  channel. That is the mechanism the T5 path was supposed to use and does not.
+
+  Two facts that shaped the fix. The technique downgrade *did* fire correctly
+  (`KeyedFold`→`PerGroupRecompute` via the absent `ReconciliationLedger` — the four
+  `MaintenanceStateDowngraded` diagnostics the spine saw); T5 recording is orthogonal to
+  technique and bit the already-downgraded plan anyway. And the read side already tolerates
+  absence — `observed_delta.rs:82` returns `Ok(None)` on any non-DuckDB dialect, which
+  `since_upstream.rs` and `delta_restriction` document as "always a legal fallback
+  trigger", i.e. conservative over-propagation. So the downgrade path was never blocked on
+  a missing fallback; it was blocked on the availability layer's claim.
+
+  **Decision: realise the substrate on BigQuery (not merely downgrade), across the whole
+  `!= DuckDB` family, with Spark carved out.** Scoping evidence gathered before choosing:
+  `ddl_bigquery.rs` and `ddl_spark.rs` exist but hold schema-evolution DDL only — all five
+  state structures live solely in `ddl_duckdb.rs`, so this is the substrate's second
+  implementation, not a spelling. DuckDB is the only backend overriding any transactional
+  seam (`smelt-backend-duckdb/src/lib.rs:631,726,786`); BigQuery overrides only
+  `delete_and_insert_transactional`, Spark none, so bookkeeping and write are sequential
+  and non-atomic on both today. The four guarantees are not equally portable: BigQuery has
+  real multi-statement transactions (`BEGIN TRANSACTION … COMMIT` as one query job, DDL not
+  permitted inside — matching the trait's existing "keep the `IF NOT EXISTS` DDL outside
+  the transaction" precedent), but its `PRIMARY KEY`s are declared-and-unenforced, so the
+  additive never-fold-twice refusal — today a PK constraint violation caught as
+  `already_reflected` (`smelt-backend-duckdb/src/lib.rs:748-755`) — has to be re-expressed
+  transactionally. That is the load-bearing phase: get it wrong and an additive fold
+  double-counts. Delta has per-table atomicity and no cross-table transaction at all, so
+  Spark's realisation is refused here rather than attempted; its row is corrected to tell
+  the truth and the reason lands in the spec.
+
+  **Ordering is the deliberate part: the honesty fix goes first, not last.** Phase 11
+  reconciles the two layers and adds the structural gate *before* a line of new SQL, which
+  (a) unblocks the spine's phases 12-14 immediately, without waiting on phases 12-15, and
+  (b) converts every later phase into ratchet-down work — flipping a dialect's row back on
+  forces its driver guard to be deleted, and deleting a guard without an emitter behind it
+  fails. Neither half can be satisfied by a promise. Spec-first obligations: `docs/specs/
+  state.md` §"The state-structure inventory" and §"The degradation contract" (per-dialect
+  realisation becomes a stated property rather than a code detail) and
+  `docs/specs/incremental_shapes.md` (never-fold-twice becomes dialect-plural). No conflict
+  with maintenance-plan purity — `CLAUDE.md` already excludes `smelt-state` ledger DDL/DML
+  as bookkeeping. Open and left to phase 11 rather than assumed: whether
+  `StateStructure::FingerprintSidecar`, claimed realisable on both non-DuckDB dialects, is
+  actually backed, or is a second instance of the same lie.
 
 - 2026-09-08 (phase 10 implementation, close): **outcome done.** All success criteria
   verified at HEAD as the planning entry laid out. New structural gate
