@@ -15,7 +15,7 @@ Comprehensive test suite for the smelt-parser crate.
 
 **Location**: Inline with implementation for fast feedback during development.
 
-### Printer Tests (`src/printer.rs`)
+### Printer Tests (`src/printer/tests.rs`)
 **10 tests** verifying SQL regeneration:
 - Round-trip preservation for valid SQL
 - Keyword uppercasing (SELECT, WHERE, etc.)
