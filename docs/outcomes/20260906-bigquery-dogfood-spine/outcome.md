@@ -7,7 +7,8 @@ and this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a hum
 BigQuery token for one fixture regeneration (see "## Blocked"); phases 7, 10–14 and 16 are
 **human-gated** — they provision cloud resources and run live BigQuery, which a headless
 loop cannot do, so those phases must emit `<<PHASE_BLOCKED>>` rather than attempt it.
-Phase 15 banks the DuckDB half of the evidence and is loop-grindable.
+Phases 15 and 16 bank the evidence and are loop-grindable: phase 16 harvests the *committed
+summaries* of the live phases 10 and 11, so it needs no credential of its own.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/multi_backend.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/smelt_yml.md`; `docs/specs/run_state.md`; `docs/specs/state.md`
 
@@ -136,9 +137,19 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | blocked |
 | 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | blocked |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
-| 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | pending |
+| 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | planned |
 
 ## Decision log
+
+- 2026-09-10 (phase 16 plan): **phase 16 is loop work, not human-gated.** The header's
+  driver line listed 16 among the phases needing live BigQuery; that was written before any
+  live run existed. Phases 10 and 11 executed and their summaries carry the verbatim job
+  output, costs, error strings and `file:line` references, so extending the handoff is a
+  pure harvest of committed text — the same shape phase 15 already had for the DuckDB half.
+  Driver line corrected; no phase rows added, split or reordered. Phases 12-14 stay
+  `blocked` on the T5 gap owned by `20260906-bigquery-correctness` (2026-09-10 entry
+  below), and phase 16's job is to make that gate legible in the handoff rather than to
+  close it.
 
 - 2026-09-10 (post-phase-11, orchestrator): **the T5 block has an owner and an unblock
   point.** `docs/outcomes/20260906-bigquery-correctness` reopened for it (its decision log
