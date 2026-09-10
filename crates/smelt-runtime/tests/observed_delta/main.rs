@@ -15,6 +15,8 @@
 //! - the record survives a re-run of the same window as a REPLACE, never a
 //!   duplicate (`PRIMARY KEY (model_name, window_start, window_end)`).
 
+mod degradation;
+
 use smelt_backend::{Backend, PartitionRange};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::analysis::walk::{ColumnComparability, Comparability};
@@ -1080,142 +1082,6 @@ async fn keyed_fold_delta_rolls_back_with_a_failed_write() {
 /// observed-delta record — the same posture
 /// `execute_column_scoped_write_with_observed_delta` already takes for its
 /// own `Suppressed` arm.
-struct KeyedNonDuckDbBackend;
-
-#[async_trait::async_trait]
-impl Backend for KeyedNonDuckDbBackend {
-    async fn execute_sql(
-        &self,
-        _sql: &str,
-    ) -> Result<Vec<arrow::array::RecordBatch>, smelt_backend::BackendError> {
-        unimplemented!("must not be called — the driver refuses before any write")
-    }
-    async fn create_table_as(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn create_view_as(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn drop_table_if_exists(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn drop_view_if_exists(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn get_row_count(&self, _: &str, _: &str) -> Result<usize, smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn get_preview(
-        &self,
-        _: &str,
-        _: &str,
-        _: usize,
-    ) -> Result<Vec<arrow::array::RecordBatch>, smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn table_exists(&self, _: &str, _: &str) -> Result<bool, smelt_backend::BackendError> {
-        // The target already exists — so the driver reaches the merge
-        // (not the first-run `CREATE TABLE ... AS`) branch, where the
-        // dialect refusal lives.
-        Ok(true)
-    }
-    async fn ensure_schema(&self, _: &str) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    fn dialect(&self) -> smelt_backend::SqlDialect {
-        smelt_backend::SqlDialect::SparkSQL
-    }
-    fn capabilities(&self) -> smelt_backend::BackendCapabilities {
-        // The write-mechanism resolution (`resolve_keyed_write_mechanism`,
-        // 27g) now consults capabilities before any backend call — this
-        // fake backend's own SparkSQL dialect answers truthfully (Spark can
-        // run MERGE) so the driver reaches this test's actual target: the
-        // non-DuckDB dialect refusal inside the observed-delta branch, not
-        // an unrelated panic here.
-        smelt_backend::BackendCapabilities::spark()
-    }
-    async fn load_table(
-        &self,
-        _: &str,
-        _: &str,
-        _: arrow::datatypes::SchemaRef,
-        _: Vec<arrow::array::RecordBatch>,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn delete_partitions(
-        &self,
-        _: &str,
-        _: &str,
-        _: &PartitionRange,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn insert_into_from_query(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-    async fn insert_overwrite(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &PartitionRange,
-    ) -> Result<(), smelt_backend::BackendError> {
-        unimplemented!()
-    }
-}
-
-#[tokio::test]
-async fn keyed_fold_suppressed_recording_refuses_a_non_duckdb_backend() {
-    let backend = KeyedNonDuckDbBackend;
-    let suppression = key_suppression(&["score"]);
-    let steps = one_step("2026-01-01", "2026-01-02");
-
-    let err = run_windowed_keyed_maintenance(
-        &backend,
-        "dim_scores",
-        "main",
-        "dim_scores",
-        &steps,
-        &max_score_rule(),
-        None,
-        &suppression,
-        None,
-        |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
-        &no_retry_policy(),
-        &ProbePolicy::per_run(),
-    )
-    .await
-    .expect_err("a non-DuckDB backend must refuse observed-delta recording");
-    assert!(
-        err.to_string().contains("observed-delta"),
-        "the refusal should name the observed-delta recording capability, got: {err}"
-    );
-}
-
 /// The staged-candidate conditional recompute records the keys whose
 /// applied effect was not the identity — new, changed, or departed.
 #[tokio::test]

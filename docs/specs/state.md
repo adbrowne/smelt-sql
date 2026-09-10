@@ -55,6 +55,19 @@ declaration the SQL supports is never rejected for lack of state; only a declara
 *semantics themselves* require state (a `contract.deferral` lag budget) fails loudly under a
 posture that cannot supply it.
 
+The degradation contract covers two distinct losses, and conflating them is what produces a
+refusal where a downgrade belongs:
+
+- **Losing a technique.** The structure a technique *needs to be correct* is unavailable, so
+  the cell downgrades to its recompute-family equivalent and records
+  `MaintenanceStateDowngraded`. The maintained table still equals what a full refresh would
+  produce; only the cost changes.
+- **Losing precision.** The structure carries no correctness obligation of its own but lets a
+  downstream consumer narrow its work — the observed output delta is the instance. Here there
+  is no cheaper technique to fall back to and nothing to swap: the write proceeds, the record
+  is skipped, and the consumer takes its already-defined widen-never-narrow path. A run must
+  never refuse for this class of loss.
+
 ## Surface
 
 ### The state-structure inventory
@@ -83,6 +96,43 @@ structure's format and semantics; this table owns only its class.
 The class assignment is itself normative: a structure listed as correctness may never be
 realised only in `.smelt/`, and a structure listed as observability may never become a
 correctness dependency without moving classes here first.
+
+#### Which dialects realise which structure
+
+A structure is **realisable** on a dialect when that dialect has emitters for it and a
+backend seam to run them through. Realisability is per-dialect data, not a property of the
+structure:
+
+| Structure | DuckDB | BigQuery | Spark (Delta) |
+|---|---|---|---|
+| Transactional merge ledger | yes | not yet | **no** |
+| Reconciliation ledger (frontier record) | yes | not yet | **no** |
+| Observed output deltas | yes | not yet | **no** |
+| Fingerprint sidecar | yes | not yet | **no** |
+| Tombstone ledger (succession grain) | yes | not yet | **no** |
+
+"not yet" is pending work; "**no**" is a permanent, reasoned absence. Spark's is the
+latter: Delta provides per-table atomicity and no cross-table transaction, so a ledger
+write and its data write cannot be made atomic, and the additive fold's never-fold-twice
+refusal has no sound realisation there.
+
+Two rules bind this table to the implementation, and they are the whole point of stating
+it:
+
+1. **A claim implies a builder.** Declaring a structure realisable on a dialect that
+   cannot build it is worse than declaring nothing: availability resolution records no
+   downgrade for a structure it believes present, so the run reaches the execution path,
+   finds no builder, and *refuses* — losing exactly the graceful degradation the
+   degradation contract promises.
+2. **An absence implies a downgrade, never a refusal.** Where a structure is unrealisable,
+   the execution path degrades and records the degradation. A technique needing that
+   structure downgrades to its recompute equivalent (below). A structure that only carries
+   *precision* — the observed output delta is the instance — is simply not recorded: the
+   write still happens, and consumers fall back to their widen-never-narrow path, because
+   an absent delta is already defined as a legal fallback trigger
+   (`incremental_models.md` §"The graph layer" — "Empty and absent are distinct"). Costing
+   a downstream recompute its narrowness is a permitted degradation; refusing the run is
+   not.
 
 ### `state.mode` and what each posture provides
 

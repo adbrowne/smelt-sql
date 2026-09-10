@@ -482,6 +482,7 @@ pub async fn run_windowed_keyed_maintenance(
                 // dialect implemented today (MP12); fail loudly rather than
                 // handing another backend DuckDB-flavored SQL it cannot run
                 // (`CLAUDE.md` §"Fail-loud discipline").
+                // STATE-GUARD: ReconciliationLedger
                 if backend.dialect() != SqlDialect::DuckDB {
                     bail!(
                         "{}",
@@ -607,6 +608,7 @@ pub async fn run_windowed_keyed_maintenance(
                 // is now the user-visible channel, surfaced by `smelt
                 // explain` — this is bookkeeping, not a correctness gate, so
                 // the run itself proceeds.
+                // STATE-GUARD: MergeLedger
                 let ledger_bookkeeping = if backend.dialect() == SqlDialect::DuckDB {
                     let ledger_ensure = ddl_duckdb::generate_ledger_table_ddl(schema);
                     let ledger_upsert = ddl_duckdb::generate_ledger_upsert_sql(
@@ -631,18 +633,34 @@ pub async fn run_windowed_keyed_maintenance(
                     None
                 };
 
+                // T5's observed-delta record is skipped, not refused, where the
+                // structure is unrealisable — see
+                // `observed_delta::records_observed_deltas`. The arm below is
+                // guarded on it, so an unrealisable dialect falls through to
+                // the plain write in `_`, which is precisely the "recorded but
+                // unrecorded-delta" degradation the availability layer now
+                // declares (`docs/specs/state.md` §"The degradation contract").
+                let records_deltas = super::records_observed_deltas(backend.dialect());
+                if !records_deltas
+                    && matches!(
+                        (&create_group, suppression),
+                        (None, WriteSuppression::Suppressed { .. })
+                    )
+                {
+                    tracing::debug!(
+                        model = model_name,
+                        run_id = retry.run_id,
+                        dialect = backend.dialect().name(),
+                        "change-suppressed keyed fold's observed-delta record (T5) skipped: \
+                         observed output deltas are not realisable on this dialect — \
+                         downstream delta restriction falls back to the widen-never-narrow \
+                         path, and the cell's own recorded state_downgrade is the \
+                         user-visible channel"
+                    );
+                }
+
                 match (&create_group, suppression) {
-                    (None, WriteSuppression::Suppressed { compared_columns }) => {
-                        if backend.dialect() != SqlDialect::DuckDB {
-                            bail!(
-                                "{}",
-                                BackendError::unsupported(
-                                    backend.dialect().name(),
-                                    "observed-delta recording for a change-suppressed keyed \
-                                     fold (T5)",
-                                )
-                            );
-                        }
+                    (None, WriteSuppression::Suppressed { compared_columns }) if records_deltas => {
                         let partition_column = locality.map(LocalitySlice::partition_column);
                         let changed_keys_query = match rule.observed_delta_changed_keys_sql(
                             schema,

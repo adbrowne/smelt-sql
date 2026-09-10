@@ -1,7 +1,29 @@
 use arrow::array::Array;
 use smelt_backend::{Backend, BackendError};
 use smelt_dialect::SqlDialect;
+use smelt_logical::maintenance::availability::{realisable_state_structures, StateStructure};
 use smelt_state::ddl_duckdb;
+
+/// Can `dialect` record an observed output delta at all?
+///
+/// **Derived from the availability layer, never hardcoded.** Every
+/// `_smelt_observed_delta` write site asks this rather than comparing against
+/// `SqlDialect::DuckDB` itself, so a dialect gaining the structure in
+/// `realisable_state_structures` retires its guards in the same commit that
+/// lands its emitters — the two can never drift apart again
+/// (`docs/specs/state.md` §"The state-structure inventory";
+/// `docs/outcomes/20260906-bigquery-correctness` decision log, 2026-09-10).
+///
+/// Where this is `false`, a write site **skips the record and proceeds with
+/// the write**: it must not refuse. The read side already treats an absent
+/// delta as a legal widen-never-narrow fallback trigger
+/// ([`read_observed_delta`]), so an unrecorded window costs downstream
+/// precision — a wider recompute — and never correctness. Refusing instead
+/// was the 2026-09-10 hard stop that halted `examples/github_activity` on
+/// BigQuery at `silver.events_deduped`.
+pub fn records_observed_deltas(dialect: SqlDialect) -> bool {
+    realisable_state_structures(dialect).contains(&StateStructure::ObservedOutputDeltas)
+}
 
 /// Read the exact observed-delta changed-key set an upstream driving model
 /// edge recorded for `[window_start, window_end)` (T5, Group D). `None` = no
@@ -11,12 +33,11 @@ use smelt_state::ddl_duckdb;
 /// upstream run; `incremental_models.md` §"The graph layer" — "Empty and
 /// absent are distinct").
 ///
-/// DuckDB-only, matching every other `_smelt_observed_delta` consumer in
-/// this module (`execute_column_scoped_write_with_observed_delta` above).
-/// Unlike that function's *write*-side capability gap (a hard error — the
-/// caller asked for a technique the backend cannot provide), a missing
-/// delta on the *read* side is always a legal fallback trigger, so a non-
-/// DuckDB backend reads back `None` rather than erroring.
+/// Gated on [`records_observed_deltas`], like every other
+/// `_smelt_observed_delta` consumer. A missing delta is always a legal
+/// widen-never-narrow fallback trigger, so a dialect that cannot record one
+/// reads back `None` rather than erroring — the same posture the write side
+/// now takes (it skips the record; before 2026-09-10 it refused the run).
 pub async fn read_observed_delta_changed_keys(
     backend: &dyn Backend,
     schema: &str,
@@ -68,10 +89,10 @@ fn decode_string_list_column(batch: &arrow::array::RecordBatch, column: &str) ->
 /// widen-never-narrow fallback trigger); `Some` — even with both vectors
 /// empty — means a row exists (§"Empty and absent are distinct").
 ///
-/// DuckDB-only, matching every other `_smelt_observed_delta` consumer in
-/// this module: a missing delta on the read side is always a legal
-/// fallback trigger, so a non-DuckDB backend reads back `None` rather than
-/// erroring.
+/// Gated on [`records_observed_deltas`], matching every other
+/// `_smelt_observed_delta` consumer: a missing delta on the read side is
+/// always a legal fallback trigger, so a dialect that cannot record one
+/// reads back `None` rather than erroring.
 pub async fn read_observed_delta(
     backend: &dyn Backend,
     schema: &str,
@@ -79,7 +100,7 @@ pub async fn read_observed_delta(
     window_start: &str,
     window_end: &str,
 ) -> std::result::Result<Option<ddl_duckdb::ObservedDelta>, BackendError> {
-    if backend.dialect() != SqlDialect::DuckDB {
+    if !records_observed_deltas(backend.dialect()) {
         return Ok(None);
     }
     let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);

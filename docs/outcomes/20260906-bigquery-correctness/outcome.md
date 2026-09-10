@@ -135,7 +135,7 @@ rediscovered.
 | 8 | Resolve every divergence the spine registered (`github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY`): each residual entry fixed or promoted to a reasoned permanent entry naming the engines and the construct, unexplained count zero — and, if phases 3-7 have emptied the registry, prove the unregistered-divergence sweep still fails closed on an empty registry rather than passing vacuously | done |
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | done |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | done |
-| 11 | Make the plan layer and the run layer agree before any new SQL: correct `realisable_state_structures`' BigQuery/Spark rows, express the observed-delta recording requirement in the availability layer so the three T5 `bail!` sites become recorded downgrades, and add the structural gate tying every `dialect != DuckDB` guard under `maintenance_driver/` to a structure declared unrealisable | pending |
+| 11 | Make the plan layer and the run layer agree before any new SQL: correct `realisable_state_structures`' BigQuery/Spark rows, express the observed-delta recording requirement in the availability layer so the three T5 `bail!` sites become recorded downgrades, and add the structural gate tying every `dialect != DuckDB` guard under `maintenance_driver/` to a structure declared unrealisable | done |
 | 12 | Observed deltas on BigQuery: `ddl_bigquery` sidecar emitters plus a `record_observed_delta_with_write` override on a BigQuery multi-statement transaction; flip the row back on, which the phase-11 gate then forces the driver guard to be deleted for | pending |
 | 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | pending |
 | 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | pending |
@@ -143,6 +143,64 @@ rediscovered.
 | 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | pending |
 
 ## Decision log
+
+- 2026-09-10 (phase 11, implementation): **both layers now agree, and the agreement is held
+  structurally rather than by inspection.** `realisable_state_structures` returns `vec![]`
+  for BigQuery and SparkSQL: `ObservedOutputDeltas` and `FingerprintSidecar` were both false
+  claims. The sidecar was the open question the reopening left for this phase, and it
+  resolved as a *second* instance of the same lie — it also contradicted a source of truth
+  already in the tree, `BackendCapabilities::supports_fingerprint_sidecar`, `true` for DuckDB
+  alone and gated on by every consumer in `maintenance_driver/sidecar.rs`. That contradiction
+  is now its own test.
+
+  The three T5 `bail!`s are gone. Rather than annotate the hardcoded comparisons, they route
+  through one predicate — `maintenance_driver::records_observed_deltas(dialect)`, *derived
+  from* `realisable_state_structures` — so phase 12 flipping BigQuery's row on retires its own
+  guard and the two cannot drift apart again. Where the structure is unrealisable the write
+  still happens and only the record is skipped; the read side has always treated an absent
+  delta as a legal widen-never-narrow trigger, so the cost is downstream precision, never
+  correctness.
+
+  Criterion 8's gate is `cargo test -p smelt-runtime --test state_guard_census` (3 tests):
+  every remaining `SqlDialect::DuckDB` comparison under `maintenance_driver/` must carry
+  `// STATE-GUARD: <StateStructure>` and that structure must be unrealisable off DuckDB. Four
+  remain (two `TombstoneLedger`, one each `MergeLedger`/`ReconciliationLedger`), all
+  reachable only if the plan layer failed to downgrade first. The contradiction leg was
+  verified by temporarily re-adding `MergeLedger` to BigQuery's row — it failed naming file,
+  line, structure and dialect — then reverted; the scanner's annotation/prose/fixture
+  discrimination has its own synthetic controls.
+
+  **Three pre-existing tests encoded the lie and were corrected, not deleted**:
+  `maintenance_availability/succession.rs`'s `a_ledger_less_dialect_realises_no_ledger`,
+  `availability_seam`'s intersection test (which gained a DuckDB comparison so its claim is
+  still about the dialect rather than `warehouse_tables`), and — found only after the first
+  verify run — `observed_delta.rs`'s `keyed_fold_suppressed_recording_refuses_a_non_duckdb_backend`,
+  now `..._degrades_on_a_non_duckdb_backend`. That third one was hidden behind `cargo test`'s
+  fail-fast: the large-file ratchet failed first and the run never reached `smelt-runtime`.
+  Worth remembering — a ratchet failure can mask real test failures in later crates.
+
+  `crates/smelt-runtime/tests/observed_delta.rs` (1331 lines, exactly at its cap) became the
+  directory target `observed_delta/{main.rs,degradation.rs}`, matching the existing
+  `availability_seam/`/`dialect_seam/` pattern; the fake backend's ~110 lines of trait stubs
+  moved out with the degradation test. The baseline changed by one line and **downward**
+  (1331 → 1197) — the sanctioned `--update` for an orphaned entry after a split, not a raised
+  ratchet, so criterion 4 is satisfied by a fall. The fake's `get_row_count` had to stop being
+  `unimplemented!()` because the run now completes instead of refusing before any write —
+  itself evidence of the behaviour change, and commented as such.
+
+  Spec delta landed: `docs/specs/state.md` gained §"Which dialects realise which structure"
+  (BigQuery "not yet", Spark "**no**" with the Delta cross-table-transaction reason) plus the
+  two binding rules, and §"The degradation contract" now separates *losing a technique* from
+  *losing precision* — the distinction whose absence let a precision loss be treated as a
+  refusal. Gates: `verify-phase.sh` ALL GREEN (fmt, clippy both feature sets, workspace
+  `cargo test`, `example_diagnostics`), `state_guard_census` 3/3, `observed_delta` 14/14,
+  `availability_seam` 6/6, `maintenance_availability` 20/20,
+  `maintenance_dialect_blindness` 3/3.
+
+  **The spine's phases 12-14 are unblocked**: `silver.events_deduped` no longer refuses on
+  BigQuery. It will run the downgraded (`PerGroupRecompute`) plan until phases 12-15 land the
+  real substrate, which is the coarser-but-equivalence-preserving posture the reopening
+  planned for.
 
 - 2026-09-10 (reopening): **the outcome reopens for the T5 gap, and the defect is not the
   one the spine filed.** The spine recorded "BigQuery has no observed-delta bookkeeping".

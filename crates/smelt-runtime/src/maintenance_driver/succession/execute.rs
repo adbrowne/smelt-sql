@@ -94,6 +94,7 @@ pub async fn execute_succession_maintenance(
     reporter: &dyn RunReporter,
     run_id: &str,
 ) -> Result<ExecutionResult> {
+    // STATE-GUARD: TombstoneLedger
     if backend.dialect() != SqlDialect::DuckDB {
         bail!(
             "{}",
@@ -308,6 +309,7 @@ pub async fn rebuild_succession_state(
     reporter: &dyn RunReporter,
     run_id: &str,
 ) -> Result<ExecutionResult> {
+    // STATE-GUARD: TombstoneLedger
     if backend.dialect() != SqlDialect::DuckDB {
         bail!(
             "{}",

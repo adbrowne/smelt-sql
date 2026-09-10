@@ -1,6 +1,5 @@
 use anyhow::Result;
 use smelt_backend::{maintenance_dialect, Backend, BackendError, ExecutionResult, PartitionRange};
-use smelt_dialect::SqlDialect;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
@@ -354,11 +353,26 @@ async fn execute_column_scoped_write_with_observed_delta(
                 columns,
                 dialect,
             );
-            if backend.dialect() != SqlDialect::DuckDB {
-                return Err(BackendError::unsupported(
-                    backend.dialect().name(),
-                    "observed-delta recording for a change-suppressed column-scoped MERGE (T5)",
-                ));
+            // Skipped, not refused, where the structure is unrealisable
+            // (`super::records_observed_deltas`): the conditional write still
+            // happens, and only the delta record is lost — a downstream
+            // precision cost the read side already absorbs, never a
+            // correctness one. Refusing here was half of the 2026-09-10 hard
+            // stop (`docs/outcomes/20260906-bigquery-correctness` decision
+            // log).
+            if !super::records_observed_deltas(backend.dialect()) {
+                tracing::debug!(
+                    schema,
+                    table,
+                    dialect = backend.dialect().name(),
+                    "change-suppressed column-scoped MERGE's observed-delta record (T5) \
+                     skipped: observed output deltas are not realisable on this dialect — \
+                     the write proceeds and downstream delta restriction widens"
+                );
+                return crate::execute::retry_backend_call(retry, || {
+                    backend.execute_statement_group(&group)
+                })
+                .await;
             }
             let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
             let partition_column = if window.column.is_empty() {

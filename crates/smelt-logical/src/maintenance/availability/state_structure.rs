@@ -6,11 +6,35 @@ use crate::maintenance::Technique;
 
 /// The [`StateStructure`]s `dialect` has a builder for, independent of
 /// `state.warehouse_tables`. Exhaustive over [`SqlDialect`]: a new dialect
-/// is a compile error here, not a silent default. Today only DuckDB has a
-/// ledger builder (`smelt-state/src/ddl_duckdb.rs`); every dialect realises
-/// the sidecar/output-delta structures, which have no per-dialect builder
-/// gate (`sources.md` §"The fingerprint sidecar", `incremental_models.md`
-/// §"The graph layer").
+/// is a compile error here, not a silent default.
+///
+/// **Every structure named here must have emitters and a backend seam behind
+/// it** (`docs/specs/state.md` §"The state-structure inventory"). Naming one
+/// that does not is worse than omitting it: `resolve_availability` records no
+/// downgrade for a structure it believes available, so the run reaches a
+/// DuckDB-only guard and refuses instead of degrading. That is exactly the
+/// defect this list carried until 2026-09-10, when it claimed
+/// `ObservedOutputDeltas` and `FingerprintSidecar` for BigQuery and Spark on
+/// the reasoning that they "have no per-dialect builder gate" — they have no
+/// per-dialect *builder*, which is the opposite conclusion.
+///
+/// Today only DuckDB has any builder: every ledger, sidecar and observed-delta
+/// emitter lives in `smelt-state/src/ddl_duckdb.rs`, and DuckDB is the only
+/// backend overriding the transactional seams those structures need
+/// (`Backend::fold_ledger_delta`, `execute_write_with_bookkeeping`,
+/// `record_observed_delta_with_write`). `ddl_bigquery.rs` and `ddl_spark.rs`
+/// carry schema-evolution DDL only. The fingerprint sidecar has a second,
+/// independent source of truth agreeing with this: every consumer in
+/// `maintenance_driver/sidecar.rs` gates on
+/// `BackendCapabilities::supports_fingerprint_sidecar`, `true` for DuckDB
+/// alone.
+///
+/// BigQuery's rows are pending work (`docs/outcomes/20260906-bigquery-correctness`
+/// phases 12-15) and flip on as each realisation lands. **Spark's are not**:
+/// Delta gives per-table atomicity and no cross-table transaction, so a ledger
+/// write and its data write cannot be made atomic there and the additive
+/// never-fold-twice refusal has no sound Delta realisation — an honest
+/// permanent absence, not a deferral.
 pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
     match dialect {
         SqlDialect::DuckDB => vec![
@@ -20,10 +44,7 @@ pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
             StateStructure::FingerprintSidecar,
             StateStructure::TombstoneLedger,
         ],
-        SqlDialect::SparkSQL | SqlDialect::BigQuery => vec![
-            StateStructure::ObservedOutputDeltas,
-            StateStructure::FingerprintSidecar,
-        ],
+        SqlDialect::SparkSQL | SqlDialect::BigQuery => vec![],
     }
 }
 

@@ -74,7 +74,14 @@ fn a_ledger_less_dialect_realises_no_ledger() {
             realisable_state_structures(dialect).into_iter().collect();
         assert!(!realised.contains(&StateStructure::MergeLedger));
         assert!(!realised.contains(&StateStructure::ReconciliationLedger));
-        assert!(realised.contains(&StateStructure::FingerprintSidecar));
-        assert!(realised.contains(&StateStructure::ObservedOutputDeltas));
+        // Corrected 2026-09-10: this test used to assert the sidecar and the
+        // observed-delta table WERE realised on these dialects. They are not —
+        // every emitter of both is DuckDB-only, and claiming them suppressed
+        // the downgrade that should have been recorded, turning a graceful
+        // degradation into a hard `bail!` at run time
+        // (`docs/outcomes/20260906-bigquery-correctness` decision log,
+        // 2026-09-10). Two-sided coverage lives in `realisation.rs`.
+        assert!(!realised.contains(&StateStructure::FingerprintSidecar));
+        assert!(!realised.contains(&StateStructure::ObservedOutputDeltas));
     }
 }
