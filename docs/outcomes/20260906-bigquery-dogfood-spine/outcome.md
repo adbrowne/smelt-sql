@@ -133,13 +133,33 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
 | 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | done |
 | 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | done |
-| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | blocked |
-| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | blocked |
-| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | blocked |
+| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
+| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | planned |
 
 ## Decision log
+
+- 2026-09-11 (orchestrator): **the T5 block is lifted; phases 12-14 return to `pending`.**
+  `20260906-bigquery-correctness` phase 11 landed (`6158dc921`): `realisable_state_structures`
+  no longer claims BigQuery or Spark realise `ObservedOutputDeltas`/`FingerprintSidecar`, so
+  `resolve_availability` now records a downgrade where it previously recorded none, and the
+  three T5 write sites route through `maintenance_driver::records_observed_deltas` — derived
+  from the availability layer — instead of comparing dialects. Where the structure is
+  unrealisable the write proceeds and only the *record* is skipped, so the cost is downstream
+  precision, never correctness: exactly the coarser-but-equivalence-preserving downgraded plan
+  the 2026-09-10 entry named as the unblock point. Verified rather than taken on the commit
+  message: `cargo test -p smelt-runtime --test state_guard_census --test observed_delta` is
+  green (14 + 3 tests), and the new structural gate ties every remaining `dialect != DuckDB`
+  guard under `maintenance_driver/` to a structure declared unrealisable.
+
+  Phases 12-14 remain **human-gated** — they run live BigQuery and need a minted credential,
+  so a headless iteration must still emit `<<PHASE_BLOCKED>>` for them. What changed is that
+  the gate is now only the credential, not a capability hole in the product. Nothing is known
+  yet about whether the downgraded plan carries the whole model set through
+  `silver.events_deduped`; that is phase 12's first question.
+
 
 - 2026-09-10 (phase 16 plan): **phase 16 is loop work, not human-gated.** The header's
   driver line listed 16 among the phases needing live BigQuery; that was written before any
@@ -819,6 +839,12 @@ exists — so the live run is a test of the *backend*, not of the models.
   centrepiece per-window sweep is blocked on this finding.
 
 ## Blocked
+
+- 2026-09-11 — **LIFTED (phases 12-14).** `20260906-bigquery-correctness` phase 11 landed the
+  downgrade path described below as "more likely the right design", so the refusal is gone and
+  the three rows are `pending` again. They still need a human-minted BigQuery credential to
+  run; see the 2026-09-11 decision-log entry. The entry below is kept for the history of the
+  gap and its diagnosis.
 
 - 2026-09-10 — **phases 12, 13 and 14: the T5 capability gap stops the pipeline before
   they have anything to run on.** Phase 11 got `bronze.events` and the first write of the
