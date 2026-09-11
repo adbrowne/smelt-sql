@@ -134,12 +134,68 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | done |
 | 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | done |
 | 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | done (10 of 16 models — see the 2026-09-11 entry) |
-| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
-| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
+| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending (needs 17) |
+| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending (needs 17) |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | planned |
+| 17 | Expand the BigQuery source population to the committed fixture's full thirty days with the real loader, and delete the stray 2026-08-04 slice, so both targets run over the same rows — **runs before 13 and 14** | done |
 
 ## Decision log
+
+- 2026-09-12 (phase 17, executed live): **the two targets now hold the same population, and
+  it is byte-identical.** 28 days (2026-08-07 … 2026-09-03) were loaded with
+  `scripts/bq-dogfood-loader.sh --emit-sql`'s own output — phase 10's
+  `` `raw. `` → `` `smelt_dogfood. `` substitution and nothing else — in strict calendar
+  order, every one of the 56 `INSERT`s returning exactly the fixture's expected row count on
+  the first attempt. The 75-row 2026-08-04 residue was then deleted from each table by
+  explicit predicate; no table was dropped or truncated. `smelt_dogfood.github_events` now
+  holds **65,583 rows over 30 partitions with 64,313 distinct ids**, and those 64,313 rows
+  are **byte-identical to the committed fixture** on
+  `(id, created_at, type, actor_id, repo_id, repo_name, payload length, payload MD5)` —
+  compared in full, not sampled: zero rows differ, zero ids on either side only. All 28
+  redelivery slices match the fixture's `MOD(id,50)=0` counts exactly. So `githubarchive`
+  has **not** drifted from the fixture, and the fixture's reproducibility claim holds against
+  a live re-derivation 26 days later.
+
+  Cost: **90.60 GB billed, US$0.45** at $5/TB (90.50 GB of it the loads; the dry-run
+  projection of 90.47 GB was 0.03% low), against the US$25/month cap.
+
+  The **2026-09-19 deadline is now live**: retention was read back from table metadata as
+  `expirationMs = 3888000000` (45 days) on both tables, unchanged and unraised, and the
+  oldest partition in both is 2026-08-05. Phases 13 and 14 must complete before then.
+
+  One consequence to carry: the source is widened but **no model was run**, so every model
+  table in `smelt_dogfood` still holds the old 6,053-row three-day population, as do
+  `_smelt_ledger` and `_smelt_observed_delta`. Phase 13 clears and rebuilds them on its own
+  terms. Detail in `phases/17-summary.md`.
+
+- 2026-09-12 (orchestrator, at the user's direction): **the parity basis is the committed
+  fixture, and BigQuery is expanded up to it rather than DuckDB narrowed down to BigQuery.**
+  The two populations were never comparable — `smelt_dogfood.github_events` held 6,053 rows
+  over 2026-08-04…06 while `seeds/github_events_sample.parquet` holds 64,313 events over
+  2026-08-05…09-03 and contains *no* 2026-08-04 rows at all, so no filter over the fixture
+  could reproduce the warehouse population. The first phase-13 plan closed the gap downward,
+  by mirroring the warehouse's three days into a scratch DuckDB source. That is now rejected
+  in favour of closing it upward: a new **phase 17** loads days 2026-08-07…2026-09-03 with
+  `scripts/bq-dogfood-loader.sh`'s own emitted SQL (28 days, ~US$0.55–1.00 against the
+  US$25/month cap) and deletes the 75-row 2026-08-04 residue.
+
+  Three reasons, in order of weight. The shared population becomes the **committed, gated**
+  one rather than a scratch artifact nothing else checks. The DuckDB leg then needs no new
+  machinery at all — `run_incremental.py`'s thirty-window replay and
+  `every_window_matches_the_full_refresh_oracle` already run over exactly those rows, which
+  collapses the DuckDB half of criterion 7 to "already met" rather than "rebuild it narrower".
+  And criterion 3's property — that the source is what the loader produced, not a copy of a
+  local file — is preserved and widened from two days to thirty, instead of being quietly
+  side-stepped by uploading the Parquet.
+
+  Consequences: phase 13's schedule becomes the fixture's **thirty** windows, not phase 12's
+  four; arrival order becomes a variable to control (BigQuery's source is static across the
+  run, DuckDB's arrives day by day) with a declared attribution procedure rather than an
+  assumption; and the whole comparison carries a hard deadline — both source tables declare
+  `partition_expiration_days = 45`, so the fixture's oldest day (2026-08-05) expires on
+  **2026-09-19**. Phases 13 and 14 must complete before then or their oldest partitions
+  vanish mid-comparison and read as a divergence.
 
 - 2026-09-11 (phase 12's findings fixed and verified live): **the live model set is 14, not 10.**
   `20260906-bigquery-correctness` closed findings 1a, 1b, 2, 3 and 5 and they were proven against
