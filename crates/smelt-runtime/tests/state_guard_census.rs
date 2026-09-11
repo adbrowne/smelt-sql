@@ -95,9 +95,15 @@ fn maintenance_driver_sources() -> Vec<PathBuf> {
         for entry in std::fs::read_dir(dir).expect("read maintenance_driver dir") {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
+                // Test fixtures configure a dialect, they do not guard on one.
+                // A unit-test module may be a `tests.rs` file or a `tests/`
+                // directory; skip both, the same convention
+                // `statement_parity`'s no-authoring gate uses.
+                if path.file_name().is_some_and(|n| n == "tests") {
+                    continue;
+                }
                 walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                // Test fixtures configure a dialect, they do not guard on one.
                 if path.file_name().is_some_and(|n| n == "tests.rs") {
                     continue;
                 }
@@ -181,23 +187,29 @@ fn every_duckdb_guard_names_an_unrealisable_structure() {
 fn the_census_is_non_empty_and_covers_the_known_guards() {
     let guards = census();
     assert!(
-        guards.len() >= 3,
-        "expected at least the three known ledger guards, found {}: {guards:#?}",
+        guards.len() >= 2,
+        "expected at least the two known tombstone-ledger guards, found {}: {guards:#?}",
         guards.len(),
     );
     let structures: BTreeSet<_> = guards.iter().filter_map(|g| g.structure.clone()).collect();
-    for expected in ["ReconciliationLedger", "TombstoneLedger"] {
-        assert!(
-            structures.contains(expected),
-            "expected a {expected} guard in the census, got {structures:?}",
-        );
-    }
-    // Two structures must have NO raw guard left, each for the same reason:
+    // The only structure still gated by a raw guard: phase 15's tombstone
+    // ledger, at `succession/execute.rs`'s two sites. Both ledger rows above
+    // it now derive their gate instead.
+    assert!(
+        structures.contains("TombstoneLedger"),
+        "expected a TombstoneLedger guard in the census, got {structures:?}",
+    );
+    // Three structures must have NO raw guard left, each for the same reason:
     // their write sites ask a predicate derived from the availability layer
-    // (`records_observed_deltas`, `realises_merge_ledger`) instead of comparing
-    // dialects themselves. A guard reappearing for either means someone
+    // (`records_observed_deltas`, `realises_merge_ledger`,
+    // `realises_reconciliation_ledger`) instead of comparing dialects
+    // themselves. A guard reappearing for any of them means someone
     // reintroduced a hardcoded dialect assumption.
-    for retired in ["ObservedOutputDeltas", "MergeLedger"] {
+    for retired in [
+        "ObservedOutputDeltas",
+        "MergeLedger",
+        "ReconciliationLedger",
+    ] {
         assert!(
             !structures.contains(retired),
             "{retired} write sites must derive their gate from the availability layer, not \

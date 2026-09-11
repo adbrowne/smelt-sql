@@ -111,7 +111,7 @@ structure:
 | Structure | DuckDB | BigQuery | Spark (Delta) |
 |---|---|---|---|
 | Transactional merge ledger | yes | yes | **no** |
-| Reconciliation ledger (frontier record) | yes | not yet | **no** |
+| Reconciliation ledger (frontier record) | yes | yes | **no** |
 | Observed output deltas | yes | not yet | **no** |
 | Fingerprint sidecar | yes | not yet | **no** |
 | Tombstone ledger (succession grain) | yes | not yet | **no** |
@@ -121,8 +121,7 @@ latter: Delta provides per-table atomicity and no cross-table transaction, so a 
 write and its data write cannot be made atomic, and the additive fold's never-fold-twice
 refusal has no sound realisation there.
 
-Three facts of BigQuery's merge-ledger realisation are load-bearing rather than incidental,
-because they are what makes the *reconciliation* ledger a separate question:
+Four facts of BigQuery's ledger realisation are load-bearing rather than incidental:
 
 - **The ledger table is addressed by a two-part name.** The ledger lives beside the models
   it records, in the run's own schema, and is named `` `<schema>._smelt_ledger` `` — one
@@ -136,11 +135,30 @@ because they are what makes the *reconciliation* ledger a separate question:
   `ON CONFLICT DO NOTHING`, so the idempotent bookkeeping upsert is expressed as a merge
   against a one-row inline source. The statement is a no-op when the window is already
   recorded, which is the same observable behaviour the conflict clause gives on DuckDB.
+- **The never-fold-twice refusal is a zero-row abort, not a key violation.** The second
+  fact rules out DuckDB's mechanism entirely: there the refusal *is* the `PRIMARY KEY`
+  violation, and an unenforced key raises nothing. On BigQuery the additive fold's ledger
+  record is the same conditional `MERGE`, and the refusal is its effect — the record, an
+  `IF @@row_count = 0 THEN RAISE`, and the fold action run in one multi-statement
+  transaction, so a repeat aborts before the action is reached and the transaction rolls
+  back. The guarantee is one guarantee with two realisations, not two guarantees.
 
-The reconciliation ledger's "not yet" follows directly from the second fact: its
-never-fold-twice refusal is a `PRIMARY KEY` *violation* on DuckDB, and an unenforced key
-raises none. Until that refusal is re-expressed with a mechanism BigQuery actually enforces,
-an additive-graded keyed fold on BigQuery downgrades rather than folding.
+  This rests on a documented BigQuery property stronger than the snapshot isolation it is
+  usually stated alongside: two transactions that mutate rows in the same table cannot run
+  concurrently, and a conflicting transaction is cancelled. Both folds of the same delta
+  mutate the ledger table, so they cannot both commit — one wins, the other is cancelled
+  loudly, and a later re-run reads the committed row and refuses. Were that property to
+  weaken, the correct response is to withdraw the realisation, not to fall back on a
+  check-then-act probe.
+
+**One shape BigQuery refuses rather than realises.** BigQuery does not permit DDL creating
+or dropping permanent entities inside a transaction, and an additive fold's *first* action
+against a not-yet-existing target is a `CREATE TABLE … AS`. There is no safe degradation —
+committing the ledger record and the create separately would let a crash between them leave
+the ledger claiming a fold that never happened — so that first step is refused, naming the
+construct and the remedy: run once with `--full-refresh` to materialise the target, after
+which every step is a merge the transaction can hold. The condition is the backend's
+transactional-DDL capability, not its dialect.
 
 Two rules bind this table to the implementation, and they are the whole point of stating
 it:

@@ -48,8 +48,12 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 /// spelling, dispatched by `smelt_state::ledger`, and
 /// `smelt-backend-bigquery` overrides `execute_write_with_bookkeeping` to run
 /// the record and the write in one transaction. Its **reconciliation** ledger
-/// is a separate question from the emitters: the never-fold-twice refusal is a
-/// `PRIMARY KEY` violation on DuckDB, and BigQuery's key is `NOT ENFORCED`.
+/// took more than the emitters: the never-fold-twice refusal is a `PRIMARY
+/// KEY` violation on DuckDB and BigQuery's key is `NOT ENFORCED`, so there the
+/// record is `generate_ledger_conditional_insert_sql` (a `MERGE … WHEN NOT
+/// MATCHED`) and the refusal is `fold_ledger_delta`'s zero-row abort inside a
+/// GoogleSQL multi-statement transaction
+/// (`smelt_backend_bigquery::sql::fold_ledger_delta_script`).
 /// `ddl_spark.rs` carries schema-evolution DDL only, and Spark has no sound
 /// realisation to add: Delta gives per-table atomicity only and no cross-table
 /// transaction, so a ledger write and its data write cannot be made atomic
@@ -57,7 +61,10 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 fn has_emitters(dialect: SqlDialect, structure: StateStructure) -> bool {
     match dialect {
         SqlDialect::DuckDB => true,
-        SqlDialect::BigQuery => matches!(structure, StateStructure::MergeLedger),
+        SqlDialect::BigQuery => matches!(
+            structure,
+            StateStructure::MergeLedger | StateStructure::ReconciliationLedger
+        ),
         SqlDialect::SparkSQL => false,
     }
 }
@@ -113,8 +120,8 @@ fn the_sidecar_claim_matches_the_backend_capability() {
 
 /// Today's concrete expectation, stated positively so the reopening's
 /// remaining phases flip it deliberately rather than by accident: DuckDB
-/// realises everything, BigQuery realises exactly the merge ledger, and Spark
-/// realises **nothing** — permanently, not pending.
+/// realises everything, BigQuery realises both ledgers, and Spark realises
+/// **nothing** — permanently, not pending.
 #[test]
 fn each_dialect_realises_exactly_the_structures_it_has_today() {
     assert!(
@@ -124,9 +131,12 @@ fn each_dialect_realises_exactly_the_structures_it_has_today() {
     );
     assert_eq!(
         realised(SqlDialect::BigQuery),
-        BTreeSet::from([StateStructure::MergeLedger]),
-        "BigQuery realises the merge ledger; its other rows land with \
-         docs/outcomes/20260906-bigquery-correctness phases 12, 14 and 15",
+        BTreeSet::from([
+            StateStructure::MergeLedger,
+            StateStructure::ReconciliationLedger
+        ]),
+        "BigQuery realises both ledgers; its other rows land with \
+         docs/outcomes/20260906-bigquery-correctness phases 12 and 15",
     );
     assert_eq!(realised(SqlDialect::DuckDB).len(), ALL_STRUCTURES.len());
 }
@@ -155,12 +165,16 @@ fn every_dialect_is_covered() {
     assert_eq!(ALL_STRUCTURES.len(), 5);
 }
 
-/// The consequence of BigQuery's row, at the layer users feel it: a technique
-/// needing only the merge ledger resolves untouched, while one needing the
-/// reconciliation ledger still downgrades and still says so. The two are
-/// separate structures precisely so this pair can differ.
+/// The consequence of BigQuery's rows, at the layer users feel it: neither a
+/// technique needing the merge ledger nor one needing the reconciliation
+/// ledger is coarsened any more, and the `KeyedFold` cell that used to be
+/// downgraded to `PerGroupRecompute` now survives as itself.
+///
+/// The **absence** of a downgrade is the assertion — the same shape phase 13
+/// established for the `ColumnScopedMerge` half. Spark's half below is what
+/// keeps it non-vacuous.
 #[test]
-fn bigquery_keeps_a_merge_ledger_technique_and_still_downgrades_a_keyed_fold() {
+fn bigquery_keeps_both_a_merge_ledger_and_a_keyed_fold_technique() {
     let available = StateAvailability::resolve(
         WarehouseTables::Allowed,
         &realisable_state_structures(SqlDialect::BigQuery),
@@ -176,6 +190,32 @@ fn bigquery_keeps_a_merge_ledger_technique_and_still_downgrades_a_keyed_fold() {
         merge_cell[0].state_downgrade.is_none(),
         "BigQuery realises the merge ledger, so nothing is lost: {:?}",
         merge_cell[0].state_downgrade,
+    );
+
+    let mut fold_cell = vec![super::base_cell(Corner::FoldDelta, Technique::KeyedFold)];
+    resolve_availability(&mut fold_cell, &available);
+    assert_eq!(
+        fold_cell[0].technique,
+        Technique::KeyedFold,
+        "BigQuery refuses a repeat fold by zero-row abort inside a transaction, so the cell \
+         must not be coarsened to a recompute",
+    );
+    assert!(
+        fold_cell[0].state_downgrade.is_none(),
+        "no reconciliation-ledger downgrade may be recorded on BigQuery any more: {:?}",
+        fold_cell[0].state_downgrade,
+    );
+}
+
+/// Non-vacuity for the test above: a dialect that genuinely cannot refuse a
+/// repeat still downgrades the same cell, and still says which structure it is
+/// missing. Spark's absence is permanent — Delta has no cross-table
+/// transaction — so this half is not waiting on a future phase.
+#[test]
+fn a_dialect_without_the_reconciliation_ledger_still_downgrades_a_keyed_fold() {
+    let available = StateAvailability::resolve(
+        WarehouseTables::Allowed,
+        &realisable_state_structures(SqlDialect::SparkSQL),
     );
 
     let mut fold_cell = vec![super::base_cell(Corner::FoldDelta, Technique::KeyedFold)];

@@ -772,6 +772,47 @@ pub fn generate_ledger_upsert_sql(
     )
 }
 
+/// The GoogleSQL realisation of the **never-fold-twice record**: insert this
+/// delta identity, or touch nothing if it is already there
+/// (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
+/// already reflected in the state").
+///
+/// DuckDB realises the same guarantee with
+/// [`crate::ddl_duckdb::generate_ledger_insert_sql`] and an *enforced*
+/// `PRIMARY KEY`: a repeat raises a constraint violation, and the violation is
+/// the refusal. GoogleSQL's `PRIMARY KEY` is `NOT ENFORCED` and raises nothing,
+/// so the refusal has to come from the statement's own effect instead — this
+/// one inserts zero rows on a repeat, and the caller
+/// (`smelt_backend_bigquery::sql::fold_ledger_delta_script`) turns a zero-row
+/// outcome into the abort, inside the transaction that also holds the fold.
+///
+/// The statement itself is [`generate_ledger_upsert_sql`]'s `MERGE … WHEN NOT
+/// MATCHED THEN INSERT` verbatim — the two roles differ only in how the caller
+/// reads the row count, never in the text, so they are deliberately one
+/// builder rather than two spellings that could drift. Delegating also means
+/// the additive fold and the idempotent bookkeeping record can never disagree
+/// about what "this window is recorded" means.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_ledger_conditional_insert_sql(
+    schema: &str,
+    model: &str,
+    group: &str,
+    input: &str,
+    delta_id: &str,
+    region_start: &str,
+    region_end: &str,
+) -> String {
+    generate_ledger_upsert_sql(
+        schema,
+        model,
+        group,
+        input,
+        delta_id,
+        region_start,
+        region_end,
+    )
+}
+
 /// GoogleSQL existence check for `(model, group, input, delta_id)` — the
 /// best-effort fallback `Backend::fold_ledger_delta` default uses on a backend
 /// that cannot wrap the insert and the fold action in one native transaction.

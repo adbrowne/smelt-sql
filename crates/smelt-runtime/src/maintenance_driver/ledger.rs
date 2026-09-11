@@ -27,3 +27,31 @@ use smelt_logical::maintenance::availability::{realisable_state_structures, Stat
 pub fn realises_merge_ledger(dialect: SqlDialect) -> bool {
     realisable_state_structures(dialect).contains(&StateStructure::MergeLedger)
 }
+
+/// Can `dialect` hold the never-fold-twice reconciliation ledger — i.e. does a
+/// repeat fold of the same delta identity *refuse* there
+/// (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
+/// already reflected in the state")?
+///
+/// **Derived from the availability layer, never hardcoded** — same posture and
+/// same reason as [`realises_merge_ledger`] and
+/// [`super::records_observed_deltas`]. Spelling this as
+/// `dialect != SqlDialect::DuckDB` was exactly the guard the structural census
+/// (`tests/state_guard_census.rs`) had to be told about, and exactly the drift
+/// between the plan layer and the run layer this outcome exists to close.
+///
+/// Unlike the merge ledger's, this one is **not** optional bookkeeping: an
+/// additive fold with no refusal double-counts. Where this is `false` the run
+/// refuses rather than proceeding — but it should never get that far, because
+/// `required_state_structure(Technique::KeyedFold)` is
+/// `StateStructure::ReconciliationLedger` and the plan layer downgrades the
+/// cell first, recording the downgrade the user can see.
+///
+/// The two realisations behind a `true` differ in mechanism and agree in
+/// effect: DuckDB refuses by enforced `PRIMARY KEY` violation inside a
+/// `duckdb::Transaction`; BigQuery refuses by a zero-row `MERGE … WHEN NOT
+/// MATCHED` inside a GoogleSQL multi-statement transaction
+/// (`smelt_state::ledger::ledger_fold_record_sql`).
+pub fn realises_reconciliation_ledger(dialect: SqlDialect) -> bool {
+    realisable_state_structures(dialect).contains(&StateStructure::ReconciliationLedger)
+}

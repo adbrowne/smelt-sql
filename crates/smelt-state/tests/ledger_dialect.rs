@@ -28,11 +28,14 @@ fn all_statements(dialect: SqlDialect) -> Option<Vec<String>> {
         ledger::ledger_insert_sql(dialect, "ds", "m", "{*}", "smelt.src", "d", "s", "e").ok()?;
     let upsert =
         ledger::ledger_upsert_sql(dialect, "ds", "m", "{*}", "smelt.src", "d", "s", "e").ok()?;
+    let fold_record =
+        ledger::ledger_fold_record_sql(dialect, "ds", "m", "{*}", "smelt.src", "d", "s", "e")
+            .ok()?;
     let exists = ledger::ledger_exists_sql(dialect, "ds", "m", "{*}", "smelt.src", "d").ok()?;
     let reset =
         ledger::ledger_recompute_reset_sqls(dialect, "ds", "m", "{*}", "s", "e", "smelt.src", "d")
             .ok()?;
-    let mut out = vec![table, insert, upsert, exists];
+    let mut out = vec![table, insert, fold_record, upsert, exists];
     out.extend(reset);
     Some(out)
 }
@@ -87,6 +90,98 @@ fn the_bigquery_path_is_never_duckdb_flavoured() {
             .expect("BigQuery upsert");
     assert!(upsert.starts_with("MERGE "), "{upsert}");
     assert!(upsert.contains("WHEN NOT MATCHED THEN INSERT"), "{upsert}");
+}
+
+/// GoogleSQL does not continue a string on `''` — it is two adjacent empty
+/// strings — and a backslash IS an escape character there, so a quote-doubled
+/// literal is a silent value corruption rather than a syntax error. Every
+/// statement the BigQuery path can produce must use the backslash form.
+#[test]
+fn the_bigquery_path_never_doubles_a_quote_to_escape_one() {
+    let table = ledger::ledger_table_ddl(SqlDialect::BigQuery, "ds").expect("BigQuery DDL");
+    let quoted_model = "o'brien\\co";
+    let mut statements = vec![table];
+    statements.push(
+        ledger::ledger_insert_sql(
+            SqlDialect::BigQuery,
+            "ds",
+            quoted_model,
+            "{*}",
+            "smelt.src",
+            "d",
+            "s",
+            "e",
+        )
+        .expect("BigQuery insert"),
+    );
+    statements.push(
+        ledger::ledger_fold_record_sql(
+            SqlDialect::BigQuery,
+            "ds",
+            quoted_model,
+            "{*}",
+            "smelt.src",
+            "d",
+            "s",
+            "e",
+        )
+        .expect("BigQuery fold record"),
+    );
+    statements.push(
+        ledger::ledger_exists_sql(
+            SqlDialect::BigQuery,
+            "ds",
+            quoted_model,
+            "{*}",
+            "smelt.src",
+            "d",
+        )
+        .expect("BigQuery exists"),
+    );
+    for sql in &statements {
+        assert!(!sql.contains("''"), "quote-doubled escape: {sql}");
+    }
+}
+
+/// The never-fold-twice record is the phase's whole point, and its two
+/// realisations must be *different statements* that mean the same thing.
+/// DuckDB's refusal is the enforced `PRIMARY KEY`, so a plain `INSERT`
+/// suffices; BigQuery's key is `NOT ENFORCED`, so the record has to insert
+/// zero rows on a repeat instead — a `MERGE … WHEN NOT MATCHED`, whose row
+/// count the backend seam reads. A BigQuery fold record that is a plain
+/// `INSERT` silently double-counts, which is exactly what this asserts
+/// against.
+#[test]
+fn the_fold_record_refuses_a_repeat_in_each_dialects_own_way() {
+    let duckdb =
+        ledger::ledger_fold_record_sql(SqlDialect::DuckDB, "main", "m", "g", "i", "d", "s", "e")
+            .expect("DuckDB fold record");
+    assert!(
+        duckdb.starts_with("INSERT INTO"),
+        "DuckDB refuses by enforced PRIMARY KEY on a plain INSERT: {duckdb}"
+    );
+
+    let bigquery =
+        ledger::ledger_fold_record_sql(SqlDialect::BigQuery, "ds", "m", "g", "i", "d", "s", "e")
+            .expect("BigQuery fold record");
+    assert!(
+        bigquery.starts_with("MERGE "),
+        "BigQuery's PRIMARY KEY is NOT ENFORCED, so a plain INSERT would double-count: {bigquery}"
+    );
+    assert!(
+        bigquery.contains("WHEN NOT MATCHED THEN INSERT"),
+        "the repeat must modify zero rows: {bigquery}"
+    );
+    assert!(
+        !bigquery.contains("WHEN MATCHED"),
+        "a matched arm would modify a row on a repeat and defeat the row-count test: {bigquery}"
+    );
+
+    assert!(
+        ledger::ledger_fold_record_sql(SqlDialect::SparkSQL, "ds", "m", "g", "i", "d", "s", "e")
+            .is_err(),
+        "Spark has no sound never-fold-twice realisation"
+    );
 }
 
 /// …and the DuckDB path is unchanged by the dispatch — byte-identical to the

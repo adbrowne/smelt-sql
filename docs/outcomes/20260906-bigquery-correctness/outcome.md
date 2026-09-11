@@ -138,11 +138,93 @@ rediscovered.
 | 11 | Make the plan layer and the run layer agree before any new SQL: correct `realisable_state_structures`' BigQuery/Spark rows, express the observed-delta recording requirement in the availability layer so the three T5 `bail!` sites become recorded downgrades, and add the structural gate tying every `dialect != DuckDB` guard under `maintenance_driver/` to a structure declared unrealisable | done |
 | 12 | Observed deltas on BigQuery: `ddl_bigquery` sidecar emitters plus a `record_observed_delta_with_write` override on a BigQuery multi-statement transaction; flip the row back on, which the phase-11 gate then forces the driver guard to be deleted for | pending |
 | 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | done |
-| 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | pending |
+| 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | done |
 | 15 | Tombstone ledger on BigQuery, so the succession-patch technique runs live rather than downgrading to `DeleteInsert` | pending |
 | 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | pending |
 
 ## Decision log
+
+- 2026-09-11 (phase 14, implementation): **BigQuery refuses a repeat fold, and the refusal is a
+  statement's effect rather than a storage constraint.** `realisable_state_structures(BigQuery)`
+  is now `vec![MergeLedger, ReconciliationLedger]`. The user-visible result is again one line
+  gone from a fixture: `examples/github_activity`'s `KeyedFold` cell on `raw.github_events` no
+  longer emits `MaintenanceStateDowngraded` on the `bigquery` target, so the workspace is down
+  to two diagnostics, both tombstone-ledger (phase 15's), and both remaining cells keep their
+  planned technique.
+
+  **What the refusal actually is.** On DuckDB the guarantee *is* the enforced `PRIMARY KEY`
+  (`smelt-backend-duckdb/src/lib.rs:748-755`). BigQuery's is `NOT ENFORCED`, so the mechanism
+  is re-expressed in three pieces: `smelt_state::ledger::ledger_fold_record_sql` (new) is the
+  record whose zero-effect outcome *is* the refusal — a plain `INSERT` on DuckDB, the
+  phase-13 `MERGE … WHEN NOT MATCHED` on BigQuery, deliberately the same builder as the
+  idempotent upsert so the two can never disagree about what "recorded" means;
+  `smelt_backend_bigquery::sql::fold_ledger_delta_script` wraps record + `IF @@row_count = 0
+  THEN RAISE` + action in one `BEGIN TRANSACTION … COMMIT TRANSACTION` under an
+  `EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION; RAISE …` handler; and
+  `BigQueryBackend::fold_ledger_delta` overrides the trait default, which is explicitly
+  **not** used — its `exists` → `insert` → `action` across three jobs is the check-then-act
+  race this row exists to prevent, and shipping it would have satisfied the census while
+  reintroducing the defect. The sentinel (`SMELT_LEDGER_ALREADY_REFLECTED`) is emitted and
+  matched in one module, `contains`-matched because the adapter wraps it in a job-error
+  envelope, with the pairing asserted in a single test so the two halves cannot drift.
+
+  **Decision 2 checked, and the answer is stronger than the plan assumed.** BigQuery's
+  "Multi-statement transactions" documentation gives snapshot isolation *and* — the
+  load-bearing sentence — "If a transaction mutates (updates or deletes) rows in a table, then
+  other transactions or DML statements that mutate rows in the same table cannot run
+  concurrently. Conflicting transactions are cancelled." Both folds of one delta mutate
+  `_smelt_ledger`, so they cannot both commit: the loser is cancelled loudly, and a later
+  re-run reads the committed row and refuses. The soundness argument therefore rests on
+  write-conflict detection on one table, not on read-snapshot reasoning — written into the
+  emitter's doc comment and into `docs/specs/state.md`.
+
+  **Decision 3, and a capability that was simply wrong.** The same docs say DDL creating or
+  dropping *permanent* entities is not supported inside a transaction. The plan's option (b)
+  — prove the additive path never produces DDL — is provably false at the call site:
+  `driver.rs`'s `action_group` is `create_group` (an `emit_create_table_as`) whenever the
+  target does not exist. So the first step is refused, before any backend call, naming the
+  construct and the remedy (`--full-refresh` materialises the target outside the
+  window-forward loop, after which every step is a merge). The condition is the capability,
+  never a dialect: `BackendCapabilities::bigquery()` declared `supports_transactional_ddl:
+  true`, which was untrue, and is now `false` with the quote in the comment and the
+  `capability_conformance` cell corrected — inert today, since BigQuery does not override
+  `execute_statement_group` and the default ignores `StatementGroup::transactional`.
+  Decision 4: `exists_sql` is dead on this dialect and is bound `_exists_sql` with a paragraph
+  saying why, rather than issued and ignored.
+
+  **The guard left the census rather than being re-annotated**, the second phase running to
+  phase 13's precedent: `driver.rs`'s `!= SqlDialect::DuckDB` became
+  `maintenance_driver::realises_reconciliation_ledger`, derived from the availability layer, so
+  `state_guard_census` now covers two guards (both `TombstoneLedger`) and `ReconciliationLedger`
+  joins `ObservedOutputDeltas` and `MergeLedger` in the derive-don't-compare list. The census's
+  own directory walk had to learn that a unit-test module can be a `tests/` directory and not
+  only a `tests.rs` file — that split was forced by the large-file ratchet
+  (`maintenance_driver/tests.rs` 1083 → 1205), and the directory form was chosen because
+  `statement_parity`'s no-authoring gate skips `tests/` by that same convention and had flagged
+  a flat `ledger_tests.rs`'s fixture `MERGE INTO` text. No baseline was raised.
+
+  **The red was verified to be the right red.** Pointing BigQuery's fold record back at
+  `generate_ledger_insert_sql` makes the headline test fail with "a repeat fold must be
+  refused, got Committed" — the double-count itself — because the test's fake warehouse models
+  an unenforced key honestly: a duplicate `INSERT` simply lands again. Nine pre-existing tests
+  encoded the old claim and were corrected, not deleted, including `RecordingBackend::
+  capabilities`, which was pinned to `duckdb()` regardless of dialect and would have made the
+  new refusal untestable. Gates: `verify-phase.sh` ALL GREEN, `state_guard_census` 3/3,
+  `availability_seam` 6/6, `maintenance_availability` 22/22, `maintenance_dialect_blindness`
+  3/3, `ledger_dialect` 7/7, `never_fold_twice` 3/3 (new),
+  `cargo check -p smelt-cli --features bigquery` clean, `large-file-check.sh` OK.
+
+  **Not proven offline, and one of them is a live bug this phase chose not to fix.** Phase 16
+  inherits: that a live repeat really refuses and the sentinel survives the adapter's error
+  envelope; that `@@row_count` after a `MERGE … WHEN NOT MATCHED` really is `0` on a repeat.
+  And phase 13's open DDL-in-transaction question is now **answered from the docs** — it is not
+  permitted — which means `driver.rs`'s `Grade::Idempotent` arm still hands the first
+  (table-creating) step's `CREATE TABLE … AS` to `execute_write_with_bookkeeping`, where
+  `write_with_bookkeeping_plan` puts it inside the transaction. On the docs' reading the engine
+  will reject that script: loudly, on a first run only, and with a fix local to that plan
+  function. It is named here rather than left to be discovered live, and deliberately left out
+  of this row — different grade, different seam, and changing it here would have meant
+  untested new behaviour on a path this row does not touch.
 
 - 2026-09-11 (phase 13, implementation): **BigQuery realises the merge ledger, and the guard
   that refused it is gone from the census rather than merely annotated.**

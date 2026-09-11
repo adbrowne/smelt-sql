@@ -1,3 +1,5 @@
+mod ledger;
+
 use super::*;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -16,7 +18,6 @@ use smelt_logical::maintenance::{
     PartitionLocal, PlanCell, RowPreservation, ScanClamp, SkeletonSourceClosure, SourceFacts,
     Technique, Trigger,
 };
-use smelt_state::reconciliation::Grade;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
@@ -26,7 +27,7 @@ use std::sync::Mutex;
 /// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). Retry
 /// behaviour itself is covered end-to-end by `tests/retry.rs`.
 const NO_OP_REPORTER: crate::reporter::NoOpReporter = crate::reporter::NoOpReporter;
-fn no_retry_policy() -> crate::execute::RetryPolicy<'static> {
+pub(super) fn no_retry_policy() -> crate::execute::RetryPolicy<'static> {
     crate::execute::RetryPolicy {
         retry_max: 0,
         base_backoff_ms: 0,
@@ -253,7 +254,7 @@ fn driving_steps_rejects_empty_window() {
 
 /// The plain unconditional matched arm — the pre-Phase-C6 default for
 /// tests below that don't exercise suppression itself.
-fn unconditional_suppression() -> WriteSuppression {
+pub(super) fn unconditional_suppression() -> WriteSuppression {
     WriteSuppression::Unconditional {
         why: "test rule does not exercise write suppression".to_string(),
     }
@@ -283,10 +284,10 @@ impl WindowedKeyedRule for AlwaysRefuses {
 /// An in-memory fake backend that records every call it receives so the
 /// driver's classify → step → pushdown → create-or-merge sequencing can
 /// be exercised without a real database.
-struct RecordingBackend {
-    table_exists: Mutex<bool>,
-    calls: Mutex<Vec<String>>,
-    dialect: SqlDialect,
+pub(super) struct RecordingBackend {
+    pub(super) table_exists: Mutex<bool>,
+    pub(super) calls: Mutex<Vec<String>>,
+    pub(super) dialect: SqlDialect,
 }
 
 impl Default for RecordingBackend {
@@ -364,8 +365,16 @@ impl Backend for RecordingBackend {
     fn dialect(&self) -> SqlDialect {
         self.dialect
     }
+    /// Keyed to `self.dialect`, not pinned to DuckDB's: the driver's
+    /// first-run DDL refusal reads `supports_transactional_ddl`, and a fake
+    /// whose capabilities contradict its dialect would make that branch
+    /// untestable (and, worse, assert the wrong thing).
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities::duckdb()
+        match self.dialect {
+            SqlDialect::DuckDB => BackendCapabilities::duckdb(),
+            SqlDialect::BigQuery => BackendCapabilities::bigquery(),
+            SqlDialect::SparkSQL => BackendCapabilities::spark(),
+        }
     }
     async fn load_table(
         &self,
@@ -414,7 +423,7 @@ impl Backend for RecordingBackend {
 }
 
 /// A monoid `SUM`-style rule: always safe, merges via a fixed template.
-struct SumRule;
+pub(super) struct SumRule;
 
 impl WindowedKeyedRule for SumRule {
     fn refuse(&self) -> Option<String> {
@@ -430,34 +439,6 @@ impl WindowedKeyedRule for SumRule {
         _dialect: MaintenanceDialect,
     ) -> String {
         format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
-    }
-}
-
-/// Same as [`SumRule`] but opts into `Grade::Additive` ledger grading
-/// (MP12) — exercises the driver's never-fold-twice wiring without a
-/// real backend.
-struct SumRuleAdditive;
-
-impl WindowedKeyedRule for SumRuleAdditive {
-    fn refuse(&self) -> Option<String> {
-        None
-    }
-    fn merge_sql(
-        &self,
-        schema: &str,
-        table: &str,
-        delta_sql: &str,
-        _slice: Option<&TargetSlicePredicate>,
-        _suppression: &WriteSuppression,
-        _dialect: MaintenanceDialect,
-    ) -> String {
-        format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
-    }
-    fn ledger_grade(&self) -> Grade {
-        Grade::Additive
-    }
-    fn ledger_input(&self) -> &str {
-        "smelt.events"
     }
 }
 
@@ -597,184 +578,6 @@ async fn sequences_create_then_merge_across_partitions_in_temporal_order() {
     assert!(calls[7].contains("ON CONFLICT DO NOTHING"));
     assert!(calls[8].starts_with("execute_sql: MERGE INTO main.t"));
     assert!(calls[8].contains("2024-01-03"));
-}
-
-/// A re-run-tolerant (`Grade::Idempotent`) keyed model on a dialect with
-/// no merge-ledger substrate (Spark) skips the bookkeeping record but
-/// still succeeds — this is bookkeeping, not a correctness gate. The
-/// omission is no longer surfaced via the old `RunReporter` stand-in
-/// method (retired — `docs/outcomes/20260904-state-residency/
-/// outcome.md` phase 6): the affected cell's own recorded
-/// `state_downgrade` is now the user-visible channel, surfaced by
-/// `smelt explain` (`crates/smelt-cli/tests/explain_maintenance.rs`).
-/// This test proves only the mechanical half the driver itself owns:
-/// no `RunReporter` event fires and no ledger statement is issued.
-#[tokio::test]
-async fn keyed_ledger_skip_reports_no_reporter_event() {
-    let backend = RecordingBackend {
-        dialect: SqlDialect::SparkSQL,
-        ..Default::default()
-    };
-    let retry = no_retry_policy();
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
-    run_windowed_keyed_maintenance(
-        &backend,
-        "model.under.test",
-        "main",
-        "t",
-        &steps,
-        &SumRule,
-        None,
-        &unconditional_suppression(),
-        None,
-        |step| {
-            Ok(format!(
-                "SELECT * FROM src WHERE d = '{}'",
-                step.partition_value
-            ))
-        },
-        &retry,
-        &crate::probes::ProbePolicy::per_run(),
-    )
-    .await
-    .expect("a skipped ledger record must not fail the run");
-
-    let calls = backend.calls.lock().unwrap();
-    assert!(
-        !calls.iter().any(|c| c.contains("_smelt_ledger")),
-        "no ledger statement must be issued on a ledger-less dialect: {:?}",
-        calls
-    );
-}
-
-/// The negative direction of the test above: on DuckDB (which has the
-/// ledger substrate) the bookkeeping record is written.
-#[tokio::test]
-async fn idempotent_ledger_on_duckdb_writes_the_record() {
-    let backend = RecordingBackend::default();
-    let retry = no_retry_policy();
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
-    run_windowed_keyed_maintenance(
-        &backend,
-        "model.under.test",
-        "main",
-        "t",
-        &steps,
-        &SumRule,
-        None,
-        &unconditional_suppression(),
-        None,
-        |step| {
-            Ok(format!(
-                "SELECT * FROM src WHERE d = '{}'",
-                step.partition_value
-            ))
-        },
-        &retry,
-        &crate::probes::ProbePolicy::per_run(),
-    )
-    .await
-    .unwrap();
-
-    let calls = backend.calls.lock().unwrap();
-    assert!(
-        calls.iter().any(|c| c.contains("_smelt_ledger")),
-        "the ledger record must be written on DuckDB: {:?}",
-        calls
-    );
-}
-
-/// MP12: an `Additive`-graded rule routes every step's create-or-merge
-/// action through `Backend::fold_ledger_delta` instead of the plain
-/// `create_table_as`/`execute_sql` path — the never-fold-twice wiring
-/// is reached even without a real database (`RecordingBackend` falls
-/// back to `fold_ledger_delta`'s generic default, which itself calls
-/// `execute_sql` for the ledger DDL/DML and the fold action).
-#[tokio::test]
-async fn additive_grade_routes_through_ledger_fold() {
-    let backend = RecordingBackend::default();
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
-    run_windowed_keyed_maintenance(
-        &backend,
-        "model.under.test",
-        "main",
-        "t",
-        &steps,
-        &SumRuleAdditive,
-        None,
-        &unconditional_suppression(),
-        None,
-        |step| {
-            Ok(format!(
-                "SELECT * FROM src WHERE d = '{}'",
-                step.partition_value
-            ))
-        },
-        &no_retry_policy(),
-        &crate::probes::ProbePolicy::per_run(),
-    )
-    .await
-    .unwrap();
-
-    let calls = backend.calls.lock().unwrap();
-    // The default `fold_ledger_delta` fallback issues ensure + exists +
-    // insert + action, all via `execute_sql` — never `create_table_as`,
-    // since the ledger-guarded action string carries its own `CREATE
-    // TABLE ... AS` text for the create branch.
-    assert!(
-        calls.iter().any(|c| c.contains("_smelt_ledger")),
-        "the ledger table DDL/DML must be issued: {:?}",
-        calls
-    );
-    assert!(
-        calls.iter().any(|c| c.contains("CREATE TABLE main.t AS")),
-        "the create branch's action must run through the ledger fold: {:?}",
-        calls
-    );
-}
-
-/// MP12: the ledger DDL/DML is DuckDB-flavored SQL
-/// (`smelt_state::ddl_duckdb`). An `Additive`-graded rule on a non-DuckDB
-/// backend must fail loudly instead of handing that backend SQL it
-/// cannot run (`CLAUDE.md` §"Fail-loud discipline").
-#[tokio::test]
-async fn additive_grade_on_non_duckdb_backend_fails_loud() {
-    let backend = RecordingBackend {
-        dialect: SqlDialect::SparkSQL,
-        ..Default::default()
-    };
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
-    let err = run_windowed_keyed_maintenance(
-        &backend,
-        "model.under.test",
-        "main",
-        "t",
-        &steps,
-        &SumRuleAdditive,
-        None,
-        &unconditional_suppression(),
-        None,
-        |step| {
-            Ok(format!(
-                "SELECT * FROM src WHERE d = '{}'",
-                step.partition_value
-            ))
-        },
-        &no_retry_policy(),
-        &crate::probes::ProbePolicy::per_run(),
-    )
-    .await
-    .unwrap_err();
-
-    assert!(
-        backend.calls.lock().unwrap().is_empty(),
-        "no SQL must be issued once the dialect guard refuses"
-    );
-    let message = format!("{err:#}");
-    assert!(
-        message.contains("Spark SQL"),
-        "error must name the unsupported dialect: {message}"
-    );
 }
 
 /// A rule that records the slice predicate it receives from the driver —

@@ -2007,6 +2007,23 @@ decision-acceptance records in `09-spec-readiness.md` §1 and `10-dependency-pro
 - **Never fold a delta already reflected in the state.** Every fold consults the ledger; every
   region recompute resets the entries it overwrote. No path may merge a window twice. The
   same rule governs definition-delta catch-up.
+
+  **The ledger refuses the repeat — it does not merely report one.** The refusal and the fold
+  share one backend transaction, so a repeat can never leave the fold applied and the ledger
+  disagreeing, and no check-then-act window exists between reading the ledger and writing to
+  it. A separate "does this entry exist?" probe followed by an insert is not an acceptable
+  realisation: two concurrent runs can both read absent and both fold. How the refusal is
+  *mechanised* is a dialect property with two admissible realisations —
+  (a) the ledger's own **enforced key**: the record is a plain insert, a repeat violates the
+  key, and the violation aborts the transaction before the action runs; or
+  (b) a **conditional record whose zero-row outcome aborts** the enclosing transaction, for a
+  dialect whose key is unenforced — sound only where the engine also refuses to commit two
+  concurrent transactions mutating the ledger table.
+  A dialect offering neither does not realise the reconciliation ledger, and a cell needing
+  one downgrades rather than folding unguarded (`state.md` §"Which dialects realise which
+  structure"). Where realisation (b) is in force and the fold's action would be DDL on a
+  permanent entity — the first run's `CREATE TABLE … AS` — the step is refused rather than
+  split across two commits.
 - **Write window = output window**, per cell: the DELETE/merge target and the output clamp
   range over the same output-axis column and window, by construction.
 - **Only proofs prune.** A declared bound is admitted only checked; a guardrail

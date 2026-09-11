@@ -30,4 +30,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 smelt-dialect = { path = "../smelt-dialect" }
+# Drives the never-fold-twice test with the REAL ledger builders rather than
+# a restatement of them. Dev-only: the production backend receives its ledger
+# SQL from the caller and depends on `smelt-state` not at all.
+smelt-state = { path = "../smelt-state" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

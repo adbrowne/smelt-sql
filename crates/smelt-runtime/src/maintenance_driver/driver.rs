@@ -2,7 +2,6 @@ use crate::transformer::{add_seconds_to_date, subtract_seconds_from_date, TimeRa
 use anyhow::{bail, Context, Result};
 use smelt_backend::{Backend, BackendError, ExecutionResult};
 use smelt_core::config::Granularity;
-use smelt_dialect::SqlDialect;
 use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::emit::{
     emit_create_table_as, MaintenanceDialect, MaintenanceStatement, StatementGroup,
@@ -478,29 +477,58 @@ pub async fn run_windowed_keyed_maintenance(
 
         match grade {
             Grade::Additive => {
-                // The ledger *text* now exists on BigQuery too
-                // (`smelt_state::ledger` dispatches it), but the
-                // never-fold-twice refusal this arm depends on does not: on
-                // DuckDB it IS the ledger table's `PRIMARY KEY` violation,
-                // surfaced as `BackendError::AlreadyReflected`, and BigQuery's
-                // `PRIMARY KEY` is declared `NOT ENFORCED` — it raises nothing
-                // (`docs/specs/state.md` §"Which dialects realise which
-                // structure"). Re-expressing that refusal transactionally is
-                // `docs/outcomes/20260906-bigquery-correctness` row 14; until
-                // it lands, an additive fold off DuckDB fails loudly rather
-                // than silently double-counting (`CLAUDE.md` §"Fail-loud
-                // discipline"). Reaching here at all means the plan layer
-                // failed to downgrade first: `required_state_structure(
-                // KeyedFold)` is `ReconciliationLedger`, unrealisable
-                // everywhere but DuckDB.
-                // STATE-GUARD: ReconciliationLedger
-                if backend.dialect() != SqlDialect::DuckDB {
+                // Whether this dialect can refuse a repeat fold at all is
+                // asked of `realises_reconciliation_ledger`, **derived from
+                // the availability layer** rather than compared against a
+                // dialect name here (same posture as `realises_merge_ledger`
+                // and `records_observed_deltas`). Reaching a `false` means the
+                // plan layer failed to downgrade first —
+                // `required_state_structure(KeyedFold)` is
+                // `ReconciliationLedger` — so this fails loudly rather than
+                // silently double-counting (`CLAUDE.md` §"Fail-loud
+                // discipline"). It is not a guard the census has to be told
+                // about, because it can never disagree with the row.
+                if !super::realises_reconciliation_ledger(backend.dialect()) {
                     bail!(
                         "{}",
                         BackendError::unsupported(
                             backend.dialect().name(),
                             "additive-fold windowed-keyed maintenance ledger (never-fold-twice)",
                         )
+                    );
+                }
+
+                // The first step's action is a `CREATE TABLE … AS` (see
+                // `create_group` above), and this arm folds its action
+                // *inside* the ledger's transaction. A backend whose
+                // transactions cannot hold DDL on a permanent table therefore
+                // has no atomic realisation of the first step, and there is no
+                // safe degradation: committing the ledger record and the
+                // create separately would let a crash between them leave the
+                // ledger claiming a fold that never happened. So refuse, with
+                // the remedy named — `--full-refresh` materialises the target
+                // outside the window-forward loop, after which every step is a
+                // pure-DML merge this transaction can hold.
+                //
+                // Capability-shaped, not dialect-shaped: BigQuery reports
+                // `supports_transactional_ddl: false` because GoogleSQL does
+                // not permit DDL creating or dropping permanent entities
+                // inside a transaction, while DuckDB's transactions roll a
+                // `CREATE TABLE` back for free.
+                if create_group.is_some() && !backend.capabilities().supports_transactional_ddl {
+                    bail!(
+                        "windowed-keyed-maintenance driver refused model '{}': the target \
+                         {}.{} does not exist yet, so this additive fold's first action is a \
+                         `CREATE TABLE … AS`, and {} cannot hold DDL on a permanent table \
+                         inside the transaction that also carries the never-fold-twice ledger \
+                         record (`docs/specs/incremental_models.md` §Constraints \"Never fold \
+                         a delta already reflected in the state\"). Run once with \
+                         `--full-refresh` to materialise the target, after which every step \
+                         is a merge this transaction can hold.",
+                        model_name,
+                        schema,
+                        table,
+                        backend.dialect().name(),
                     );
                 }
 
@@ -526,12 +554,16 @@ pub async fn run_windowed_keyed_maintenance(
                 }
 
                 // Routed through the one dialect dispatch point
-                // (`smelt_state::ledger`) rather than a named DuckDB builder,
-                // so row 14 only has to make the refusal above correct — the
-                // statements it needs are already dialect-plural.
+                // (`smelt_state::ledger`) rather than a named DuckDB builder.
+                // `ledger_fold_record_sql`, not `ledger_insert_sql`: the
+                // record whose *zero-effect outcome is the refusal*, which on
+                // DuckDB is a plain `INSERT` against an enforced key and on
+                // BigQuery a `MERGE … WHEN NOT MATCHED` whose row count the
+                // backend seam reads. One guarantee, two spellings, chosen in
+                // one place.
                 let dialect = backend.dialect();
                 let ensure_sql = smelt_state::ledger::ledger_table_ddl(dialect, schema)?;
-                let insert_sql = smelt_state::ledger::ledger_insert_sql(
+                let insert_sql = smelt_state::ledger::ledger_fold_record_sql(
                     dialect,
                     schema,
                     model_name,

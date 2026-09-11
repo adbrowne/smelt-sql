@@ -21,7 +21,9 @@ use smelt_backend::{
     StatementGroup,
 };
 
-mod sql;
+/// GoogleSQL statement and script builders, kept pure so their contracts can
+/// be asserted against the text they produce rather than against a warehouse.
+pub mod sql;
 
 /// BigQuery backend for smelt, powered by google-cloud-bigquery via PyO3.
 ///
@@ -550,6 +552,55 @@ impl Backend for BigQueryBackend {
     /// emission (single owner)"; the ledger's own DDL/DML from
     /// `smelt_state::ledger`, the bookkeeping exclusion in `CLAUDE.md`
     /// §"Maintenance-plan purity").
+    /// Real transactional override of the never-fold-twice seam
+    /// (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
+    /// already reflected in the state").
+    ///
+    /// The trait's default is a documented best-effort, **non-atomic**
+    /// `exists` → `insert` → `action` fallback: two concurrent runs can both
+    /// read "absent" and both fold, which for an additive fold is a silent
+    /// double-count. That is precisely the defect this structure exists to
+    /// prevent, so BigQuery does not use it. The refusal is re-expressed as a
+    /// zero-row abort inside the same multi-statement transaction as the
+    /// action — see [`sql::fold_ledger_delta_script`] for the script and for
+    /// the isolation argument it rests on.
+    ///
+    /// `ensure_sql` (idempotent `CREATE TABLE IF NOT EXISTS`) runs first and
+    /// **outside** the transaction, the precedent the trait sets and BigQuery
+    /// makes load-bearing: GoogleSQL does not permit DDL on permanent entities
+    /// inside a transaction at all.
+    ///
+    /// `exists_sql` is **dead on this dialect** and deliberately unused rather
+    /// than issued and ignored. A separate existence check is exactly the
+    /// check-then-act window this override exists to close; the record
+    /// statement's own row count answers the same question atomically, so
+    /// running the probe would cost a job and buy nothing. It stays in the
+    /// signature because DuckDB's trait default still has a use for it.
+    async fn fold_ledger_delta(
+        &self,
+        ensure_sql: &str,
+        record_sql: &str,
+        _exists_sql: &str,
+        action_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.py_execute_no_result(ensure_sql).await?;
+        let script = sql::fold_ledger_delta_script(record_sql, action_sql);
+        match self.py_execute_no_result(&script).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let message = e.to_string();
+                if sql::is_already_reflected(&message) {
+                    // The script raised before `action_sql` was reached and
+                    // the EXCEPTION handler rolled the transaction back, so
+                    // the ledger row and the fold are both un-applied.
+                    Err(BackendError::already_reflected(message))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     async fn execute_write_with_bookkeeping(
         &self,
         ensure_sqls: &[String],

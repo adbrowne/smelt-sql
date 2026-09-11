@@ -103,6 +103,60 @@ pub fn ledger_insert_sql(
     }
 }
 
+/// The ledger record an **additive** fold writes before its action, whose
+/// zero-effect outcome *is* the never-fold-twice refusal
+/// (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
+/// already reflected in the state").
+///
+/// The guarantee is dialect-plural; the two realisations are:
+///
+/// - **DuckDB** — a plain `INSERT` against an *enforced* `PRIMARY KEY`. A
+///   repeat raises a constraint violation, which
+///   `smelt_backend_duckdb`'s `fold_ledger_delta` recognises inside its
+///   `duckdb::Transaction` and reports as `BackendError::AlreadyReflected`.
+/// - **BigQuery** — a `MERGE … WHEN NOT MATCHED THEN INSERT`, because
+///   GoogleSQL's `PRIMARY KEY` is `NOT ENFORCED` and refuses nothing. A repeat
+///   modifies zero rows, and `smelt_backend_bigquery`'s `fold_ledger_delta`
+///   turns `@@row_count = 0` into the same `AlreadyReflected`, inside the same
+///   multi-statement transaction as the fold action.
+///
+/// Distinct from [`ledger_upsert_sql`] in *role*, not necessarily in text: an
+/// idempotent cell's repeat record is a no-op by design, an additive cell's is
+/// a refusal. The backend seam is what tells them apart.
+#[allow(clippy::too_many_arguments)]
+pub fn ledger_fold_record_sql(
+    dialect: SqlDialect,
+    schema: &str,
+    model: &str,
+    group: &str,
+    input: &str,
+    delta_id: &str,
+    region_start: &str,
+    region_end: &str,
+) -> LedgerResult<String> {
+    match dialect {
+        SqlDialect::DuckDB => Ok(ddl_duckdb::generate_ledger_insert_sql(
+            schema,
+            model,
+            group,
+            input,
+            delta_id,
+            region_start,
+            region_end,
+        )),
+        SqlDialect::BigQuery => Ok(ddl_bigquery::generate_ledger_conditional_insert_sql(
+            schema,
+            model,
+            group,
+            input,
+            delta_id,
+            region_start,
+            region_end,
+        )),
+        SqlDialect::SparkSQL => Err(UnsupportedLedgerDialect::new(dialect)),
+    }
+}
+
 /// Record one merged window as bookkeeping, no-op on repeat — the
 /// re-run-tolerant (`Grade::Idempotent`) merge-ledger write.
 #[allow(clippy::too_many_arguments)]

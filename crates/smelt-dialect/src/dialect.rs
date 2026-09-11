@@ -348,7 +348,19 @@ impl BackendCapabilities {
             supports_date_literal: true,
             supports_concat_operator: true,
             supports_array_literal: true,
-            supports_transactional_ddl: true,
+            // BigQuery has multi-statement transactions, but they cannot hold
+            // DDL on *permanent* entities: "DDL statements that create or drop
+            // permanent entities, such as datasets, tables, and functions, are
+            // not supported inside transactions" (BigQuery docs,
+            // "Multi-statement transactions"); only `CREATE TEMP TABLE` and
+            // friends are. Every smelt caller of this flag is asking about a
+            // permanent table — a `CREATE TABLE … AS` target or an `ALTER
+            // TABLE` migration — so the honest answer here is `false`. It
+            // gates the maintenance driver's refusal to fold a first-run
+            // `CREATE TABLE … AS` action together with its ledger record
+            // (`smelt_runtime::maintenance_driver`), which would otherwise be
+            // discovered against a live warehouse.
+            supports_transactional_ddl: false,
             // GoogleSQL has no `::` cast operator: `SELECT 1::INT64` is a syntax error.
             supports_double_colon_cast: false,
             supports_trailing_commas: true,

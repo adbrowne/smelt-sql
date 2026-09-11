@@ -26,18 +26,24 @@ use crate::maintenance::Technique;
 /// nothing else: `smelt-state/src/ddl_bigquery.rs` carries its GoogleSQL
 /// ledger spelling (a `MERGE … WHEN NOT MATCHED` upsert, since GoogleSQL has
 /// no `ON CONFLICT`) beside its schema-evolution DDL, and
-/// `smelt-backend-bigquery` overrides `execute_write_with_bookkeeping` with a
-/// real multi-statement transaction. Its `ReconciliationLedger` row stays off
-/// for a reason that is not a missing emitter: the never-fold-twice refusal is
-/// a `PRIMARY KEY` *violation* on DuckDB, and BigQuery's `PRIMARY KEY` is
-/// declared `NOT ENFORCED`. `ddl_spark.rs` carries schema-evolution DDL only.
+/// `smelt-backend-bigquery` overrides `execute_write_with_bookkeeping` and
+/// `fold_ledger_delta` with real multi-statement transactions. Its
+/// `ReconciliationLedger` row is on for a reason that took re-deriving rather
+/// than porting: the never-fold-twice refusal is a `PRIMARY KEY` *violation*
+/// on DuckDB, and BigQuery's `PRIMARY KEY` is declared `NOT ENFORCED`, so
+/// there the guarantee is a zero-row abort — the record statement is a
+/// `MERGE … WHEN NOT MATCHED`, and `@@row_count = 0` raises inside the same
+/// transaction that holds the fold action
+/// (`smelt_backend_bigquery::sql::fold_ledger_delta_script`). The guarantee is
+/// one guarantee with two realisations, not two guarantees.
+/// `ddl_spark.rs` carries schema-evolution DDL only.
 /// The fingerprint sidecar has a second, independent source of truth agreeing
 /// with this: every consumer in `maintenance_driver/sidecar.rs` gates on
 /// `BackendCapabilities::supports_fingerprint_sidecar`, `true` for DuckDB
 /// alone.
 ///
 /// BigQuery's remaining rows are pending work
-/// (`docs/outcomes/20260906-bigquery-correctness` phases 12, 14 and 15) and
+/// (`docs/outcomes/20260906-bigquery-correctness` phases 12 and 15) and
 /// flip on as each realisation lands. **Spark's are not**:
 /// Delta gives per-table atomicity and no cross-table transaction, so a ledger
 /// write and its data write cannot be made atomic there and the additive
@@ -52,7 +58,10 @@ pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
             StateStructure::FingerprintSidecar,
             StateStructure::TombstoneLedger,
         ],
-        SqlDialect::BigQuery => vec![StateStructure::MergeLedger],
+        SqlDialect::BigQuery => vec![
+            StateStructure::MergeLedger,
+            StateStructure::ReconciliationLedger,
+        ],
         SqlDialect::SparkSQL => vec![],
     }
 }

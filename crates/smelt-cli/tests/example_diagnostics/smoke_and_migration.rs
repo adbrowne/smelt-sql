@@ -47,11 +47,12 @@ fn web_analytics_no_diagnostics() {
 /// for every `grain: key`/succession cell whose ledger structure BigQuery does
 /// not realise — see `check_workspace_diagnostics_are_exactly`'s doc comment.
 ///
-/// The `ColumnScopedMerge` cell is **not** in this list, and its absence is the
-/// point: BigQuery realises the transactional merge ledger
-/// (`docs/specs/state.md` §"Which dialects realise which structure"), so that
-/// cell keeps its technique. The reconciliation and tombstone ledgers it does
-/// not realise, so those downgrades stand.
+/// Two cells are **not** in this list, and their absence is the point:
+/// BigQuery realises the transactional merge ledger *and* the reconciliation
+/// ledger (`docs/specs/state.md` §"Which dialects realise which structure"),
+/// so the `ColumnScopedMerge` cell and the `KeyedFold` cell both keep their
+/// technique. Only the tombstone ledger is still unrealised there, so only
+/// the `SuccessionPatch` downgrades stand — two of them, one per source.
 #[test]
 fn github_activity_no_diagnostics() {
     check_workspace_diagnostics_are_exactly(
@@ -62,11 +63,6 @@ fn github_activity_no_diagnostics() {
              SuccessionPatch requires the tombstone ledger, which is unavailable for this \
              project; downgraded to DeleteInsert, the cheapest recompute-family technique \
              that preserves the equivalence invariant",
-            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } \
-             downgraded from KeyedFold to its recompute-family equivalent — KeyedFold \
-             requires the reconciliation ledger (frontier record), which is unavailable for \
-             this project; downgraded to PerGroupRecompute, the cheapest recompute-family \
-             technique that preserves the equivalence invariant",
             "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events_arrival\" } \
              downgraded from SuccessionPatch to its recompute-family equivalent — \
              SuccessionPatch requires the tombstone ledger, which is unavailable for this \

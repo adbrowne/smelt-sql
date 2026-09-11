@@ -69,17 +69,20 @@ fn succession_downgrade_fires_for_spark_bigquery_and_warehouse_tables_none() {
 
 #[test]
 fn a_ledger_less_dialect_realises_no_ledger() {
-    // Spark is the ledger-less dialect; BigQuery holds the *merge* ledger but
-    // not the reconciliation ledger, whose never-fold-twice refusal needs an
-    // enforced key BigQuery does not have (`docs/specs/state.md` §"Which
-    // dialects realise which structure"), so it is asserted separately below.
+    // Spark is the ledger-less dialect. BigQuery holds **both** ledgers: the
+    // merge ledger since phase 13, and the reconciliation ledger since phase
+    // 14, whose never-fold-twice refusal no longer needs the enforced key
+    // BigQuery does not have — it is a zero-row abort inside a multi-statement
+    // transaction instead (`docs/specs/state.md` §"Which dialects realise
+    // which structure"). What both dialects still lack is the sidecar and the
+    // observed-delta table, which is what this test is now about.
     for dialect in [SqlDialect::SparkSQL, SqlDialect::BigQuery] {
         let realised: BTreeSet<StateStructure> =
             realisable_state_structures(dialect).into_iter().collect();
         if dialect == SqlDialect::SparkSQL {
             assert!(!realised.contains(&StateStructure::MergeLedger));
+            assert!(!realised.contains(&StateStructure::ReconciliationLedger));
         }
-        assert!(!realised.contains(&StateStructure::ReconciliationLedger));
         // Corrected 2026-09-10: this test used to assert the sidecar and the
         // observed-delta table WERE realised on these dialects. They are not —
         // every emitter of both is DuckDB-only, and claiming them suppressed

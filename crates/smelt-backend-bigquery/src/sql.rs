@@ -246,6 +246,118 @@ pub fn write_with_bookkeeping_plan(
     plan
 }
 
+/// The marker [`fold_ledger_delta_script`] raises when the fold's ledger
+/// record turns out to be a repeat, and the *only* string
+/// [`is_already_reflected`] matches on.
+///
+/// It is emitted and recognised in this one module on purpose: a recogniser
+/// living apart from its emitter is the failure this seam could least afford —
+/// drift would turn "refuse the repeat" into "fail the run with an
+/// unclassified error", or worse, leave a repeat unrecognised. The pairing is
+/// asserted by `sentinel_the_script_emits_is_the_sentinel_the_matcher_knows`.
+///
+/// Shaped so it cannot collide with user data reaching an error message:
+/// screaming snake case, a `SMELT_` namespace prefix, and a token
+/// (`ALREADY_REFLECTED`) that appears in no GoogleSQL keyword, no table name
+/// and no smelt-emitted SQL.
+pub const ALREADY_REFLECTED_SENTINEL: &str = "SMELT_LEDGER_ALREADY_REFLECTED";
+
+/// The GoogleSQL script realising `Backend::fold_ledger_delta`'s
+/// never-fold-twice contract (`docs/specs/incremental_models.md` §Constraints
+/// "Never fold a delta already reflected in the state") on BigQuery.
+///
+/// **Why this exists at all.** On DuckDB the guarantee *is* a storage
+/// constraint: the ledger's `PRIMARY KEY` is enforced, a repeat insert
+/// violates it, and the violation aborts the transaction before the fold runs.
+/// GoogleSQL's `PRIMARY KEY` is `NOT ENFORCED` — it documents row identity and
+/// refuses nothing — so the same two statements would silently double-count an
+/// additive fold. Here the refusal is re-expressed as an *effect* test:
+/// `record_sql` (`smelt_state::ledger::ledger_fold_record_sql`, which on this
+/// dialect is a `MERGE … WHEN NOT MATCHED THEN INSERT`) modifies one row the
+/// first time and zero rows on a repeat, and `@@row_count = 0` aborts the
+/// script before `action_sql` is ever reached.
+///
+/// ```text
+/// BEGIN
+/// BEGIN TRANSACTION;
+/// <record_sql>;
+/// IF @@row_count = 0 THEN
+/// RAISE USING MESSAGE = '<sentinel>: …';
+/// END IF;
+/// <action_sql>;
+/// COMMIT TRANSACTION;
+/// EXCEPTION WHEN ERROR THEN
+/// ROLLBACK TRANSACTION;
+/// RAISE USING MESSAGE = @@error.message;
+/// END;
+/// ```
+///
+/// **The soundness argument, and exactly what it rests on.** Two concurrent
+/// runs must not both see "absent" and both fold — the check-then-act race
+/// that makes `Backend::fold_ledger_delta`'s documented best-effort default
+/// (`exists` → `insert` → `action`, as three separate jobs) unacceptable as
+/// BigQuery's realisation. BigQuery's multi-statement transactions are
+/// documented to "guarantee ACID properties and support snapshot isolation",
+/// and — the load-bearing sentence — "If a transaction mutates (updates or
+/// deletes) rows in a table, then other transactions or DML statements that
+/// mutate rows in the same table cannot run concurrently. Conflicting
+/// transactions are cancelled." (BigQuery docs, "Multi-statement
+/// transactions"). Both folds mutate `_smelt_ledger`, the same table, so they
+/// cannot commit concurrently: one wins and the other is cancelled by the
+/// engine. The winner's fold applies once; the loser is either cancelled (a
+/// loud failure, never a silent second fold) or, on a later re-run, reads the
+/// committed row and refuses here. The property this rests on is therefore
+/// *conflict detection between mutating transactions on one table*, which is
+/// stronger than the snapshot isolation it is usually stated alongside — the
+/// refusal does not need to reason about read skew at all.
+///
+/// Two things offline evidence cannot settle, both inherited by phase 16 of
+/// `docs/outcomes/20260906-bigquery-correctness`: that a live repeat really
+/// surfaces this sentinel through the adapter's error text unmangled, and that
+/// the engine's cancellation of a conflicting transaction is observed as a
+/// failure rather than as a retry that quietly succeeds.
+///
+/// **Rollback is explicit.** BigQuery does not unwind a script's transaction
+/// on its own when a statement fails mid-script, so the body is wrapped in
+/// `BEGIN … EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION; RAISE USING
+/// MESSAGE = @@error.message; END` — the same shape
+/// [`write_with_bookkeeping_plan`] uses. A `RAISE` inside the `BEGIN` section
+/// is caught by that handler, which rolls the transaction back and re-raises
+/// carrying the sentinel, so the refusal still reaches the caller as an error.
+///
+/// **No DDL may appear in `action_sql`.** BigQuery does not permit DDL that
+/// creates or drops permanent entities inside a transaction, so a first-run
+/// `CREATE TABLE … AS` action cannot be folded atomically here. That is
+/// refused *upstream*, at the driver, keyed on
+/// `BackendCapabilities::supports_transactional_ddl` — never discovered inside
+/// this script.
+pub fn fold_ledger_delta_script(record_sql: &str, action_sql: &str) -> String {
+    let terminate = |s: &str| format!("{};", s.trim().trim_end_matches(';').trim_end());
+    format!(
+        "BEGIN\nBEGIN TRANSACTION;\n{}\nIF @@row_count = 0 THEN\n\
+         RAISE USING MESSAGE = '{}: this delta is already recorded in the reconciliation \
+         ledger; the fold was not applied';\nEND IF;\n{}\nCOMMIT TRANSACTION;\n\
+         EXCEPTION WHEN ERROR THEN\nROLLBACK TRANSACTION;\n\
+         RAISE USING MESSAGE = @@error.message;\nEND;",
+        terminate(record_sql),
+        ALREADY_REFLECTED_SENTINEL,
+        terminate(action_sql),
+    )
+}
+
+/// Does this BigQuery error message carry [`fold_ledger_delta_script`]'s
+/// already-reflected sentinel?
+///
+/// The counterpart of `smelt_backend_duckdb`'s `is_constraint_violation`: it
+/// answers "is this failure the ledger refusing a repeat, rather than a
+/// genuine execution failure?", and it is the one place that answer is decided
+/// on this backend. Deliberately a `contains` rather than an equality test —
+/// the adapter wraps the raised message in BigQuery's own job-error envelope
+/// (`400 Query error: …`), so the sentinel arrives embedded, not alone.
+pub fn is_already_reflected(message: &str) -> bool {
+    message.contains(ALREADY_REFLECTED_SENTINEL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +595,81 @@ mod tests {
                 "INSERT INTO `ds.t` VALUES ('a')".to_string(),
             ]
         );
+    }
+
+    // ── never-fold-twice (`fold_ledger_delta_script`) ────────────────────
+
+    /// The emitter and the recogniser must never drift apart: the string the
+    /// script raises is the string [`is_already_reflected`] matches, asserted
+    /// in one place so a rename of either half fails here rather than silently
+    /// downgrading a refusal into an unclassified execution failure.
+    #[test]
+    fn sentinel_the_script_emits_is_the_sentinel_the_matcher_knows() {
+        let script = fold_ledger_delta_script(
+            "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS model_name) S ON T.model_name = \
+             S.model_name WHEN NOT MATCHED THEN INSERT (model_name) VALUES (S.model_name)",
+            "MERGE INTO `ds.t` USING (SELECT 1)",
+        );
+        assert!(
+            script.contains(ALREADY_REFLECTED_SENTINEL),
+            "the script must raise the sentinel: {script}"
+        );
+        // The shape the adapter actually hands back: BigQuery's job-error
+        // envelope wrapped around the raised message.
+        let live_shaped_error = format!(
+            "400 Query error: {}: this delta is already recorded in the reconciliation ledger; \
+             the fold was not applied at [4:1]",
+            ALREADY_REFLECTED_SENTINEL
+        );
+        assert!(is_already_reflected(&live_shaped_error));
+        assert!(!is_already_reflected(
+            "404 Not found: Table project:dataset.orders"
+        ));
+    }
+
+    /// The atomicity shape, asserted against the pure builder rather than a
+    /// warehouse: the record, the zero-row abort and the action all sit inside
+    /// exactly one `BEGIN TRANSACTION … COMMIT TRANSACTION`, in that order,
+    /// and the abort is positioned so the action cannot be reached on a
+    /// repeat.
+    #[test]
+    fn record_abort_and_action_share_exactly_one_transaction_in_that_order() {
+        let script = fold_ledger_delta_script(
+            "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS model_name) S ON T.model_name = \
+             S.model_name WHEN NOT MATCHED THEN INSERT (model_name) VALUES (S.model_name)",
+            "MERGE INTO `ds.t` USING (SELECT 1)",
+        );
+        assert_eq!(script.matches("BEGIN TRANSACTION;").count(), 1, "{script}");
+        assert_eq!(script.matches("COMMIT TRANSACTION;").count(), 1, "{script}");
+        assert_eq!(
+            script.matches("ROLLBACK TRANSACTION;").count(),
+            1,
+            "{script}"
+        );
+
+        let begin = script.find("BEGIN TRANSACTION;").unwrap();
+        let record = script.find("_smelt_ledger").unwrap();
+        let abort = script.find("IF @@row_count = 0 THEN").unwrap();
+        let action = script.find("MERGE INTO `ds.t`").unwrap();
+        let commit = script.find("COMMIT TRANSACTION;").unwrap();
+        assert!(
+            begin < record && record < abort && abort < action && action < commit,
+            "record → abort → action must all fall inside the one transaction: {script}"
+        );
+        assert!(
+            script.contains("EXCEPTION WHEN ERROR THEN\nROLLBACK TRANSACTION;"),
+            "BigQuery does not unwind a script's transaction on its own: {script}"
+        );
+    }
+
+    /// Statements arrive unterminated from the emitters and must be
+    /// `;`-terminated exactly once — an already-terminated statement must not
+    /// become `;;`, which is a script syntax error.
+    #[test]
+    fn fold_script_terminates_each_statement_exactly_once() {
+        let script = fold_ledger_delta_script("MERGE `ds._smelt_ledger` X;", "MERGE INTO `ds.t` Y");
+        assert!(!script.contains(";;"), "{script}");
+        assert!(script.contains("MERGE `ds._smelt_ledger` X;\n"), "{script}");
+        assert!(script.contains("MERGE INTO `ds.t` Y;\n"), "{script}");
     }
 }
