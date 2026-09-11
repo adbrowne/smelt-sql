@@ -227,6 +227,11 @@ rediscovered.
      With 1a and 1b fixed the workaround is deleted from `examples/github_activity/smelt.yml` and
      the DuckDB negative control keeps its teeth.
 
+  **Every residual gap is now tracked as an issue**, not only as spec prose: #200 (the `FILTER`
+  lowering, waiting on a registry null-input disposition), #201 (the `INTERVAL` frame lowering,
+  waiting on a window-spec dialect seam) and #202 (finding 4's structured half). Each is also a
+  Known Divergence in its owning spec.
+
   **What is left of finding 4, stated rather than quietly dropped.** The precision-downgrade
   skip sites now log at `warn!` instead of `debug!`, so an operator sees them without raising the
   log level. The *structured* half is not done: no per-model record in the run manifest or report,

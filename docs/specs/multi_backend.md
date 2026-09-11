@@ -1034,6 +1034,17 @@ resolves nested widening to a table rewrite.
   and verified live (`docs/outcomes/20260904-dialect-emission-vocabulary` phase 7); BigQuery's
   remains open, tracked in the same outcome.
 
+- **A clause GoogleSQL lacks is refused rather than lowered (#200, #201).** Both
+  §"Clause-level dialect refusals" constructs stop at compile time on BigQuery, so a model valid
+  on DuckDB and Spark stays unrunnable there until its author rewrites it. The aggregate
+  `FILTER (WHERE …)` clause waits on a null-input disposition in `BuiltinRegistry` — the
+  `CASE WHEN` rewrite changes `ARRAY_AGG`'s answer, so it cannot be applied blindly (#200). The
+  `INTERVAL`-offset `RANGE` frame waits on a window-spec dialect seam — the exact GoogleSQL form
+  needs the `OVER` clause's `ORDER BY` rewritten too, and window specs print through
+  `smelt-parser`'s dialect-agnostic `Display` (#201). The concrete cost is two models of
+  `examples/github_activity` (`silver.actor_sessions` and its downstream) that build on DuckDB
+  and not on BigQuery.
+
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,
   not a path smelt takes. Tracked in `docs/research/20260816-bigquery-backend.md`.

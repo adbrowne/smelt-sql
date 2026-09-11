@@ -340,13 +340,13 @@ lands.
 ## Known Divergences / Open Questions
 
 - **A skipped precision record reaches the operator as a log warning, not as structured run
-  state.** §"The degradation contract"'s precision class is reported per occurrence at warn
+  state (#202).** §"The degradation contract"'s precision class is reported per occurrence at warn
   level, which is what a live BigQuery run showed was missing entirely. It is not yet carried in
   the run manifest or the run report, and `smelt explain` cannot be asked what a given target
   would give up (`explain` takes no `--target`), so there is no offline way to see the loss
   before a run and no machine-readable record of it after one. Both are the same missing piece:
   a per-model precision-downgrade record derived from the availability layer, which already
-  knows the answer statically. Tracked in
+  knows the answer statically. Tracked in #202; found by
   `docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md` finding 4.
 
 Otherwise none open — `state.mode` is honoured by `execute_project`, the reconciliation ledger
