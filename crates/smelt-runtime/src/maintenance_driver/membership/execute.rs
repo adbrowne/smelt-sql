@@ -2,7 +2,6 @@ use super::*;
 use anyhow::Result;
 use smelt_backend::{maintenance_dialect, Backend, ExecutionResult, PartitionRange};
 use smelt_logical::maintenance::emit::emit_staged_candidate_conditional_recompute;
-use smelt_state::ddl_duckdb;
 use std::time::Instant;
 
 /// Execute a live, membership-sensitive `Technique::DeleteInsert` cell
@@ -87,7 +86,10 @@ pub async fn execute_staged_membership_recompute(
             preview: None,
         });
     }
-    let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+    // Routed through the one dialect dispatch point
+    // (`smelt_state::observed_delta`) rather than a named DuckDB builder.
+    let dialect_id = backend.dialect();
+    let ensure_sql = smelt_state::observed_delta::observed_delta_table_ddl(dialect_id, schema)?;
     let partition_column = if window.column.is_empty() {
         None
     } else {
@@ -100,13 +102,14 @@ pub async fn execute_staged_membership_recompute(
         compared_columns,
         partition_column,
     );
-    let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+    let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
+        dialect_id,
         schema,
         table,
         &window.start,
         &window.end,
         &changed_keys_query,
-    );
+    )?;
     crate::execute::retry_backend_call(retry, || {
         backend.execute_conditional_write_and_record_observed_delta(
             &ensure_sql,

@@ -222,15 +222,59 @@ pub fn is_wrong_type_drop_failure(error_message: &str) -> bool {
 /// transaction is opened: the write statements run as ordinary jobs, exactly
 /// as the trait's default would. The transaction exists to make a bookkeeping
 /// record and its write atomic, and with no record there is nothing to bind.
+///
+/// **And where the write itself is a `CREATE`, the transaction cannot hold
+/// it.** BigQuery does not permit DDL creating or dropping permanent entities
+/// inside a multi-statement transaction (the same documented fact
+/// `BackendCapabilities::supports_transactional_ddl: false` records, and the
+/// reason the additive fold refuses its first step outright). A maintained
+/// model's *first* run writes `CREATE TABLE … AS` rather than a merge, so a
+/// re-run-tolerant cell's ledger record would otherwise be bound into a script
+/// the engine rejects. That case takes [`BookkeepingAtomicity::
+/// NonAtomicCreatingWrite`]: no transaction, the write first and the
+/// bookkeeping after, each its own job — and the caller **reports** the lost
+/// atomicity rather than absorbing it (`docs/specs/state.md` §"The degradation
+/// contract").
+///
+/// Two things make that ordering the right one rather than a coin flip:
+///
+/// - **Record-before-write is vacuous here.** The contract's ordering exists
+///   because a record reads the target's *pre-write* state to compute the
+///   changed-row set. A write that creates the target has no pre-write state
+///   to read — the record's own query would reference a table that does not
+///   exist yet — so nothing is lost by running it after.
+/// - **The surviving exposure is the harmless direction.** A crash between the
+///   two leaves the table created and the window unrecorded, so a re-run
+///   redoes the window. The reverse (a bookkeeping record claiming a window
+///   whose write never happened) is the direction that can mislead a later
+///   run, and this ordering makes it impossible.
+///
+/// Only a leading `CREATE` is treated this way, because that is the only DDL
+/// the maintenance driver ever puts in a write group (`create_group` is
+/// `emit_create_table_as`). Any other DDL reaching a write group would still
+/// be bound into the transaction and rejected by the engine — loudly, and
+/// noted here rather than silently pre-empted, since inventing a degradation
+/// for a shape nothing emits would be untested behaviour.
 pub fn write_with_bookkeeping_plan(
     ensure_sqls: &[String],
     pre_write_sqls: &[String],
     write_sqls: &[String],
-) -> Vec<String> {
-    let mut plan: Vec<String> = ensure_sqls.to_vec();
+) -> BookkeepingPlan {
+    let mut statements: Vec<String> = ensure_sqls.to_vec();
     if pre_write_sqls.is_empty() {
-        plan.extend(write_sqls.iter().cloned());
-        return plan;
+        statements.extend(write_sqls.iter().cloned());
+        return BookkeepingPlan {
+            statements,
+            atomicity: BookkeepingAtomicity::NothingToBind,
+        };
+    }
+    if write_sqls.iter().any(|s| creates_a_permanent_entity(s)) {
+        statements.extend(write_sqls.iter().cloned());
+        statements.extend(pre_write_sqls.iter().cloned());
+        return BookkeepingPlan {
+            statements,
+            atomicity: BookkeepingAtomicity::NonAtomicCreatingWrite,
+        };
     }
     let body = pre_write_sqls
         .iter()
@@ -238,12 +282,61 @@ pub fn write_with_bookkeeping_plan(
         .map(|s| format!("{};", s.trim().trim_end_matches(';').trim_end()))
         .collect::<Vec<_>>()
         .join("\n");
-    plan.push(format!(
+    statements.push(format!(
         "BEGIN\nBEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;\nEXCEPTION WHEN ERROR THEN\n\
          ROLLBACK TRANSACTION;\nRAISE USING MESSAGE = @@error.message;\nEND;",
         body
     ));
-    plan
+    BookkeepingPlan {
+        statements,
+        atomicity: BookkeepingAtomicity::Transactional,
+    }
+}
+
+/// The statements [`write_with_bookkeeping_plan`] produces, and how much
+/// atomicity they actually buy. The second half is data, not a log line, so
+/// the caller can report a degradation instead of silently absorbing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookkeepingPlan {
+    /// The ordered statements, each one query job.
+    pub statements: Vec<String>,
+    /// What the plan guarantees about the bookkeeping/write pair.
+    pub atomicity: BookkeepingAtomicity,
+}
+
+/// How much the statement plan binds the bookkeeping record to its write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookkeepingAtomicity {
+    /// The record and the write share one multi-statement transaction — the
+    /// seam's full contract.
+    Transactional,
+    /// There was no bookkeeping to bind; the write ran as ordinary jobs. Not
+    /// a degradation — nothing was promised.
+    NothingToBind,
+    /// **Degraded.** The write group creates a permanent entity, which
+    /// GoogleSQL forbids inside a transaction, so the write and the
+    /// bookkeeping ran as separate jobs (write first). The caller must report
+    /// this; the surviving exposure is a created table whose window is
+    /// unrecorded, which costs a redundant re-run and never correctness.
+    NonAtomicCreatingWrite,
+}
+
+/// Does this statement create a permanent entity — the one DDL shape a write
+/// group produced by the maintenance driver can contain?
+///
+/// `CREATE TEMP`/`CREATE TEMPORARY` are excluded: BigQuery does permit those
+/// inside a transaction, and they are never a maintained model's target.
+fn creates_a_permanent_entity(sql: &str) -> bool {
+    let head = sql.trim_start().to_ascii_uppercase();
+    if !head.starts_with("CREATE") {
+        return false;
+    }
+    let rest = head["CREATE".len()..].trim_start();
+    let rest = rest
+        .strip_prefix("OR REPLACE")
+        .map(str::trim_start)
+        .unwrap_or(rest);
+    !(rest.starts_with("TEMP ") || rest.starts_with("TEMPORARY "))
 }
 
 /// The marker [`fold_ledger_delta_script`] raises when the fold's ledger
@@ -515,6 +608,7 @@ mod tests {
                     .to_string(),
             ],
         );
+        let plan = plan.statements;
         assert_eq!(plan.len(), 2, "{plan:#?}");
         assert_eq!(
             plan[0],
@@ -546,7 +640,8 @@ mod tests {
             &["INSERT INTO x VALUES (1)".to_string()],
             &["INSERT INTO y VALUES (2)".to_string()],
         );
-        let script = &plan[0];
+        assert_eq!(plan.atomicity, BookkeepingAtomicity::Transactional);
+        let script = &plan.statements[0];
         assert!(script.starts_with("BEGIN\nBEGIN TRANSACTION;"), "{script}");
         assert!(script.contains("EXCEPTION WHEN ERROR THEN"), "{script}");
         assert!(script.contains("ROLLBACK TRANSACTION;"), "{script}");
@@ -566,6 +661,7 @@ mod tests {
             &["INSERT INTO x VALUES (1);".to_string()],
             &["INSERT INTO y VALUES (2)".to_string()],
         );
+        let plan = plan.statements;
         assert!(!plan[0].contains(";;"), "{}", plan[0]);
         assert!(
             plan[0].contains("INSERT INTO x VALUES (1);\n"),
@@ -588,13 +684,91 @@ mod tests {
             &[],
             &["INSERT INTO `ds.t` VALUES ('a')".to_string()],
         );
+        assert_eq!(plan.atomicity, BookkeepingAtomicity::NothingToBind);
         assert_eq!(
-            plan,
+            plan.statements,
             vec![
                 "CREATE TABLE IF NOT EXISTS `ds.t` (a STRING)".to_string(),
                 "INSERT INTO `ds.t` VALUES ('a')".to_string(),
             ]
         );
+    }
+
+    /// A first run's write group is a `CREATE TABLE … AS`, and GoogleSQL does
+    /// not permit DDL on a permanent entity inside a transaction — so binding
+    /// the bookkeeping record to it would produce a script the engine rejects.
+    /// The plan degrades instead: no transaction, write first, record after,
+    /// and the lost atomicity is *reported* rather than absorbed.
+    #[test]
+    fn a_creating_write_group_is_not_bound_into_a_transaction() {
+        let plan = write_with_bookkeeping_plan(
+            &["CREATE TABLE IF NOT EXISTS `ds._smelt_ledger` (a STRING)".to_string()],
+            &[
+                "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS a) S ON T.a = S.a WHEN NOT \
+               MATCHED THEN INSERT (a) VALUES (S.a)"
+                    .to_string(),
+            ],
+            &["CREATE OR REPLACE TABLE `ds.t` AS SELECT 1 AS a".to_string()],
+        );
+        assert_eq!(
+            plan.atomicity,
+            BookkeepingAtomicity::NonAtomicCreatingWrite,
+            "the degradation must be reported, not silent: {plan:#?}"
+        );
+        assert!(
+            plan.statements.iter().all(|s| !s.contains("TRANSACTION")),
+            "GoogleSQL rejects permanent-entity DDL inside a transaction: {:#?}",
+            plan.statements
+        );
+        assert_eq!(plan.statements.len(), 3, "{:#?}", plan.statements);
+        assert!(plan.statements[0].starts_with("CREATE TABLE IF NOT EXISTS `ds._smelt_ledger`"));
+        assert!(
+            plan.statements[1].starts_with("CREATE OR REPLACE TABLE `ds.t`"),
+            "the write runs first — a created table with an unrecorded window costs a re-run; \
+             the reverse could mislead a later run: {:#?}",
+            plan.statements
+        );
+        assert!(plan.statements[2].starts_with("MERGE `ds._smelt_ledger`"));
+    }
+
+    /// Non-vacuity for the case above: an ordinary DML write group with the
+    /// same bookkeeping still gets the full transaction.
+    #[test]
+    fn a_dml_write_group_still_shares_one_transaction_with_its_record() {
+        let plan = write_with_bookkeeping_plan(
+            &[],
+            &[
+                "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS a) S ON T.a = S.a WHEN NOT \
+               MATCHED THEN INSERT (a) VALUES (S.a)"
+                    .to_string(),
+            ],
+            &[
+                "MERGE `ds.t` USING (SELECT 1) ON FALSE WHEN NOT MATCHED THEN INSERT ROW"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(plan.atomicity, BookkeepingAtomicity::Transactional);
+        assert_eq!(plan.statements.len(), 1);
+        assert!(plan.statements[0].contains("BEGIN TRANSACTION;"));
+    }
+
+    /// A temporary table is not a permanent entity, and BigQuery does allow
+    /// it inside a transaction — so it must not trip the degradation.
+    #[test]
+    fn a_temp_create_is_not_treated_as_permanent_ddl() {
+        assert!(creates_a_permanent_entity(
+            "CREATE OR REPLACE TABLE `ds.t` AS SELECT 1"
+        ));
+        assert!(creates_a_permanent_entity("create table `ds.t` (a STRING)"));
+        assert!(!creates_a_permanent_entity(
+            "CREATE TEMP TABLE t AS SELECT 1"
+        ));
+        assert!(!creates_a_permanent_entity(
+            "CREATE OR REPLACE TEMPORARY TABLE t AS SELECT 1"
+        ));
+        assert!(!creates_a_permanent_entity(
+            "MERGE `ds.t` USING (SELECT 1) ON FALSE WHEN NOT MATCHED THEN INSERT ROW"
+        ));
     }
 
     // ── never-fold-twice (`fold_ledger_delta_script`) ────────────────────

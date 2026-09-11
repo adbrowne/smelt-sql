@@ -352,7 +352,8 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
 /// nullability operations the backbuild emitters have no forms for, and
 /// `smelt-state` sits below `smelt-logical`, so it cannot call into
 /// `backbuild::emit`. `ddl_duckdb.rs` is the actual per-dialect renderer
-/// owner; `ddl_spark.rs`/`ddl_bigquery.rs` are excluded on the same
+/// owner; `ddl_spark.rs` and the `ddl_bigquery/` directory (see
+/// [`EMITTER_MODULE_DIR_EXCLUSIONS`]) are excluded on the same
 /// per-dialect-owner basis even though their DDL shapes (backtick-quoted
 /// identifiers, `ADD COLUMNS (...)`, `SET DATA TYPE`) don't match this
 /// scan's DuckDB-flavored `ALTER TABLE `/`UPDATE ` shapes anyway.
@@ -360,14 +361,21 @@ const EMITTER_MODULE_EXCLUSIONS: &[&str] = &[
     "smelt-logical/src/backbuild/emit.rs",
     "smelt-state/src/ddl_duckdb.rs",
     "smelt-state/src/ddl_spark.rs",
-    "smelt-state/src/ddl_bigquery.rs",
 ];
 
 /// `src/`-relative directory paths excluded wholesale: the maintenance
 /// emitter module, whose emitters are split across per-family submodules
-/// under one directory. Excluded for the same circularity reason as the
-/// files in [`EMITTER_MODULE_EXCLUSIONS`].
-const EMITTER_MODULE_DIR_EXCLUSIONS: &[&str] = &["smelt-logical/src/maintenance/emit/"];
+/// under one directory, and `smelt-state`'s GoogleSQL DDL module, which
+/// became a directory (`mod.rs` for schema evolution plus one submodule per
+/// state structure) once its ledger and observed-delta spellings outgrew a
+/// single file. Excluded for the same reasons as the files in
+/// [`EMITTER_MODULE_EXCLUSIONS`] — the exclusion is of the per-dialect
+/// renderer *owner*, and which files that owner is spread across is an
+/// organisation detail.
+const EMITTER_MODULE_DIR_EXCLUSIONS: &[&str] = &[
+    "smelt-logical/src/maintenance/emit/",
+    "smelt-state/src/ddl_bigquery/",
+];
 
 fn is_emitter_module(path: &Path) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");

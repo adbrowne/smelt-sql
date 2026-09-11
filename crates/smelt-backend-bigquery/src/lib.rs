@@ -612,7 +612,23 @@ impl Backend for BigQueryBackend {
             .iter()
             .map(|s| s.sql.clone())
             .collect();
-        for stmt in sql::write_with_bookkeeping_plan(ensure_sqls, pre_write_sqls, &write_sqls) {
+        let plan = sql::write_with_bookkeeping_plan(ensure_sqls, pre_write_sqls, &write_sqls);
+        if plan.atomicity == sql::BookkeepingAtomicity::NonAtomicCreatingWrite {
+            // Recorded, never silent (`docs/specs/state.md` §"The degradation
+            // contract"): GoogleSQL forbids DDL on a permanent entity inside a
+            // transaction, so a first run's `CREATE TABLE … AS` and its
+            // bookkeeping record cannot be bound together. `warn!`, matching
+            // the observed-delta skip sites — a live BigQuery run proved
+            // `debug!` invisible to an operator.
+            tracing::warn!(
+                statements = plan.statements.len(),
+                "bookkeeping record and write could not share a transaction: the write group \
+                 creates a permanent entity, which GoogleSQL does not permit inside one. The \
+                 write runs first and the record after, so a failure between them leaves the \
+                 window unrecorded (a redundant re-run) rather than recorded-but-unwritten."
+            );
+        }
+        for stmt in plan.statements {
             self.py_execute_no_result(&stmt).await?;
         }
         Ok(())

@@ -43,9 +43,12 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 ///
 /// DuckDB emits all five (`smelt_state::ddl_duckdb`'s `generate_ledger_*`,
 /// `generate_observed_delta_*`, `generate_fingerprint_sidecar_*`,
-/// `generate_tombstone_*`). BigQuery emits the merge ledger and nothing else:
-/// `smelt_state::ddl_bigquery`'s `generate_ledger_*` carry its GoogleSQL
-/// spelling, dispatched by `smelt_state::ledger`, and
+/// `generate_tombstone_*`). BigQuery emits both ledgers and the
+/// observed-delta record — what it still lacks is the sidecar and the
+/// tombstone ledger:
+/// `smelt_state::ddl_bigquery`'s `generate_ledger_*` and
+/// `generate_observed_delta_*` carry its GoogleSQL spelling, dispatched by
+/// `smelt_state::ledger` and `smelt_state::observed_delta`, and
 /// `smelt-backend-bigquery` overrides `execute_write_with_bookkeeping` to run
 /// the record and the write in one transaction. Its **reconciliation** ledger
 /// took more than the emitters: the never-fold-twice refusal is a `PRIMARY
@@ -63,7 +66,9 @@ fn has_emitters(dialect: SqlDialect, structure: StateStructure) -> bool {
         SqlDialect::DuckDB => true,
         SqlDialect::BigQuery => matches!(
             structure,
-            StateStructure::MergeLedger | StateStructure::ReconciliationLedger
+            StateStructure::MergeLedger
+                | StateStructure::ReconciliationLedger
+                | StateStructure::ObservedOutputDeltas
         ),
         SqlDialect::SparkSQL => false,
     }
@@ -120,8 +125,8 @@ fn the_sidecar_claim_matches_the_backend_capability() {
 
 /// Today's concrete expectation, stated positively so the reopening's
 /// remaining phases flip it deliberately rather than by accident: DuckDB
-/// realises everything, BigQuery realises both ledgers, and Spark realises
-/// **nothing** — permanently, not pending.
+/// realises everything, BigQuery realises both ledgers and the observed-delta
+/// record, and Spark realises **nothing** — permanently, not pending.
 #[test]
 fn each_dialect_realises_exactly_the_structures_it_has_today() {
     assert!(
@@ -133,10 +138,12 @@ fn each_dialect_realises_exactly_the_structures_it_has_today() {
         realised(SqlDialect::BigQuery),
         BTreeSet::from([
             StateStructure::MergeLedger,
-            StateStructure::ReconciliationLedger
+            StateStructure::ReconciliationLedger,
+            StateStructure::ObservedOutputDeltas
         ]),
-        "BigQuery realises both ledgers; its other rows land with \
-         docs/outcomes/20260906-bigquery-correctness phases 12 and 15",
+        "BigQuery realises both ledgers and the observed-delta record; its two remaining \
+         rows (fingerprint sidecar, tombstone ledger) land with \
+         docs/outcomes/20260906-bigquery-correctness phase 15 and later work",
     );
     assert_eq!(realised(SqlDialect::DuckDB).len(), ALL_STRUCTURES.len());
 }

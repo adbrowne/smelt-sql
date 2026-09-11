@@ -9,7 +9,6 @@ use smelt_logical::maintenance::emit::{
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::WritePattern;
-use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
 use std::time::Instant;
 use tracing::debug;
@@ -736,14 +735,22 @@ pub async fn run_windowed_keyed_maintenance(
                                 model_name
                             ),
                         };
-                        let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
-                        let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+                        // Routed through the one dialect dispatch point
+                        // (`smelt_state::observed_delta`) rather than a named
+                        // DuckDB builder, exactly as the ledger statements
+                        // above go through `smelt_state::ledger`.
+                        let dialect_id = backend.dialect();
+                        let ensure_sql = smelt_state::observed_delta::observed_delta_table_ddl(
+                            dialect_id, schema,
+                        )?;
+                        let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
+                            dialect_id,
                             schema,
                             table,
                             &step.range.start,
                             &step.range.end,
                             &changed_keys_query,
-                        );
+                        )?;
                         let mut ensure_sqls = vec![ensure_sql];
                         let mut pre_write_sqls = vec![record_sql];
                         if let Some((ledger_ensure, ledger_upsert)) = &ledger_bookkeeping {

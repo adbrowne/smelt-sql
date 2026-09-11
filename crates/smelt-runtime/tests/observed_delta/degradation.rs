@@ -12,9 +12,22 @@ use smelt_backend::{Backend, PartitionRange};
 use smelt_runtime::maintenance_driver::run_windowed_keyed_maintenance;
 use smelt_runtime::probes::ProbePolicy;
 
-#[derive(Default)]
+/// A non-DuckDB backend that records every statement it is handed. The
+/// dialect is a field rather than a constant because the two legs this file
+/// now holds differ only in it: Spark cannot realise the observed-delta
+/// record and degrades, BigQuery realises it and records.
 struct KeyedNonDuckDbBackend {
     calls: std::sync::Mutex<Vec<String>>,
+    dialect: smelt_backend::SqlDialect,
+}
+
+impl KeyedNonDuckDbBackend {
+    fn new(dialect: smelt_backend::SqlDialect) -> Self {
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+            dialect,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -79,7 +92,7 @@ impl Backend for KeyedNonDuckDbBackend {
         unimplemented!()
     }
     fn dialect(&self) -> smelt_backend::SqlDialect {
-        smelt_backend::SqlDialect::SparkSQL
+        self.dialect
     }
     fn capabilities(&self) -> smelt_backend::BackendCapabilities {
         // The write-mechanism resolution (`resolve_keyed_write_mechanism`,
@@ -88,7 +101,10 @@ impl Backend for KeyedNonDuckDbBackend {
         // run MERGE) so the driver reaches this test's actual target: the
         // non-DuckDB dialect refusal inside the observed-delta branch, not
         // an unrelated panic here.
-        smelt_backend::BackendCapabilities::spark()
+        match self.dialect {
+            smelt_backend::SqlDialect::BigQuery => smelt_backend::BackendCapabilities::bigquery(),
+            _ => smelt_backend::BackendCapabilities::spark(),
+        }
     }
     async fn load_table(
         &self,
@@ -142,7 +158,7 @@ impl Backend for KeyedNonDuckDbBackend {
 /// structure IS realisable.
 #[tokio::test]
 async fn keyed_fold_suppressed_recording_degrades_on_a_non_duckdb_backend() {
-    let backend = KeyedNonDuckDbBackend::default();
+    let backend = KeyedNonDuckDbBackend::new(smelt_backend::SqlDialect::SparkSQL);
     let suppression = key_suppression(&["score"]);
     let steps = one_step("2026-01-01", "2026-01-02");
 
@@ -172,4 +188,80 @@ async fn keyed_fold_suppressed_recording_degrades_on_a_non_duckdb_backend() {
         calls.iter().any(|c| c.contains("MERGE")),
         "the merge itself must still run: {calls:?}"
     );
+}
+
+/// The same change-suppressed keyed fold on **BigQuery** no longer degrades:
+/// the structure is realisable there, so the record is emitted — in GoogleSQL,
+/// not DuckDB SQL.
+///
+/// This is the other side of the test above, and the pair is what keeps each
+/// non-vacuous: one dialect skips because it cannot realise the structure, the
+/// other records because it can.
+#[tokio::test]
+async fn keyed_fold_suppressed_recording_is_realised_on_bigquery() {
+    let backend = KeyedNonDuckDbBackend::new(smelt_backend::SqlDialect::BigQuery);
+    let suppression = key_suppression(&["score"]);
+    let steps = one_step("2026-01-01", "2026-01-02");
+
+    run_windowed_keyed_maintenance(
+        &backend,
+        "dim_scores",
+        "main",
+        "dim_scores",
+        &steps,
+        &max_score_rule(),
+        None,
+        &suppression,
+        None,
+        |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
+        &no_retry_policy(),
+        &ProbePolicy::per_run(),
+    )
+    .await
+    .expect("BigQuery realises the observed-delta record");
+
+    let calls = backend.calls.lock().unwrap();
+    let record = calls
+        .iter()
+        .find(|c| c.contains("_smelt_observed_delta") && c.starts_with("MERGE"))
+        .unwrap_or_else(|| panic!("the observed-delta record must be emitted: {calls:?}"));
+    // GoogleSQL, not DuckDB SQL — the whole point of the dispatch.
+    assert!(record.contains("IGNORE NULLS"), "{record}");
+    assert!(!record.contains("ON CONFLICT"), "{record}");
+    assert!(!record.contains("FILTER (WHERE"), "{record}");
+    assert!(!record.contains("::VARCHAR[]"), "{record}");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("CREATE TABLE IF NOT EXISTS `main._smelt_observed_delta`")),
+        "the backticked GoogleSQL ensure-DDL must be emitted: {calls:?}"
+    );
+}
+
+/// The run-layer predicate is derived from the availability layer, so the row
+/// flip *is* the switch. Exhaustive over the dialects so a new one has to be
+/// considered here rather than defaulting.
+#[test]
+fn records_observed_deltas_follows_the_availability_row() {
+    use smelt_backend::SqlDialect;
+    use smelt_runtime::maintenance_driver::records_observed_deltas;
+
+    for dialect in [
+        SqlDialect::DuckDB,
+        SqlDialect::BigQuery,
+        SqlDialect::SparkSQL,
+    ] {
+        let expected = match dialect {
+            SqlDialect::DuckDB | SqlDialect::BigQuery => true,
+            // Permanent, not pending: Delta has no cross-table transaction, so
+            // the record and its write cannot commit together.
+            SqlDialect::SparkSQL => false,
+        };
+        assert_eq!(
+            records_observed_deltas(dialect),
+            expected,
+            "{dialect:?} disagrees with docs/specs/state.md §\"Which dialects realise which \
+             structure\""
+        );
+    }
 }

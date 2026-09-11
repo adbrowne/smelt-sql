@@ -54,6 +54,32 @@ summary rather than widening the phase.
 
 ## Work
 
+### 0. First, fix the defect phase 14 handed over (it blocks phase 13's own realisation)
+
+Phase 14 settled from BigQuery's documentation that **DDL is not permitted inside a
+multi-statement transaction**, and flagged that `sql::write_with_bookkeeping_plan`
+(`crates/smelt-backend-bigquery/src/sql.rs:225`) still places the write group's statements
+inside its `BEGIN TRANSACTION … COMMIT TRANSACTION` script whenever `pre_write_sqls` is
+non-empty. On a first run the `Grade::Idempotent` path's write group *is* a
+`CREATE TABLE … AS`, so the engine will reject the script — loudly, not silently, but it
+breaks the merge-ledger realisation phase 13 landed on exactly the run where a table is first
+created.
+
+Phase 14 left it deliberately (different grade, different seam, and it would have been
+untested new behaviour on a path that row did not touch). It lands here because this phase
+owns the same seam: the observed-delta record is a `pre_write_sqls` entry driving the same
+`write_with_bookkeeping_plan`, so this phase cannot be correct without it.
+
+Decide and implement one of, stating which and why:
+- keep the bookkeeping record and the write in one transaction when the write is DML, and take
+  a documented non-atomic path (or refuse) when it is DDL; or
+- refuse the DDL-shaped write group before any backend call, as phase 14 did for the fold's
+  action, keyed on the same honest `supports_transactional_ddl` flag phase 14 corrected.
+
+Whichever way it goes it needs a test against the pure plan builder, and the degradation — if
+any — must be *recorded*, never silent (`docs/specs/state.md` §"The degradation contract";
+`CLAUDE.md` §"Fail-loud discipline"). Do not widen what a downgraded cell computes.
+
 ### 1. BigQuery observed-delta SQL (`crates/smelt-state/src/ddl_bigquery.rs` or its split)
 
 Port the three builders from `ddl_duckdb.rs:579-740`:

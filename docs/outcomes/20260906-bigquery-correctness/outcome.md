@@ -136,13 +136,100 @@ rediscovered.
 | 9 | Characterise or fix the two known live conformance failures (`diamond_propagation_suffices`, `composed_keyed_pool_upholds_equivalence`) | done |
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | done |
 | 11 | Make the plan layer and the run layer agree before any new SQL: correct `realisable_state_structures`' BigQuery/Spark rows, express the observed-delta recording requirement in the availability layer so the three T5 `bail!` sites become recorded downgrades, and add the structural gate tying every `dialect != DuckDB` guard under `maintenance_driver/` to a structure declared unrealisable | done |
-| 12 | Observed deltas on BigQuery: `ddl_bigquery` sidecar emitters plus a `record_observed_delta_with_write` override on a BigQuery multi-statement transaction; flip the row back on, which the phase-11 gate then forces the driver guard to be deleted for | pending |
+| 12 | Observed deltas on BigQuery: `ddl_bigquery` sidecar emitters plus a `record_observed_delta_with_write` override on a BigQuery multi-statement transaction; flip the row back on, which the phase-11 gate then forces the driver guard to be deleted for | done |
 | 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | done |
 | 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | done |
 | 15 | Tombstone ledger on BigQuery, so the succession-patch technique runs live rather than downgrading to `DeleteInsert` | pending |
 | 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | pending |
 
 ## Decision log
+
+- 2026-09-11 (phase 12, implementation): **BigQuery records observed output deltas, and the
+  translation that made it possible was not the one the plan predicted.**
+  `realisable_state_structures(BigQuery)` is now
+  `vec![MergeLedger, ReconciliationLedger, ObservedOutputDeltas]`
+  (`crates/smelt-logical/src/maintenance/availability/state_structure.rs:61-66`). Phase 11 had
+  already retired the three T5 write guards and the read guard in favour of the derived
+  `records_observed_deltas`, so the row flip *is* the switch: `state_guard_census` is unchanged,
+  and nothing was deleted. The row's other clause — "a `record_observed_delta_with_write`
+  override" — needed nothing either: that method is
+  `Backend::execute_conditional_write_and_record_observed_delta`
+  (`crates/smelt-backend/src/lib.rs:697-711`), a thin delegation to the
+  `execute_write_with_bookkeeping` seam phase 13 already overrode
+  (`crates/smelt-backend-bigquery/src/lib.rs:604`). Both were verified by reading and are now
+  asserted rather than re-implemented.
+
+  **The load-bearing translation has four parts, not three.** The plan named `IGNORE NULLS` (no
+  `FILTER` clause in GoogleSQL, and `ARRAY_AGG` *raises* on a NULL element rather than yielding
+  a NULL array), the `COALESCE` (`ARRAY_AGG` over zero rows is `NULL` on BigQuery too, so it
+  stays, spelled `ARRAY<STRING>[]` because a bare `[]` has no element type to unify against),
+  and the `MERGE` in place of `ON CONFLICT … DO UPDATE`. The fourth was found by reading the
+  caller rather than the DuckDB text: **each element needs `CAST(… AS STRING)`**. GoogleSQL
+  coerces no array element type on write where DuckDB folds an `INTEGER[]` into a `VARCHAR[]`
+  column, and `changed_keys_select` emits a literal `NULL AS delta_partition` — an INT64-typed
+  NULL — for every model with no partition axis
+  (`crates/smelt-runtime/src/maintenance_driver/column_scoped.rs:304`). Without the cast the
+  `COALESCE` is a type error on *every bare keyed model*, not an edge case. The statement is
+  `crates/smelt-state/src/ddl_bigquery/observed_delta.rs`, dispatched by the new
+  `crates/smelt-state/src/observed_delta.rs` (`SqlDialect`-keyed, exhaustive, Spark an error by
+  name — phase 13's `ledger.rs` pattern, second instance).
+
+  **Empty-versus-absent survives BigQuery's array flattening because it never depended on a
+  column value.** BigQuery cannot distinguish a NULL `ARRAY` from an empty one — a NULL written
+  to an `ARRAY` column reads back empty — which would be fatal if *absent* meant a NULL column.
+  It means **no row for the window**: the upsert's source is one un-grouped aggregate `SELECT`,
+  so exactly one row lands per recorded window even over zero input rows, and
+  `read_observed_delta` returns `None` iff the row count is zero. Stated as a property of the
+  guarantee in `docs/specs/state.md` and pinned by
+  `ledger_dialect::on_bigquery_empty_and_absent_are_separated_by_row_presence`. Consequence: the
+  two `ARRAY<STRING>` columns carry **no** `NOT NULL` — BigQuery cannot store a NULL array
+  anyway, so the constraint is redundant at best and a live-only DDL rejection at worst.
+
+  **§0, the defect phase 14 handed over, was resolved by degrading rather than refusing — and
+  the reasons the two cases differ are the whole argument.**
+  `sql::write_with_bookkeeping_plan` bound the write group into its transaction
+  unconditionally, and a first run's write group is a `CREATE TABLE … AS`, which GoogleSQL
+  forbids inside one. Phase 14 refused the analogous shape because its record protects a
+  *correctness* guarantee (an unrefused repeat fold double-counts); this record is bookkeeping,
+  and refusing a first run over bookkeeping costs a capability for nothing. So the plan now
+  returns `BookkeepingPlan { statements, atomicity }`
+  (`crates/smelt-backend-bigquery/src/sql.rs:258,300,309`), and a creating write group takes
+  `BookkeepingAtomicity::NonAtomicCreatingWrite`: no transaction, **write first and record
+  after**, reported at `warn!` by the backend (`lib.rs:616`) and recorded in
+  `docs/specs/state.md`. The reordering is sound for a specific reason, not by convenience —
+  record-before-write exists because a record reads the target's *pre-write* state, and a write
+  that creates the target has none to read (the record's own query would reference a
+  nonexistent table); and the surviving exposure is the harmless direction, a created table
+  with an unrecorded window (a redundant re-run) rather than a record claiming a write that
+  never happened. Detection is a leading `CREATE`, excluding `TEMP`/`TEMPORARY`
+  (`creates_a_permanent_entity`, `sql.rs:329`), because `create_group` is the only DDL the
+  driver ever puts in a write group; any *other* DDL reaching one would still be bound and
+  rejected by the engine, which is noted in the doc comment rather than silently pre-empted.
+
+  **What is not proven offline, and what phase 16 inherits.** The Arrow list type BigQuery's
+  adapter returns for an `ARRAY<STRING>` column. `python/smelt/bigquery_adapter.py:88-94` goes
+  `result.to_arrow()` → `to_batches()` → `RecordBatch::from_pyarrow_bound`, and
+  google-cloud-bigquery conventionally maps a `REPEATED STRING` to `list<…: string>` — but the
+  storage-API path and the client version are outside this repo, so that is a reading, not a
+  proof. Rather than claim it, the failure mode was removed: `decode_string_list_column`
+  (`crates/smelt-runtime/src/maintenance_driver/observed_delta.rs:76`) now accepts both list
+  widths over both string widths and **errors** on any other shape or a missing column, where
+  it previously early-returned an empty vector. That silent empty was harmless with one
+  in-process producer and is a silent-*narrowing* hazard with an adapter: a consumer cannot tell
+  an empty decode from an empty delta, so an unrecognised shape would restrict a downstream
+  recompute to no keys instead of widening — precisely the class this outcome exists to catch.
+  Phase 16 also inherits the live check that the `ARRAY<STRING>` columns without `NOT NULL`
+  accept the write, and that a fully-suppressed window lands one present-and-empty row.
+
+  **One gate earned its keep during the split.** `ddl_bigquery.rs` was at its 1007-line
+  baseline, so it became `ddl_bigquery/{mod,ledger,observed_delta}.rs` (split, not raised —
+  the only baseline change is `--update` dropping the orphaned row). That immediately turned
+  `statement_parity`'s no-authoring gate red, because its exclusion was a *file* suffix and the
+  owner is now a directory; the fix moves it to `EMITTER_MODULE_DIR_EXCLUSIONS`
+  (`crates/smelt-runtime/tests/statement_parity/structural_and_ledger.rs:359-378`), the same
+  treatment `smelt-logical/src/maintenance/emit/` already has. Worth recording because it is the
+  second time a file split has tripped this gate (phase 14 was the first) — a per-dialect
+  renderer owner spread over a directory is now the expected shape, not the exception.
 
 - 2026-09-11 (phase 14, implementation): **BigQuery refuses a repeat fold, and the refusal is a
   statement's effect rather than a storage constraint.** `realisable_state_structures(BigQuery)`

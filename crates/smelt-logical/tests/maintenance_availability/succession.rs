@@ -74,14 +74,20 @@ fn a_ledger_less_dialect_realises_no_ledger() {
     // 14, whose never-fold-twice refusal no longer needs the enforced key
     // BigQuery does not have — it is a zero-row abort inside a multi-statement
     // transaction instead (`docs/specs/state.md` §"Which dialects realise
-    // which structure"). What both dialects still lack is the sidecar and the
-    // observed-delta table, which is what this test is now about.
+    // which structure"), and the observed-delta table since phase 12 (a
+    // `MERGE` upsert whose key set is `ARRAY_AGG(DISTINCT CAST(… AS STRING)
+    // IGNORE NULLS)`). What both dialects still lack is the fingerprint
+    // sidecar, which is what this test is now about.
     for dialect in [SqlDialect::SparkSQL, SqlDialect::BigQuery] {
         let realised: BTreeSet<StateStructure> =
             realisable_state_structures(dialect).into_iter().collect();
         if dialect == SqlDialect::SparkSQL {
             assert!(!realised.contains(&StateStructure::MergeLedger));
             assert!(!realised.contains(&StateStructure::ReconciliationLedger));
+            // Spark's observed-delta absence is permanent for the same
+            // reason: no cross-table transaction, so the record and the
+            // write it describes cannot commit together.
+            assert!(!realised.contains(&StateStructure::ObservedOutputDeltas));
         }
         // Corrected 2026-09-10: this test used to assert the sidecar and the
         // observed-delta table WERE realised on these dialects. They are not —
@@ -91,6 +97,5 @@ fn a_ledger_less_dialect_realises_no_ledger() {
         // (`docs/outcomes/20260906-bigquery-correctness` decision log,
         // 2026-09-10). Two-sided coverage lives in `realisation.rs`.
         assert!(!realised.contains(&StateStructure::FingerprintSidecar));
-        assert!(!realised.contains(&StateStructure::ObservedOutputDeltas));
     }
 }

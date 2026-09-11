@@ -224,6 +224,156 @@ fn the_duckdb_path_is_byte_identical_to_the_duckdb_builders() {
     );
 }
 
+// ── observed-output-delta dispatch (`smelt_state::observed_delta`) ────────
+//
+// The same shape, and the same three obligations: exhaustive over the
+// dialects, no other dialect's spelling leaking through, and Spark refused by
+// name rather than handed SQL it cannot run.
+
+const CHANGED_KEYS_QUERY: &str = "SELECT user_id AS delta_key, NULL AS delta_partition FROM main.t";
+
+fn all_observed_delta_statements(dialect: SqlDialect) -> Option<Vec<String>> {
+    use smelt_state::observed_delta as od;
+    let table = od::observed_delta_table_ddl(dialect, "ds").ok()?;
+    let upsert =
+        od::observed_delta_upsert_sql(dialect, "ds", "m", "s", "e", CHANGED_KEYS_QUERY).ok()?;
+    let select = od::observed_delta_select_sql(dialect, "ds", "m", "s", "e").ok()?;
+    Some(vec![table, upsert, select])
+}
+
+/// Spark is refused by name, not given DuckDB SQL; every other dialect
+/// resolves. A new dialect makes the `match` inside the dispatch a compile
+/// error, and this test the place its verdict is stated.
+#[test]
+fn the_observed_delta_dispatch_is_exhaustive_and_refuses_spark() {
+    use smelt_state::observed_delta as od;
+    for dialect in ALL_DIALECTS {
+        match dialect {
+            SqlDialect::DuckDB | SqlDialect::BigQuery => {
+                assert!(
+                    all_observed_delta_statements(dialect).is_some(),
+                    "{dialect:?} realises the observed-delta record"
+                );
+            }
+            SqlDialect::SparkSQL => {
+                let err = od::observed_delta_table_ddl(dialect, "ds")
+                    .expect_err("Spark has no observed-delta spelling");
+                assert_eq!(err.dialect, SqlDialect::SparkSQL.name());
+                assert!(
+                    err.to_string().contains(SqlDialect::SparkSQL.name()),
+                    "the refusal must name the dialect: {err}"
+                );
+                assert!(od::observed_delta_upsert_sql(
+                    dialect,
+                    "ds",
+                    "m",
+                    "s",
+                    "e",
+                    CHANGED_KEYS_QUERY
+                )
+                .is_err());
+                assert!(od::observed_delta_select_sql(dialect, "ds", "m", "s", "e").is_err());
+            }
+        }
+    }
+}
+
+/// No DuckDB-ism may reach BigQuery through the observed-delta dispatch — the
+/// same leak check the ledger half makes, over the constructs that actually
+/// differ here.
+#[test]
+fn the_bigquery_observed_delta_path_carries_no_duckdb_spelling() {
+    let statements =
+        all_observed_delta_statements(SqlDialect::BigQuery).expect("BigQuery realises it");
+    for sql in &statements {
+        assert!(!sql.contains('"'), "double-quoted identifier: {sql}");
+        assert!(!sql.contains("ON CONFLICT"), "{sql}");
+        assert!(!sql.contains("FILTER (WHERE"), "{sql}");
+        assert!(!sql.contains("VARCHAR"), "{sql}");
+        assert!(!sql.contains("excluded."), "{sql}");
+        assert!(
+            !sql.contains("''"),
+            "quote-doubling is not GoogleSQL escaping: {sql}"
+        );
+    }
+}
+
+/// The DuckDB observed-delta path is byte-identical to the builders it
+/// delegates to — the dispatch adds no text of its own.
+#[test]
+fn the_duckdb_observed_delta_path_delegates_verbatim() {
+    use smelt_state::{ddl_duckdb, observed_delta as od};
+    assert_eq!(
+        od::observed_delta_table_ddl(SqlDialect::DuckDB, "main").unwrap(),
+        ddl_duckdb::generate_observed_delta_table_ddl("main")
+    );
+    assert_eq!(
+        od::observed_delta_upsert_sql(
+            SqlDialect::DuckDB,
+            "main",
+            "m",
+            "s",
+            "e",
+            CHANGED_KEYS_QUERY
+        )
+        .unwrap(),
+        ddl_duckdb::generate_observed_delta_upsert_sql("main", "m", "s", "e", CHANGED_KEYS_QUERY)
+    );
+    assert_eq!(
+        od::observed_delta_select_sql(SqlDialect::DuckDB, "main", "m", "s", "e").unwrap(),
+        ddl_duckdb::generate_observed_delta_select_sql("main", "m", "s", "e")
+    );
+}
+
+/// Non-vacuity for the leak check above.
+#[test]
+fn the_two_realising_dialects_produce_different_observed_delta_text() {
+    let duckdb = all_observed_delta_statements(SqlDialect::DuckDB).expect("DuckDB");
+    let bigquery = all_observed_delta_statements(SqlDialect::BigQuery).expect("BigQuery");
+    assert_eq!(duckdb.len(), bigquery.len());
+    for (d, b) in duckdb.iter().zip(bigquery.iter()) {
+        assert_ne!(d, b, "the dispatch returned DuckDB text for BigQuery");
+    }
+}
+
+/// **Empty and absent are distinct, and on BigQuery the distinction is row
+/// presence** (`docs/specs/incremental_models.md` §"The graph layer").
+///
+/// BigQuery cannot tell a NULL `ARRAY` from an empty one — a NULL written to
+/// an `ARRAY` column reads back empty — so a realisation that encoded
+/// "never recorded" as a NULL column would lose the distinction the moment it
+/// crossed the wire. It does not: the upsert's source is one un-grouped
+/// aggregate `SELECT`, so it writes exactly one row for the window even when
+/// nothing changed (`COALESCE` folding the `NULL` aggregate to an empty
+/// array), and the read filters on the window key alone. Absence is therefore
+/// zero rows, which array flattening cannot manufacture or destroy.
+#[test]
+fn on_bigquery_empty_and_absent_are_separated_by_row_presence() {
+    use smelt_state::observed_delta as od;
+    let upsert = od::observed_delta_upsert_sql(
+        SqlDialect::BigQuery,
+        "ds",
+        "m",
+        "s",
+        "e",
+        CHANGED_KEYS_QUERY,
+    )
+    .unwrap();
+    // Exactly one row is always written: an un-grouped aggregate source, and
+    // both aggregates coalesced to the empty typed array.
+    assert!(!upsert.contains("GROUP BY"), "{upsert}");
+    assert_eq!(upsert.matches("ARRAY<STRING>[])").count(), 2, "{upsert}");
+    // …and it is an upsert, so a re-run replaces rather than duplicating.
+    assert!(upsert.contains("WHEN MATCHED THEN UPDATE SET"), "{upsert}");
+
+    let select = od::observed_delta_select_sql(SqlDialect::BigQuery, "ds", "m", "s", "e").unwrap();
+    assert!(
+        !select.contains("IS NULL") && !select.contains("IS NOT NULL"),
+        "absence must be row absence, never a NULL test: {select}"
+    );
+    assert!(select.contains("WHERE model_name = 'm'"), "{select}");
+}
+
 /// Non-vacuity: the two dialects that DO have a spelling must not produce the
 /// same text, or the leak assertions above would pass on an accidental
 /// single-dialect dispatch.

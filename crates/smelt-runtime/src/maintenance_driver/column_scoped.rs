@@ -8,7 +8,6 @@ use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, MaintenanceDialect,
 };
 use smelt_logical::maintenance::{KeyDiscovery, PartitionLocal, PlanCell, ScanClamp};
-use smelt_state::ddl_duckdb;
 use std::time::Instant;
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an
@@ -379,7 +378,16 @@ async fn execute_column_scoped_write_with_observed_delta(
                 })
                 .await;
             }
-            let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+            // Routed through the one dialect dispatch point
+            // (`smelt_state::observed_delta`) rather than a named DuckDB
+            // builder — the guard above has already established that this
+            // dialect realises the structure, so an error here is a caller
+            // bug and fails loud rather than degrading a second time.
+            let dialect_id = backend.dialect();
+            let ensure_sql =
+                smelt_state::observed_delta::observed_delta_table_ddl(dialect_id, schema).map_err(
+                    |e| smelt_backend::BackendError::unsupported(dialect_id.name(), e.to_string()),
+                )?;
             let partition_column = if window.column.is_empty() {
                 None
             } else {
@@ -392,13 +400,17 @@ async fn execute_column_scoped_write_with_observed_delta(
                 compared_columns,
                 partition_column,
             );
-            let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+            let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
+                dialect_id,
                 schema,
                 table,
                 &window.start,
                 &window.end,
                 &changed_keys_query,
-            );
+            )
+            .map_err(|e| {
+                smelt_backend::BackendError::unsupported(dialect_id.name(), e.to_string())
+            })?;
             crate::execute::retry_backend_call(retry, || {
                 backend.execute_conditional_write_and_record_observed_delta(
                     &ensure_sql,

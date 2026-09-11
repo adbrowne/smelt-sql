@@ -109,7 +109,6 @@ crates/smelt-runtime/tests/repair_lowering.rs 1569
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1120
 crates/smelt-runtime/tests/windowing_parity.rs 1150
-crates/smelt-state/src/ddl_bigquery.rs 1007
 crates/smelt-state/src/ddl_duckdb.rs 1883
 crates/smelt-state/src/ddl_spark.rs 1708
 crates/smelt-state/src/file_store.rs 1695

@@ -112,7 +112,7 @@ structure:
 |---|---|---|---|
 | Transactional merge ledger | yes | yes | **no** |
 | Reconciliation ledger (frontier record) | yes | yes | **no** |
-| Observed output deltas | yes | not yet | **no** |
+| Observed output deltas | yes | yes | **no** |
 | Fingerprint sidecar | yes | not yet | **no** |
 | Tombstone ledger (succession grain) | yes | not yet | **no** |
 
@@ -121,7 +121,7 @@ latter: Delta provides per-table atomicity and no cross-table transaction, so a 
 write and its data write cannot be made atomic, and the additive fold's never-fold-twice
 refusal has no sound realisation there.
 
-Four facts of BigQuery's ledger realisation are load-bearing rather than incidental:
+Four facts of BigQuery's **ledger** realisation are load-bearing rather than incidental:
 
 - **The ledger table is addressed by a two-part name.** The ledger lives beside the models
   it records, in the run's own schema, and is named `` `<schema>._smelt_ledger` `` — one
@@ -150,6 +150,46 @@ Four facts of BigQuery's ledger realisation are load-bearing rather than inciden
   loudly, and a later re-run reads the committed row and refuses. Were that property to
   weaken, the correct response is to withdraw the realisation, not to fall back on a
   check-then-act probe.
+
+Three facts of BigQuery's **observed-output-delta** realisation are load-bearing in the same
+way:
+
+- **The idempotent replace is a `MERGE`, not a conflict clause.** GoogleSQL has no
+  `ON CONFLICT … DO UPDATE`, so re-recording a window is `MERGE … WHEN MATCHED THEN UPDATE
+  … WHEN NOT MATCHED THEN INSERT` against the same three-column window key — the same
+  observable behaviour as DuckDB's conflict clause, and it does not lean on the unenforced
+  `PRIMARY KEY`.
+- **The delta's key set is `ARRAY_AGG(DISTINCT CAST(… AS STRING) IGNORE NULLS)`.** Three
+  separate GoogleSQL facts collapse into that one expression, and each is a correctness
+  requirement rather than a spelling: there is no `FILTER (WHERE …)` clause; `ARRAY_AGG`
+  **raises** on a NULL element rather than yielding a NULL array, so `IGNORE NULLS` is what
+  keeps an unmatched key from failing the run; and array element types are not coerced on
+  write, so a non-string key — or the literal NULL a model with no partition axis projects
+  as its partition — must be cast before it can enter an `ARRAY<STRING>` column. The
+  `COALESCE` to an empty typed array is kept for the same reason it exists on DuckDB:
+  `ARRAY_AGG` over zero rows is `NULL`, and folding that to `[]` is what makes a
+  fully-suppressed run record present-and-empty.
+- **Empty-versus-absent rests on row presence, never on a column value.** BigQuery cannot
+  represent a NULL array at all — a NULL written to an `ARRAY` column reads back as empty —
+  so a realisation that encoded "never recorded" in a column would lose the distinction the
+  moment it crossed the wire. It does not, and this is a property of the guarantee rather
+  than an implementation detail: *absent* means **no row for the window**
+  (`incremental_models.md` §"The graph layer" — "Empty and absent are distinct"), the upsert
+  always writes exactly one row per recorded window, and the read filters on the window key
+  alone. Array flattening can neither manufacture nor destroy a row. For the same reason the
+  two array columns are declared without `NOT NULL`: nothing depends on it.
+
+**One shape BigQuery degrades rather than binds atomically.** The seam that records
+bookkeeping in the same transaction as its write cannot hold a write group that creates a
+permanent entity, because GoogleSQL does not permit that DDL inside a transaction — and a
+maintained model's *first* run writes `CREATE TABLE … AS` rather than a merge. There the
+statements run unbound: the write first, the bookkeeping record after, and the lost
+atomicity is reported. The ordering is what makes the degradation admissible. A record that
+reads the target's pre-write state has nothing to read when the write is what creates the
+target, so running it second loses nothing; and the surviving exposure — a created table
+whose window went unrecorded — costs a redundant re-run, whereas the reverse (a record
+claiming a write that never happened) could mislead a later run. This is a degradation of
+*atomicity only*: what the cell computes is unchanged.
 
 **One shape BigQuery refuses rather than realises.** BigQuery does not permit DDL creating
 or dropping permanent entities inside a transaction, and an additive fold's *first* action
