@@ -3875,6 +3875,8 @@ sent to the warehouse to fail there:</p>
 ignore NULLs (<code>MIN</code>, <code>MAX</code>, <code>SUM</code>, <code>AVG</code>, <code>COUNT</code>, <code>STRING_AGG</code>) and would change the answer for
 <code>ARRAY_AGG</code>, so smelt tells you the rewrite rather than picking one that is wrong for some
 aggregates. Both clauses keep working unchanged on DuckDB and Spark.</p>
+<p>A construct declared inside a <code>smelt.define</code> function body is refused the same way, naming the
+built-in that carries it — writing it in a function is not a way around the check.</p>
 <h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
 <ul>
 <li><a href="../materializations/">Materializations</a> for how tables and views are created in each target</li>
