@@ -32,9 +32,14 @@ maintenance:
 -- route (`docs/specs/incremental_models.md` §"Upstream model edges")
 -- addresses that cell by this model's own declared `unique_key`
 -- (`repo_id`), not by its `delta_signature`.
+-- `MAX(CASE WHEN … END)` rather than `MAX(…) FILTER (WHERE is_current)`: the
+-- two are exactly equivalent for a NULL-ignoring aggregate, and GoogleSQL has
+-- no aggregate `FILTER` clause at all, so the `FILTER` spelling is refused at
+-- compile time on the `bigquery` target
+-- (`SqlDialect::supports_aggregate_filter_clause`).
 SELECT
     repo_id,
-    MAX(repo_name) FILTER (WHERE is_current) AS current_repo_name,
+    MAX(CASE WHEN is_current THEN repo_name END) AS current_repo_name,
     MIN(created_at) AS first_seen_at
 FROM smelt.silver.repo_naming
 GROUP BY repo_id

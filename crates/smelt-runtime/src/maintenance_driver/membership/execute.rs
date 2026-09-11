@@ -61,7 +61,10 @@ pub async fn execute_staged_membership_recompute(
     // Refusing here was the third leg of the 2026-09-10 hard stop
     // (`docs/outcomes/20260906-bigquery-correctness` decision log).
     if !crate::maintenance_driver::records_observed_deltas(backend.dialect()) {
-        tracing::debug!(
+        // `warn!`, not `debug!` — see `column_scoped.rs`'s twin site: the
+        // precision half of the degradation contract has to reach an operator
+        // without raising the log level.
+        tracing::warn!(
             schema,
             table,
             dialect = backend.dialect().name(),

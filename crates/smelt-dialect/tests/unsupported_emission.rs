@@ -290,3 +290,138 @@ fn a_plain_within_group_sort_key_is_not_reported() {
         "a plain WITHIN GROUP sort key must be admissible"
     );
 }
+
+/// A live BigQuery run compiled `MAX(repo_name) FILTER (WHERE is_current)`
+/// and shipped it to the warehouse, where GoogleSQL — which has no aggregate
+/// `FILTER` clause — answered `400 Syntax error: Expected ")" but got "("`
+/// (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md`
+/// finding 2). The refusal belongs at compile time, naming the construct, the
+/// backend, and the portable rewrite.
+#[test]
+fn an_aggregate_filter_clause_is_refused_on_bigquery() {
+    let found = unsupported_emissions(
+        &tree("SELECT MAX(name) FILTER (WHERE is_current) AS n FROM t"),
+        SqlDialect::BigQuery,
+        |_| None,
+    );
+    assert_eq!(found.len(), 1, "expected exactly one refusal: {found:#?}");
+    assert_eq!(found[0].name, "MAX");
+    assert_eq!(found[0].dialect, DialectId::BigQuery);
+    assert!(
+        found[0].reason.contains("FILTER"),
+        "the reason must name the clause: {}",
+        found[0].reason
+    );
+    assert!(
+        found[0].reason.contains("CASE WHEN"),
+        "the reason must name the portable rewrite: {}",
+        found[0].reason
+    );
+}
+
+/// The same model is clean where the dialect has the clause — DuckDB and
+/// Spark both do, so nothing about those legs changes.
+#[test]
+fn an_aggregate_filter_clause_is_clean_where_the_dialect_has_it() {
+    for dialect in [SqlDialect::DuckDB, SqlDialect::SparkSQL] {
+        assert!(
+            unsupported_emissions(
+                &tree("SELECT MAX(name) FILTER (WHERE is_current) AS n FROM t"),
+                dialect,
+                |_| None
+            )
+            .is_empty(),
+            "{dialect:?} has an aggregate FILTER clause"
+        );
+    }
+}
+
+/// `COUNT(*) FILTER (WHERE …)` is the same refusal — the `*` argument is not
+/// what makes it unsupported, the clause is.
+#[test]
+fn a_count_star_filter_clause_is_refused_on_bigquery() {
+    let found = unsupported_emissions(
+        &tree("SELECT COUNT(*) FILTER (WHERE ok) AS n FROM t"),
+        SqlDialect::BigQuery,
+        |_| None,
+    );
+    assert_eq!(found.len(), 1, "expected exactly one refusal: {found:#?}");
+    assert!(found[0].reason.contains("FILTER"));
+}
+
+/// The refusal fires on the call carrying the clause, not on an enclosing or
+/// nested call that does not — so a model with one `FILTER` aggregate inside
+/// another call reports once, against the right span.
+#[test]
+fn only_the_call_carrying_the_filter_clause_is_reported() {
+    let sql = "SELECT ABS(SUM(x) FILTER (WHERE ok)) AS n FROM t";
+    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery, |_| None);
+    assert_eq!(found.len(), 1, "expected exactly one refusal: {found:#?}");
+    assert_eq!(found[0].name, "SUM");
+    let span = &sql[found[0].range];
+    assert!(
+        span.starts_with("SUM(") && span.contains("FILTER"),
+        "the span must cover the SUM call and its clause, got: {span}"
+    );
+}
+
+/// The second construct the live run shipped to the warehouse
+/// (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md`
+/// finding 3): `RANGE BETWEEN INTERVAL '2 days' PRECEDING`. GoogleSQL's
+/// `RANGE` frames take a numeric offset over a numeric `ORDER BY` and have no
+/// `INTERVAL` form, so BigQuery answered `400 Syntax error: Unexpected keyword
+/// PRECEDING`.
+#[test]
+fn an_interval_range_frame_is_refused_on_bigquery() {
+    let sql = "SELECT LAG(ts) OVER (PARTITION BY k ORDER BY ts \
+               RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW) AS p FROM t";
+    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery, |_| None);
+    assert_eq!(found.len(), 1, "expected exactly one refusal: {found:#?}");
+    assert_eq!(found[0].name, "LAG");
+    assert_eq!(found[0].dialect, DialectId::BigQuery);
+    assert!(
+        found[0].reason.contains("RANGE"),
+        "the reason must name the frame: {}",
+        found[0].reason
+    );
+}
+
+/// The same frame is clean on DuckDB and Spark, which both have it.
+#[test]
+fn an_interval_range_frame_is_clean_where_the_dialect_has_it() {
+    let sql = "SELECT LAG(ts) OVER (PARTITION BY k ORDER BY ts \
+               RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW) AS p FROM t";
+    for dialect in [SqlDialect::DuckDB, SqlDialect::SparkSQL] {
+        assert!(
+            unsupported_emissions(&tree(sql), dialect, |_| None).is_empty(),
+            "{dialect:?} has INTERVAL RANGE frames"
+        );
+    }
+}
+
+/// A numeric `RANGE` frame and a `ROWS` frame are both fine on BigQuery — the
+/// refusal is about the `INTERVAL` offset, not about framed windows.
+#[test]
+fn numeric_range_and_rows_frames_are_not_refused_on_bigquery() {
+    for sql in [
+        "SELECT SUM(x) OVER (ORDER BY n RANGE BETWEEN 5 PRECEDING AND CURRENT ROW) AS s FROM t",
+        "SELECT SUM(x) OVER (ORDER BY n ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) AS s FROM t",
+        "SELECT SUM(x) OVER (ORDER BY n ROWS UNBOUNDED PRECEDING) AS s FROM t",
+    ] {
+        assert!(
+            unsupported_emissions(&tree(sql), SqlDialect::BigQuery, |_| None).is_empty(),
+            "must not refuse: {sql}"
+        );
+    }
+}
+
+/// The frame belongs to the call that carries it: an outer call with no frame
+/// of its own is not reported for an inner call's frame.
+#[test]
+fn only_the_call_carrying_the_interval_frame_is_reported() {
+    let sql = "SELECT ABS(LAG(ts) OVER (ORDER BY ts \
+               RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW)) AS p FROM t";
+    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery, |_| None);
+    assert_eq!(found.len(), 1, "expected exactly one refusal: {found:#?}");
+    assert_eq!(found[0].name, "LAG");
+}

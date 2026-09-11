@@ -361,7 +361,12 @@ async fn execute_column_scoped_write_with_observed_delta(
             // stop (`docs/outcomes/20260906-bigquery-correctness` decision
             // log).
             if !super::records_observed_deltas(backend.dialect()) {
-                tracing::debug!(
+                // `warn!`, not `debug!`: this is the precision half of the
+                // degradation contract, and a live BigQuery run proved it
+                // invisible to an operator at `debug!`
+                // (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md`
+                // finding 4).
+                tracing::warn!(
                     schema,
                     table,
                     dialect = backend.dialect().name(),

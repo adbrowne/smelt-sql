@@ -647,7 +647,9 @@ pub async fn run_windowed_keyed_maintenance(
                         (None, WriteSuppression::Suppressed { .. })
                     )
                 {
-                    tracing::debug!(
+                    // `warn!`, not `debug!` — see `column_scoped.rs`'s twin
+                    // site.
+                    tracing::warn!(
                         model = model_name,
                         run_id = retry.run_id,
                         dialect = backend.dialect().name(),
