@@ -568,6 +568,9 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
     let expected_probe_sql = emit_append_only_posture_probe(
         "raw.events",
         "event_date",
+        // The source declares no type for `event_date`, so its raw values
+        // are its buckets (`classify_partition_bucket`).
+        &smelt_logical::maintenance::emit::PartitionBucket::Exact,
         &["payload".to_string()],
         &[
             smelt_logical::maintenance::emit::AppendOnlyBaselinePartition {
@@ -600,6 +603,7 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
         smelt_logical::maintenance::emit::emit_append_only_baseline_snapshot(
             "raw.events",
             "event_date",
+            &smelt_logical::maintenance::emit::PartitionBucket::Exact,
             &["payload".to_string()],
             MaintenanceDialect::DuckDb,
         )

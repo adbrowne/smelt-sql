@@ -20,8 +20,8 @@ use smelt_backend::{Backend, BackendError, MaintenanceDialect};
 use smelt_core::sources::{MutationProfile, SourceInfo};
 use smelt_core::ModelFile;
 use smelt_logical::maintenance::emit::{
-    emit_append_only_baseline_snapshot, emit_append_only_posture_probe, late_appends,
-    AppendOnlyBaselinePartition, CurrentPartitionState,
+    classify_partition_bucket, emit_append_only_baseline_snapshot, emit_append_only_posture_probe,
+    late_appends, AppendOnlyBaselinePartition, CurrentPartitionState,
 };
 use smelt_logical::maintenance::{should_dispatch, ProbeDispatch};
 use smelt_state::source_postures::{SourcePosturePartition, SourcePostureStore};
@@ -134,9 +134,21 @@ pub fn append_only_posture_probes(
 
         let digest_columns: Vec<String> = info.columns.iter().map(|c| c.name.clone()).collect();
         let table = info.db_name_for_target(target_name, target_schema);
+        // The declared partition column's declared type decides whether its
+        // raw values already are the source's partitions or have to be
+        // truncated onto the declared grid first — a TIMESTAMP column under
+        // `granularity: day` holds one value per second, not per day
+        // (`smelt_logical::classify_partition_bucket`).
+        let partition_column_type = info
+            .columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(&ts.partition_column))
+            .map(|c| &c.data_type);
+        let bucket = classify_partition_bucket(partition_column_type, ts.granularity);
         let snapshot = emit_append_only_baseline_snapshot(
             &table,
             &ts.partition_column,
+            &bucket,
             &digest_columns,
             dialect,
         );
@@ -159,6 +171,7 @@ pub fn append_only_posture_probes(
             let stmt = emit_append_only_posture_probe(
                 &table,
                 &ts.partition_column,
+                &bucket,
                 &digest_columns,
                 &baseline,
                 dialect,

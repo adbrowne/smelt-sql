@@ -25,6 +25,7 @@
 mod bootstrap;
 mod fingerprint;
 mod merge;
+mod partition_bucket;
 mod probes;
 mod projection;
 mod recompute;
@@ -35,6 +36,7 @@ mod types;
 pub use bootstrap::*;
 pub use fingerprint::*;
 pub use merge::*;
+pub use partition_bucket::*;
 pub use probes::*;
 pub use projection::*;
 pub use recompute::*;

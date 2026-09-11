@@ -177,9 +177,10 @@ fn external_facts_refuse_without_the_sidecar_capability() {
 
 /// The rejection test at the `maintenance_driver` call site: for
 /// `MaintenanceDialect::BigQuery` the emitted affected-keys relation is
-/// never a `FROM (VALUES …)` table-value constructor, and for
-/// DuckDB/Spark it is byte-identical (both route through the shared
-/// `smelt_core::build_row_set_table` owner).
+/// never a `FROM (VALUES …)` table-value constructor, and never the
+/// one-operand-per-key `UNION ALL` chain a live run refused at scale
+/// (`smelt_core::sql::row_set`); for DuckDB/Spark it is byte-identical
+/// (both route through the shared `smelt_core::build_row_set_table` owner).
 #[test]
 fn repair_keys_literal_select_bigquery_is_not_a_values_constructor() {
     let keys = vec!["a".to_string(), "b".to_string()];
@@ -188,7 +189,10 @@ fn repair_keys_literal_select_bigquery_is_not_a_values_constructor() {
         !select.contains("VALUES"),
         "BigQuery has no table-value constructor, got: {select}"
     );
-    assert!(select.contains("UNION ALL"));
+    assert!(
+        select.contains("UNNEST") && !select.contains("UNION ALL"),
+        "expected the array form, got: {select}"
+    );
 }
 
 #[test]

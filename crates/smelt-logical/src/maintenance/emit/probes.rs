@@ -3,6 +3,7 @@
 //! append-only baseline snapshot and source-mutation fingerprint.
 
 use super::fingerprint::row_fingerprint_expr;
+use super::partition_bucket::{partition_bucket_expr, PartitionBucket};
 use super::types::*;
 
 /// The out-of-slice match probe for a **checked** route-3 (recurrence-
@@ -553,6 +554,7 @@ pub struct AppendOnlyBaselinePartition {
 pub fn emit_append_only_posture_probe(
     source_table: &str,
     partition_column: &str,
+    bucket: &PartitionBucket,
     digest_columns: &[String],
     baseline: &[AppendOnlyBaselinePartition],
     dialect: MaintenanceDialect,
@@ -566,8 +568,13 @@ pub fn emit_append_only_posture_probe(
         "emit_append_only_posture_probe requires a non-empty recorded baseline for {source_table}"
     );
     let cast_type = probe_dialect_string_type(dialect);
-    let snapshot =
-        emit_append_only_baseline_snapshot(source_table, partition_column, digest_columns, dialect);
+    let snapshot = emit_append_only_baseline_snapshot(
+        source_table,
+        partition_column,
+        bucket,
+        digest_columns,
+        dialect,
+    );
     let baseline_rows: Vec<Vec<String>> = baseline
         .iter()
         .map(|b| {
@@ -701,6 +708,7 @@ pub fn late_appends(
 pub fn emit_append_only_baseline_snapshot(
     source_table: &str,
     partition_column: &str,
+    bucket: &PartitionBucket,
     digest_columns: &[String],
     dialect: MaintenanceDialect,
 ) -> MaintenanceStatement {
@@ -724,11 +732,16 @@ pub fn emit_append_only_baseline_snapshot(
             format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
         }
     };
+    // The grid, not the raw column: a TIMESTAMP partition column under
+    // `granularity: day` holds one value per second, and grouping it raw
+    // would record one "partition" per instant
+    // (`partition_bucket::classify_partition_bucket`).
+    let bucket_expr = partition_bucket_expr(partition_column, bucket, dialect);
     let sql = format!(
-        "SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
+        "SELECT CAST({bucket_expr} AS {cast_type}) AS partition_value, \
          COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
          FROM {source_table} \
-         GROUP BY {partition_column}"
+         GROUP BY {bucket_expr}"
     );
     MaintenanceStatement::new(sql)
 }

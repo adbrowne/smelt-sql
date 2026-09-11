@@ -9,10 +9,26 @@
 //!
 //! GoogleSQL has no table-value constructor: `FROM (VALUES (1), (2))` is a
 //! syntax error (`400 Syntax error: Expected keyword JOIN but got ')'`,
-//! measured live against BigQuery). The portable rewrite every dialect
-//! accepts is a chained `SELECT … UNION ALL SELECT …`, which is what
-//! [`BackendType::BigQuery`] renders here; every other dialect keeps the
-//! `VALUES` table-value constructor unchanged.
+//! measured live against BigQuery). What [`BackendType::BigQuery`] renders
+//! instead is `SELECT * FROM UNNEST([STRUCT(… AS col), (…)])` — GoogleSQL's
+//! own array-of-structs form, **one** query operand no matter how many rows
+//! it carries. Every other dialect keeps the `VALUES` table-value
+//! constructor unchanged.
+//!
+//! The chained `SELECT … UNION ALL SELECT …` this used to render is also
+//! valid GoogleSQL, and it does not scale: one query operand *per row*. A
+//! live dogfood run refused a 5,797-row baseline probe outright — *"Not
+//! enough resources for query planning - too many subqueries or query is
+//! too complex"* at 692,597 characters
+//! (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md`
+//! finding 1b). The array form has no per-row planning cost.
+//!
+//! The first array element carries the column names as `AS` aliases and
+//! therefore types the whole array; later elements are bare tuples. A first
+//! row whose cell is an untyped `NULL` literal would type that field from
+//! `NULL` — a hazard the `UNION ALL` form shared, since GoogleSQL types a
+//! bare `NULL` as `INT64` in both — so callers that may emit NULL in the
+//! first row cast it (`seeds::ephemeral` does).
 //!
 //! Both functions require a non-empty row set — deciding what an *empty*
 //! row set means (an always-false guard row, a `WHERE FALSE` predicate with
@@ -24,14 +40,14 @@ use crate::config::BackendType;
 
 /// The dialect-appropriate body of an inline row-set constructor: a
 /// `VALUES (…), (…)` table-value constructor for dialects that support one,
-/// or the portable `SELECT … UNION ALL SELECT …` rewrite GoogleSQL requires.
+/// or the `SELECT * FROM UNNEST([STRUCT(…), …])` array form GoogleSQL
+/// requires.
 ///
 /// `columns` names the row set's columns. For the `VALUES` form the names
 /// are not embedded in the body (the caller supplies them separately, e.g.
-/// as a CTE's or derived table's external column list); for the
-/// `UNION ALL` form they are used to alias the first branch's projections,
-/// since that branch is the only one carrying column names on a `SELECT …
-/// UNION ALL …` chain.
+/// as a CTE's or derived table's external column list); for the `UNNEST`
+/// form they alias the **first** array element's fields, which is what
+/// names the fields of every element and types the array.
 ///
 /// `rows[i][j]` is the already-formatted SQL literal for row `i`, column
 /// `j`.
@@ -52,33 +68,37 @@ pub fn row_set_body(dialect: BackendType, columns: &[&str], rows: &[Vec<String>]
                 rows.iter().map(|r| format!("({})", r.join(", "))).collect();
             format!("VALUES {}", rows_sql.join(", "))
         }
-        BackendType::BigQuery => rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                if i == 0 {
-                    let projected: Vec<String> = r
-                        .iter()
-                        .zip(columns.iter())
-                        .map(|(lit, name)| format!("{lit} AS {name}"))
-                        .collect();
-                    format!("SELECT {}", projected.join(", "))
-                } else {
-                    format!("SELECT {}", r.join(", "))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" UNION ALL "),
+        BackendType::BigQuery => {
+            let elements: Vec<String> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    if i == 0 {
+                        // The first element names the fields and thereby
+                        // types the array.
+                        let projected: Vec<String> = r
+                            .iter()
+                            .zip(columns.iter())
+                            .map(|(lit, name)| format!("{lit} AS {name}"))
+                            .collect();
+                        format!("STRUCT({})", projected.join(", "))
+                    } else {
+                        format!("({})", r.join(", "))
+                    }
+                })
+                .collect();
+            format!("SELECT * FROM UNNEST([{}])", elements.join(", "))
+        }
     }
 }
 
 /// The full derived-table expression for an inline row set, ready to splice
 /// directly into a `FROM`/`JOIN` clause: `(VALUES …) AS alias(cols)` for
-/// dialects with a table-value constructor, or `(SELECT … UNION ALL
-/// SELECT …) AS alias` for GoogleSQL — column names come from the first
-/// branch's aliased projections in that case, so the outer alias carries no
-/// column list (GoogleSQL's `AS alias(cols)` external column-list syntax on
-/// a derived table is not exercised here).
+/// dialects with a table-value constructor, or
+/// `(SELECT * FROM UNNEST([STRUCT(…), …])) AS alias` for GoogleSQL — column
+/// names come from the first array element's field aliases in that case, so
+/// the outer alias carries no column list (GoogleSQL's `AS alias(cols)`
+/// external column-list syntax on a derived table is not exercised here).
 ///
 /// # Panics
 /// Panics if `rows` is empty; see [`row_set_body`].
@@ -123,12 +143,12 @@ mod tests {
             "BigQuery has no table-value constructor, got: {body}"
         );
         assert!(
-            body.contains("UNION ALL"),
-            "expected a chained UNION ALL rewrite, got: {body}"
+            !body.contains("UNION ALL"),
+            "the UNION ALL rewrite costs one query operand per row, got: {body}"
         );
         assert_eq!(
             body,
-            "SELECT 1 AS id, 'North' AS name UNION ALL SELECT 2, 'South'"
+            "SELECT * FROM UNNEST([STRUCT(1 AS id, 'North' AS name), (2, 'South')])"
         );
     }
 
@@ -141,7 +161,7 @@ mod tests {
         );
         assert_eq!(
             table,
-            "(SELECT 1 AS id, 'North' AS name UNION ALL SELECT 2, 'South') AS t"
+            "(SELECT * FROM UNNEST([STRUCT(1 AS id, 'North' AS name), (2, 'South')])) AS t"
         );
     }
 
@@ -166,5 +186,25 @@ mod tests {
     #[should_panic(expected = "requires at least one row")]
     fn row_set_body_panics_on_empty_rows() {
         row_set_body(BackendType::DuckDB, &["id"], &[]);
+    }
+    /// The property the live refusal was about: GoogleSQL's rendering costs
+    /// a fixed number of query operands, not one per row. A 5,797-row set —
+    /// the size the dogfood run actually hit — renders as a single `UNNEST`
+    /// over one array literal.
+    #[test]
+    fn bigquery_row_set_operand_count_is_independent_of_row_count() {
+        let many: Vec<Vec<String>> = (0..5_797)
+            .map(|i| vec![i.to_string(), format!("'p{i}'")])
+            .collect();
+        let body = row_set_body(BackendType::BigQuery, &["id", "name"], &many);
+        assert_eq!(
+            body.matches("SELECT").count(),
+            1,
+            "one query operand regardless of row count"
+        );
+        assert_eq!(body.matches("UNNEST").count(), 1);
+        assert!(!body.contains("UNION ALL"));
+        // Every row is still carried.
+        assert_eq!(body.matches("'p").count(), 5_797);
     }
 }

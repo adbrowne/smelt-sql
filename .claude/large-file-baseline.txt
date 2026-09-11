@@ -1,5 +1,5 @@
 # Large-file ratchet baseline
-# Updated: 2026-09-10
+# Updated: 2026-09-11
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -71,7 +71,7 @@ crates/smelt-logical/src/rules/rule_diagnostics.rs 1587
 crates/smelt-logical/tests/backbuild_conformance.rs 3294
 crates/smelt-logical/tests/backbuild_options.rs 2249
 crates/smelt-logical/tests/backbuild_property.rs 1063
-crates/smelt-logical/tests/emit_statements.rs 1710
+crates/smelt-logical/tests/emit_statements.rs 1727
 crates/smelt-logical/tests/keyed_families.rs 1309
 crates/smelt-logical/tests/maintenance_grouping.rs 1072
 crates/smelt-lsp/src/backend/hover_impl.rs 1072
@@ -98,7 +98,7 @@ crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-runtime/src/compile.rs 4015
 crates/smelt-runtime/src/cumulative.rs 2179
 crates/smelt-runtime/src/execute/project/mod.rs 4898
-crates/smelt-runtime/src/maintenance_driver/tests.rs 1079
+crates/smelt-runtime/src/maintenance_driver/tests.rs 1083
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
 crates/smelt-runtime/src/windowing.rs 1277

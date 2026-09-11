@@ -14,7 +14,7 @@ use smelt_logical::maintenance::emit::{
     emit_monotonicity_probe, emit_recurrence_bound_probe, emit_source_mutation_fingerprint,
     emit_staged_candidate_conditional, emit_staged_candidate_conditional_recompute,
     presentation_projection, state_augmented_projection, AppendOnlyBaselinePartition,
-    MaintenanceDialect, PresentationRefusal, Region, StateAugmentRefusal,
+    MaintenanceDialect, PartitionBucket, PresentationRefusal, Region, StateAugmentRefusal,
 };
 use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
 use std::collections::{BTreeMap, HashMap};
@@ -1255,6 +1255,7 @@ fn append_only_posture_probe_flags_shrunk_partition_and_changed_fingerprint() {
     let stmt = emit_append_only_posture_probe(
         "main.raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["event_id".to_string(), "payload".to_string()],
         &baseline,
         MaintenanceDialect::DuckDb,
@@ -1313,7 +1314,14 @@ fn every_probe_emitter_returns_violation_count_and_sample_keys() {
             ),
             emit_bounded_domain_probe("SELECT c FROM t", "c", 10, dialect),
             emit_monotonicity_probe("SELECT id, ts FROM t", &["id".to_string()], "ts", dialect),
-            emit_append_only_posture_probe("main.t", "d", &["c".to_string()], &baseline, dialect),
+            emit_append_only_posture_probe(
+                "main.t",
+                "d",
+                &PartitionBucket::Exact,
+                &["c".to_string()],
+                &baseline,
+                dialect,
+            ),
         ];
         for stmt in &statements {
             assert!(
@@ -1390,7 +1398,14 @@ fn append_only_posture_probe_panics_on_empty_digest_columns() {
         recorded_fingerprint: "fp".to_string(),
         check_fingerprint: true,
     }];
-    emit_append_only_posture_probe("main.t", "d", &[], &baseline, MaintenanceDialect::DuckDb);
+    emit_append_only_posture_probe(
+        "main.t",
+        "d",
+        &PartitionBucket::Exact,
+        &[],
+        &baseline,
+        MaintenanceDialect::DuckDb,
+    );
 }
 
 /// The rejection test at the `emit` call site: for
@@ -1422,6 +1437,7 @@ fn append_only_posture_probe_bigquery_is_not_a_values_constructor() {
     let stmt = emit_append_only_posture_probe(
         "main.raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["event_id".to_string()],
         &baseline,
         MaintenanceDialect::BigQuery,
@@ -1469,6 +1485,7 @@ fn append_only_posture_probe_panics_on_empty_baseline() {
     emit_append_only_posture_probe(
         "main.t",
         "d",
+        &PartitionBucket::Exact,
         &["c".to_string()],
         &[],
         MaintenanceDialect::DuckDb,
