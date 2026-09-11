@@ -128,7 +128,8 @@ fn apply_window(
         delete_flag_expr,
         &event_delta.sql,
         MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     batch_group(conn, &group);
 }
 
@@ -556,7 +557,8 @@ fn recipe_feeds_emitters_end_to_end() {
             recipe.delete_flag_expr.as_deref(),
             &event_delta.sql,
             MaintenanceDialect::DuckDb,
-        );
+        )
+        .expect("a realisable succession dialect");
         batch_group(&conn, &group);
     };
 
@@ -636,7 +638,8 @@ fn full_rebuild_executes_against_duckdb_and_matches_the_oracle() {
         None,
         "is_deleted",
         MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     batch_group(&conn, &group);
 
     assert!(
@@ -695,7 +698,8 @@ fn full_rebuild_folds_on_key_and_clock() {
         None,
         "FALSE",
         MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     let presented_sql = &group.statements[0].sql;
     assert_ne!(
         presented_sql,

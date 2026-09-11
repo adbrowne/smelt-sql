@@ -46,9 +46,88 @@ fn key_join_cond(left_alias: &str, right_alias: &str, key_cols: &[String]) -> St
         .join(" AND ")
 }
 
-fn touched_keys_predicate(key_cols: &[String], event_delta_select: &str) -> String {
+/// The succession-patch technique was asked for statements in a dialect that
+/// has no realisation of it.
+///
+/// Reaching this means a caller skipped the availability check
+/// (`smelt_runtime::maintenance_driver::realises_tombstone_ledger`): the plan
+/// layer downgrades a `SuccessionPatch` cell to `DeleteInsert` on a dialect
+/// with no tombstone ledger, so a correct run never gets here. A typed
+/// refusal rather than the `assert!` this used to be — `CLAUDE.md`
+/// §"Fail-loud discipline" wants a diagnostic, not an abort.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the succession-patch technique has no realisation in dialect '{dialect}': the tombstone \
+     ledger is not realisable there, so the plan layer should have downgraded this cell to \
+     DeleteInsert before the run reached a succession statement (docs/specs/state.md \
+     §\"Which dialects realise which structure\")"
+)]
+pub struct UnsupportedSuccessionDialect {
+    /// The offending dialect, as [`MaintenanceDialect`] spells it.
+    pub dialect: &'static str,
+}
+
+impl UnsupportedSuccessionDialect {
+    fn new(dialect: MaintenanceDialect) -> Self {
+        Self {
+            dialect: match dialect {
+                MaintenanceDialect::DuckDb => "duckdb",
+                MaintenanceDialect::Spark => "spark",
+                MaintenanceDialect::BigQuery => "bigquery",
+            },
+        }
+    }
+}
+
+/// The dialects that realise the tombstone ledger, and therefore the whole
+/// succession-patch statement family (`docs/specs/state.md` §"Which dialects
+/// realise which structure"). Spark is refused — Delta has no cross-table
+/// transaction, so the tombstone record and the presented `MERGE` cannot be
+/// made atomic, which is the same permanent absence `smelt_state::ledger`
+/// records for the reconciliation ledger.
+fn check_succession_dialect(
+    dialect: MaintenanceDialect,
+) -> Result<(), UnsupportedSuccessionDialect> {
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery => Ok(()),
+        MaintenanceDialect::Spark => Err(UnsupportedSuccessionDialect::new(dialect)),
+    }
+}
+
+/// The scoping predicate restricting one neighbour-domain relation to the
+/// keys the batch touches. Two spellings, one meaning:
+///
+/// - **DuckDB** — `(k…) IN (SELECT k… FROM (<batch>))`, a row-constructor
+///   `IN` over the batch's own key projection.
+/// - **BigQuery** — GoogleSQL has no row constructor: `(a, b)` is a
+///   parenthesised expression there, not a tuple, so a multi-column `IN`
+///   subquery is a syntax error (and the single-column case would be the
+///   only one that happened to work). The same semi-join is spelled as a
+///   correlated `EXISTS`, which needs the *outer* relation to carry an alias
+///   so the correlation can name it — hence `outer_alias`, which
+///   [`build_domain_cte`] supplies on the BigQuery path only.
+///
+/// Spark shares DuckDB's arm but never reaches it: every public entry point
+/// refuses Spark via [`check_succession_dialect`] before any helper runs.
+/// The arm exists so a new dialect is still a compile error here.
+fn touched_keys_predicate(
+    key_cols: &[String],
+    event_delta_select: &str,
+    dialect: MaintenanceDialect,
+    outer_alias: &str,
+) -> String {
     let keys = key_col_list(key_cols);
-    format!("({keys}) IN (SELECT {keys} FROM ({event_delta_select}) AS __smelt_touched_keys)")
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => {
+            format!(
+                "({keys}) IN (SELECT {keys} FROM ({event_delta_select}) AS __smelt_touched_keys)"
+            )
+        }
+        MaintenanceDialect::BigQuery => format!(
+            "EXISTS (SELECT 1 FROM ({event_delta_select}) AS __smelt_touched_keys WHERE {})",
+            key_join_cond("__smelt_touched_keys", outer_alias, key_cols)
+        ),
+    }
 }
 
 /// The event-delta `SELECT` (`model_transforms.md`'s "Succession-patch
@@ -120,6 +199,7 @@ pub type DerivedColumn = (String, String);
 /// keys the batch touches. Ledger rows carry `NULL` payload (a tombstone
 /// has no presented row to carry columns on); `__smelt_is_delete` marks
 /// which relation a row came from / the batch's own delete flag.
+#[allow(clippy::too_many_arguments)]
 fn build_domain_cte(
     presented_table: &str,
     tombstone_table: &str,
@@ -128,6 +208,7 @@ fn build_domain_cte(
     payload_columns: &[String],
     delete_flag_expr: &str,
     event_delta_select: &str,
+    dialect: MaintenanceDialect,
 ) -> String {
     let keys = key_col_list(key_cols);
     let payload_select = if payload_columns.is_empty() {
@@ -147,13 +228,35 @@ fn build_domain_cte(
                 .join(", ")
         )
     };
-    let touched = touched_keys_predicate(key_cols, event_delta_select);
+    // The correlated-`EXISTS` spelling needs each scanned relation to carry a
+    // name the correlation can qualify; the row-constructor `IN` spelling
+    // needs none, and adding one would change DuckDB's emitted text for no
+    // reason. So the alias is part of the per-dialect relation reference, not
+    // a uniform addition.
+    let (presented_ref, tombstone_ref, presented_alias, tombstone_alias) = match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => (
+            presented_table.to_string(),
+            tombstone_table.to_string(),
+            "",
+            "",
+        ),
+        MaintenanceDialect::BigQuery => (
+            format!("{presented_table} AS __smelt_presented"),
+            format!("{tombstone_table} AS __smelt_tombstones"),
+            "__smelt_presented",
+            "__smelt_tombstones",
+        ),
+    };
+    let touched_presented =
+        touched_keys_predicate(key_cols, event_delta_select, dialect, presented_alias);
+    let touched_tombstone =
+        touched_keys_predicate(key_cols, event_delta_select, dialect, tombstone_alias);
     format!(
         "SELECT {keys}, {clock_col} AS __smelt_t{payload_select}, FALSE AS __smelt_is_delete \
-         FROM {presented_table} WHERE {touched} \
+         FROM {presented_ref} WHERE {touched_presented} \
          UNION ALL \
          SELECT {keys}, {clock_col} AS __smelt_t{payload_null}, TRUE AS __smelt_is_delete \
-         FROM {tombstone_table} WHERE {touched} \
+         FROM {tombstone_ref} WHERE {touched_tombstone} \
          UNION ALL \
          SELECT {keys}, {clock_col} AS __smelt_t{payload_select}, {delete_flag_expr} AS \
          __smelt_is_delete FROM ({event_delta_select}) AS __smelt_batch"
@@ -174,12 +277,12 @@ fn build_domain_cte(
 /// expression, evaluated in the same scope `emit_succession_event_delta`
 /// projected it into.
 ///
-/// # Panics
-/// DuckDB is the only dialect this phase renders correctly — Spark and
-/// BigQuery take the recorded state downgrade
-/// (`docs/outcomes/20260906-scd2-keyed-succession/outcome.md` §"Out of
-/// scope") rather than half-right emitted text, so a non-DuckDB dialect
-/// panics rather than silently compiling wrong SQL.
+/// # Errors
+/// [`UnsupportedSuccessionDialect`] for a dialect with no tombstone-ledger
+/// realisation (Spark). A cell on such a dialect takes the recorded state
+/// downgrade to `DeleteInsert` in the plan layer and never reaches this
+/// emitter; the refusal is the fail-loud backstop for a caller that skipped
+/// the availability check.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_succession_patch(
     presented_table: &str,
@@ -191,13 +294,8 @@ pub fn emit_succession_patch(
     delete_flag_expr: Option<&str>,
     event_delta_select: &str,
     dialect: MaintenanceDialect,
-) -> StatementGroup {
-    assert!(
-        matches!(dialect, MaintenanceDialect::DuckDb),
-        "emit_succession_patch: only MaintenanceDialect::DuckDb is supported today for \
-         {presented_table} — Spark/BigQuery take the recorded state downgrade rather than a \
-         half-right emitted MERGE"
-    );
+) -> Result<StatementGroup, UnsupportedSuccessionDialect> {
+    check_succession_dialect(dialect)?;
     let tombstone_table = tombstone_table_name(presented_table);
     let keys = key_col_list(key_cols);
     let delete_expr = delete_flag_expr.unwrap_or("FALSE");
@@ -210,6 +308,7 @@ pub fn emit_succession_patch(
         payload_columns,
         delete_expr,
         event_delta_select,
+        dialect,
     );
 
     let payload_select = if payload_columns.is_empty() {
@@ -234,17 +333,42 @@ pub fn emit_succession_patch(
         format!(", {derived_select}")
     };
 
-    let using_select = format!(
-        "WITH __smelt_domain AS ({domain}), \
-         __smelt_dedup AS (SELECT * FROM __smelt_domain QUALIFY ROW_NUMBER() OVER (PARTITION BY \
-         {keys}, __smelt_t ORDER BY __smelt_is_delete ASC) = 1), \
-         __smelt_windowed AS (SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete, \
-         LEAD(__smelt_t) OVER (PARTITION BY {keys} ORDER BY __smelt_t) AS __smelt_lead_t, \
-         LAG(__smelt_t) OVER (PARTITION BY {keys} ORDER BY __smelt_t) AS __smelt_lag_t FROM \
-         __smelt_dedup) \
-         SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete{derived_select_part} FROM \
-         __smelt_windowed"
-    );
+    // Two spellings of one relation — dedup the domain on `(k, t)`, then
+    // recompute LEAD/LAG over it.
+    //
+    // DuckDB's uses `WITH` + `QUALIFY`. GoogleSQL has both, but this path
+    // relies on neither: a `WITH` clause inside a `MERGE`'s `USING` subquery
+    // and the exact preconditions BigQuery's `QUALIFY` carries are both
+    // things only a live engine could settle, and this emitter's failure mode
+    // is text the engine rejects on a path no offline test covers. Nested
+    // derived tables with an explicit `ROW_NUMBER() … WHERE rn = 1` are the
+    // universally-valid spelling of the same relation — the very shape
+    // `emit_succession_full_rebuild`'s own fold already uses — so BigQuery
+    // gets that instead of a construct whose acceptance is a guess.
+    let using_select = match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => format!(
+            "WITH __smelt_domain AS ({domain}), \
+             __smelt_dedup AS (SELECT * FROM __smelt_domain QUALIFY ROW_NUMBER() OVER (PARTITION \
+             BY {keys}, __smelt_t ORDER BY __smelt_is_delete ASC) = 1), \
+             __smelt_windowed AS (SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete, \
+             LEAD(__smelt_t) OVER (PARTITION BY {keys} ORDER BY __smelt_t) AS __smelt_lead_t, \
+             LAG(__smelt_t) OVER (PARTITION BY {keys} ORDER BY __smelt_t) AS __smelt_lag_t FROM \
+             __smelt_dedup) \
+             SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete{derived_select_part} \
+             FROM __smelt_windowed"
+        ),
+        MaintenanceDialect::BigQuery => format!(
+            "SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete{derived_select_part} \
+             FROM (SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete, \
+             LEAD(__smelt_t) OVER (PARTITION BY {keys} ORDER BY __smelt_t) AS __smelt_lead_t, \
+             LAG(__smelt_t) OVER (PARTITION BY {keys} ORDER BY __smelt_t) AS __smelt_lag_t FROM \
+             (SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete FROM (SELECT {keys}, \
+             __smelt_t{payload_select}, __smelt_is_delete, ROW_NUMBER() OVER (PARTITION BY \
+             {keys}, __smelt_t ORDER BY __smelt_is_delete ASC) AS __smelt_dedup_rn FROM \
+             ({domain}) AS __smelt_domain) AS __smelt_dedup_ranked WHERE __smelt_dedup_rn = 1) \
+             AS __smelt_dedup) AS __smelt_windowed"
+        ),
+    };
 
     let on = format!(
         "{} AND target.{clock_col} = source.__smelt_t",
@@ -311,13 +435,13 @@ pub fn emit_succession_patch(
         key_join_cond("__smelt_existing", "__smelt_batch", key_cols)
     );
 
-    StatementGroup {
+    Ok(StatementGroup {
         statements: vec![
             MaintenanceStatement::new(tombstone_insert),
             MaintenanceStatement::new(merge_sql),
         ],
         transactional: true,
-    }
+    })
 }
 
 /// The full-rebuild statement group (`incremental_shapes.md` §"The
@@ -361,8 +485,17 @@ pub fn emit_succession_patch(
 /// [`emit_succession_ledger_rebuild_select`]) takes the resolved
 /// expression, not the `Option`.
 ///
-/// # Panics
-/// Same DuckDb-only restriction as [`emit_succession_patch`].
+/// # Errors
+/// Same [`UnsupportedSuccessionDialect`] refusal as
+/// [`emit_succession_patch`].
+///
+/// The group is marked `transactional`, which every dialect cannot equally
+/// honour: it opens with a `CREATE TABLE … AS`, and GoogleSQL forbids
+/// permanent-entity DDL inside a multi-statement transaction, so
+/// `smelt_backend_bigquery`'s bookkeeping plan runs the three statements as
+/// separate jobs. The rebuild stays *correct* — it is a pure function of the
+/// whole retained source, so a re-run re-derives both tables from scratch —
+/// but it is not atomic there, and `docs/specs/state.md` records that.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_succession_full_rebuild(
     presented_table: &str,
@@ -376,13 +509,8 @@ pub fn emit_succession_full_rebuild(
     pre_filter: Option<&str>,
     delete_flag_expr: &str,
     dialect: MaintenanceDialect,
-) -> StatementGroup {
-    assert!(
-        matches!(dialect, MaintenanceDialect::DuckDb),
-        "emit_succession_full_rebuild: only MaintenanceDialect::DuckDb is supported today for \
-         {presented_table} — Spark/BigQuery take the recorded state downgrade rather than a \
-         half-right emitted rebuild"
-    );
+) -> Result<StatementGroup, UnsupportedSuccessionDialect> {
+    check_succession_dialect(dialect)?;
     let tombstone_table = tombstone_table_name(presented_table);
     let keys = key_col_list(key_cols);
 
@@ -428,7 +556,16 @@ pub fn emit_succession_full_rebuild(
     );
 
     let presented_create = super::emit_create_table_as(presented_table, &folded_select, dialect);
-    let ledger_delete = MaintenanceStatement::new(format!("DELETE FROM {tombstone_table}"));
+    // GoogleSQL rejects a `DELETE` with no `WHERE` ("DELETE must have a WHERE
+    // clause"); `WHERE TRUE` is its documented spelling for "every row".
+    // DuckDB accepts both, and keeps the bare form so its emitted text is
+    // unchanged.
+    let ledger_delete = MaintenanceStatement::new(match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => {
+            format!("DELETE FROM {tombstone_table}")
+        }
+        MaintenanceDialect::BigQuery => format!("DELETE FROM {tombstone_table} WHERE TRUE"),
+    });
     let ledger_rebuild_select = emit_succession_ledger_rebuild_select(
         source_table,
         key_cols,
@@ -451,10 +588,10 @@ pub fn emit_succession_full_rebuild(
         None => unreachable!("emit_create_table_as always returns exactly one statement"),
     };
 
-    StatementGroup {
+    Ok(StatementGroup {
         statements: vec![presented_stmt, ledger_delete, ledger_insert],
         transactional: true,
-    }
+    })
 }
 
 /// The clock-tie probe (`incremental_shapes.md` §"Run shape and late
@@ -495,6 +632,7 @@ pub fn emit_succession_clock_tie_probe(
         payload_columns,
         delete_expr,
         event_delta_select,
+        dialect,
     );
     let cast_type = super::probes::probe_dialect_string_type(dialect);
     let content_sig = if payload_columns.is_empty() {
@@ -540,444 +678,4 @@ fn clock_tie_sample_agg(dialect: MaintenanceDialect) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn keys() -> Vec<String> {
-        vec!["customer_id".to_string()]
-    }
-
-    #[test]
-    fn tombstone_table_name_appends_the_reserved_suffix() {
-        assert_eq!(
-            tombstone_table_name("main.customer_history"),
-            "main.customer_history__tombstones"
-        );
-    }
-
-    #[test]
-    fn event_delta_select_projects_row_local_columns_and_the_delete_flag_with_no_window_function() {
-        let projection = vec![
-            ("customer_id".to_string(), "customer_id".to_string()),
-            ("changed_at".to_string(), "changed_at".to_string()),
-            ("tier".to_string(), "tier".to_string()),
-            ("is_deleted".to_string(), "is_deleted".to_string()),
-        ];
-        let stmt = emit_succession_event_delta(
-            "raw.customer_changes",
-            &projection,
-            Some("ingested_at < changed_at + INTERVAL '7 days'"),
-            "ingested_date >= DATE '2026-01-01' AND ingested_date < DATE '2026-01-02'",
-        );
-        assert!(!stmt.sql.contains("OVER ("), "{}", stmt.sql);
-        assert!(
-            stmt.sql
-                .contains("ingested_at < changed_at + INTERVAL '7 days'"),
-            "{}",
-            stmt.sql
-        );
-        assert!(
-            stmt.sql.contains(
-                "ingested_date >= DATE '2026-01-01' AND ingested_date < DATE '2026-01-02'"
-            ),
-            "{}",
-            stmt.sql
-        );
-        assert!(stmt.sql.starts_with(
-            "SELECT customer_id AS customer_id, changed_at AS changed_at, tier AS tier, \
-             is_deleted AS is_deleted FROM raw.customer_changes WHERE"
-        ));
-    }
-
-    #[test]
-    fn patch_group_is_transactional_and_records_tombstones_before_the_presented_merge() {
-        let group = emit_succession_patch(
-            "main.customer_history",
-            &keys(),
-            "changed_at",
-            &["tier".to_string()],
-            &[("valid_to".to_string(), "{lead}".to_string())],
-            &[],
-            Some("is_deleted"),
-            "SELECT customer_id, changed_at, tier, is_deleted FROM raw.customer_changes",
-            MaintenanceDialect::DuckDb,
-        );
-        assert!(group.transactional);
-        assert_eq!(group.statements.len(), 2);
-        assert!(
-            group.statements[0]
-                .sql
-                .starts_with("INSERT INTO main.customer_history__tombstones"),
-            "{}",
-            group.statements[0].sql
-        );
-        assert!(
-            group.statements[1].sql.starts_with("MERGE INTO"),
-            "{}",
-            group.statements[1].sql
-        );
-    }
-
-    #[test]
-    fn patch_merge_neighbour_domain_unions_presented_ledger_and_batch() {
-        let group = emit_succession_patch(
-            "main.customer_history",
-            &keys(),
-            "changed_at",
-            &["tier".to_string()],
-            &[("valid_to".to_string(), "{lead}".to_string())],
-            &[],
-            None,
-            "SELECT customer_id, changed_at, tier FROM raw.customer_changes",
-            MaintenanceDialect::DuckDb,
-        );
-        let merge_sql = &group.statements[1].sql;
-        assert!(
-            merge_sql.contains("FROM main.customer_history WHERE"),
-            "{merge_sql}"
-        );
-        assert!(
-            merge_sql.contains("FROM main.customer_history__tombstones WHERE"),
-            "{merge_sql}"
-        );
-        assert!(
-            merge_sql.contains(
-                "FROM (SELECT customer_id, changed_at, tier FROM \
-             raw.customer_changes) AS __smelt_batch"
-            ),
-            "{merge_sql}"
-        );
-        assert!(
-            merge_sql.contains(
-                "LEAD(__smelt_t) OVER (PARTITION BY customer_id ORDER BY \
-             __smelt_t)"
-            ),
-            "{merge_sql}"
-        );
-        assert!(
-            !merge_sql.contains(
-                "LEAD(__smelt_t) OVER (PARTITION BY customer_id ORDER BY \
-             __smelt_t) AS __smelt_lead_t FROM main.customer_history"
-            ),
-            "the LEAD/LAG recomputation must run over the domain union, not the presented table \
-             alone: {merge_sql}"
-        );
-    }
-
-    #[test]
-    fn patch_merge_keys_on_key_columns_and_the_clock() {
-        let group = emit_succession_patch(
-            "main.customer_history",
-            &keys(),
-            "changed_at",
-            &["tier".to_string()],
-            &[("valid_to".to_string(), "{lead}".to_string())],
-            &[],
-            None,
-            "SELECT customer_id, changed_at, tier FROM raw.customer_changes",
-            MaintenanceDialect::DuckDb,
-        );
-        let merge_sql = &group.statements[1].sql;
-        assert!(
-            merge_sql.contains(
-                "ON target.customer_id = source.customer_id AND target.changed_at = \
-                 source.__smelt_t"
-            ),
-            "{merge_sql}"
-        );
-    }
-
-    #[test]
-    fn ledger_rebuild_select_is_key_and_clock_of_delete_flagged_rows_passing_the_pre_filter() {
-        let stmt = emit_succession_ledger_rebuild_select(
-            "raw.customer_changes",
-            &keys(),
-            "changed_at",
-            Some("ingested_at < changed_at + INTERVAL '7 days'"),
-            "is_deleted",
-            None,
-        );
-        assert_eq!(
-            stmt.sql,
-            "SELECT customer_id, changed_at FROM raw.customer_changes WHERE (ingested_at < \
-             changed_at + INTERVAL '7 days') AND (is_deleted)"
-        );
-    }
-
-    #[test]
-    fn clock_tie_probe_selects_key_clock_and_a_sample_for_non_identical_collisions() {
-        let stmt = emit_succession_clock_tie_probe(
-            "main.customer_history",
-            &keys(),
-            "changed_at",
-            &["tier".to_string()],
-            None,
-            "SELECT customer_id, changed_at, tier FROM raw.customer_changes",
-            MaintenanceDialect::DuckDb,
-        );
-        assert!(stmt.sql.contains("violation_count"), "{}", stmt.sql);
-        assert!(stmt.sql.contains("sample_keys"), "{}", stmt.sql);
-        assert!(stmt.sql.contains("HAVING COUNT(DISTINCT"), "{}", stmt.sql);
-    }
-
-    /// Runs [`emit_succession_clock_tie_probe`] against a real in-memory
-    /// DuckDB, over a `main.customer_history` presented table and its
-    /// `__tombstones` ledger sibling, both pre-created by the caller, and
-    /// returns the probe's `violation_count`.
-    fn clock_tie_violation_count(conn: &duckdb::Connection, event_delta_select: &str) -> i64 {
-        let stmt = emit_succession_clock_tie_probe(
-            "main.customer_history",
-            &keys(),
-            "changed_at",
-            &["tier".to_string()],
-            Some("is_deleted"),
-            event_delta_select,
-            MaintenanceDialect::DuckDb,
-        );
-        conn.query_row(&stmt.sql, [], |row| row.get::<_, i64>(0))
-            .expect("clock tie probe query")
-    }
-
-    fn conn_with_empty_presented_and_ledger() -> duckdb::Connection {
-        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
-        conn.execute_batch(
-            "CREATE TABLE main.customer_history (customer_id INTEGER, changed_at TIMESTAMP, \
-             tier VARCHAR); CREATE TABLE main.customer_history__tombstones (customer_id \
-             INTEGER, changed_at TIMESTAMP);",
-        )
-        .expect("create presented and ledger tables");
-        conn
-    }
-
-    /// The red test: replaying a tombstoned delete (same `(k, t)` as an
-    /// existing ledger row, delete flag set) must be silent — the spec's
-    /// rule that "against a stored tombstone only the delete flag is
-    /// comparable, since the ledger carries no row-local content"
-    /// (`docs/specs/incremental_shapes.md` §"Run shape and late events").
-    /// Before the fix, the ledger row's NULL payload and the replayed
-    /// event's real payload compared unequal, so this fired a spurious
-    /// `SuccessionClockTie` on every refold of a window containing a
-    /// delete.
-    #[test]
-    fn clock_tie_probe_is_silent_when_a_tombstoned_delete_is_replayed() {
-        let conn = conn_with_empty_presented_and_ledger();
-        conn.execute_batch(
-            "INSERT INTO main.customer_history__tombstones VALUES (1, TIMESTAMP \
-             '2024-01-01 00:00:00');",
-        )
-        .expect("seed ledger row");
-        let count = clock_tie_violation_count(
-            &conn,
-            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'bronze' \
-             AS tier, TRUE AS is_deleted",
-        );
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn clock_tie_probe_still_fires_for_a_delete_and_an_insert_at_one_clock_value() {
-        let conn = conn_with_empty_presented_and_ledger();
-        conn.execute_batch(
-            "INSERT INTO main.customer_history VALUES (1, TIMESTAMP '2024-01-01 00:00:00', \
-             'silver');",
-        )
-        .expect("seed presented row");
-        let count = clock_tie_violation_count(
-            &conn,
-            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, NULL AS \
-             tier, TRUE AS is_deleted",
-        );
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn clock_tie_probe_still_fires_for_two_non_identical_inserts() {
-        let conn = conn_with_empty_presented_and_ledger();
-        let count = clock_tie_violation_count(
-            &conn,
-            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'bronze' \
-             AS tier, FALSE AS is_deleted \
-             UNION ALL \
-             SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'gold' AS \
-             tier, FALSE AS is_deleted",
-        );
-        assert_eq!(count, 1);
-    }
-
-    /// Two deletes colliding at one `(k, t)` are indistinguishable by
-    /// construction once a delete row's signature is its flag alone, so
-    /// they must stay silent (the spec's "identical ⇒ re-presentation"
-    /// rule) — distinct from the tombstone-replay case above in that
-    /// neither delete comes from the ledger.
-    #[test]
-    fn clock_tie_probe_is_silent_for_two_identical_deletes_at_one_clock_value() {
-        let conn = conn_with_empty_presented_and_ledger();
-        let count = clock_tie_violation_count(
-            &conn,
-            "SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, 'bronze' \
-             AS tier, TRUE AS is_deleted \
-             UNION ALL \
-             SELECT 1 AS customer_id, TIMESTAMP '2024-01-01 00:00:00' AS changed_at, NULL AS \
-             tier, TRUE AS is_deleted",
-        );
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn full_rebuild_group_is_transactional_and_replaces_the_ledger() {
-        let model_select_sql = "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER \
-                                 (PARTITION BY customer_id ORDER BY changed_at) AS valid_to FROM \
-                                 raw.customer_changes";
-        let output_columns = vec![
-            "customer_id".to_string(),
-            "changed_at".to_string(),
-            "tier".to_string(),
-            "valid_to".to_string(),
-        ];
-        let lead_derived = vec![("valid_to".to_string(), "{lead}".to_string())];
-        let group = emit_succession_full_rebuild(
-            "main.customer_history",
-            model_select_sql,
-            "raw.customer_changes",
-            &keys(),
-            "changed_at",
-            &output_columns,
-            &lead_derived,
-            &[],
-            None,
-            "FALSE",
-            MaintenanceDialect::DuckDb,
-        );
-        assert!(group.transactional);
-        assert_eq!(group.statements.len(), 3);
-        assert_eq!(
-            group.statements[0].sql,
-            format!(
-                "CREATE TABLE main.customer_history AS SELECT customer_id, changed_at, tier, \
-                 valid_to FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id, \
-                 changed_at ORDER BY (CASE WHEN valid_to = changed_at THEN 1 ELSE 0 END) ASC) \
-                 AS __smelt_rn FROM ({model_select_sql}) AS __smelt_model) AS __smelt_ranked \
-                 WHERE __smelt_rn = 1"
-            )
-        );
-        assert_eq!(
-            group.statements[1].sql,
-            "DELETE FROM main.customer_history__tombstones"
-        );
-        let expected_select = emit_succession_ledger_rebuild_select(
-            "raw.customer_changes",
-            &keys(),
-            "changed_at",
-            None,
-            "FALSE",
-            None,
-        );
-        assert_eq!(
-            group.statements[2].sql,
-            format!(
-                "INSERT INTO main.customer_history__tombstones (customer_id, changed_at) {}",
-                expected_select.sql
-            )
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "only MaintenanceDialect::DuckDb is supported today")]
-    fn emit_succession_full_rebuild_refuses_non_duckdb_dialects() {
-        emit_succession_full_rebuild(
-            "main.customer_history",
-            "SELECT 1",
-            "raw.customer_changes",
-            &keys(),
-            "changed_at",
-            &[],
-            &[],
-            &[],
-            None,
-            "FALSE",
-            MaintenanceDialect::Spark,
-        );
-    }
-
-    #[test]
-    fn full_rebuild_fold_is_identity_with_no_extra_columns() {
-        let model_select_sql = "SELECT customer_id, changed_at FROM raw.customer_changes";
-        let output_columns = vec!["customer_id".to_string(), "changed_at".to_string()];
-        let group = emit_succession_full_rebuild(
-            "main.customer_history",
-            model_select_sql,
-            "raw.customer_changes",
-            &keys(),
-            "changed_at",
-            &output_columns,
-            &[],
-            &[],
-            None,
-            "FALSE",
-            MaintenanceDialect::DuckDb,
-        );
-        assert_eq!(
-            group.statements[0].sql,
-            format!(
-                "CREATE TABLE main.customer_history AS SELECT customer_id, changed_at FROM \
-                 (SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id, changed_at ORDER BY 1 \
-                 ASC) AS __smelt_rn FROM ({model_select_sql}) AS __smelt_model) AS \
-                 __smelt_ranked WHERE __smelt_rn = 1"
-            )
-        );
-    }
-
-    #[test]
-    fn full_rebuild_folds_on_key_and_clock_with_no_bare_passthrough() {
-        let model_select_sql = "SELECT customer_id, changed_at, tier FROM raw.customer_changes";
-        let output_columns = vec![
-            "customer_id".to_string(),
-            "changed_at".to_string(),
-            "tier".to_string(),
-        ];
-        let group = emit_succession_full_rebuild(
-            "main.customer_history",
-            model_select_sql,
-            "raw.customer_changes",
-            &keys(),
-            "changed_at",
-            &output_columns,
-            &[],
-            &[],
-            None,
-            "FALSE",
-            MaintenanceDialect::DuckDb,
-        );
-        let presented_sql = &group.statements[0].sql;
-        assert_ne!(
-            presented_sql,
-            &format!("CREATE TABLE main.customer_history AS {model_select_sql}"),
-            "the presented rebuild must not be a bare passthrough of the model select: \
-             {presented_sql}"
-        );
-        assert!(
-            presented_sql.contains("PARTITION BY customer_id, changed_at"),
-            "{presented_sql}"
-        );
-        assert!(
-            presented_sql.contains("WHERE __smelt_rn = 1"),
-            "{presented_sql}"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "only MaintenanceDialect::DuckDb is supported today")]
-    fn emit_succession_patch_refuses_non_duckdb_dialects() {
-        emit_succession_patch(
-            "main.customer_history",
-            &keys(),
-            "changed_at",
-            &["tier".to_string()],
-            &[("valid_to".to_string(), "{lead}".to_string())],
-            &[],
-            None,
-            "SELECT customer_id, changed_at, tier FROM raw.customer_changes",
-            MaintenanceDialect::Spark,
-        );
-    }
-}
+mod tests;

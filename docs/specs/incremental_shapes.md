@@ -1145,7 +1145,14 @@ touches the key, the clock, the delete flag, or the pre-window filter changes wh
 §"Skeleton changes are a new relation"). A definition delta that touches only row-local
 payload columns leaves the ledger untouched. The ledger-rebuild `SELECT` is the third emitter
 output of the succession-patch technique (`model_transforms.md`), never authored by a
-backend. Ledger size is proportional to the number of delete events ever folded and is never
+backend — and the same is true of every other statement the ledger takes part in: the
+idempotent tombstone insert, the presented `MERGE`, the rebuild's truncate-and-refill pair
+and the clock-tie probe are all outputs of that one emitter, in whichever dialect the target
+speaks. A backend runs them; it never writes its own. Where an engine cannot express the
+rebuild group atomically — an engine that forbids table-creating DDL inside a transaction is
+the live instance — the rebuild runs unbound rather than being refused, because it is a pure
+function of the whole retained source and a re-run repairs any partial application; what is
+lost is atomicity, never what the model computes. Ledger size is proportional to the number of delete events ever folded and is never
 compacted: a tombstone stays load-bearing for as long as a later-arriving event could splice
 next to it, which under the default contract point is forever.
 
@@ -1179,6 +1186,17 @@ key `(k, t)`; no payload, no delete flag (every row is a delete by construction)
 run-metadata column. Its lifecycle is tied to the presented table: created with it, dropped with
 it, rebuilt from the whole source in the same transaction on `--full-refresh` and `smelt
 rebuild`, and replaced wholesale by a skeleton change, per the Lifecycle paragraph above.
+
+The shape is dialect-plural where the engine requires it, and identical in meaning
+everywhere. Two differences are worth stating because they are requirements rather than
+spellings. **The declared primary key is advisory on an engine that does not enforce one**
+— nothing in the technique depends on it, because the tombstone insert's idempotence is its
+own anti-join on `(k, t)` rather than a constraint violation. And **a column type with no
+spelling in the target engine's type system is a refusal**, naming the column and the type:
+the ledger's columns must be the model's own inferred types, so a substituted type would be
+a column the next fold cannot write. Where the engine has no realisation of the ledger at
+all, the cell downgrades to full refresh and says so, per `state.md` §"Which dialects
+realise which structure".
 
 #### The maintenance theorem (bounded footprint)
 
@@ -2094,10 +2112,12 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-logical/src/maintenance/succession.rs` — `Grain::Succession`,
     `Technique::SuccessionPatch`, the pure succession-plan/refusal deriver and `SuccessionRecipe`
     assembler
-  - `crates/smelt-logical/src/maintenance/emit/succession.rs` — the event-delta `SELECT`, the
-    succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and the clock-tie probe
-  - `crates/smelt-state/src/ddl_duckdb.rs` — `generate_tombstone_table_ddl`,
-    `generate_tombstone_table_drop_ddl` (ledger DDL, bookkeeping only)
+  - `crates/smelt-logical/src/maintenance/emit/succession/mod.rs` — the event-delta `SELECT`,
+    the succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and the clock-tie
+    probe, in every dialect that realises the ledger
+  - `crates/smelt-state/src/tombstone.rs` — the per-dialect dispatch for the ledger table's own
+    DDL, over `crates/smelt-state/src/ddl_duckdb.rs` and
+    `crates/smelt-state/src/ddl_bigquery/tombstone.rs` (bookkeeping only; never a statement)
   - `crates/smelt-runtime/src/maintenance_driver/succession/` — the window-forward driver
     dispatch, transactional ledger write, frontier recording, and append-only posture probes
   - `crates/smelt-db` — the `resolved_grain()`-is-`None` branch of `derive_model_maintenance_plan`

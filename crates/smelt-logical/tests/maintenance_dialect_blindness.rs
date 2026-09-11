@@ -12,7 +12,9 @@
 //! `row_fingerprint_expr(cols, MaintenanceDialect::DuckDb)`. Occurrences
 //! inside string literals (e.g. an assertion message that mentions the
 //! variant by name) and inside `#[cfg(test)] mod ... { ... }` blocks are not
-//! production hardcodes and are excluded.
+//! production hardcodes and are excluded — as are whole unit-test module
+//! files (`tests.rs`, or a `tests/` directory), which the inline stripper
+//! cannot reach because the module lives outside the file that declares it.
 
 use std::path::{Path, PathBuf};
 
@@ -27,8 +29,19 @@ fn maintenance_files() -> Vec<(PathBuf, String)> {
         for entry in std::fs::read_dir(dir).expect("readable maintenance dir") {
             let path = entry.expect("readable dir entry").path();
             if path.is_dir() {
+                // A unit-test module may be a `tests.rs` file or a `tests/`
+                // directory; neither is production code, and the
+                // `#[cfg(test)] mod tests { ... }` stripper below cannot
+                // reach a module that lives in its own file. Same convention
+                // `state_guard_census` uses.
+                if path.file_name().is_some_and(|n| n == "tests") {
+                    continue;
+                }
                 walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
+                if path.file_name().is_some_and(|n| n == "tests.rs") {
+                    continue;
+                }
                 out.push(path);
             }
         }

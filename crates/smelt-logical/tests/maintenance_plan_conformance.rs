@@ -460,7 +460,8 @@ fn described_technique_matches_execution_succession_patch() {
         None,
         &event_delta.sql,
         MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     batch_group(&conn, &group);
 
     let oracle = "SELECT customer_id, changed_at, tier, \

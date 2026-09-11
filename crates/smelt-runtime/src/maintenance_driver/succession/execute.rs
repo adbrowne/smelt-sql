@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use anyhow::{bail, Result};
 
-use smelt_backend::{Backend, BackendError, ExecutionResult, SqlDialect};
-use smelt_state::ddl_duckdb;
+use smelt_backend::{Backend, BackendError, ExecutionResult};
+use smelt_state::{ledger as state_ledger, tombstone as state_tombstone};
 use smelt_types::DataType;
 
 use super::SuccessionCell;
@@ -94,8 +94,13 @@ pub async fn execute_succession_maintenance(
     reporter: &dyn RunReporter,
     run_id: &str,
 ) -> Result<ExecutionResult> {
-    // STATE-GUARD: TombstoneLedger
-    if backend.dialect() != SqlDialect::DuckDB {
+    // The gate is DERIVED from the availability layer, never a dialect
+    // comparison (`CLAUDE.md` §"Fail-loud discipline"; the structural census
+    // in `tests/state_guard_census.rs`). The plan layer downgrades a
+    // `SuccessionPatch` cell to `DeleteInsert` on a dialect with no tombstone
+    // ledger and records the downgrade, so this refusal is the backstop for a
+    // caller that skipped that check, not the ordinary path.
+    if !crate::maintenance_driver::realises_tombstone_ledger(backend.dialect()) {
         bail!(
             "{}",
             BackendError::unsupported(
@@ -153,13 +158,14 @@ pub async fn execute_succession_maintenance(
         // every window, including the first").
         let table_exists = backend.table_exists(schema, table).await.unwrap_or(false);
         let mut ensure_sqls = vec![
-            ddl_duckdb::generate_tombstone_table_ddl(
+            state_tombstone::tombstone_table_ddl(
+                backend.dialect(),
                 &tombstone_table,
                 &key_cols_typed,
                 &recipe.clock_col,
                 &clock_type,
-            ),
-            ddl_duckdb::generate_ledger_table_ddl(schema),
+            )?,
+            state_ledger::ledger_table_ddl(backend.dialect(), schema)?,
         ];
         if !table_exists {
             let shell = smelt_logical::maintenance::emit::emit_create_empty_table(
@@ -226,7 +232,8 @@ pub async fn execute_succession_maintenance(
             }
         }
 
-        let ledger_upsert = ddl_duckdb::generate_ledger_upsert_sql(
+        let ledger_upsert = state_ledger::ledger_upsert_sql(
+            backend.dialect(),
             schema,
             model_name,
             SUCCESSION_LEDGER_GROUP,
@@ -234,7 +241,7 @@ pub async fn execute_succession_maintenance(
             &step.partition_value,
             &step.range.start,
             &step.range.end,
-        );
+        )?;
 
         let patch_group = smelt_logical::maintenance::emit::emit_succession_patch(
             &cell.presented_table,
@@ -246,7 +253,7 @@ pub async fn execute_succession_maintenance(
             recipe.delete_flag_expr.as_deref(),
             &event_delta.sql,
             dialect,
-        );
+        )?;
         reporter.maintenance_statements(run_id, model_name, None, &patch_group);
 
         let pre_write_sqls = vec![ledger_upsert];
@@ -309,8 +316,13 @@ pub async fn rebuild_succession_state(
     reporter: &dyn RunReporter,
     run_id: &str,
 ) -> Result<ExecutionResult> {
-    // STATE-GUARD: TombstoneLedger
-    if backend.dialect() != SqlDialect::DuckDB {
+    // The gate is DERIVED from the availability layer, never a dialect
+    // comparison (`CLAUDE.md` §"Fail-loud discipline"; the structural census
+    // in `tests/state_guard_census.rs`). The plan layer downgrades a
+    // `SuccessionPatch` cell to `DeleteInsert` on a dialect with no tombstone
+    // ledger and records the downgrade, so this refusal is the backstop for a
+    // caller that skipped that check, not the ordinary path.
+    if !crate::maintenance_driver::realises_tombstone_ledger(backend.dialect()) {
         bail!(
             "{}",
             BackendError::unsupported(
@@ -335,12 +347,13 @@ pub async fn rebuild_succession_state(
     // Re-issued (harmlessly — `CREATE TABLE IF NOT EXISTS`) as the "ensure"
     // half of `execute_write_with_bookkeeping` below, matching every other
     // technique's precedent of the bookkeeping DDL running inside that call.
-    let ensure_sqls = vec![ddl_duckdb::generate_tombstone_table_ddl(
+    let ensure_sqls = vec![state_tombstone::tombstone_table_ddl(
+        backend.dialect(),
         &tombstone_table,
         &key_cols_typed,
         &recipe.clock_col,
         &clock_type,
-    )];
+    )?];
     for ensure_sql in &ensure_sqls {
         backend
             .execute_sql(ensure_sql)
@@ -447,7 +460,7 @@ pub async fn rebuild_succession_state(
         recipe.pre_filter.as_deref(),
         delete_expr,
         dialect,
-    );
+    )?;
     reporter.maintenance_statements(run_id, model_name, None, &group);
 
     crate::execute::retry_backend_call(retry, || {

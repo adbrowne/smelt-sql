@@ -11,7 +11,8 @@
 //! that one.
 
 use smelt_dialect::SqlDialect;
-use smelt_state::ledger;
+use smelt_state::{ledger, tombstone};
+use smelt_types::DataType;
 
 /// Every `SqlDialect`. Kept exhaustive by [`every_dialect_is_covered`].
 const ALL_DIALECTS: [SqlDialect; 3] = [
@@ -386,4 +387,132 @@ fn the_two_realising_dialects_produce_different_text() {
     for (d, b) in duckdb.iter().zip(bigquery.iter()) {
         assert_ne!(d, b, "the dispatch returned DuckDB text for BigQuery");
     }
+}
+
+// ── The tombstone ledger's table DDL ───────────────────────────────────────
+//
+// The *table* is bookkeeping and lives here; every statement the tombstone
+// ledger participates in is a maintenance statement, single-owned by
+// `smelt_logical::maintenance::emit::succession` and gated by
+// `cargo test -p smelt-runtime --test statement_parity`.
+
+fn tombstone_key_cols() -> Vec<(String, DataType)> {
+    vec![("customer_id".to_string(), DataType::Integer)]
+}
+
+fn tombstone_clock() -> DataType {
+    DataType::Timestamp {
+        with_timezone: false,
+    }
+}
+
+/// Exhaustive, and Spark refused by name rather than handed DuckDB DDL.
+#[test]
+fn the_tombstone_dispatch_is_exhaustive_and_refuses_spark() {
+    for dialect in ALL_DIALECTS {
+        let ddl = tombstone::tombstone_table_ddl(
+            dialect,
+            "ds.customer_history__tombstones",
+            &tombstone_key_cols(),
+            "changed_at",
+            &tombstone_clock(),
+        );
+        let drop = tombstone::tombstone_table_drop_ddl(dialect, "ds.customer_history__tombstones");
+        match dialect {
+            SqlDialect::SparkSQL => {
+                let err = ddl.expect_err("Spark has no tombstone ledger").to_string();
+                assert!(err.contains("Spark"), "{err}");
+                assert!(err.contains("not realisable"), "{err}");
+                drop.expect_err("Spark has no tombstone ledger");
+            }
+            SqlDialect::DuckDB | SqlDialect::BigQuery => {
+                ddl.expect("a realising dialect");
+                drop.expect("a realising dialect");
+            }
+        }
+    }
+}
+
+/// BigQuery's tombstone DDL carries no DuckDB spelling: no `VARCHAR`, no
+/// double-quoted identifier, and a `PRIMARY KEY` that says `NOT ENFORCED`.
+#[test]
+fn the_bigquery_tombstone_ddl_carries_no_duckdb_spelling() {
+    let ddl = tombstone::tombstone_table_ddl(
+        SqlDialect::BigQuery,
+        "ds.customer_history__tombstones",
+        &[("customer_id".to_string(), DataType::Text)],
+        "changed_at",
+        &tombstone_clock(),
+    )
+    .expect("BigQuery realises the tombstone ledger");
+    assert!(!ddl.contains("VARCHAR"), "{ddl}");
+    assert!(!ddl.contains('"'), "{ddl}");
+    assert!(ddl.contains("NOT ENFORCED"), "{ddl}");
+    assert!(ddl.contains("`ds.customer_history__tombstones`"), "{ddl}");
+}
+
+/// DuckDB's path delegates verbatim to the builder it wraps, so the dispatch
+/// adds no spelling of its own.
+#[test]
+fn the_duckdb_tombstone_path_delegates_verbatim() {
+    assert_eq!(
+        tombstone::tombstone_table_ddl(
+            SqlDialect::DuckDB,
+            "main.customer_history__tombstones",
+            &tombstone_key_cols(),
+            "changed_at",
+            &tombstone_clock(),
+        )
+        .expect("DuckDB realises the tombstone ledger"),
+        smelt_state::ddl_duckdb::generate_tombstone_table_ddl(
+            "main.customer_history__tombstones",
+            &tombstone_key_cols(),
+            "changed_at",
+            &tombstone_clock(),
+        )
+    );
+}
+
+/// A column type with no GoogleSQL spelling is refused with the column named
+/// — never substituted, and never an `Unknown` column (`CLAUDE.md`
+/// §"Fail-loud discipline").
+#[test]
+fn an_unmappable_tombstone_column_type_is_refused_with_the_column_named() {
+    let err = tombstone::tombstone_table_ddl(
+        SqlDialect::BigQuery,
+        "ds.t__tombstones",
+        &[(
+            "payload".to_string(),
+            DataType::Map(Box::new(DataType::Text), Box::new(DataType::Text)),
+        )],
+        "changed_at",
+        &tombstone_clock(),
+    )
+    .expect_err("MAP has no GoogleSQL type")
+    .to_string();
+    assert!(err.contains("payload"), "{err}");
+    assert!(err.contains("MAP"), "{err}");
+}
+
+/// Non-vacuity for the two realising dialects, same posture as the ledger's
+/// and the observed-delta's.
+#[test]
+fn the_two_realising_dialects_produce_different_tombstone_ddl() {
+    let duckdb = tombstone::tombstone_table_ddl(
+        SqlDialect::DuckDB,
+        "ds.t__tombstones",
+        &tombstone_key_cols(),
+        "changed_at",
+        &tombstone_clock(),
+    )
+    .expect("DuckDB");
+    let bigquery = tombstone::tombstone_table_ddl(
+        SqlDialect::BigQuery,
+        "ds.t__tombstones",
+        &tombstone_key_cols(),
+        "changed_at",
+        &tombstone_clock(),
+    )
+    .expect("BigQuery");
+    assert_ne!(duckdb, bigquery);
 }

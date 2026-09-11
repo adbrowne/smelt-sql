@@ -168,7 +168,8 @@ async fn succession_patch_executed_statements_match_the_emitters() {
         None,
         &expected_event_delta.sql,
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     assert_eq!(
         patch_group.statements.len(),
         expected_patch_group.statements.len()
@@ -287,7 +288,8 @@ async fn succession_full_refresh_executed_statements_match_the_emitters() {
         None,
         "FALSE",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     assert_eq!(
         rebuild_group.statements.len(),
         expected_group.statements.len()
@@ -401,7 +403,8 @@ async fn succession_rebuild_executed_statements_match_the_emitters() {
         None,
         "FALSE",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     assert_eq!(
         rebuild_group.statements.len(),
         expected_group.statements.len()

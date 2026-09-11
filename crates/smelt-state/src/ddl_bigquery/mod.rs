@@ -608,6 +608,11 @@ mod tests {
 
 mod ledger;
 mod observed_delta;
+mod tombstone;
+
+pub use tombstone::{
+    generate_tombstone_table_ddl, generate_tombstone_table_drop_ddl, UnmappableTombstoneColumn,
+};
 
 pub use ledger::{
     generate_ledger_conditional_insert_sql, generate_ledger_exists_sql, generate_ledger_insert_sql,

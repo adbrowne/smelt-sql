@@ -14,6 +14,7 @@ pub mod schema_tracking;
 pub mod snapshot_store;
 pub mod source_mutations;
 pub mod source_postures;
+pub mod tombstone;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

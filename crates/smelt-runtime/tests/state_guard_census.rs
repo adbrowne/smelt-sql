@@ -23,9 +23,12 @@
 //! The preferred fix for a *new* guard is not an annotation but a predicate
 //! derived from the availability layer — see
 //! `maintenance_driver::records_observed_deltas` and
-//! `maintenance_driver::realises_merge_ledger`, which is why the three T5
-//! write sites and the merge-ledger bookkeeping site no longer appear in this
-//! census at all.
+//! `maintenance_driver::realises_merge_ledger`. Every structure has now taken
+//! that route — the three T5 write sites, the merge-ledger bookkeeping site,
+//! the reconciliation-ledger fold and the two succession sites — so the
+//! census is **empty**. That is the finished state, not a broken scan; see
+//! `the_census_is_empty_because_every_gate_is_derived` and its planted-guard
+//! control for how non-vacuity is held without any real guard to find.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -133,15 +136,24 @@ fn census() -> Vec<Guard> {
     guards
 }
 
-/// Every guard names a structure, and that structure really is unrealisable
-/// off DuckDB.
-#[test]
-fn every_duckdb_guard_names_an_unrealisable_structure() {
+/// The three ways a guard can be wrong, as data — extracted from the test
+/// below so the non-vacuity control can drive the *same* verdict logic on
+/// synthetic guards. That matters now that the real census is empty: a
+/// verdict function only ever fed an empty list would pass no matter what it
+/// said.
+#[derive(Debug, Default)]
+struct Verdicts {
+    unannotated: Vec<String>,
+    unknown: Vec<String>,
+    contradicted: Vec<String>,
+}
+
+fn judge(guards: Vec<Guard>) -> Verdicts {
     let mut unannotated = Vec::new();
     let mut unknown = Vec::new();
     let mut contradicted = Vec::new();
 
-    for guard in census() {
+    for guard in guards {
         let Some(name) = guard.structure.clone() else {
             unannotated.push(format!("{}:{}", guard.file, guard.line));
             continue;
@@ -160,60 +172,113 @@ fn every_duckdb_guard_names_an_unrealisable_structure() {
         }
     }
 
+    Verdicts {
+        unannotated,
+        unknown,
+        contradicted,
+    }
+}
+
+/// Every guard names a structure, and that structure really is unrealisable
+/// off DuckDB.
+#[test]
+fn every_duckdb_guard_names_an_unrealisable_structure() {
+    let v = judge(census());
     assert!(
-        unannotated.is_empty(),
+        v.unannotated.is_empty(),
         "these DuckDB guards name no state structure — add `// {MARKER} <StateStructure>`, or \
          better, derive the guard from the availability layer the way \
          `records_observed_deltas` does:\n  {}",
-        unannotated.join("\n  "),
+        v.unannotated.join("\n  "),
     );
     assert!(
-        unknown.is_empty(),
+        v.unknown.is_empty(),
         "unrecognised StateStructure in a {MARKER} annotation:\n  {}",
-        unknown.join("\n  "),
+        v.unknown.join("\n  "),
     );
     assert!(
-        contradicted.is_empty(),
+        v.contradicted.is_empty(),
         "the plan layer and the run layer disagree — a dialect claims a structure that a \
          driver guard still refuses. Delete the guard in the same commit that lands the \
          emitters:\n  {}",
-        contradicted.join("\n  "),
+        v.contradicted.join("\n  "),
     );
 }
 
-/// The census is not empty and covers the guards we know about, so the test
-/// above cannot pass by scanning nothing.
+/// **The census is now empty, and that is the finished state, not a bug.**
+/// Every state structure's run-layer gate is derived from the availability
+/// layer (`records_observed_deltas`, `realises_merge_ledger`,
+/// `realises_reconciliation_ledger`, `realises_tombstone_ledger`) rather than
+/// compared against a dialect, so there is no raw guard left to annotate.
+///
+/// An empty census would make
+/// [`every_duckdb_guard_names_an_unrealisable_structure`] pass vacuously, so
+/// the non-vacuity moved rather than disappeared, and now stands on three
+/// legs: the scanner really is run over a non-empty file set
+/// ([`maintenance_driver_sources`] asserts that), the scanner really does
+/// recognise a guard when one exists
+/// ([`the_scanner_distinguishes_guards_from_prose`]), and the verdict logic
+/// really does fail a bad guard
+/// ([`an_empty_census_still_fails_closed_on_a_planted_guard`]).
 #[test]
-fn the_census_is_non_empty_and_covers_the_known_guards() {
+fn the_census_is_empty_because_every_gate_is_derived() {
     let guards = census();
     assert!(
-        guards.len() >= 2,
-        "expected at least the two known tombstone-ledger guards, found {}: {guards:#?}",
-        guards.len(),
+        guards.is_empty(),
+        "a raw `SqlDialect::DuckDB` guard reappeared under src/maintenance_driver/. Derive the \
+         gate from the availability layer instead — see `maintenance_driver::ledger`'s \
+         predicates:\n{guards:#?}",
     );
     let structures: BTreeSet<_> = guards.iter().filter_map(|g| g.structure.clone()).collect();
-    // The only structure still gated by a raw guard: phase 15's tombstone
-    // ledger, at `succession/execute.rs`'s two sites. Both ledger rows above
-    // it now derive their gate instead.
-    assert!(
-        structures.contains("TombstoneLedger"),
-        "expected a TombstoneLedger guard in the census, got {structures:?}",
-    );
-    // Three structures must have NO raw guard left, each for the same reason:
-    // their write sites ask a predicate derived from the availability layer
-    // (`records_observed_deltas`, `realises_merge_ledger`,
-    // `realises_reconciliation_ledger`) instead of comparing dialects
-    // themselves. A guard reappearing for any of them means someone
-    // reintroduced a hardcoded dialect assumption.
     for retired in [
         "ObservedOutputDeltas",
         "MergeLedger",
         "ReconciliationLedger",
+        "TombstoneLedger",
     ] {
         assert!(
             !structures.contains(retired),
             "{retired} write sites must derive their gate from the availability layer, not \
              compare dialects directly: {structures:?}",
+        );
+    }
+}
+
+/// The control that keeps the empty census honest: plant the three kinds of
+/// bad guard and assert the *same* verdict logic the real test uses reports
+/// each one. Without this, `judge(census())` on an empty list would pass even
+/// if `judge` returned `Verdicts::default()` unconditionally.
+#[test]
+fn an_empty_census_still_fails_closed_on_a_planted_guard() {
+    assert!(census().is_empty(), "this control assumes an empty census");
+
+    let unannotated = judge(scan(
+        "planted.rs",
+        "fn a() {\n    if x != SqlDialect::DuckDB {\n    }\n}\n",
+    ));
+    assert_eq!(unannotated.unannotated.len(), 1, "{unannotated:?}");
+
+    let unknown = judge(scan(
+        "planted.rs",
+        "fn a() {\n    // STATE-GUARD: NotAStructure\n    if x != SqlDialect::DuckDB {}\n}\n",
+    ));
+    assert_eq!(unknown.unknown.len(), 1, "{unknown:?}");
+
+    // `MergeLedger` is realisable on BigQuery, so a guard still refusing it
+    // is exactly the plan-layer/run-layer disagreement this census exists to
+    // catch — and so is a `TombstoneLedger` guard, as of this phase.
+    for realised_now in ["MergeLedger", "TombstoneLedger"] {
+        let contradicted = judge(scan(
+            "planted.rs",
+            &format!(
+                "fn a() {{\n    // STATE-GUARD: {realised_now}\n    if x != \
+                 SqlDialect::DuckDB {{}}\n}}\n"
+            ),
+        ));
+        assert!(
+            !contradicted.contradicted.is_empty(),
+            "a guard refusing {realised_now} must be flagged now that a dialect realises it: \
+             {contradicted:?}",
         );
     }
 }

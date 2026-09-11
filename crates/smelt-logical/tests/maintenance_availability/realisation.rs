@@ -43,9 +43,9 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 ///
 /// DuckDB emits all five (`smelt_state::ddl_duckdb`'s `generate_ledger_*`,
 /// `generate_observed_delta_*`, `generate_fingerprint_sidecar_*`,
-/// `generate_tombstone_*`). BigQuery emits both ledgers and the
-/// observed-delta record — what it still lacks is the sidecar and the
-/// tombstone ledger:
+/// `generate_tombstone_*`). BigQuery emits both ledgers, the observed-delta
+/// record and the tombstone ledger — the one structure it still lacks is the
+/// fingerprint sidecar:
 /// `smelt_state::ddl_bigquery`'s `generate_ledger_*` and
 /// `generate_observed_delta_*` carry its GoogleSQL spelling, dispatched by
 /// `smelt_state::ledger` and `smelt_state::observed_delta`, and
@@ -56,7 +56,13 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 /// record is `generate_ledger_conditional_insert_sql` (a `MERGE … WHEN NOT
 /// MATCHED`) and the refusal is `fold_ledger_delta`'s zero-row abort inside a
 /// GoogleSQL multi-statement transaction
-/// (`smelt_backend_bigquery::sql::fold_ledger_delta_script`).
+/// (`smelt_backend_bigquery::sql::fold_ledger_delta_script`). Its **tombstone**
+/// ledger is split across two layers by the maintenance-plan purity rule: the
+/// table's own DDL is bookkeeping (`ddl_bigquery::generate_tombstone_table_ddl`,
+/// dispatched by `smelt_state::tombstone`), while every statement the ledger
+/// participates in is a maintenance statement single-owned by
+/// `smelt_logical::maintenance::emit::succession`, which is dialect-plural
+/// there.
 /// `ddl_spark.rs` carries schema-evolution DDL only, and Spark has no sound
 /// realisation to add: Delta gives per-table atomicity only and no cross-table
 /// transaction, so a ledger write and its data write cannot be made atomic
@@ -69,6 +75,7 @@ fn has_emitters(dialect: SqlDialect, structure: StateStructure) -> bool {
             StateStructure::MergeLedger
                 | StateStructure::ReconciliationLedger
                 | StateStructure::ObservedOutputDeltas
+                | StateStructure::TombstoneLedger
         ),
         SqlDialect::SparkSQL => false,
     }
@@ -125,8 +132,9 @@ fn the_sidecar_claim_matches_the_backend_capability() {
 
 /// Today's concrete expectation, stated positively so the reopening's
 /// remaining phases flip it deliberately rather than by accident: DuckDB
-/// realises everything, BigQuery realises both ledgers and the observed-delta
-/// record, and Spark realises **nothing** — permanently, not pending.
+/// realises everything, BigQuery realises both ledgers, the observed-delta
+/// record and the tombstone ledger, and Spark realises **nothing** —
+/// permanently, not pending.
 #[test]
 fn each_dialect_realises_exactly_the_structures_it_has_today() {
     assert!(
@@ -139,11 +147,12 @@ fn each_dialect_realises_exactly_the_structures_it_has_today() {
         BTreeSet::from([
             StateStructure::MergeLedger,
             StateStructure::ReconciliationLedger,
-            StateStructure::ObservedOutputDeltas
+            StateStructure::ObservedOutputDeltas,
+            StateStructure::TombstoneLedger
         ]),
-        "BigQuery realises both ledgers and the observed-delta record; its two remaining \
-         rows (fingerprint sidecar, tombstone ledger) land with \
-         docs/outcomes/20260906-bigquery-correctness phase 15 and later work",
+        "BigQuery realises both ledgers, the observed-delta record and the tombstone ledger; \
+         its one remaining row (the fingerprint sidecar) is out of scope for \
+         docs/outcomes/20260906-bigquery-correctness",
     );
     assert_eq!(realised(SqlDialect::DuckDB).len(), ALL_STRUCTURES.len());
 }

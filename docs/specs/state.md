@@ -114,7 +114,7 @@ structure:
 | Reconciliation ledger (frontier record) | yes | yes | **no** |
 | Observed output deltas | yes | yes | **no** |
 | Fingerprint sidecar | yes | not yet | **no** |
-| Tombstone ledger (succession grain) | yes | not yet | **no** |
+| Tombstone ledger (succession grain) | yes | yes | **no** |
 
 "not yet" is pending work; "**no**" is a permanent, reasoned absence. Spark's is the
 latter: Delta provides per-table atomicity and no cross-table transaction, so a ledger
@@ -190,6 +190,47 @@ target, so running it second loses nothing; and the surviving exposure — a cre
 whose window went unrecorded — costs a redundant re-run, whereas the reverse (a record
 claiming a write that never happened) could mislead a later run. This is a degradation of
 *atomicity only*: what the cell computes is unchanged.
+
+Four facts of BigQuery's **tombstone-ledger** realisation are load-bearing, and unlike the
+two above they are not confined to a bookkeeping module. The tombstone ledger's table is
+bookkeeping, but every statement it participates in — the idempotent tombstone insert, the
+presented `MERGE`, the rebuild's truncate-and-refill pair, the clock-tie probe — is a
+*maintenance* statement, so its dialect plurality lives in the maintenance emitter that
+single-owns it rather than in a per-dialect DDL module.
+
+- **The touched-key scoping is a correlated `EXISTS`, not a row-constructor `IN`.**
+  GoogleSQL has no row constructor: `(a, b)` is a parenthesised expression there, not a
+  tuple, so a multi-column `IN` subquery is a syntax error. The neighbour domain's
+  restriction to the keys the batch touches is spelled as a correlated `EXISTS` over an
+  aliased relation instead. This is a correctness requirement, not a preference: the
+  single-key case would have parsed and every multi-key model would have failed at the
+  warehouse.
+- **The dedup relation is an explicit `ROW_NUMBER() … WHERE rn = 1`, not `QUALIFY`, and it
+  is nested derived tables rather than a `WITH` inside the `MERGE`'s `USING`.** Both of the
+  constructs it avoids exist in GoogleSQL, and neither's acceptance in this exact position
+  can be established without a warehouse. The nested-derived-table form denotes the same
+  relation and is accepted everywhere, so it is what BigQuery gets — the same shape the
+  full-rebuild fold already uses.
+- **Truncating the ledger says `WHERE TRUE`.** GoogleSQL rejects a `DELETE` with no `WHERE`
+  clause. The rebuild's ledger truncation carries the clause GoogleSQL requires; DuckDB's
+  keeps the bare form.
+- **The ledger table's columns are the model's own inferred types, rendered in GoogleSQL.**
+  A type with no GoogleSQL spelling is refused with the column and the reason named, never
+  substituted — a substituted type is a column the next write cannot fill. The declared
+  `PRIMARY KEY (k…, t)` says `NOT ENFORCED` and, as everywhere else on BigQuery, refuses
+  nothing: the tombstone insert's idempotence is its own anti-join, which never depended on
+  an enforced key in either dialect.
+
+**One shape the succession rebuild degrades on BigQuery.** The `--full-refresh`/`smelt
+rebuild` group re-derives the presented table and the ledger in one transaction on DuckDB.
+It opens with a `CREATE TABLE … AS`, so on BigQuery the same permanent-entity-DDL rule
+applies and the three statements run as separate jobs. This is admissible here in a way it
+is not for an additive fold, and for a reason specific to the statement: the rebuild is a
+pure function of the whole retained source, so a partially-applied rebuild is repaired by
+re-running it, and no bookkeeping row can outlive a write that never happened. It is a
+degradation of *atomicity only* — a rebuild interrupted midway leaves a presented table and
+a ledger that disagree until the next rebuild, and never a ledger that claims a fold that
+did not occur.
 
 **One shape BigQuery refuses rather than realises.** BigQuery does not permit DDL creating
 or dropping permanent entities inside a transaction, and an additive fold's *first* action

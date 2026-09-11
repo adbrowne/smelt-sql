@@ -139,10 +139,107 @@ rediscovered.
 | 12 | Observed deltas on BigQuery: `ddl_bigquery` sidecar emitters plus a `record_observed_delta_with_write` override on a BigQuery multi-statement transaction; flip the row back on, which the phase-11 gate then forces the driver guard to be deleted for | done |
 | 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | done |
 | 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | done |
-| 15 | Tombstone ledger on BigQuery, so the succession-patch technique runs live rather than downgrading to `DeleteInsert` | pending |
+| 15 | Tombstone ledger on BigQuery, so the succession-patch technique runs live rather than downgrading to `DeleteInsert` | done |
 | 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | pending |
 
 ## Decision log
+
+- 2026-09-11 (phase 15, implementation): **The tombstone ledger is realised on BigQuery, the
+  row flipped, and the census is now empty.**
+  `realisable_state_structures(BigQuery)` is
+  `vec![MergeLedger, ReconciliationLedger, ObservedOutputDeltas, TombstoneLedger]`
+  (`crates/smelt-logical/src/maintenance/availability/state_structure.rs:67-72`). §5's
+  honest-refusal path was **not** taken: every construct the two blocked emitters emit
+  either has a GoogleSQL realisation or has one that is provably equivalent, and the two
+  whose acceptance could not be settled offline were *removed* rather than guessed at.
+
+  **Three constructs needed a dialect branch and one of them was a genuine correctness
+  trap.** `touched_keys_predicate`'s `(k…) IN (SELECT k…)` is a syntax error in GoogleSQL,
+  which has no row constructor — but a *single*-key model would have parsed, so the failure
+  would have appeared only when someone declared two key columns. It is a correlated
+  `EXISTS` over an aliased relation on BigQuery now
+  (`crates/smelt-logical/src/maintenance/emit/succession/mod.rs:113-131`), with the aliases
+  (`__smelt_presented`, `__smelt_tombstones`) introduced by `build_domain_cte` on that path
+  only, since the `IN` form needs none. The other two — `QUALIFY` in the dedup relation and
+  a `WITH` inside the `MERGE`'s `USING` — both *exist* in GoogleSQL; what could not be
+  settled offline is their acceptance in these exact positions. Rather than ship a guess,
+  BigQuery gets nested derived tables with an explicit `ROW_NUMBER() … WHERE
+  __smelt_dedup_rn = 1`, which denotes the same relation, is accepted everywhere, and is
+  the shape `emit_succession_full_rebuild`'s own fold already used. The fourth branch is
+  `DELETE FROM <ledger>` → `… WHERE TRUE`, which GoogleSQL requires.
+
+  **What did *not* need a branch is asserted, not assumed.** The idempotent tombstone insert
+  — `INSERT … SELECT … WHERE <flag> AND NOT EXISTS (correlated)` — is byte-identical across
+  the two dialects, and `the_tombstone_insert_needed_no_dialect_branch` asserts that
+  equality *and* asserts the `MERGE` differs, so the claim cannot pass vacuously. The
+  `MERGE` itself, the three-arm `UNION ALL`, `LEAD`/`LAG`, and the whole clock-tie probe are
+  unchanged. The probe was fixed for free: the union is built by the private
+  `build_domain_cte`, not by the `emit_succession_union_relation` the plan named (no such
+  function exists), so making it dialect-plural fixed the probe and the patch at once.
+
+  **The two `assert!`s became one typed refusal, and it names only Spark.**
+  `emit_succession_patch`/`emit_succession_full_rebuild` return
+  `Result<StatementGroup, UnsupportedSuccessionDialect>`; Spark's absence is stated as
+  permanent (no cross-table Delta transaction) rather than pending, matching
+  `smelt_state::ledger`'s own wording. The two `#[should_panic]` tests were corrected into
+  refusal tests that also assert both realising dialects succeed.
+
+  **The purity rule split the work across two layers, and the split is the interesting
+  part.** The tombstone *table*'s DDL is bookkeeping and went to `smelt-state`
+  (`src/ddl_bigquery/tombstone.rs`, dispatched by the new `src/tombstone.rs` — third
+  instance of the `ledger.rs` pattern, Spark an error by name). Every *statement* stayed
+  single-owned in `smelt-logical` and became dialect-plural there, which is what
+  `statement_parity`'s structural no-authoring leg proves. `bigquery_type_sql`'s `Result`
+  propagates end to end: `TombstoneDdlError::UnmappableColumn` reaches
+  `succession/execute.rs`'s `ensure_sqls` via `?`, so a `MAP` key column fails naming the
+  column instead of being substituted.
+
+  **Two DuckDB-only call sites were live bugs the moment the guard came down.**
+  `succession/execute.rs` still called `ddl_duckdb::generate_ledger_table_ddl` and
+  `generate_ledger_upsert_sql` directly — unreachable off DuckDB while the `!= DuckDB` bail
+  stood, and DuckDB SQL in a BigQuery job the instant it did not. Both now route through
+  `smelt_state::ledger`. Phase 13 deliberately left them; this is the phase that had to take
+  them.
+
+  **The census is empty, and proving that still fails closed took real work.** Both
+  `STATE-GUARD` bails are replaced by `maintenance_driver::realises_tombstone_ledger`
+  (`crates/smelt-runtime/src/maintenance_driver/ledger.rs`), so no raw guard remains
+  anywhere under `src/maintenance_driver/`. The verdict logic was extracted into a pure
+  `judge(Vec<Guard>) -> Verdicts` and a new control,
+  `an_empty_census_still_fails_closed_on_a_planted_guard`, drives it on three planted
+  guards — unannotated, unknown-structure, and one annotated with a structure a dialect now
+  realises. A stubbed `judge` returning `Verdicts::default()` passes the real test and fails
+  the control, which is the whole point.
+
+  **The legible result is criterion 9 stated as an absence.**
+  `examples/github_activity`'s two `SuccessionPatch` cells stop downgrading on the
+  `bigquery` target, so `github_activity_no_diagnostics` is
+  `check_workspace_no_diagnostics` again — the workspace is diagnostic-clean for the first
+  time since the `bigquery` target was added, and the cross-target comparison now weighs one
+  plan on two engines with no downgrade to discount.
+
+  **What is not proven offline, named rather than glossed.** (a) The domain union's
+  tombstone arm projects a bare `NULL AS <payload col>`; GoogleSQL's coercion rules say an
+  untyped `NULL` takes the set operation's supertype, but the emitter holds payload column
+  *names* only, so `CAST(NULL AS <t>)` would need a new input — if BigQuery rejects it, the
+  fix is to thread payload types, not to change the relation. (b) The patch `MERGE` as a
+  whole has never executed; its two riskiest sub-constructs were removed rather than
+  guessed, but that is an argument, not a measurement. (c) The rebuild group is marked
+  `transactional` and opens with `CREATE TABLE … AS`, so
+  `write_with_bookkeeping_plan` runs its three statements unbound on BigQuery. That is a
+  *degradation* here rather than phase 14's refusal, and the asymmetry is the argument: the
+  rebuild is a pure function of the whole retained source, so a partial application is
+  repaired by re-running and no bookkeeping row can outlive a write that did not happen.
+  Stated in `docs/specs/state.md` and in the emitter's doc comment; phase 16 confirms it
+  against the engine.
+
+  **A gate went red for a reason phase 12 did not warn about.** Splitting `succession.rs`
+  into `emit/succession/{mod.rs,tests.rs}` (to stay under the 1500-line cap) left
+  `maintenance_dialect_blindness` scanning a test module as production code — its
+  `#[cfg(test)] mod ... { ... }` stripper cannot reach a module in its own file. Fixed the
+  way `state_guard_census` and `statement_parity` already do it: skip `tests.rs` and
+  `tests/` in the walk. `statement_parity` itself stayed green, because
+  `smelt-logical/src/maintenance/emit/` was already a directory exclusion.
 
 - 2026-09-11 (phase 12, implementation): **BigQuery records observed output deltas, and the
   translation that made it possible was not the one the plan predicted.**

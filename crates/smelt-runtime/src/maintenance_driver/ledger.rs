@@ -55,3 +55,23 @@ pub fn realises_merge_ledger(dialect: SqlDialect) -> bool {
 pub fn realises_reconciliation_ledger(dialect: SqlDialect) -> bool {
     realisable_state_structures(dialect).contains(&StateStructure::ReconciliationLedger)
 }
+
+/// Can `dialect` hold the succession grain's tombstone ledger — the
+/// per-model sibling table of `k ∪ {t}` the succession-patch technique reads
+/// and writes (`docs/specs/incremental_shapes.md` §"The tombstone ledger
+/// (hidden state)")?
+///
+/// **Derived from the availability layer, never hardcoded** — same posture
+/// and same reason as [`realises_merge_ledger`],
+/// [`realises_reconciliation_ledger`] and [`super::records_observed_deltas`].
+/// The two `dialect != SqlDialect::DuckDB` bails this replaced in
+/// `succession/execute.rs` were the last raw guards the structural census
+/// (`tests/state_guard_census.rs`) had to be told about.
+///
+/// Where this is `false` the run refuses — but it should never get that far:
+/// `required_state_structure(Technique::SuccessionPatch)` is
+/// `StateStructure::TombstoneLedger`, so the plan layer downgrades the cell
+/// to `DeleteInsert` first and records the downgrade the user can see.
+pub fn realises_tombstone_ledger(dialect: SqlDialect) -> bool {
+    realisable_state_structures(dialect).contains(&StateStructure::TombstoneLedger)
+}

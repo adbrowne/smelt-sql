@@ -43,33 +43,23 @@ fn web_analytics_no_diagnostics() {
 
 /// `examples/github_activity` deliberately declares both a `dev` (DuckDB) and
 /// a `bigquery` target (`docs/outcomes/20260906-bigquery-dogfood-spine/
-/// phases/11-summary.md`), so `MaintenanceStateDowngraded` legitimately fires
-/// for every `grain: key`/succession cell whose ledger structure BigQuery does
-/// not realise — see `check_workspace_diagnostics_are_exactly`'s doc comment.
+/// phases/11-summary.md`), so a `MaintenanceStateDowngraded` here would be
+/// legitimate rather than a bug — which is exactly what makes the **empty**
+/// diagnostic set the load-bearing claim.
 ///
-/// Two cells are **not** in this list, and their absence is the point:
-/// BigQuery realises the transactional merge ledger *and* the reconciliation
-/// ledger (`docs/specs/state.md` §"Which dialects realise which structure"),
-/// so the `ColumnScopedMerge` cell and the `KeyedFold` cell both keep their
-/// technique. Only the tombstone ledger is still unrealised there, so only
-/// the `SuccessionPatch` downgrades stand — two of them, one per source.
+/// Every state structure this workspace's cells need is now realised on
+/// BigQuery as well as DuckDB (`docs/specs/state.md` §"Which dialects realise
+/// which structure"): the transactional merge ledger, the reconciliation
+/// ledger with its never-fold-twice refusal, the observed-delta record, and —
+/// since this outcome's phase 15 — the tombstone ledger. So the
+/// `ColumnScopedMerge` cell, the `KeyedFold` cell and both `SuccessionPatch`
+/// cells all keep their technique on the `bigquery` target, and the
+/// cross-target comparison weighs one plan on two engines rather than two
+/// plans. A downgrade reappearing here means a dialect row was flipped off,
+/// or an availability claim lost its backing.
 #[test]
 fn github_activity_no_diagnostics() {
-    check_workspace_diagnostics_are_exactly(
-        "examples/github_activity",
-        &[
-            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } \
-             downgraded from SuccessionPatch to its recompute-family equivalent — \
-             SuccessionPatch requires the tombstone ledger, which is unavailable for this \
-             project; downgraded to DeleteInsert, the cheapest recompute-family technique \
-             that preserves the equivalence invariant",
-            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events_arrival\" } \
-             downgraded from SuccessionPatch to its recompute-family equivalent — \
-             SuccessionPatch requires the tombstone ledger, which is unavailable for this \
-             project; downgraded to DeleteInsert, the cheapest recompute-family technique \
-             that preserves the equivalence invariant",
-        ],
-    );
+    check_workspace_no_diagnostics("examples/github_activity");
 }
 
 #[test]

@@ -17,17 +17,25 @@ fn succession_patch_requires_the_tombstone_ledger() {
     );
 }
 
+/// DuckDB and BigQuery realise the tombstone ledger; Spark does not, and its
+/// absence there is permanent rather than pending — Delta has no cross-table
+/// transaction, so the tombstone record and the presented `MERGE` cannot land
+/// atomically (`docs/specs/state.md` §"Which dialects realise which
+/// structure").
 #[test]
-fn tombstone_ledger_is_realisable_only_on_duckdb() {
-    let duckdb: BTreeSet<StateStructure> = realisable_state_structures(SqlDialect::DuckDB)
-        .into_iter()
-        .collect();
-    assert!(duckdb.contains(&StateStructure::TombstoneLedger));
-    for dialect in [SqlDialect::SparkSQL, SqlDialect::BigQuery] {
+fn tombstone_ledger_is_realisable_everywhere_but_spark() {
+    for dialect in [SqlDialect::DuckDB, SqlDialect::BigQuery] {
         let realised: BTreeSet<StateStructure> =
             realisable_state_structures(dialect).into_iter().collect();
-        assert!(!realised.contains(&StateStructure::TombstoneLedger));
+        assert!(
+            realised.contains(&StateStructure::TombstoneLedger),
+            "{dialect:?} realises the tombstone ledger"
+        );
     }
+    let spark: BTreeSet<StateStructure> = realisable_state_structures(SqlDialect::SparkSQL)
+        .into_iter()
+        .collect();
+    assert!(!spark.contains(&StateStructure::TombstoneLedger));
     assert!(StateAvailability::all().contains(StateStructure::TombstoneLedger));
 }
 
@@ -41,16 +49,17 @@ fn succession_cell_downgrades_to_full_refresh_without_a_ledger() {
     assert_eq!(downgrade.missing, StateStructure::TombstoneLedger);
 }
 
+/// BigQuery is deliberately **not** in this list any more: it realises the
+/// tombstone ledger, so its `SuccessionPatch` cells keep their technique. The
+/// non-vacuity that used to come from BigQuery now comes from Spark and from
+/// `warehouse_tables: none`, and the positive claim is asserted directly
+/// below.
 #[test]
-fn succession_downgrade_fires_for_spark_bigquery_and_warehouse_tables_none() {
+fn succession_downgrade_fires_for_spark_and_warehouse_tables_none() {
     for available in [
         StateAvailability::resolve(
             smelt_core::config::WarehouseTables::Allowed,
             &realisable_state_structures(SqlDialect::SparkSQL),
-        ),
-        StateAvailability::resolve(
-            smelt_core::config::WarehouseTables::Allowed,
-            &realisable_state_structures(SqlDialect::BigQuery),
         ),
         StateAvailability::resolve(
             smelt_core::config::WarehouseTables::None,
@@ -65,6 +74,21 @@ fn succession_downgrade_fires_for_spark_bigquery_and_warehouse_tables_none() {
             StateStructure::TombstoneLedger
         );
     }
+}
+
+/// The row-15 claim, stated as an **absence of a downgrade**: a BigQuery
+/// project whose warehouse tables are allowed keeps its `SuccessionPatch`
+/// cell rather than coarsening it to a full refresh.
+#[test]
+fn bigquery_keeps_the_succession_patch_technique() {
+    let available = StateAvailability::resolve(
+        smelt_core::config::WarehouseTables::Allowed,
+        &realisable_state_structures(SqlDialect::BigQuery),
+    );
+    let mut cells = vec![base_cell(Corner::FoldDelta, Technique::SuccessionPatch)];
+    resolve_availability(&mut cells, &available);
+    assert_eq!(cells[0].technique, Technique::SuccessionPatch);
+    assert!(cells[0].state_downgrade.is_none());
 }
 
 #[test]
@@ -88,6 +112,9 @@ fn a_ledger_less_dialect_realises_no_ledger() {
             // reason: no cross-table transaction, so the record and the
             // write it describes cannot commit together.
             assert!(!realised.contains(&StateStructure::ObservedOutputDeltas));
+            // …and the tombstone ledger, which BigQuery gained in phase 15
+            // and Spark never will, for the same reason.
+            assert!(!realised.contains(&StateStructure::TombstoneLedger));
         }
         // Corrected 2026-09-10: this test used to assert the sidecar and the
         // observed-delta table WERE realised on these dialects. They are not —

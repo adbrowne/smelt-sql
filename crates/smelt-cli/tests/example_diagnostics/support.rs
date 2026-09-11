@@ -193,6 +193,15 @@ pub(crate) fn check_workspace_no_diagnostics(example_dir: &str) {
 /// list doesn't name, or stops emitting one it does, fails loudly rather than
 /// silently passing or silently accumulating more expected warnings than the
 /// project actually has.
+///
+/// **Currently unused**, and deliberately kept: every example workspace is
+/// diagnostic-clean again now that BigQuery realises the whole ledger
+/// substrate (`docs/outcomes/20260906-bigquery-correctness` phases 11-15), so
+/// there is no expected-downgrade list left to hold. The moment a workspace
+/// legitimately reacquires one — a new dialect, or a structure with no sound
+/// realisation there — this is the harness that must hold it, rather than
+/// widening `check_workspace_no_diagnostics`.
+#[allow(dead_code)]
 pub(crate) fn check_workspace_diagnostics_are_exactly(
     example_dir: &str,
     expected_messages: &[&str],

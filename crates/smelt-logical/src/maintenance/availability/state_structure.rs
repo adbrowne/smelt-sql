@@ -68,6 +68,7 @@ pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
             StateStructure::MergeLedger,
             StateStructure::ReconciliationLedger,
             StateStructure::ObservedOutputDeltas,
+            StateStructure::TombstoneLedger,
         ],
         SqlDialect::SparkSQL => vec![],
     }
@@ -92,8 +93,10 @@ pub enum StateStructure {
     /// holding `k ∪ {t}` for every recorded delete event
     /// (`docs/specs/state.md`'s tombstone ledger row,
     /// `docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
-    /// state)"). DuckDB-only today (`realisable_state_structures`): a
-    /// `TombstonePatch` cell with no realisable ledger downgrades to
+    /// state)"). Realised on DuckDB and BigQuery; refused on Spark, where
+    /// Delta's lack of a cross-table transaction leaves the tombstone record
+    /// and the presented `MERGE` unable to commit together. A
+    /// `SuccessionPatch` cell with no realisable ledger downgrades to
     /// `DeleteInsert` (full refresh), never a ledger-less patch.
     TombstoneLedger,
 }

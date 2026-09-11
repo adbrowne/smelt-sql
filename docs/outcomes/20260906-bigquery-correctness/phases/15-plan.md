@@ -162,7 +162,7 @@ cargo test -p smelt-runtime --test statement_parity
 cargo test -p smelt-runtime --test state_guard_census
 cargo test -p smelt-runtime --test availability_seam
 cargo test -p smelt-runtime --test observed_delta
-cargo test -p smelt-runtime --test never_fold_twice
+cargo test -p smelt-backend-bigquery --test never_fold_twice
 cargo test -p smelt-logical --test maintenance_availability
 cargo test -p smelt-logical --test maintenance_dialect_blindness
 cargo test -p smelt-dialect --test emission_ownership
