@@ -31,3 +31,42 @@ targets:
     schema: smelt_dogfood
 default_materialization: view
 unstable_schema: true
+# Run manifests, run reports and the interval ledger are the evidence this
+# pipeline's live runs are judged on (`docs/specs/run_state.md`): under the
+# default `mode: stateless` nothing is written at all, so a live run leaves no
+# artifact beyond its console transcript. `intervals` is the lowest posture that
+# persists them. Project-wide by construction (`docs/specs/smelt_yml.md`), so the
+# DuckDB target writes `.smelt/targets/dev/` too; `examples/*/.smelt/` is
+# gitignored. The reconciliation ledger is NOT controlled by this key — it is
+# engine-resident, required whenever the plan is, and on BigQuery declared
+# unrealisable (`docs/specs/state.md`).
+state:
+  mode: intervals
+# THE LIVE-BIGQUERY WORKAROUND, DELIBERATELY NOT ENABLED HERE — see
+# `docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md` findings 1
+# and 5. Uncommenting the `probes:` block below is what phase 12's live windows
+# ran with, and it is required for ANY BigQuery run of this project to complete;
+# it is left commented because it also makes the DuckDB gate
+# `github_activity_replay::recurrence_bound_violation_fails_the_run` go green-
+# when-it-should-fail. No single committed value serves both targets today, and
+# that is the finding rather than a choice to be papered over.
+#
+# The reason the live leg needs it:
+# `docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md` finding 1.
+# `raw.github_events` declares `granularity: day` over a TIMESTAMP
+# `partition_column`, but `emit_append_only_baseline_snapshot`
+# (`crates/smelt-logical/src/maintenance/emit/probes.rs`) groups the posture
+# baseline by the RAW column, so the recorded baseline holds one "partition" per
+# distinct second — 5,797 of them for this fixture. BigQuery has no table-value
+# constructor, so `build_row_set_table` (`crates/smelt-core/src/sql/row_set.rs`)
+# inlines that baseline as a 5,797-branch `SELECT … UNION ALL …` chain and the
+# query planner refuses it outright ("Not enough resources for query planning -
+# too many subqueries or query is too complex"). One model establishes the
+# baseline and the next verifies against it inside the same run, so no amount of
+# state pruning avoids it: with probes dispatching, this pipeline cannot complete
+# a single run on BigQuery. `cadence: off` records every probe as unverified this
+# run (`docs/specs/smelt_yml.md` §"Top-level keys" 10) — the declaration is
+# trusted, not abandoned. Revert this the moment the probe emitter respects the
+# declared granularity (owner: `20260906-bigquery-correctness`).
+# probes:
+#   cadence: off

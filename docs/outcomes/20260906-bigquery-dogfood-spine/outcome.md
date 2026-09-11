@@ -133,13 +133,70 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 9 | Author the loader artifact with no cloud: `scripts/bq-dogfood-loader.sh` derives the load SQL *from* `sample.sql` (rolling `_TABLE_SUFFIX` day range, `ingested_date` stamp, deliberate previous-day redelivery slice) plus the `raw.github_events` DDL and the N-day retention bound, gated by a per-PR `--emit-sql` test that proves the projection and filter are byte-identical to `sample.sql` | done |
 | 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | done |
 | 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | done |
-| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | done (10 of 16 models — see the 2026-09-11 entry) |
 | 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending |
 | 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | planned |
 
 ## Decision log
+
+- 2026-09-11 (phase 12, executed live): **the pipeline runs incrementally on BigQuery — a
+  full refresh and three consecutive windows, ten of sixteen models, for well under a cent.**
+  The T5 downgrade holds in practice, not just in the gate: `silver.events_deduped`, the model
+  phase 11 died on, succeeded on all four runs, and after W2 it holds **5,990 rows — exactly
+  the source's distinct-`id` count**, so the loader's deliberate at-least-once redelivery is
+  folded once, live, across window boundaries. W3 was an empty window on purpose (the
+  suppressed-no-op-write shape the T5 path sits on) and changed nothing, correctly. The
+  `.smelt/` frontier advanced one day per window and merged into a single interval
+  (`2026-08-04 → 2026-08-08`); the dataset holds no ledger, sidecar or tombstone table, which
+  is the absence `docs/specs/state.md` declares rather than an oversight. Cost: **1.111 GB
+  billed across 258 jobs, ≈ US$0.0056**, all of it on the 10 MB minimum-billing floor;
+  `githubarchive` was never touched and the loader was not re-run.
+
+  **Criterion 5 is met with two caveats that are the phase's real product findings**, and it
+  is stated that way rather than rounded up:
+
+  1. **The append-only posture probe cannot be planned by BigQuery at all**, so probe dispatch
+     had to be turned off for *any* run to complete. Two defects compound:
+     `emit_append_only_baseline_snapshot`
+     (`crates/smelt-logical/src/maintenance/emit/probes.rs:731`) groups the baseline by the
+     **raw** partition column rather than the source's declared `granularity: day`, so a
+     TIMESTAMP partition column yields one "partition" per second — **5,797** of them for a
+     three-day, 6,053-row source (measured from the state file smelt wrote; the arrival twin,
+     whose column is already a DATE, gets 2). Then `build_row_set_table`
+     (`crates/smelt-core/src/sql/row_set.rs:55-71`) inlines that baseline as a 5,797-branch
+     `SELECT … UNION ALL …` chain, because BigQuery has no table-value constructor, and the
+     planner refuses a 692,597-character statement: *"Not enough resources for query planning
+     - too many subqueries or query is too complex."* No state hygiene avoids it — one model
+     establishes the baseline and the next verifies against it **inside the same run**. The
+     granularity half is wrong on every backend; DuckDB's `VALUES` just never complains.
+  2. **Six of sixteen models never executed**, on two emitted-SQL defects that reach the
+     warehouse instead of being refused at compile time: `gold.repo_dim` emits
+     `MAX(…) FILTER (WHERE …)`, which GoogleSQL has no clause for, and `silver.actor_sessions`
+     emits `RANGE BETWEEN INTERVAL '2 days' PRECEDING`, where GoogleSQL allows only numeric
+     offsets (and the same statement carries a dialect-blind `CAST(NULL AS VARCHAR)` waiting
+     behind it). `BackendCapabilities` has 23 `supports_*` flags and none covers either
+     construct, so `dialect_seam` has nothing to refuse on. Consequence for **phase 13**:
+     dual-target parity can compare ten models, not sixteen, until these are fixed.
+
+  Two further findings worth not rediscovering: the precision half of the degradation
+  contract is **invisible at run time** — nothing in the console output or the run report says
+  an observed delta was skipped, and `smelt explain` still takes no `--target` — and
+  **no single committed configuration serves both targets**: `probes: { cadence: off }` is
+  required for BigQuery and silently turns the DuckDB negative control
+  `recurrence_bound_violation_fails_the_run` green-when-it-should-fail (red-green confirmed
+  both ways). The committed `smelt.yml` therefore keeps probes on and carries the two-line
+  `probes:` block commented out with the reason inline; that diff is the reproduction recipe.
+
+  Repo change is one file — `examples/github_activity/smelt.yml` gains
+  `state: { mode: intervals }`, without which this project writes **no run report at all**
+  (`docs/specs/run_state.md` §"Stateless writes nothing") and the phase's central deliverable
+  would not exist. Nothing under `crates/` was touched. Gates green on the committed config:
+  `github_activity_replay` 21, `github_activity_oracle` 18, `example_diagnostics` 128,
+  `github_activity_loader` 11, `example_workspaces github_activity` 1. Full write-up, with
+  verbatim errors, per-run billed bytes and `file:line` for every refusal:
+  `phases/12-summary.md`.
 
 - 2026-09-11 (orchestrator): **the T5 block is lifted; phases 12-14 return to `pending`.**
   `20260906-bigquery-correctness` phase 11 landed (`6158dc921`): `realisable_state_structures`
