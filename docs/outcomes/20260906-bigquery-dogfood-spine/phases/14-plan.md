@@ -29,14 +29,23 @@ relations, then compared relation-by-relation against the incrementally-maintain
 the same point. That is the DuckDB oracle's existing definition
 (`github_activity_oracle.rs:574` `full_replay_pair`), and it carries over unchanged.
 
-Thirty comparison points, matching phase 13's schedule: after the full refresh of
-2026-08-05 and after each of the twenty-nine incremental windows through 2026-09-03.
+**Seven comparison points, matching the set phase 13 measured and declared**: windows 1, 2,
+3, 5, 10, 20 and 30 of the 2026-08-05 … 2026-09-03 schedule. Phase 13 measured the landing
+path at ~1,481 rows/s on the widest relation and found thirty full checkpoints would roughly
+double the leg; the same arithmetic applies here, and the oracle leg additionally re-derives
+from a growing prefix, so its per-point cost climbs. Reuse the declared set rather than
+inventing a second one — a phase-13 claim and a phase-14 claim at the same window must be
+about the same state. `PARITY_CHECKPOINTS` makes the full thirty a one-flag change if the
+measurement supports it; if you widen the set, say so and show the measurement.
 
-A full refresh at window *k* re-derives from a growing prefix of the source, so the oracle
-leg's cost climbs across the schedule. Attempt every window. If wall time forces a reduction,
-**declare the sampled schedule** (for example every window for the first five, then every
-fifth, plus the last) in the summary and in the outcome's decision log as an explicit
-criterion-7 caveat — never quietly compare fewer points than the criterion names.
+Record the set and its justification again in this phase's summary as an explicit criterion-7
+caveat: the invariant is checked at seven of thirty windows on BigQuery, not all thirty.
+
+Note what is *not* a variable here. Phase 13's one divergence (`bronze_events`) was arrival
+order — BigQuery's source static, DuckDB's growing — and it vanished under a preloaded
+replay. This phase compares one engine against itself over the same source, so arrival order
+cannot explain anything it finds. A divergence here is a genuine equivalence-invariant
+finding.
 
 ## D1 — the BigQuery oracle leg writes to its own dataset, declared in the committed project
 
@@ -142,7 +151,7 @@ Live, credential-gated:
 1. Read `phases/13-summary.md`; restate nothing, reuse everything.
 2. Add the `bigquery_oracle` target and the two `name:` map entries; write test 1 RED first,
    then the yml. Confirm tests 2 and 5.
-3. Extend phase 13's driver (do not fork it) with an oracle leg: for each compared window *k*,
+3. Extend phase 13's driver (do not fork it) with an oracle leg: for each declared checkpoint *k*,
    run `--full-refresh --start 2026-08-05 --end <window k end>` on `bigquery_oracle`, snapshot,
    and compare against the incremental snapshot phase 13's driver already takes at *k*.
 4. Confirm the DuckDB half (D2) is green and cite it; add nothing.
