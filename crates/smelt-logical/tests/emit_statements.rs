@@ -1276,8 +1276,11 @@ fn append_only_posture_probe_flags_shrunk_partition_and_changed_fingerprint() {
         "expected the shrunk-or-changed-at-unchanged-count predicate in: {}",
         stmt.sql
     );
+    // The GROUP BY repeats the projection verbatim, wrapping CAST included —
+    // GoogleSQL rejects a grouped expression referenced from inside a wrapping
+    // expression in the SELECT list (see `emit_append_only_baseline_snapshot`).
     assert!(
-        stmt.sql.contains("GROUP BY event_date"),
+        stmt.sql.contains("GROUP BY CAST(event_date AS VARCHAR)"),
         "expected per-partition grouping in: {}",
         stmt.sql
     );

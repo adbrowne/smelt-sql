@@ -289,6 +289,18 @@ would be unsound or unreachable rather than merely unwritten:
   derivation reads the **source** CST before any lowering, a later print-time lowering would not
   disturb `max_lookback` derivation.
 
+### Refusal covers function bodies
+A `smelt.define` function call is opaque in the calling model's own CST — the body is inlined at
+print time — so a walk over the model tree alone cannot see a refused construct declared *inside*
+a function. The compile-path refusal therefore walks **both** the model's tree and the
+expanded-source tree, the latter being the model with its function calls inlined. That expansion
+is still smelt SQL, before any dialect lowering, so this is not a re-parse of printed output
+(`architecture.md` §"Source-derived projection") — it is the same expanded-source pass the
+lookback-bound deriver already makes over function bodies. Refusals are deduplicated by
+(construct, reason), and the model-tree occurrence is preferred because its span points at the
+user's own file rather than into expanded text. This applies to every `Emission::Unsupported`
+verdict and every clause-level refusal alike: a body is not an exemption.
+
 ### Emission is scoped to call position
 A built-in's emission verdict is stated per `(dialect, position)`, not per dialect alone, because a
 backend's support for a built-in routinely differs between the positions it can appear in. GoogleSQL

@@ -141,6 +141,26 @@ exists — so the live run is a test of the *backend*, not of the models.
 
 ## Decision log
 
+- 2026-09-11 (phase 12's findings fixed and verified live): **the live model set is 14, not 10.**
+  `20260906-bigquery-correctness` closed findings 1a, 1b, 2, 3 and 5 and they were proven against
+  `smelt_dogfood` the same day (that outcome's 2026-09-11 entries carry the detail and the two
+  further defects the verification itself found). What changed for this outcome: the posture
+  baseline is planned by BigQuery (3 recorded partitions for `raw.github_events`, not 5,797), the
+  `probes: { cadence: off }` workaround is deleted from `examples/github_activity/smelt.yml`, and
+  `gold/` and `marts/` materialise on BigQuery for the first time.
+
+  **Consequences for phase 13 (dual-target parity).** It can compare **14** models rather than
+  10. The two outside are `silver.actor_sessions` — whose `RANGE BETWEEN INTERVAL` lookback frame
+  is refused at compile time on GoogleSQL, by design and with an actionable message, rather than
+  failing at the warehouse — and its one downstream `marts.daily_active_contributors`. Making
+  those two runnable on BigQuery needs a window-spec lowering seam in the dialect printer, which
+  is its own piece of work, not a phase-13 blocker.
+
+  **What phase 13 still has to do itself:** nothing here compares *values* across targets. The
+  BigQuery leg holds three days (6,053 rows) against the DuckDB fixture's thirty (64,313), so the
+  populations differ by construction and equal counts are not expected — the comparison over the
+  same rows is exactly phase 13's job.
+
 - 2026-09-11 (phase 12, executed live): **the pipeline runs incrementally on BigQuery — a
   full refresh and three consecutive windows, ten of sixteen models, for well under a cent.**
   The T5 downgrade holds in practice, not just in the gate: `silver.events_deduped`, the model

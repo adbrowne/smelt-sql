@@ -507,6 +507,9 @@ ignore NULLs (`MIN`, `MAX`, `SUM`, `AVG`, `COUNT`, `STRING_AGG`) and would chang
 `ARRAY_AGG`, so smelt tells you the rewrite rather than picking one that is wrong for some
 aggregates. Both clauses keep working unchanged on DuckDB and Spark.
 
+A construct declared inside a `smelt.define` function body is refused the same way, naming the
+built-in that carries it — writing it in a function is not a way around the check.
+
 ## Further reading
 
 - [Materializations](materializations.md) for how tables and views are created in each target

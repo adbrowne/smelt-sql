@@ -71,7 +71,7 @@ crates/smelt-logical/src/rules/rule_diagnostics.rs 1587
 crates/smelt-logical/tests/backbuild_conformance.rs 3294
 crates/smelt-logical/tests/backbuild_options.rs 2249
 crates/smelt-logical/tests/backbuild_property.rs 1063
-crates/smelt-logical/tests/emit_statements.rs 1727
+crates/smelt-logical/tests/emit_statements.rs 1730
 crates/smelt-logical/tests/keyed_families.rs 1309
 crates/smelt-logical/tests/maintenance_grouping.rs 1072
 crates/smelt-lsp/src/backend/hover_impl.rs 1072
@@ -95,7 +95,7 @@ crates/smelt-parser/src/parser/select.rs 1455
 crates/smelt-parser/src/parser/smelt_ext.rs 1798
 crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
-crates/smelt-runtime/src/compile.rs 4015
+crates/smelt-runtime/src/compile.rs 4051
 crates/smelt-runtime/src/cumulative.rs 2179
 crates/smelt-runtime/src/execute/project/mod.rs 4898
 crates/smelt-runtime/src/maintenance_driver/tests.rs 1083

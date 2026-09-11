@@ -737,11 +737,21 @@ pub fn emit_append_only_baseline_snapshot(
     // would record one "partition" per instant
     // (`partition_bucket::classify_partition_bucket`).
     let bucket_expr = partition_bucket_expr(partition_column, bucket, dialect);
+    // The `GROUP BY` repeats the projection **verbatim**, wrapping CAST
+    // included, rather than grouping by the bare bucket expression. GoogleSQL
+    // does not accept a grouped expression referenced from inside a wrapping
+    // expression in the SELECT list: `SELECT CAST(TIMESTAMP_TRUNC(c, DAY) AS
+    // STRING) … GROUP BY TIMESTAMP_TRUNC(c, DAY)` is rejected with "SELECT list
+    // expression references column c which is neither grouped nor aggregated"
+    // (measured live, job 8a576599). Grouping by the cast is the same
+    // partitioning either way — the cast is injective over the bucket's values
+    // — and it is legal on every dialect.
+    let partition_value = format!("CAST({bucket_expr} AS {cast_type})");
     let sql = format!(
-        "SELECT CAST({bucket_expr} AS {cast_type}) AS partition_value, \
+        "SELECT {partition_value} AS partition_value, \
          COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
          FROM {source_table} \
-         GROUP BY {bucket_expr}"
+         GROUP BY {partition_value}"
     );
     MaintenanceStatement::new(sql)
 }

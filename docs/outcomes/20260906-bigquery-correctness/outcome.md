@@ -144,6 +144,55 @@ rediscovered.
 
 ## Decision log
 
+- 2026-09-11 (live verification of the phase-12 fixes): **proven against the real engine, and
+  the run found two more defects that every offline gate had passed.** Three live runs against
+  `smelt_dogfood`; the pipeline now builds **14 models** where phase 12 built 10, with gold and
+  marts materialising on BigQuery for the first time. Run report
+  `20260911-065009-e8436e.json`: 14 success, 0 failed, 0 skipped, 38s.
+
+  **The measurement that was the whole point.** `raw.github_events`' recorded posture baseline
+  now holds **3 partitions**, not 5,797 — read back from the state file smelt wrote, against the
+  same source and the same fixture phase 12 measured. The arrival twin still holds 2, unchanged.
+  Probes ran at their default cadence with no workaround.
+
+  **Defect A — grouping by a bucket expression is not enough on GoogleSQL.** The first live run
+  failed both probe-carrying models with `400 SELECT list expression references column created_at
+  which is neither grouped nor aggregated` (job 8a576599). GoogleSQL does not match a grouped
+  expression referenced from *inside a wrapping expression* in the SELECT list, so
+  `SELECT CAST(TIMESTAMP_TRUNC(c, DAY) AS STRING) … GROUP BY TIMESTAMP_TRUNC(c, DAY)` is rejected
+  even though the inner expression is grouped. The snapshot emitter now repeats the projection
+  verbatim in its `GROUP BY`, wrapping cast included — the same partitioning either way, since the
+  cast is injective over the bucket's values, and legal on every dialect. Nothing offline could
+  have caught this: DuckDB accepts both spellings.
+
+  **Defect B — the compile-path refusal had a hole the size of a function body.** The second run
+  shipped `RANGE BETWEEN INTERVAL '2 days' PRECEDING` to BigQuery (job d0434f7f) *with the
+  refusal for that exact construct already in place*. A `smelt.define` call is opaque in the
+  model's own CST: the body is inlined by the printer, so the emission walk never saw it. This was
+  never specific to window frames — a `//`, a `MEDIAN`, any `Emission::Unsupported` verdict inside
+  a function body had the same free pass, which makes it a hole in the
+  `dialect_seam` guarantee rather than a missed case. `print_checked` now also walks the
+  **expanded source** tree (still smelt SQL, pre-lowering — the same expanded-source pass the
+  lookback-bound deriver already makes, not a re-parse of printed output), deduplicated by
+  (name, reason) so the model-tree occurrence keeps the span that points at the user's file.
+  Regression test: `dialect_seam::refusals::a_refused_construct_inside_a_function_body_is_refused_at_compile_time`,
+  asserted for both the frame and `//`.
+
+  **What the refusals look like now.** `silver.actor_sessions` fails at compile time with
+  `UnsupportedOnBackend` naming `LAG` and `MAX`, the dialect's limit, and the numeric rewrite —
+  before any warehouse round trip. That is the designed outcome, not a regression: the model is
+  still unrunnable on BigQuery, but it now says so in the compiler with an actionable message
+  instead of costing a job and returning a syntax error. It and its one downstream
+  (`marts.daily_active_contributors`) are the two models outside the 14.
+
+  **Cost:** the three runs plus the verification queries billed well under a cent; the heaviest
+  read was 19,824 bytes. `githubarchive` was never touched and the loader was not re-run.
+
+  **Still not proven:** dual-target *value* parity. The BigQuery leg holds three days (6,053 rows)
+  and the DuckDB fixture holds thirty (64,313), so equal row counts are not expected and nothing
+  here compares the two populations — that is the spine's phase 13, and it now has 14 comparable
+  models rather than 10.
+
 - 2026-09-11 (phase 12's findings, fixed ahead of the ledger-substrate phases): **four of the
   five findings the first live incremental run produced are closed; the fifth dissolved.**
   Taken out of order deliberately — none of them needed a BigQuery ledger substrate, and two of

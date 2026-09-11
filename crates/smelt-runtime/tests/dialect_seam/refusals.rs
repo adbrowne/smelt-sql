@@ -208,3 +208,95 @@ fn intdiv_over_typed_integer_columns_compiles_on_spark() {
         compiled.sql
     );
 }
+
+/// A refused construct declared inside a `smelt.define` **function body** is
+/// refused at compile time, not printed and shipped.
+///
+/// This hole was invisible to every offline gate and was found by a live
+/// BigQuery run: `silver.actor_sessions` calls `smelt.functions.sessionize(…)`,
+/// whose body declares `RANGE BETWEEN INTERVAL '2 days' PRECEDING`. The model's
+/// own CST holds only the opaque call, so the emission walk saw nothing, the
+/// printer inlined the body, and BigQuery answered `400 Syntax error:
+/// Unexpected keyword PRECEDING` (job d0434f7f) — with the compile-time
+/// refusal for that exact construct in place and silent.
+///
+/// Not specific to window frames: any `Emission::Unsupported` verdict inside a
+/// body had the same hole, which is why `//` is asserted here alongside.
+#[test]
+fn a_refused_construct_inside_a_function_body_is_refused_at_compile_time() {
+    for (body, expected) in [
+        (
+            "SELECT LAG(ts_col) OVER (PARTITION BY k ORDER BY ts_col \
+             RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW) AS prev FROM source",
+            "RANGE",
+        ),
+        ("SELECT val // 2 AS halved FROM source", "//"),
+    ] {
+        let mut registry = registry();
+        let mut bodies: smelt_runtime::FnBodyMap = std::collections::HashMap::new();
+        bodies.insert(
+            "helper".to_string(),
+            (
+                vec![
+                    ("source".to_string(), None),
+                    ("k".to_string(), None),
+                    ("ts_col".to_string(), None),
+                    ("val".to_string(), None),
+                ],
+                body.to_string(),
+            ),
+        );
+        registry.set_function_bodies_all(bodies);
+
+        let model = make_model(
+            "q",
+            "SELECT * FROM smelt.functions.helper(\
+             source => events, k => actor_id, ts_col => created_at, val => n)",
+        );
+        let err = registry
+            .get("bigquery")
+            .compile(&model, "main")
+            .expect_err("a construct BigQuery cannot express must be refused, body or not");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UnsupportedOnBackend"),
+            "must carry its diagnostic code: {msg}"
+        );
+        assert!(
+            msg.contains(expected),
+            "must name the construct ({expected}): {msg}"
+        );
+    }
+}
+
+/// The same function body compiles clean for DuckDB, which has both
+/// constructs — the refusal is the dialect's, not the function's.
+#[test]
+fn the_same_function_body_compiles_for_duckdb() {
+    let mut registry = registry();
+    let mut bodies: smelt_runtime::FnBodyMap = std::collections::HashMap::new();
+    bodies.insert(
+        "helper".to_string(),
+        (
+            vec![
+                ("source".to_string(), None),
+                ("k".to_string(), None),
+                ("ts_col".to_string(), None),
+            ],
+            "SELECT LAG(ts_col) OVER (PARTITION BY k ORDER BY ts_col \
+             RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW) AS prev FROM source"
+                .to_string(),
+        ),
+    );
+    registry.set_function_bodies_all(bodies);
+
+    let model = make_model(
+        "q",
+        "SELECT * FROM smelt.functions.helper(\
+         source => events, k => actor_id, ts_col => created_at)",
+    );
+    registry
+        .get("duckdb")
+        .compile(&model, "main")
+        .expect("DuckDB has INTERVAL RANGE frames");
+}

@@ -553,11 +553,18 @@ fn a_timestamp_partition_column_is_bucketed_onto_the_declared_grid() {
         description: None,
     });
 
+    // The GROUP BY repeats the projection verbatim, wrapping CAST included —
+    // GoogleSQL rejects a grouped expression referenced from inside a wrapping
+    // expression in the SELECT list (measured live; see
+    // `emit_append_only_baseline_snapshot`).
     for (dialect, expected_bucket) in [
-        (MaintenanceDialect::DuckDb, "DATE_TRUNC('day', created_at)"),
+        (
+            MaintenanceDialect::DuckDb,
+            "CAST(DATE_TRUNC('day', created_at) AS VARCHAR)",
+        ),
         (
             MaintenanceDialect::BigQuery,
-            "TIMESTAMP_TRUNC(created_at, DAY)",
+            "CAST(TIMESTAMP_TRUNC(created_at, DAY) AS STRING)",
         ),
     ] {
         let probes = append_only_posture_probes(
@@ -623,8 +630,8 @@ fn a_date_partition_column_under_a_day_grid_is_left_alone() {
         smelt_runtime::source_probes::SourcePostureAction::Verify { .. } => unreachable!(),
     };
     assert!(
-        sql.contains("GROUP BY ingested_date"),
+        sql.contains("GROUP BY CAST(ingested_date AS STRING)"),
         "a DATE column at day granularity needs no truncation, got: {sql}"
     );
-    assert!(!sql.contains("TRUNC"), "no truncation introduced: {sql}");
+    assert!(!sql.contains("_TRUNC("), "no truncation introduced: {sql}");
 }
