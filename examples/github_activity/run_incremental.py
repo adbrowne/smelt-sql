@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -111,18 +112,20 @@ def redelivered_count(db: Path, day: date) -> int:
     )
 
 
-def smelt_run_window(window_start: date, window_end: date) -> None:
-    run_or_die(
-        [
-            "smelt",
-            "run",
-            "--event-time-start",
-            window_start.isoformat(),
-            "--event-time-end",
-            window_end.isoformat(),
-        ],
-        cwd=EXAMPLE_DIR,
-    )
+def smelt_run_window(
+    window_start: date, window_end: date, exclude: list[str] | None = None
+) -> None:
+    cmd = [
+        "smelt",
+        "run",
+        "--event-time-start",
+        window_start.isoformat(),
+        "--event-time-end",
+        window_end.isoformat(),
+    ]
+    for model in exclude or []:
+        cmd += ["-e", model]
+    run_or_die(cmd, cwd=EXAMPLE_DIR)
 
 
 def smelt_test() -> None:
@@ -138,7 +141,47 @@ def main() -> int:
     )
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
     parser.add_argument("--report", type=Path, default=EXAMPLE_DIR / ".last_run.json")
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="MODEL",
+        help="passed through to `smelt run -e` on every window (repeatable)",
+    )
+    parser.add_argument(
+        "--snapshot-dir",
+        type=Path,
+        help="copy the DuckDB file after each --snapshot-after window into this directory, "
+        "as w<NN>.duckdb",
+    )
+    parser.add_argument(
+        "--snapshot-after",
+        default="",
+        metavar="N[,N...]",
+        help="comma-separated 1-based window numbers to snapshot after",
+    )
+    parser.add_argument(
+        "--preload-source",
+        action="store_true",
+        help="run load_day.sh for every day in the range BEFORE the first window, so the "
+        "windows advance over a fully-populated source rather than one that grows a day "
+        "at a time. `load_day.sh`'s own per-day idempotence then makes the declared "
+        "external step a no-op inside each run. This is the arrival order a "
+        "warehouse-resident source has, and isolating it is what lets a cross-target "
+        "difference be attributed to arrival order rather than to the engine.",
+    )
+    parser.add_argument(
+        "--skip-tests",
+        action="store_true",
+        help="skip the closing `smelt test` (it asserts over models --exclude may have "
+        "kept out of the run)",
+    )
     args = parser.parse_args()
+    snapshot_after = {
+        int(n) for n in args.snapshot_after.split(",") if n.strip()
+    }
+    if snapshot_after and args.snapshot_dir is None:
+        parser.error("--snapshot-after needs --snapshot-dir")
 
     target_dir = EXAMPLE_DIR / "target"
     target_dir.mkdir(exist_ok=True)
@@ -148,13 +191,23 @@ def main() -> int:
     setup_sources(db)
 
     days = daterange(args.start_date, args.days)
+    if args.preload_source:
+        for day in days:
+            run_or_die(
+                ["bash", str(EXAMPLE_DIR / "load_day.sh"), "--date", day.isoformat()],
+                cwd=EXAMPLE_DIR,
+            )
+        print(f"preloaded {len(days)} day(s) of source before the first window")
     iter_reports: list[IterReport] = []
     total_redelivered = 0
     loop_t0 = time.monotonic()
     for idx, day in enumerate(days, start=1):
         t0 = time.monotonic()
-        smelt_run_window(day, day + timedelta(days=1))
+        smelt_run_window(day, day + timedelta(days=1), args.exclude)
         elapsed = time.monotonic() - t0
+        if idx in snapshot_after:
+            args.snapshot_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(db, args.snapshot_dir / f"w{idx:02d}.duckdb")
         redelivered = redelivered_count(db, day)
         total_redelivered += redelivered
         print(
@@ -165,7 +218,8 @@ def main() -> int:
 
     loop_seconds = time.monotonic() - loop_t0
     test_t0 = time.monotonic()
-    smelt_test()
+    if not args.skip_tests:
+        smelt_test()
     test_seconds = time.monotonic() - test_t0
 
     report = {

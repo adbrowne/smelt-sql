@@ -33,7 +33,17 @@ fn copy_dir_all(src: &Path, dst: &Path) {
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if from.is_dir() {
-            if from.file_name().and_then(|n| n.to_str()) == Some("target") {
+            // `target/` and `.smelt/` are both gitignored build/run state. A
+            // fresh clone and CI have neither, so copying whatever a developer's
+            // last local run happened to leave behind makes these tests depend
+            // on untracked residue: a `.smelt/targets/dev/` carrying a posture
+            // baseline from a differently-populated source turns the very next
+            // staged run into a `SourceMutationProfileViolated` failure that
+            // reproduces nowhere else.
+            if matches!(
+                from.file_name().and_then(|n| n.to_str()),
+                Some("target") | Some(".smelt")
+            ) {
                 continue;
             }
             copy_dir_all(&from, &to);

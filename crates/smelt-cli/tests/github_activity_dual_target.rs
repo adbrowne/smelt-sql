@@ -3,15 +3,24 @@
 //! compute the same answers on DuckDB and on BigQuery?
 //! (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` criterion 6.)
 //!
-//! **This file is the offline half.** Everything here runs per-PR with no
-//! credential and no cloud: the comparator, the relation-set totality check,
-//! the divergence registry and the landing seam are all exercised against
-//! synthetic local `.duckdb` files and synthetic NDJSON. The live sweep — the
-//! schedule, the population the two legs share, and the committed parity
-//! report — is deliberately **not** wired up here; it is being re-planned
-//! (the comparison basis moved from mirroring BigQuery's population down into
-//! DuckDB to expanding the BigQuery population up to the committed fixture),
-//! and a comparator that cannot be trusted offline is worth nothing live.
+//! **Almost all of this runs per-PR with no credential and no cloud**: the
+//! comparator, the relation-set totality check, the divergence registry, the
+//! landing seam and the two gates over the committed parity report are all
+//! exercised against synthetic local `.duckdb` files, synthetic NDJSON, and
+//! the checked-in report artifact. Exactly one test reaches for real
+//! snapshots — [`duckdb_and_bigquery_agree_on_every_model`], driven by
+//! `scripts/bq-dogfood-parity.sh`, which runs the fixture's thirty windows on
+//! both targets and leaves a manifest of per-checkpoint snapshots behind.
+//!
+//! # The measured result
+//!
+//! `docs/outcomes/20260906-bigquery-dogfood-spine/phases/13-parity.json` is
+//! that sweep's committed output: for every compared checkpoint, every
+//! compared relation's row counts on both targets and the multiset difference
+//! in both directions. [`TARGET_DIVERGENCE_REGISTRY`] is checked against it in
+//! both directions by [`registry_entries_are_all_live`], so a divergence
+//! cannot be registered without evidence and evidence cannot be left
+//! unregistered.
 //!
 //! # The comparator
 //!
@@ -230,6 +239,19 @@ enum DivergenceBound {
         monotone_columns: &'static [&'static str],
         behind_side: BehindSide,
     },
+    /// The two legs' **sources** arrive in a different order, so at an
+    /// intermediate window one leg's relation is the other's not-yet-arrived
+    /// tail short. Admissible only for a relation that is a whole-source
+    /// rebuild: `behind_side`'s rows must be a whole-row multiset **subset** of
+    /// the other's, and every row only the leading side holds must fall on or
+    /// after the behind side's own maximum event-time day — so the difference
+    /// is exactly the tail the behind side has not loaded yet, never a row it
+    /// lost from a day it has. A row missing from inside the behind side's own
+    /// loaded range violates the bound and fails the sweep.
+    ArrivalLag {
+        event_time_column: &'static str,
+        behind_side: BehindSide,
+    },
 }
 
 /// A registered difference between the two targets, carrying a root-caused
@@ -241,23 +263,48 @@ struct TargetDivergence {
     bound: DivergenceBound,
 }
 
-/// **Empty**, and empty is a claim rather than an omission.
+/// One entry, and it is about arrival order rather than about either engine.
 ///
-/// No cross-target difference has been measured and root-caused yet, so there
-/// is nothing to register. An empty registry plus a vacuous sweep would be
-/// indistinguishable from success, so it is not shipped as one:
-/// [`the_sweep_fails_closed_on_an_empty_registry`] drives the
-/// registry-consulting comparator itself over a perturbed pair and requires
-/// it to report the mismatch, and
-/// [`an_unregistered_target_divergence_fails`] does the same for
+/// An empty registry plus a vacuous sweep would be indistinguishable from
+/// success, so the registry-consulting path is driven over a perturbed pair
+/// regardless of what the registry holds:
+/// [`the_sweep_fails_closed_on_an_empty_registry`] requires
+/// [`check_targets_agree`] to report a mismatch in a relation with no entry,
+/// and [`an_unregistered_target_divergence_fails`] does the same for
 /// [`compare_databases`] underneath it. Both are the precedent at
 /// `github_activity_oracle.rs::assert_matches_oracle_fails_closed_on_an_empty_registry`.
 ///
-/// The two-sided liveness ratchet an entry needs — "an entry naming a
-/// relation that no longer diverges is an error telling you to delete it" —
-/// lands with the live sweep, against the measured parity report it will
-/// check entries against.
-const TARGET_DIVERGENCE_REGISTRY: &[TargetDivergence] = &[];
+/// The two-sided liveness ratchet is [`registry_entries_are_all_live`],
+/// checked against the committed parity report: an entry naming a relation the
+/// report shows agreeing is an error telling you to delete it, and a relation
+/// the report shows diverging with no entry is an error telling you to add
+/// one.
+const TARGET_DIVERGENCE_REGISTRY: &[TargetDivergence] = &[TargetDivergence {
+    relation: "bronze_events",
+    // Root cause, not a shrug. `bronze.events` is a whole-source passthrough
+    // (`materialization: table`, no incremental strategy), so each window
+    // rebuilds it from whatever the source holds *at that moment*. The two legs'
+    // sources do not arrive the same way: BigQuery's `smelt_dogfood.github_events`
+    // is fully populated before the first window, while the DuckDB leg's
+    // `load_day.sh` appends day D at window D. So at window w the BigQuery side
+    // holds all thirty days and the DuckDB side holds w of them — identical
+    // behaviour over different input, and the gap closes monotonically
+    // (62,382 -> 59,605 -> 57,217 -> 50,406 -> 32,251 -> 11,536 -> 0) to exact
+    // agreement at the final window.
+    //
+    // Attributed, not assumed: replaying the DuckDB leg with the source staged
+    // up front (`run_incremental.py --preload-source`) removes the difference at
+    // every checkpoint including the first, which is
+    // `13-parity-attribution.json` and is gated by
+    // `controlling_arrival_order_removes_every_divergence`. No other relation
+    // diverges on either run — every window-addressed and keyed model is
+    // window-limited on both targets.
+    reason: "arrival order: `bronze.events` is a whole-source rebuild, and the BigQuery              leg's source is fully populated before window 1 while the DuckDB leg's grows              a day per window. Removed entirely by the --preload-source attribution run              (13-parity-attribution.json); zero at the final window on both runs.",
+    bound: DivergenceBound::ArrivalLag {
+        event_time_column: "created_at",
+        behind_side: BehindSide::Duckdb,
+    },
+}];
 
 fn check_bound(duck_db: &Path, bq_db: &Path, entry: &TargetDivergence) -> Result<(), String> {
     let conn = attached_conn(duck_db, bq_db);
@@ -331,6 +378,51 @@ fn check_bound(duck_db: &Path, bq_db: &Path, entry: &TargetDivergence) -> Result
             }
             Ok(())
         }
+        DivergenceBound::ArrivalLag {
+            event_time_column,
+            behind_side,
+        } => {
+            let r = entry.relation;
+            let (behind, leading, behind_name, leading_name) = match behind_side {
+                BehindSide::Duckdb => ("duck_db", "bq_db", "duckdb", "bigquery"),
+                BehindSide::Bigquery => ("bq_db", "duck_db", "bigquery", "duckdb"),
+            };
+            // (1) The behind side holds nothing the leading side lacks.
+            let behind_only_sql = format!(
+                "SELECT * FROM {behind}.main.{r} EXCEPT ALL SELECT * FROM {leading}.main.{r}"
+            );
+            let behind_only =
+                scalar_on(&conn, &format!("SELECT count(*) FROM ({behind_only_sql})"));
+            if behind_only != 0 {
+                return Err(format!(
+                    "{behind_only} row(s) exist only on the {behind_name} leg, which this \
+                     bound licenses to be strictly behind — an arrival lag never adds rows \
+                     to the lagging side"
+                ));
+            }
+            // (2) The rows only the leading side holds are the not-yet-arrived
+            // tail, never a row lost from a day the behind side already has.
+            let leading_only_sql = format!(
+                "SELECT * FROM {leading}.main.{r} EXCEPT ALL SELECT * FROM {behind}.main.{r}"
+            );
+            let inside_loaded_range = scalar_on(
+                &conn,
+                &format!(
+                    "SELECT count(*) FROM ({leading_only_sql}) x \
+                     WHERE CAST(x.{event_time_column} AS DATE) < \
+                       (SELECT max(CAST({event_time_column} AS DATE)) \
+                        FROM {behind}.main.{r})"
+                ),
+            );
+            if inside_loaded_range != 0 {
+                return Err(format!(
+                    "{inside_loaded_range} row(s) exist only on the {leading_name} leg with \
+                     an `{event_time_column}` day the {behind_name} leg has already loaded \
+                     — that is a lost row, not an arrival lag"
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -342,13 +434,22 @@ fn check_targets_agree(
     bq_db: &Path,
     window_label: &str,
 ) -> Result<Vec<RelationDiff>, String> {
+    check_targets_agree_against(duck_db, bq_db, window_label, TARGET_DIVERGENCE_REGISTRY)
+}
+
+/// [`check_targets_agree`] with the registry as a parameter, so the fail-closed
+/// control can drive the real code path over an **empty** registry no matter
+/// what [`TARGET_DIVERGENCE_REGISTRY`] happens to hold today.
+fn check_targets_agree_against(
+    duck_db: &Path,
+    bq_db: &Path,
+    window_label: &str,
+    registry: &[TargetDivergence],
+) -> Result<Vec<RelationDiff>, String> {
     let diffs = compare_databases(duck_db, bq_db)
         .map_err(|e| format!("window {window_label}: coverage failure: {e}"))?;
     for diff in &diffs {
-        if let Some(entry) = TARGET_DIVERGENCE_REGISTRY
-            .iter()
-            .find(|e| e.relation == diff.relation)
-        {
+        if let Some(entry) = registry.iter().find(|e| e.relation == diff.relation) {
             if let Err(msg) = check_bound(duck_db, bq_db, entry) {
                 return Err(format!(
                     "window {window_label}: registered divergence bound violated for `{}` \
@@ -574,21 +675,17 @@ fn an_unregistered_target_divergence_fails() {
     );
 }
 
-/// The sweep fails closed on an empty registry. An empty
-/// [`TARGET_DIVERGENCE_REGISTRY`] plus a vacuous sweep is indistinguishable
-/// from success, so the registry-consulting path itself is driven over a real
-/// mismatch rather than left to be inferred from the registry's silence.
+/// The sweep fails closed on an empty registry. An empty registry plus a
+/// vacuous sweep is indistinguishable from success, so the registry-consulting
+/// path itself is driven over a real mismatch with the registry emptied — the
+/// control holds whatever [`TARGET_DIVERGENCE_REGISTRY`] happens to contain, so
+/// adding or removing an entry can never quietly retire it.
 #[test]
 fn the_sweep_fails_closed_on_an_empty_registry() {
-    assert!(
-        TARGET_DIVERGENCE_REGISTRY.is_empty(),
-        "this test's assertions assume an empty registry — see the \
-         TARGET_DIVERGENCE_REGISTRY doc comment for what changes once an entry is added"
-    );
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (duck, bq) = perturbed_pair(tmp.path());
 
-    let err = check_targets_agree(&duck, &bq, "synthetic")
+    let err = check_targets_agree_against(&duck, &bq, "synthetic", &[])
         .expect_err("an empty registry must not make the sweep vacuous");
     assert!(
         err.contains("unregistered divergence"),
@@ -886,4 +983,403 @@ fn a_value_that_will_not_cast_is_a_loud_failure() {
 
     let bq = tmp.path().join("bq.duckdb");
     load_bigquery_snapshot(&duck, &ndjson_dir, &bq);
+}
+
+// ---------------------------------------------------------------------------
+// The committed parity report, and the two-sided liveness ratchet over it
+// ---------------------------------------------------------------------------
+
+/// The measured result of the live sweep, committed so the registry has
+/// something to be checked against per-PR. Written by
+/// [`duckdb_and_bigquery_agree_on_every_model`]; read here.
+const PARITY_REPORT_PATH: &str =
+    "docs/outcomes/20260906-bigquery-dogfood-spine/phases/13-parity.json";
+
+/// The measured result of the live sweep, as committed.
+fn parity_report() -> serde_json::Value {
+    let path = repo_root().join(PARITY_REPORT_PATH);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read the committed parity report {path:?}: {e}"));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
+}
+
+fn report_checkpoints(report: &serde_json::Value) -> Vec<&serde_json::Value> {
+    report["checkpoints"]
+        .as_array()
+        .expect("the report carries a `checkpoints` array")
+        .iter()
+        .collect()
+}
+
+/// Relations the report shows diverging at *any* compared checkpoint.
+fn divergent_relations(report: &serde_json::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for cp in report_checkpoints(report) {
+        for rel in cp["relations"].as_array().expect("relations array") {
+            let duck_only = rel["duck_only"].as_i64().expect("duck_only");
+            let bq_only = rel["bq_only"].as_i64().expect("bq_only");
+            if duck_only != 0 || bq_only != 0 {
+                out.insert(rel["relation"].as_str().expect("relation name").to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The report is total: the same relation set at every compared checkpoint,
+/// one row per model on both targets, and no blank cell. A report that quietly
+/// covered twelve relations at one checkpoint and fourteen at another would
+/// make the registry ratchet below vacuous for the two it dropped.
+#[test]
+fn the_parity_report_covers_every_model_on_both_targets() {
+    let report = parity_report();
+    let checkpoints = report_checkpoints(&report);
+    assert!(
+        !checkpoints.is_empty(),
+        "the parity report compares no checkpoint at all"
+    );
+
+    let windows: Vec<i64> = checkpoints
+        .iter()
+        .map(|cp| cp["window"].as_i64().expect("window number"))
+        .collect();
+    let days = report["schedule"]["days"]
+        .as_i64()
+        .expect("the schedule declares its length");
+    assert_eq!(
+        windows.last().copied(),
+        Some(days),
+        "the final window is compared in full, always — that is the end state \
+         criterion 6 is about"
+    );
+
+    let mut expected: Option<BTreeSet<String>> = None;
+    for cp in &checkpoints {
+        let label = cp["label"].as_str().expect("checkpoint label");
+        let mut names = BTreeSet::new();
+        for rel in cp["relations"].as_array().expect("relations array") {
+            let name = rel["relation"].as_str().expect("relation name").to_string();
+            for cell in ["duck_rows", "bq_rows", "duck_only", "bq_only"] {
+                assert!(
+                    rel[cell].as_i64().is_some(),
+                    "checkpoint {label}, relation {name}: `{cell}` is blank"
+                );
+            }
+            assert!(
+                names.insert(name.clone()),
+                "checkpoint {label} lists `{name}` twice"
+            );
+        }
+        match &expected {
+            None => expected = Some(names),
+            Some(first) => assert_eq!(
+                &names, first,
+                "checkpoint {label} compares a different relation set than the first \
+                 checkpoint — the comparison silently narrowed"
+            ),
+        }
+    }
+
+    let names = expected.expect("at least one checkpoint");
+    assert_eq!(
+        names.len(),
+        14,
+        "expected the 14 models that run on both targets (16 less the \
+         compile-refused pair), got: {names:?}"
+    );
+    for excluded in EXCLUDED_MODELS {
+        let physical = excluded.replace('.', "_");
+        assert!(
+            !names.contains(&physical),
+            "`{excluded}` is refused at compile time on GoogleSQL and must not appear \
+             in the parity report"
+        );
+    }
+}
+
+/// The two-sided liveness ratchet. An entry naming a relation the report shows
+/// agreeing is stale and must be deleted; a relation the report shows diverging
+/// with no entry is an unregistered divergence. Mirrors
+/// `github_activity_oracle.rs::registry_entries_are_all_live`.
+#[test]
+fn registry_entries_are_all_live() {
+    let report = parity_report();
+    let measured = divergent_relations(&report);
+    let registered: BTreeSet<String> = TARGET_DIVERGENCE_REGISTRY
+        .iter()
+        .map(|e| e.relation.to_string())
+        .collect();
+
+    let stale: Vec<&String> = registered.difference(&measured).collect();
+    assert!(
+        stale.is_empty(),
+        "TARGET_DIVERGENCE_REGISTRY entries name relations the committed parity report \
+         shows agreeing on every compared checkpoint — delete them: {stale:?}"
+    );
+    let unregistered: Vec<&String> = measured.difference(&registered).collect();
+    assert!(
+        unregistered.is_empty(),
+        "the committed parity report shows these relations diverging with no registry \
+         entry — register each with a root-caused reason and a checkable bound: \
+         {unregistered:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The live sweep
+// ---------------------------------------------------------------------------
+
+/// One compared checkpoint: the DuckDB leg's database file at that window, and
+/// the directory of per-relation NDJSON the BigQuery leg exported at the same
+/// window. Produced by `scripts/bq-dogfood-parity.sh manifest`.
+#[derive(serde::Deserialize)]
+struct Checkpoint {
+    label: String,
+    window: i64,
+    day: String,
+    duck_db_path: PathBuf,
+    ndjson_dir: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+struct ParityManifest {
+    checkpoints: Vec<Checkpoint>,
+}
+
+/// The whole sweep over the live snapshots, and the writer of the committed
+/// parity report.
+///
+/// Gating, per the plan: with `SMELT_BQ_DOGFOOD_LIVE=1` set this **fails**
+/// rather than skipping when the snapshots are absent — a live gate that goes
+/// green because nothing was there is worse than no gate. With it unset the
+/// test skips, because the snapshots are hundreds of megabytes of exported rows
+/// that no per-PR run produces.
+#[test]
+fn duckdb_and_bigquery_agree_on_every_model() {
+    if std::env::var("SMELT_BQ_DOGFOOD_LIVE").as_deref() != Ok("1") {
+        eprintln!(
+            "SMELT_BQ_DOGFOOD_LIVE is not 1 — skipping the live sweep. Produce the \
+             snapshots with scripts/bq-dogfood-parity.sh."
+        );
+        return;
+    }
+    let manifest_path = std::env::var("PARITY_MANIFEST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root().join("target/phase13/parity-manifest.json"));
+    let manifest: ParityManifest = serde_json::from_str(
+        &std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+            panic!("SMELT_BQ_DOGFOOD_LIVE=1 but no parity manifest at {manifest_path:?}: {e}")
+        }),
+    )
+    .unwrap_or_else(|e| panic!("parse {manifest_path:?}: {e}"));
+    assert!(
+        !manifest.checkpoints.is_empty(),
+        "{manifest_path:?} declares no checkpoint — the sweep would pass vacuously"
+    );
+
+    let scratch = tempfile::TempDir::new().expect("tempdir");
+    let mut checkpoints_json = Vec::new();
+    let mut failures = Vec::new();
+
+    for cp in &manifest.checkpoints {
+        assert!(
+            cp.duck_db_path.exists(),
+            "checkpoint {}: no DuckDB snapshot at {:?}",
+            cp.label,
+            cp.duck_db_path
+        );
+        assert!(
+            cp.ndjson_dir.is_dir(),
+            "checkpoint {}: no BigQuery snapshot directory at {:?}",
+            cp.label,
+            cp.ndjson_dir
+        );
+        let landed = scratch.path().join(format!("{}.duckdb", cp.label));
+        load_bigquery_snapshot(&cp.duck_db_path, &cp.ndjson_dir, &landed);
+
+        let diffs = match check_targets_agree(&cp.duck_db_path, &landed, &cp.label) {
+            Ok(diffs) => diffs,
+            Err(msg) => {
+                failures.push(msg);
+                // Still record the raw numbers, so the report names what
+                // diverged rather than merely that something did.
+                compare_databases(&cp.duck_db_path, &landed)
+                    .unwrap_or_else(|e| panic!("checkpoint {}: {e}", cp.label))
+            }
+        };
+        checkpoints_json.push(serde_json::json!({
+            "label": cp.label,
+            "window": cp.window,
+            "day": cp.day,
+            "relations": diffs.iter().map(|d| serde_json::json!({
+                "relation": d.relation,
+                "duck_rows": d.duck_rows,
+                "bq_rows": d.bq_rows,
+                "duck_only": d.duck_only,
+                "bq_only": d.bq_only,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
+    let report = serde_json::json!({
+        "schedule": {
+            "start_date": "2026-08-05",
+            "days": 30,
+            "checkpoints": manifest.checkpoints.iter().map(|c| c.window).collect::<Vec<_>>(),
+        },
+        "excluded_models": EXCLUDED_MODELS,
+        "checkpoints": checkpoints_json,
+    });
+    // `PARITY_REPORT_OUT` exists for the D2 attribution run: the same sweep is
+    // run a second time against the DuckDB leg replayed over a pre-staged
+    // source, and its result is a separate artifact rather than an overwrite of
+    // the natural pair's.
+    let out = std::env::var("PARITY_REPORT_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root().join(PARITY_REPORT_PATH));
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&report).expect("serialise the parity report") + "\n",
+    )
+    .unwrap_or_else(|e| panic!("write {out:?}: {e}"));
+    eprintln!("wrote {out:?}");
+
+    assert!(
+        failures.is_empty(),
+        "the two targets disagree:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// The `ArrivalLag` bound holds for the shape it is registered against — the
+/// lagging leg is the leading leg's not-yet-arrived tail short — and rejects
+/// both ways it could be abused: a row the lagging leg holds and the leading
+/// leg does not, and a row missing from *inside* the range the lagging leg has
+/// already loaded. The second is the one that matters: without it the bound
+/// would license a genuine row-loss bug in `bronze_events`.
+#[test]
+fn an_arrival_lag_bound_rejects_a_lost_row_inside_the_loaded_range() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let entry = |reason| TargetDivergence {
+        relation: "bronze_events",
+        reason,
+        bound: DivergenceBound::ArrivalLag {
+            event_time_column: "created_at",
+            behind_side: BehindSide::Duckdb,
+        },
+    };
+
+    // The real shape: DuckDB has loaded through 2026-08-06, BigQuery holds the
+    // whole three-day source.
+    let duck = tmp.path().join("lag_duck.duckdb");
+    let bq = tmp.path().join("lag_bq.duckdb");
+    synth_db(
+        &duck,
+        "CREATE TABLE main.bronze_events AS SELECT * FROM (VALUES \
+           ('a', TIMESTAMP '2026-08-05 01:00:00'), ('b', TIMESTAMP '2026-08-06 01:00:00')) \
+           AS t(id, created_at);",
+    );
+    synth_db(
+        &bq,
+        "CREATE TABLE main.bronze_events AS SELECT * FROM (VALUES \
+           ('a', TIMESTAMP '2026-08-05 01:00:00'), ('b', TIMESTAMP '2026-08-06 01:00:00'), \
+           ('c', TIMESTAMP '2026-08-07 01:00:00')) AS t(id, created_at);",
+    );
+    check_bound(
+        &duck,
+        &bq,
+        &entry("test-local: the tail has not arrived yet"),
+    )
+    .expect("a pure arrival lag is exactly what this bound licenses");
+
+    // A row lost from inside the range DuckDB has already loaded. Same subset
+    // relation, same direction — and it must still be refused.
+    let duck_lost = tmp.path().join("lag_duck_lost.duckdb");
+    synth_db(
+        &duck_lost,
+        "CREATE TABLE main.bronze_events AS SELECT * FROM (VALUES \
+           ('b', TIMESTAMP '2026-08-06 01:00:00')) AS t(id, created_at);",
+    );
+    let err = check_bound(
+        &duck_lost,
+        &bq,
+        &entry("test-local: a lost row must not hide behind an arrival lag"),
+    )
+    .expect_err("a row missing from inside the loaded range is a lost row, not a lag");
+    assert!(
+        err.contains("lost row"),
+        "expected the failure to name it as a lost row: {err}"
+    );
+
+    // A row the lagging leg holds and the leading leg does not.
+    let duck_extra = tmp.path().join("lag_duck_extra.duckdb");
+    synth_db(
+        &duck_extra,
+        "CREATE TABLE main.bronze_events AS SELECT * FROM (VALUES \
+           ('a', TIMESTAMP '2026-08-05 01:00:00'), ('b', TIMESTAMP '2026-08-06 01:00:00'), \
+           ('z', TIMESTAMP '2026-08-06 02:00:00')) AS t(id, created_at);",
+    );
+    let err = check_bound(
+        &duck_extra,
+        &bq,
+        &entry("test-local: the lagging side may never hold an extra row"),
+    )
+    .expect_err("an arrival lag never adds rows to the lagging side");
+    assert!(
+        err.contains("only on the duckdb leg"),
+        "expected the extra row on the lagging side to be named: {err}"
+    );
+}
+
+/// The attribution run (`13-parity.md` §"Arrival-order attribution"): with the
+/// DuckDB leg replayed over a source staged up front — the same arrival order
+/// BigQuery's warehouse-resident source has — **no** relation diverges at any
+/// checkpoint. This is what makes the one registered divergence a statement
+/// about arrival order rather than about either engine, and it is gated here
+/// rather than asserted in prose.
+#[test]
+fn controlling_arrival_order_removes_every_divergence() {
+    let path = repo_root()
+        .join("docs/outcomes/20260906-bigquery-dogfood-spine/phases/13-parity-attribution.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read the attribution report {path:?}: {e}"));
+    let report: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path:?}: {e}"));
+
+    let checkpoints = report_checkpoints(&report);
+    assert_eq!(
+        checkpoints.len(),
+        report_checkpoints(&parity_report()).len(),
+        "the attribution run must cover the same checkpoints as the natural pair, or it \
+         attributes less than it claims"
+    );
+    let divergent = divergent_relations(&report);
+    assert!(
+        divergent.is_empty(),
+        "the arrival-order attribution run still shows divergence in {divergent:?} — those \
+         differences are NOT attributable to arrival order and belong to \
+         20260906-bigquery-correctness"
+    );
+}
+
+/// Criterion 6's core claim, gated against the committed report rather than
+/// left to the summary's prose: at the final window the two targets agree
+/// exactly on every compared relation, with no registered divergence standing.
+#[test]
+fn the_two_targets_agree_at_the_final_window() {
+    let report = parity_report();
+    let checkpoints = report_checkpoints(&report);
+    let last = checkpoints.last().expect("at least one checkpoint");
+    let label = last["label"].as_str().expect("label");
+    for rel in last["relations"].as_array().expect("relations array") {
+        let name = rel["relation"].as_str().expect("relation name");
+        assert_eq!(
+            (
+                rel["duck_only"].as_i64().expect("duck_only"),
+                rel["bq_only"].as_i64().expect("bq_only")
+            ),
+            (0, 0),
+            "final window {label}: `{name}` differs between the targets"
+        );
+    }
 }

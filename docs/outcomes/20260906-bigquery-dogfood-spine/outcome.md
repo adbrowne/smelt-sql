@@ -134,13 +134,56 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 10 | Deploy the loader in the dogfood project and run it: `raw.github_events` created day-partitioned, at least two days loaded, retention verified, cost per run measured and recorded | done |
 | 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | done |
 | 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | done (10 of 16 models — see the 2026-09-11 entry) |
-| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | pending (needs 17) |
+| 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | done (14 of 14 relations equal at the final window; one arrival-order divergence registered — see the 2026-09-12 entry) |
 | 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending (needs 17) |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | planned |
 | 17 | Expand the BigQuery source population to the committed fixture's full thirty days with the real loader, and delete the stray 2026-08-04 slice, so both targets run over the same rows — **runs before 13 and 14** | done |
 
 ## Decision log
+
+- 2026-09-12 (phase 13, executed live): **the two targets agree.** The fixture's thirty
+  windows ran on both targets over phase 17's one shared population, both legs excluding the
+  same compile-refused pair, and at the final window all **fourteen** compared relations are
+  byte-equal in both directions of a whole-row `EXCEPT ALL` — zero rows on either side.
+  Thirteen of the fourteen agree at *every* compared checkpoint. `silver.events_deduped`
+  reaches exactly 64,313 rows, the source's distinct-`id` count, so the loader's deliberate
+  1,270-row at-least-once redelivery folds once live on BigQuery across twenty-nine window
+  boundaries.
+
+  **The one divergence is about arrival order, not about either engine, and that is measured
+  rather than argued.** `bronze_events` — the pipeline's only whole-source rebuild — is short
+  the tail the DuckDB leg has not loaded yet at each intermediate checkpoint
+  (62,382 → 59,605 → 57,217 → 50,406 → 32,251 → 11,536 → **0**), always with the DuckDB side a
+  strict subset. Replaying the DuckDB leg over a source staged up front
+  (`run_incremental.py --preload-source`, which leaves `load_day.sh` unchanged and relies on
+  its own per-day idempotence) removes the difference at **every** checkpoint including the
+  first. So it is registered as one `TARGET_DIVERGENCE_REGISTRY` entry under a new
+  `ArrivalLag` bound that still refuses a row lost from inside the lagging leg's own loaded
+  range — the clause that stops the entry from licensing a real row-loss bug — and nothing is
+  handed to `20260906-bigquery-correctness`.
+
+  **Comparison points were measured before being chosen**, per D2. Exporting
+  `github_events` (65,583 rows, the dataset's widest relation) through the real landing path
+  took 44.29 s — 1,481 rows/s — which puts a thirty-checkpoint sweep at ≈7.2M exported rows
+  ≈81 min, roughly doubling the leg's ~51 min of model execution. Seven checkpoints
+  (windows 1, 2, 3, 5, 10, 20, 30 — 1.42M rows, ≈9 min realised) were declared instead. The
+  final window is compared in full over all fourteen relations and that is now a gate
+  (`the_two_targets_agree_at_the_final_window`), not prose; the six earlier checkpoints earned
+  their place by being the only reason the arrival lag is visible at all.
+
+  The liveness ratchet the offline half deliberately left out now exists:
+  `registry_entries_are_all_live` checks the registry against the committed
+  `13-parity.json` in both directions, and `the_sweep_fails_closed_on_an_empty_registry` was
+  rewritten to pass the registry as a parameter so the fail-closed control survives the
+  registry becoming non-empty rather than being retired by it.
+
+  Cost **US$0.29** over 2,160 jobs (58.46 GB billed, mostly the 10 MB per-table minimum
+  applied many times), inside the US$1 stop gate. Ran 2026-09-11/12 UTC, a week inside the
+  2026-09-19 partition-expiry deadline. One operational trap worth carrying: a concurrent
+  `cargo test -p smelt-cli` rebuilt `target/debug/smelt` **without** `--features bigquery`
+  mid-leg and the next window refused at backend construction — anything driving a live
+  warehouse for an hour must run against a pinned binary copy. Detail in `phases/13-summary.md`.
 
 - 2026-09-12 (phase 17, executed live): **the two targets now hold the same population, and
   it is byte-identical.** 28 days (2026-08-07 … 2026-09-03) were loaded with
