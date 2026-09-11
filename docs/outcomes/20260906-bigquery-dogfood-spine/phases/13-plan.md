@@ -97,11 +97,19 @@ absence from BigQuery is not a value divergence to register; it is a compile-tim
 recorded in the summary as a structural exclusion with its `UnsupportedOnBackend` message
 quoted.
 
-**Comparison points.** Compare after **every** window, as the DuckDB oracle already does —
-not only at the end. Thirty comparison points × 14 relations is the claim; if the wall-clock
-cost of exporting 14 relations from BigQuery thirty times proves prohibitive, reduce the
-*export* frequency explicitly and say so in the summary (e.g. every window for the small
-relations, every fifth plus the final for the 64k-row ones), never silently.
+**Comparison points — measure the export rate before choosing them.** The DuckDB oracle
+compares after every window because its diff is two attached local files. Here each
+BigQuery-side snapshot must be paged out over REST, and after phase 17 the six largest
+relations hold ~60k rows apiece, so thirty full snapshots is ~10M exported rows and hours of
+wall time. Do not silently truncate and do not blindly attempt it either: export the largest
+relation once, measure rows/second, and then **declare** a checkpoint set the measurement
+supports — as a starting shape, after the full refresh, after windows 2, 3, 5, 10 and 20, and
+after the final window 30. The final window is compared in full over all 14 relations, always;
+that is the state criterion 6 is about. Intermediate checkpoints exist to catch a divergence
+that appears and then heals, which an end-state-only comparison would miss.
+
+Record the chosen set and the measurement behind it in the summary. A reduction that is
+measured and declared is fine; one that is assumed is not.
 
 ## D3 — the comparator: whole-row multiset difference, not stringify-and-sort
 
