@@ -137,12 +137,77 @@ rediscovered.
 | 10 | Close: regenerate `docs/reference/dialect-coverage.md`, move the gap ratchets down, update issue #179 with what was verified, all standing gates green | done |
 | 11 | Make the plan layer and the run layer agree before any new SQL: correct `realisable_state_structures`' BigQuery/Spark rows, express the observed-delta recording requirement in the availability layer so the three T5 `bail!` sites become recorded downgrades, and add the structural gate tying every `dialect != DuckDB` guard under `maintenance_driver/` to a structure declared unrealisable | done |
 | 12 | Observed deltas on BigQuery: `ddl_bigquery` sidecar emitters plus a `record_observed_delta_with_write` override on a BigQuery multi-statement transaction; flip the row back on, which the phase-11 gate then forces the driver guard to be deleted for | pending |
-| 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | pending |
+| 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | done |
 | 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | pending |
 | 15 | Tombstone ledger on BigQuery, so the succession-patch technique runs live rather than downgrading to `DeleteInsert` | pending |
 | 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | pending |
 
 ## Decision log
+
+- 2026-09-11 (phase 13, implementation): **BigQuery realises the merge ledger, and the guard
+  that refused it is gone from the census rather than merely annotated.**
+  `realisable_state_structures(BigQuery)` is now `vec![MergeLedger]`, backed by five GoogleSQL
+  builders in `crates/smelt-state/src/ddl_bigquery.rs` and a real transaction seam in
+  `smelt-backend-bigquery`. The most legible result is one line deleted from a fixture:
+  `examples/github_activity`'s `UpstreamMutation`/`ColumnScopedMerge` cell no longer emits
+  `MaintenanceStateDowngraded` on the `bigquery` target
+  (`example_diagnostics/smoke_and_migration.rs`), and its **absence** is now the asserted
+  claim. A real cell on a real workspace stopped being coarsened.
+
+  **The row's named defect and two the plan did not name.** `ON CONFLICT DO NOTHING` has no
+  GoogleSQL form, so the idempotent record is a `MERGE` into the backticked two-part
+  `` `<schema>._smelt_ledger` ``, sourced from a one-row `SELECT` of the six literals, matched
+  on the four key columns, `WHEN NOT MATCHED THEN INSERT` — `SELECT`, not
+  `UNNEST([STRUCT(…)])`, because phase 12's finding 1b is about a row *set* and this source is
+  always one row. Found while porting: (a) `PRIMARY KEY` is a syntax error without
+  `NOT ENFORCED`, and (b) **string escaping is not portable** — `ddl_duckdb::
+  escape_sql_literal` doubles the quote, but `''` does not continue a GoogleSQL string and a
+  backslash IS an escape character there, so a model name or partition value carrying either
+  would have been silently corrupted. `ddl_bigquery::escape_string_literal` uses the backslash
+  form, with its own test.
+
+  **One dispatch point, and a derived gate rather than a comparison.** `smelt_state::ledger`
+  (new) is the single `SqlDialect`-keyed `match` — exhaustive, so a new dialect is a compile
+  error, and Spark is an error naming the dialect rather than DuckDB SQL it cannot run.
+  `driver.rs`'s ledger sites route through it. The guard at `driver.rs:611` was not
+  re-annotated but **replaced** by `maintenance_driver::realises_merge_ledger`, derived from
+  `realisable_state_structures` the way `records_observed_deltas` is, so it left the census
+  entirely: `state_guard_census` now covers three guards, and `MergeLedger` joins
+  `ObservedOutputDeltas` in the list of structures whose gate must be derived, never compared.
+  The census's own module doc named this as the preferred fix; this is the first phase to take
+  it.
+
+  **`ReconciliationLedger` stayed off, and the plan's reason survived contact with the code.**
+  `driver.rs:485`'s `Grade::Additive` arm gets its never-fold-twice refusal from
+  `fold_ledger_delta` returning `AlreadyReflected`, which on DuckDB *is* the `PRIMARY KEY`
+  violation (`smelt-backend-duckdb/src/lib.rs:748-755`). An unenforced key raises nothing, so
+  the identical statements would double-count. Its guard stays, with the comment rewritten to
+  say the ledger text now exists and only the enforced refusal is missing. Its three builders
+  were routed through the dispatch anyway, so row 14 has nothing left but the refusal itself.
+
+  **Not proven, and it is the interesting half.** `BigQueryBackend::
+  execute_write_with_bookkeeping` runs `ensure_sqls` as separate jobs then
+  `pre_write_sqls` + the write group in one `BEGIN TRANSACTION … COMMIT TRANSACTION` script,
+  wrapped in `BEGIN … EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION; RAISE …; END` because
+  BigQuery does not unwind a script's transaction on its own. Whether BigQuery accepts the
+  first step's `CREATE TABLE … AS` *inside* that transaction cannot be settled offline — the
+  write group genuinely can be DDL — so it is stated here rather than assumed, and phase 16
+  owns it. The contract that IS proven is the ordering and the boundary, asserted against the
+  pure `sql::write_with_bookkeeping_plan`'s statement list rather than a warehouse. Where
+  there is no record to bind (`pre_write_sqls` empty), no transaction is opened at all.
+
+  **Five pre-existing tests encoded the old claim and were corrected, not deleted** —
+  `realisation.rs`'s `has_emitters` (now per `(dialect, structure)`) and its positive
+  expectation, `succession.rs`'s `a_ledger_less_dialect_realises_no_ledger` (the merge-ledger
+  half is Spark-only now), the census's known-guard count, and the `github_activity`
+  diagnostics fixture. Gates: `verify-phase.sh` ALL GREEN, `state_guard_census` 3/3,
+  `availability_seam` 6/6, `maintenance_availability` 21/21,
+  `maintenance_dialect_blindness` 3/3, new `smelt-state --test ledger_dialect` 5/5,
+  `cargo check -p smelt-cli --features bigquery` clean, `large-file-check.sh` OK
+  (`ddl_bigquery.rs` 607 → 967, well under the 1500 default cap — no split needed, no ratchet
+  raised). No warehouse was reached. **Row 12 is now unblocked on its transactional half**:
+  `execute_conditional_write_and_record_observed_delta` delegates to the seam this phase
+  overrode, so it needs only its emitters and the row flip.
 
 - 2026-09-11 (live verification of the phase-12 fixes): **proven against the real engine, and
   the run found two more defects that every offline gate had passed.** Three live runs against

@@ -12,8 +12,12 @@
 
 use std::collections::BTreeSet;
 
+use smelt_core::config::WarehouseTables;
 use smelt_dialect::{BackendCapabilities, SqlDialect};
-use smelt_logical::maintenance::availability::{realisable_state_structures, StateStructure};
+use smelt_logical::maintenance::availability::{
+    realisable_state_structures, resolve_availability, StateAvailability, StateStructure,
+};
+use smelt_logical::maintenance::{Corner, Technique};
 
 /// Every [`SqlDialect`], so a new one is a test failure rather than a silent
 /// omission. Kept exhaustive by [`every_dialect_is_covered`].
@@ -35,20 +39,26 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 ///
 /// **This is the table a phase adding a dialect's realisation edits**, and
 /// editing it without landing the emitters turns
-/// [`every_claimed_structure_has_a_builder`] red from the other side. Today
-/// every one of the five structures is emitted only by
-/// `smelt_state::ddl_duckdb` (`generate_ledger_*`, `generate_observed_delta_*`,
-/// `generate_fingerprint_sidecar_*`, `generate_tombstone_*`); `ddl_bigquery.rs`
-/// and `ddl_spark.rs` carry schema-evolution DDL only.
-fn has_emitters(dialect: SqlDialect, _structure: StateStructure) -> bool {
+/// [`every_claimed_structure_has_a_builder`] red from the other side.
+///
+/// DuckDB emits all five (`smelt_state::ddl_duckdb`'s `generate_ledger_*`,
+/// `generate_observed_delta_*`, `generate_fingerprint_sidecar_*`,
+/// `generate_tombstone_*`). BigQuery emits the merge ledger and nothing else:
+/// `smelt_state::ddl_bigquery`'s `generate_ledger_*` carry its GoogleSQL
+/// spelling, dispatched by `smelt_state::ledger`, and
+/// `smelt-backend-bigquery` overrides `execute_write_with_bookkeeping` to run
+/// the record and the write in one transaction. Its **reconciliation** ledger
+/// is a separate question from the emitters: the never-fold-twice refusal is a
+/// `PRIMARY KEY` violation on DuckDB, and BigQuery's key is `NOT ENFORCED`.
+/// `ddl_spark.rs` carries schema-evolution DDL only, and Spark has no sound
+/// realisation to add: Delta gives per-table atomicity only and no cross-table
+/// transaction, so a ledger write and its data write cannot be made atomic
+/// (`docs/specs/state.md` §"Which dialects realise which structure").
+fn has_emitters(dialect: SqlDialect, structure: StateStructure) -> bool {
     match dialect {
         SqlDialect::DuckDB => true,
-        // No ledger, sidecar or observed-delta emitter exists outside
-        // `ddl_duckdb`. Spark additionally has no sound realisation to add:
-        // Delta gives per-table atomicity only and no cross-table transaction,
-        // so a ledger write and its data write cannot be made atomic
-        // (`docs/specs/state.md` §"The state-structure inventory").
-        SqlDialect::SparkSQL | SqlDialect::BigQuery => false,
+        SqlDialect::BigQuery => matches!(structure, StateStructure::MergeLedger),
+        SqlDialect::SparkSQL => false,
     }
 }
 
@@ -101,19 +111,23 @@ fn the_sidecar_claim_matches_the_backend_capability() {
     }
 }
 
-/// Today's concrete expectation, stated positively so the reopening's phases
-/// 12-15 flip it deliberately rather than by accident: BigQuery and Spark
-/// realise **nothing**, and DuckDB realises everything.
+/// Today's concrete expectation, stated positively so the reopening's
+/// remaining phases flip it deliberately rather than by accident: DuckDB
+/// realises everything, BigQuery realises exactly the merge ledger, and Spark
+/// realises **nothing** — permanently, not pending.
 #[test]
-fn bigquery_and_spark_realise_no_state_structure_today() {
-    for dialect in [SqlDialect::SparkSQL, SqlDialect::BigQuery] {
-        assert!(
-            realised(dialect).is_empty(),
-            "{dialect:?} should realise no state structure until its emitters land \
-             (docs/outcomes/20260906-bigquery-correctness phases 12-15); got {:?}",
-            realised(dialect),
-        );
-    }
+fn each_dialect_realises_exactly_the_structures_it_has_today() {
+    assert!(
+        realised(SqlDialect::SparkSQL).is_empty(),
+        "Spark's absence is permanent (no cross-table Delta transaction), not pending; got {:?}",
+        realised(SqlDialect::SparkSQL),
+    );
+    assert_eq!(
+        realised(SqlDialect::BigQuery),
+        BTreeSet::from([StateStructure::MergeLedger]),
+        "BigQuery realises the merge ledger; its other rows land with \
+         docs/outcomes/20260906-bigquery-correctness phases 12, 14 and 15",
+    );
     assert_eq!(realised(SqlDialect::DuckDB).len(), ALL_STRUCTURES.len());
 }
 
@@ -139,4 +153,36 @@ fn every_dialect_is_covered() {
     }
     assert_eq!(ALL_DIALECTS.len(), 3);
     assert_eq!(ALL_STRUCTURES.len(), 5);
+}
+
+/// The consequence of BigQuery's row, at the layer users feel it: a technique
+/// needing only the merge ledger resolves untouched, while one needing the
+/// reconciliation ledger still downgrades and still says so. The two are
+/// separate structures precisely so this pair can differ.
+#[test]
+fn bigquery_keeps_a_merge_ledger_technique_and_still_downgrades_a_keyed_fold() {
+    let available = StateAvailability::resolve(
+        WarehouseTables::Allowed,
+        &realisable_state_structures(SqlDialect::BigQuery),
+    );
+
+    let mut merge_cell = vec![super::base_cell(
+        Corner::ColumnMerge,
+        Technique::ColumnScopedMerge,
+    )];
+    resolve_availability(&mut merge_cell, &available);
+    assert_eq!(merge_cell[0].technique, Technique::ColumnScopedMerge);
+    assert!(
+        merge_cell[0].state_downgrade.is_none(),
+        "BigQuery realises the merge ledger, so nothing is lost: {:?}",
+        merge_cell[0].state_downgrade,
+    );
+
+    let mut fold_cell = vec![super::base_cell(Corner::FoldDelta, Technique::KeyedFold)];
+    resolve_availability(&mut fold_cell, &available);
+    assert_eq!(fold_cell[0].technique, Technique::PerGroupRecompute);
+    assert_eq!(
+        fold_cell[0].state_downgrade.as_ref().unwrap().missing,
+        StateStructure::ReconciliationLedger,
+    );
 }

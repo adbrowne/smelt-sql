@@ -22,8 +22,10 @@
 //!
 //! The preferred fix for a *new* guard is not an annotation but a predicate
 //! derived from the availability layer — see
-//! `maintenance_driver::records_observed_deltas`, which is why the three T5
-//! write sites no longer appear in this census at all.
+//! `maintenance_driver::records_observed_deltas` and
+//! `maintenance_driver::realises_merge_ledger`, which is why the three T5
+//! write sites and the merge-ledger bookkeeping site no longer appear in this
+//! census at all.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -179,25 +181,29 @@ fn every_duckdb_guard_names_an_unrealisable_structure() {
 fn the_census_is_non_empty_and_covers_the_known_guards() {
     let guards = census();
     assert!(
-        guards.len() >= 4,
-        "expected at least the four known ledger guards, found {}: {guards:#?}",
+        guards.len() >= 3,
+        "expected at least the three known ledger guards, found {}: {guards:#?}",
         guards.len(),
     );
     let structures: BTreeSet<_> = guards.iter().filter_map(|g| g.structure.clone()).collect();
-    for expected in ["MergeLedger", "ReconciliationLedger", "TombstoneLedger"] {
+    for expected in ["ReconciliationLedger", "TombstoneLedger"] {
         assert!(
             structures.contains(expected),
             "expected a {expected} guard in the census, got {structures:?}",
         );
     }
-    // The T5 sites were converted to `records_observed_deltas`, so no raw
-    // guard for this structure should remain. If one comes back, it must be
-    // because someone reintroduced a hardcoded dialect comparison.
-    assert!(
-        !structures.contains("ObservedOutputDeltas"),
-        "observed-delta write sites must derive from `records_observed_deltas`, not compare \
-         dialects directly: {structures:?}",
-    );
+    // Two structures must have NO raw guard left, each for the same reason:
+    // their write sites ask a predicate derived from the availability layer
+    // (`records_observed_deltas`, `realises_merge_ledger`) instead of comparing
+    // dialects themselves. A guard reappearing for either means someone
+    // reintroduced a hardcoded dialect assumption.
+    for retired in ["ObservedOutputDeltas", "MergeLedger"] {
+        assert!(
+            !structures.contains(retired),
+            "{retired} write sites must derive their gate from the availability layer, not \
+             compare dialects directly: {structures:?}",
+        );
+    }
 }
 
 /// Non-vacuity: the scanner really does flag an unannotated guard, really

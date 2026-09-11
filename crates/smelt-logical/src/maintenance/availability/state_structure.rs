@@ -18,19 +18,27 @@ use crate::maintenance::Technique;
 /// the reasoning that they "have no per-dialect builder gate" — they have no
 /// per-dialect *builder*, which is the opposite conclusion.
 ///
-/// Today only DuckDB has any builder: every ledger, sidecar and observed-delta
-/// emitter lives in `smelt-state/src/ddl_duckdb.rs`, and DuckDB is the only
-/// backend overriding the transactional seams those structures need
+/// DuckDB has a builder for all five: every ledger, sidecar and observed-delta
+/// emitter lives in `smelt-state/src/ddl_duckdb.rs`, and it is the only backend
+/// overriding all of the transactional seams those structures need
 /// (`Backend::fold_ledger_delta`, `execute_write_with_bookkeeping`,
-/// `record_observed_delta_with_write`). `ddl_bigquery.rs` and `ddl_spark.rs`
-/// carry schema-evolution DDL only. The fingerprint sidecar has a second,
-/// independent source of truth agreeing with this: every consumer in
-/// `maintenance_driver/sidecar.rs` gates on
+/// `record_observed_delta_with_write`). BigQuery has the merge ledger and
+/// nothing else: `smelt-state/src/ddl_bigquery.rs` carries its GoogleSQL
+/// ledger spelling (a `MERGE … WHEN NOT MATCHED` upsert, since GoogleSQL has
+/// no `ON CONFLICT`) beside its schema-evolution DDL, and
+/// `smelt-backend-bigquery` overrides `execute_write_with_bookkeeping` with a
+/// real multi-statement transaction. Its `ReconciliationLedger` row stays off
+/// for a reason that is not a missing emitter: the never-fold-twice refusal is
+/// a `PRIMARY KEY` *violation* on DuckDB, and BigQuery's `PRIMARY KEY` is
+/// declared `NOT ENFORCED`. `ddl_spark.rs` carries schema-evolution DDL only.
+/// The fingerprint sidecar has a second, independent source of truth agreeing
+/// with this: every consumer in `maintenance_driver/sidecar.rs` gates on
 /// `BackendCapabilities::supports_fingerprint_sidecar`, `true` for DuckDB
 /// alone.
 ///
-/// BigQuery's rows are pending work (`docs/outcomes/20260906-bigquery-correctness`
-/// phases 12-15) and flip on as each realisation lands. **Spark's are not**:
+/// BigQuery's remaining rows are pending work
+/// (`docs/outcomes/20260906-bigquery-correctness` phases 12, 14 and 15) and
+/// flip on as each realisation lands. **Spark's are not**:
 /// Delta gives per-table atomicity and no cross-table transaction, so a ledger
 /// write and its data write cannot be made atomic there and the additive
 /// never-fold-twice refusal has no sound Delta realisation — an honest
@@ -44,7 +52,8 @@ pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
             StateStructure::FingerprintSidecar,
             StateStructure::TombstoneLedger,
         ],
-        SqlDialect::SparkSQL | SqlDialect::BigQuery => vec![],
+        SqlDialect::BigQuery => vec![StateStructure::MergeLedger],
+        SqlDialect::SparkSQL => vec![],
     }
 }
 

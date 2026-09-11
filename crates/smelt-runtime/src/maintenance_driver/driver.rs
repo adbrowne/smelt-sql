@@ -478,10 +478,21 @@ pub async fn run_windowed_keyed_maintenance(
 
         match grade {
             Grade::Additive => {
-                // `smelt_state::ddl_duckdb` is the only ledger DDL/DML
-                // dialect implemented today (MP12); fail loudly rather than
-                // handing another backend DuckDB-flavored SQL it cannot run
-                // (`CLAUDE.md` §"Fail-loud discipline").
+                // The ledger *text* now exists on BigQuery too
+                // (`smelt_state::ledger` dispatches it), but the
+                // never-fold-twice refusal this arm depends on does not: on
+                // DuckDB it IS the ledger table's `PRIMARY KEY` violation,
+                // surfaced as `BackendError::AlreadyReflected`, and BigQuery's
+                // `PRIMARY KEY` is declared `NOT ENFORCED` — it raises nothing
+                // (`docs/specs/state.md` §"Which dialects realise which
+                // structure"). Re-expressing that refusal transactionally is
+                // `docs/outcomes/20260906-bigquery-correctness` row 14; until
+                // it lands, an additive fold off DuckDB fails loudly rather
+                // than silently double-counting (`CLAUDE.md` §"Fail-loud
+                // discipline"). Reaching here at all means the plan layer
+                // failed to downgrade first: `required_state_structure(
+                // KeyedFold)` is `ReconciliationLedger`, unrealisable
+                // everywhere but DuckDB.
                 // STATE-GUARD: ReconciliationLedger
                 if backend.dialect() != SqlDialect::DuckDB {
                     bail!(
@@ -514,8 +525,14 @@ pub async fn run_windowed_keyed_maintenance(
                     );
                 }
 
-                let ensure_sql = ddl_duckdb::generate_ledger_table_ddl(schema);
-                let insert_sql = ddl_duckdb::generate_ledger_insert_sql(
+                // Routed through the one dialect dispatch point
+                // (`smelt_state::ledger`) rather than a named DuckDB builder,
+                // so row 14 only has to make the refusal above correct — the
+                // statements it needs are already dialect-plural.
+                let dialect = backend.dialect();
+                let ensure_sql = smelt_state::ledger::ledger_table_ddl(dialect, schema)?;
+                let insert_sql = smelt_state::ledger::ledger_insert_sql(
+                    dialect,
                     schema,
                     model_name,
                     LEDGER_WHOLE_ROW_GROUP,
@@ -523,14 +540,15 @@ pub async fn run_windowed_keyed_maintenance(
                     &step.partition_value,
                     &step.range.start,
                     &step.range.end,
-                );
-                let exists_sql = ddl_duckdb::generate_ledger_exists_sql(
+                )?;
+                let exists_sql = smelt_state::ledger::ledger_exists_sql(
+                    dialect,
                     schema,
                     model_name,
                     LEDGER_WHOLE_ROW_GROUP,
                     rule.ledger_input(),
                     &step.partition_value,
-                );
+                )?;
 
                 match backend
                     .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
@@ -593,25 +611,31 @@ pub async fn run_windowed_keyed_maintenance(
                 // `ON CONFLICT DO NOTHING` rather than `Additive`'s
                 // never-fold-twice `PRIMARY KEY` refusal, since a repeat
                 // merge of the same window is never a correctness violation
-                // for an idempotent cell. The first (table-creating) step
-                // is recorded too — that window is merged state — because
-                // it always falls into the `_` arm below (its `create_group`
-                // is never the `(None, Suppressed)` pattern the first arm
-                // matches). The ledger substrate is DuckDB-only today (same
-                // posture as the `Additive` arm and the observed-delta
-                // record below); on any other dialect the record is
-                // skipped — never silently, but the channel is no longer a
-                // reporter event (the old `RunReporter` stand-in method was
-                // retired, `docs/outcomes/20260904-state-residency/
-                // outcome.md` phase 6): the affected cell's own recorded
-                // `state_downgrade` (`smelt-logical`'s `resolve_availability`)
-                // is now the user-visible channel, surfaced by `smelt
-                // explain` — this is bookkeeping, not a correctness gate, so
-                // the run itself proceeds.
-                // STATE-GUARD: MergeLedger
-                let ledger_bookkeeping = if backend.dialect() == SqlDialect::DuckDB {
-                    let ledger_ensure = ddl_duckdb::generate_ledger_table_ddl(schema);
-                    let ledger_upsert = ddl_duckdb::generate_ledger_upsert_sql(
+                // for an idempotent cell — spelled `MERGE … WHEN NOT MATCHED`
+                // where the dialect has no conflict clause, same observable
+                // behaviour. The first (table-creating) step is recorded too
+                // — that window is merged state — because it always falls
+                // into the `_` arm below (its `create_group` is never the
+                // `(None, Suppressed)` pattern the first arm matches).
+                //
+                // Whether the dialect can hold the ledger at all is asked of
+                // `realises_merge_ledger`, **derived from the availability
+                // layer** rather than compared against a dialect here (same
+                // posture as `records_observed_deltas` for the observed-delta
+                // record below). Where it cannot, the record is skipped —
+                // never silently, but the channel is no longer a reporter
+                // event (the old `RunReporter` stand-in method was retired,
+                // `docs/outcomes/20260904-state-residency/outcome.md` phase
+                // 6): the affected cell's own recorded `state_downgrade`
+                // (`smelt-logical`'s `resolve_availability`) is the
+                // user-visible channel, surfaced by `smelt explain` — this is
+                // bookkeeping, not a correctness gate, so the run itself
+                // proceeds.
+                let ledger_bookkeeping = if super::realises_merge_ledger(backend.dialect()) {
+                    let dialect = backend.dialect();
+                    let ledger_ensure = smelt_state::ledger::ledger_table_ddl(dialect, schema)?;
+                    let ledger_upsert = smelt_state::ledger::ledger_upsert_sql(
+                        dialect,
                         schema,
                         model_name,
                         LEDGER_WHOLE_ROW_GROUP,
@@ -619,7 +643,7 @@ pub async fn run_windowed_keyed_maintenance(
                         &step.partition_value,
                         &step.range.start,
                         &step.range.end,
-                    );
+                    )?;
                     Some((ledger_ensure, ledger_upsert))
                 } else {
                     tracing::debug!(
@@ -627,8 +651,8 @@ pub async fn run_windowed_keyed_maintenance(
                         run_id = retry.run_id,
                         dialect = backend.dialect().name(),
                         "re-run-tolerant keyed model merge-ledger bookkeeping record skipped: \
-                         the ledger substrate is DuckDB-only today — the affected cell's own \
-                         recorded state_downgrade is the user-visible channel"
+                         the merge ledger is not realisable on this dialect — the affected \
+                         cell's own recorded state_downgrade is the user-visible channel"
                     );
                     None
                 };

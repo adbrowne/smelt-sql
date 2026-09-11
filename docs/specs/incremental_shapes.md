@@ -838,7 +838,13 @@ mode supports it (`state.md`), so `--auto` staleness always has a record to cons
 backend offers no ledger substrate, availability resolution downgrades the cell to its
 recompute-family equivalent and records the downgrade as `MaintenanceStateDowngraded`
 (`state.md` §"The degradation contract") rather than skipping the bookkeeping write or refusing
-the run. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
+the run. "The ledger substrate" is per-dialect *and* per-grade: the re-run-tolerant
+bookkeeping record and the additive fold's refusal are separate realisations
+(`state.md` §"Which dialects realise which structure"), so a dialect can hold the
+re-run-tolerant frontier while an additive-fold cell on the same dialect still downgrades.
+The statement spelling is the dialect's own — `INSERT … ON CONFLICT DO NOTHING` where the
+dialect has one, `MERGE … WHEN NOT MATCHED` where it does not — and the observable behaviour
+(recording a window once, re-recording it as a no-op) is identical across them. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
 describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
 state-structure inventory"), distinct from the opt-in run-state observability surface
 (`run_state.md`), and the model realisation of `state.md` §"The residency rule".

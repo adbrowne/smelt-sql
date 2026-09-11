@@ -110,7 +110,7 @@ structure:
 
 | Structure | DuckDB | BigQuery | Spark (Delta) |
 |---|---|---|---|
-| Transactional merge ledger | yes | not yet | **no** |
+| Transactional merge ledger | yes | yes | **no** |
 | Reconciliation ledger (frontier record) | yes | not yet | **no** |
 | Observed output deltas | yes | not yet | **no** |
 | Fingerprint sidecar | yes | not yet | **no** |
@@ -120,6 +120,27 @@ structure:
 latter: Delta provides per-table atomicity and no cross-table transaction, so a ledger
 write and its data write cannot be made atomic, and the additive fold's never-fold-twice
 refusal has no sound realisation there.
+
+Three facts of BigQuery's merge-ledger realisation are load-bearing rather than incidental,
+because they are what makes the *reconciliation* ledger a separate question:
+
+- **The ledger table is addressed by a two-part name.** The ledger lives beside the models
+  it records, in the run's own schema, and is named `` `<schema>._smelt_ledger` `` — one
+  backticked path, resolving against the job's default project, the same shape every other
+  GoogleSQL object this tool emits uses. A schema that already carries a project prefix
+  works unchanged.
+- **Its `PRIMARY KEY` is declared `NOT ENFORCED`.** GoogleSQL requires the suffix, and the
+  declaration is documentation and an optimiser hint — never a constraint. Nothing on
+  BigQuery may rely on the key to refuse a duplicate.
+- **The re-run-tolerant record is a `MERGE … WHEN NOT MATCHED`.** GoogleSQL has no
+  `ON CONFLICT DO NOTHING`, so the idempotent bookkeeping upsert is expressed as a merge
+  against a one-row inline source. The statement is a no-op when the window is already
+  recorded, which is the same observable behaviour the conflict clause gives on DuckDB.
+
+The reconciliation ledger's "not yet" follows directly from the second fact: its
+never-fold-twice refusal is a `PRIMARY KEY` *violation* on DuckDB, and an unenforced key
+raises none. Until that refusal is re-expressed with a mechanism BigQuery actually enforces,
+an additive-graded keyed fold on BigQuery downgrades rather than folding.
 
 Two rules bind this table to the implementation, and they are the whole point of stating
 it:

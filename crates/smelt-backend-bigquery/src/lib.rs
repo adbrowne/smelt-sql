@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use smelt_backend::{
     emit_delete_insert, execute_model_default, Backend, BackendCapabilities, BackendError,
     ExecutionResult, MaintenanceDialect, Materialization, PartitionRange, Region, SqlDialect,
+    StatementGroup,
 };
 
 mod sql;
@@ -526,6 +527,44 @@ impl Backend for BigQueryBackend {
             MaintenanceDialect::BigQuery,
         );
         self.execute_statement_group(&group).await
+    }
+
+    /// Overrides the trait default so a bookkeeping record and the write it
+    /// describes commit or fail together, instead of running as separate,
+    /// independently-committing jobs.
+    ///
+    /// BigQuery has real multi-statement transactions, so the seam is realised
+    /// as one script job: `ensure_sqls` first, each its own job and outside the
+    /// transaction (idempotent DDL, kept out for the reason the trait
+    /// documents), then `pre_write_sqls` + `write_group` inside one
+    /// `BEGIN TRANSACTION … COMMIT TRANSACTION`. Rollback is **explicit** — a
+    /// `BEGIN … EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION; RAISE … END`
+    /// wrapper, so a mid-script failure both unwinds the transaction and still
+    /// reaches this method as an error.
+    ///
+    /// The statement list is built by the pure
+    /// [`sql::write_with_bookkeeping_plan`], which is where the ordering and
+    /// transaction-boundary contract is asserted; this method only executes it.
+    /// It authors no bookkeeping or write text of its own — every statement
+    /// comes from the caller (`docs/specs/incremental_models.md` §"Statement
+    /// emission (single owner)"; the ledger's own DDL/DML from
+    /// `smelt_state::ledger`, the bookkeeping exclusion in `CLAUDE.md`
+    /// §"Maintenance-plan purity").
+    async fn execute_write_with_bookkeeping(
+        &self,
+        ensure_sqls: &[String],
+        pre_write_sqls: &[String],
+        write_group: &StatementGroup,
+    ) -> Result<(), BackendError> {
+        let write_sqls: Vec<String> = write_group
+            .statements
+            .iter()
+            .map(|s| s.sql.clone())
+            .collect();
+        for stmt in sql::write_with_bookkeeping_plan(ensure_sqls, pre_write_sqls, &write_sqls) {
+            self.py_execute_no_result(&stmt).await?;
+        }
+        Ok(())
     }
 
     async fn load_table(

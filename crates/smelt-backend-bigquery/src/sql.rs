@@ -193,6 +193,59 @@ pub fn is_wrong_type_drop_failure(error_message: &str) -> bool {
         .any(|shape| error_message.contains(shape))
 }
 
+/// The ordered list of statements (each one query job) that realises
+/// `Backend::execute_write_with_bookkeeping` on BigQuery.
+///
+/// The seam's contract is that `pre_write_sqls` and `write_group` share one
+/// backend transaction while `ensure_sqls` run first and **outside** it. That
+/// maps onto GoogleSQL as: one job per `ensure_sqls` entry, then one
+/// multi-statement script holding the transaction.
+///
+/// Three GoogleSQL facts shape the script, each of which would otherwise be a
+/// silent correctness hole:
+///
+/// - **DDL stays out of the transaction.** `ensure_sqls` is idempotent
+///   `CREATE TABLE IF NOT EXISTS` DDL; the trait already documents keeping it
+///   outside for exactly this reason, and BigQuery is the backend that makes
+///   the precedent load-bearing.
+/// - **Rollback is explicit.** BigQuery does not roll a script's transaction
+///   back on its own when a statement fails mid-script, so the transaction is
+///   wrapped in `BEGIN … EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION;
+///   RAISE …; END` — the documented GoogleSQL shape. The `RAISE` re-surfaces
+///   the original error message, so a failure still reaches the caller as a
+///   failure rather than being swallowed by the handler.
+/// - **Statements are `;`-terminated.** A script is a statement list; the
+///   emitters produce unterminated SQL, so this function terminates each one
+///   (and tolerates an already-terminated statement rather than emitting `;;`).
+///
+/// Where there is **no** bookkeeping to bind (`pre_write_sqls` empty), no
+/// transaction is opened: the write statements run as ordinary jobs, exactly
+/// as the trait's default would. The transaction exists to make a bookkeeping
+/// record and its write atomic, and with no record there is nothing to bind.
+pub fn write_with_bookkeeping_plan(
+    ensure_sqls: &[String],
+    pre_write_sqls: &[String],
+    write_sqls: &[String],
+) -> Vec<String> {
+    let mut plan: Vec<String> = ensure_sqls.to_vec();
+    if pre_write_sqls.is_empty() {
+        plan.extend(write_sqls.iter().cloned());
+        return plan;
+    }
+    let body = pre_write_sqls
+        .iter()
+        .chain(write_sqls.iter())
+        .map(|s| format!("{};", s.trim().trim_end_matches(';').trim_end()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    plan.push(format!(
+        "BEGIN\nBEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;\nEXCEPTION WHEN ERROR THEN\n\
+         ROLLBACK TRANSACTION;\nRAISE USING MESSAGE = @@error.message;\nEND;",
+        body
+    ));
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +382,106 @@ mod tests {
     fn wrong_type_does_not_match_not_found() {
         let msg = "404 Not found: Table project:dataset.does_not_exist";
         assert!(!is_wrong_type_drop_failure(msg));
+    }
+
+    /// The seam's contract, asserted against the recorded statement plan
+    /// rather than a live warehouse: `ensure_sqls` run first, each as its own
+    /// job and **outside** the transaction (BigQuery does not accept the
+    /// idempotent DDL inside one), and the bookkeeping record and the write
+    /// share exactly one transaction.
+    #[test]
+    fn bookkeeping_keeps_ensure_ddl_outside_one_transaction_with_the_write() {
+        let plan = write_with_bookkeeping_plan(
+            &["CREATE TABLE IF NOT EXISTS `ds._smelt_ledger` (a STRING)".to_string()],
+            &[
+                "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS a) S ON T.a = S.a WHEN NOT \
+               MATCHED THEN INSERT (a) VALUES (S.a)"
+                    .to_string(),
+            ],
+            &[
+                "MERGE `ds.t` USING (SELECT 1) ON FALSE WHEN NOT MATCHED THEN INSERT ROW"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(plan.len(), 2, "{plan:#?}");
+        assert_eq!(
+            plan[0],
+            "CREATE TABLE IF NOT EXISTS `ds._smelt_ledger` (a STRING)"
+        );
+        assert!(!plan[0].contains("TRANSACTION"), "{}", plan[0]);
+
+        let script = &plan[1];
+        assert_eq!(script.matches("BEGIN TRANSACTION;").count(), 1, "{script}");
+        assert_eq!(script.matches("COMMIT TRANSACTION;").count(), 1, "{script}");
+        assert!(script.contains("_smelt_ledger` T USING"), "{script}");
+        assert!(script.contains("MERGE `ds.t`"), "{script}");
+        assert!(
+            !script.contains("CREATE TABLE IF NOT EXISTS"),
+            "the idempotent DDL must not be inside the transaction: {script}"
+        );
+        // The record is before the write — it reads pre-write target state.
+        let record_at = script.find("_smelt_ledger` T USING").expect("record");
+        let write_at = script.find("MERGE `ds.t`").expect("write");
+        assert!(record_at < write_at, "{script}");
+    }
+
+    /// A failure mid-script must roll the transaction back and still surface
+    /// as a failure — the handler re-raises rather than swallowing the error.
+    #[test]
+    fn bookkeeping_rolls_back_explicitly_and_re_raises() {
+        let plan = write_with_bookkeeping_plan(
+            &[],
+            &["INSERT INTO x VALUES (1)".to_string()],
+            &["INSERT INTO y VALUES (2)".to_string()],
+        );
+        let script = &plan[0];
+        assert!(script.starts_with("BEGIN\nBEGIN TRANSACTION;"), "{script}");
+        assert!(script.contains("EXCEPTION WHEN ERROR THEN"), "{script}");
+        assert!(script.contains("ROLLBACK TRANSACTION;"), "{script}");
+        assert!(
+            script.contains("RAISE USING MESSAGE = @@error.message;"),
+            "{script}"
+        );
+        assert!(script.ends_with("END;"), "{script}");
+    }
+
+    /// Every statement in the script is `;`-terminated exactly once — a
+    /// script is a statement list, and `;;` is a syntax error.
+    #[test]
+    fn bookkeeping_terminates_each_statement_once() {
+        let plan = write_with_bookkeeping_plan(
+            &[],
+            &["INSERT INTO x VALUES (1);".to_string()],
+            &["INSERT INTO y VALUES (2)".to_string()],
+        );
+        assert!(!plan[0].contains(";;"), "{}", plan[0]);
+        assert!(
+            plan[0].contains("INSERT INTO x VALUES (1);\n"),
+            "{}",
+            plan[0]
+        );
+        assert!(
+            plan[0].contains("INSERT INTO y VALUES (2);\n"),
+            "{}",
+            plan[0]
+        );
+    }
+
+    /// With nothing to bind, no transaction is opened — the plan is the
+    /// trait default's own sequence.
+    #[test]
+    fn bookkeeping_opens_no_transaction_when_there_is_no_record() {
+        let plan = write_with_bookkeeping_plan(
+            &["CREATE TABLE IF NOT EXISTS `ds.t` (a STRING)".to_string()],
+            &[],
+            &["INSERT INTO `ds.t` VALUES ('a')".to_string()],
+        );
+        assert_eq!(
+            plan,
+            vec![
+                "CREATE TABLE IF NOT EXISTS `ds.t` (a STRING)".to_string(),
+                "INSERT INTO `ds.t` VALUES ('a')".to_string(),
+            ]
+        );
     }
 }
