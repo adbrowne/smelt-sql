@@ -77,7 +77,7 @@ fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_cor
 /// `VARCHAR` (`DATATYPE_MISSING_SIZE`), so its unsized string type is
 /// `STRING`. Confirmed live against Spark
 /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
-pub(crate) fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
+pub fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
     match dialect {
         MaintenanceDialect::DuckDb => "VARCHAR",
         MaintenanceDialect::Spark => "STRING",

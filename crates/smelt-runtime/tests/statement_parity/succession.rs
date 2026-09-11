@@ -134,7 +134,16 @@ async fn succession_patch_executed_statements_match_the_emitters() {
         .find(|s| s.contains("violation_count"))
         .expect("the clock-tie probe must have executed via execute_sql");
 
-    let window_predicate = "arrival_date >= DATE '2026-01-01' AND arrival_date < DATE '2026-01-02'";
+    // Built by the same single owner the driver uses, rather than restated:
+    // the typed `DATE '…'` spelling this used to hardcode is a GoogleSQL type
+    // error against a TIMESTAMP partition column, and restating it here would
+    // let the expectation and the driver drift apart again.
+    let window_predicate = smelt_runtime::maintenance_driver::succession_window_predicate(
+        "arrival_date",
+        "2026-01-01",
+        "2026-01-02",
+    );
+    let window_predicate = window_predicate.as_str();
     let projection = vec![
         ("customer_id".to_string(), "customer_id".to_string()),
         ("changed_at".to_string(), "changed_at".to_string()),

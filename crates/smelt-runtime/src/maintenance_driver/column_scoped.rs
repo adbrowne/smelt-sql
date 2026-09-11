@@ -97,6 +97,16 @@ pub fn changed_row_predicate(left: &str, right: &str, compared_columns: &[String
         .join(" OR ")
 }
 
+/// The unsized string type a key/partition value is cast to when it is
+/// projected into an observed-delta record. Delegated to
+/// [`smelt_logical::maintenance::emit::probe_dialect_string_type`] — the one
+/// owner of that per-dialect spelling — rather than restated here: GoogleSQL
+/// has no `VARCHAR` at all (`Type not found: VARCHAR`), and a hardcoded one
+/// here made every keyed model's observed-delta record fail on BigQuery.
+fn string_cast_type(dialect: MaintenanceDialect) -> &'static str {
+    smelt_logical::maintenance::emit::probe_dialect_string_type(dialect)
+}
+
 /// The changed-key `SELECT` a conditional column-scoped MERGE's observed
 /// delta is recorded from: every row the guarded matched arm actually
 /// updates (its compared columns differ) plus every unmatched row the
@@ -113,7 +123,7 @@ pub fn changed_row_predicate(left: &str, right: &str, compared_columns: &[String
 /// partition axis.
 ///
 /// **Known limitation, deliberately not fixed here.** For a multi-column
-/// `unique_key`, `key_expr` joins each `CAST(... AS VARCHAR)` column with an
+/// `unique_key`, `key_expr` joins each string-cast key column with an
 /// unescaped `\u{1}` separator — the same collision shape
 /// `smelt_logical::maintenance::emit::concat_varchar_expr` had before its
 /// own fix (a column value containing a literal `\u{1}` byte can make two
@@ -136,6 +146,7 @@ pub fn changed_keys_select(
     source_select: &str,
     compared_columns: &[String],
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
     let predicate = changed_row_predicate("target", "source", compared_columns);
     changed_keys_select_over_predicate(
@@ -145,6 +156,7 @@ pub fn changed_keys_select(
         "source",
         &predicate,
         partition_column,
+        dialect,
     )
 }
 
@@ -161,24 +173,26 @@ fn changed_keys_select_over_predicate(
     candidate_alias: &str,
     predicate: &str,
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
+    let cast_type = string_cast_type(dialect);
     let on = unique_key
         .iter()
         .map(|k| format!("target.{k} = {candidate_alias}.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
     let key_expr = if unique_key.len() == 1 {
-        format!("CAST({candidate_alias}.{} AS VARCHAR)", unique_key[0])
+        format!("CAST({candidate_alias}.{} AS {cast_type})", unique_key[0])
     } else {
         let parts = unique_key
             .iter()
-            .map(|k| format!("CAST({candidate_alias}.{k} AS VARCHAR)"))
+            .map(|k| format!("CAST({candidate_alias}.{k} AS {cast_type})"))
             .collect::<Vec<_>>()
             .join(", '\u{1}', ");
         format!("CONCAT({parts})")
     };
     let partition_expr = match partition_column {
-        Some(col) => format!("CAST({candidate_alias}.{col} AS VARCHAR)"),
+        Some(col) => format!("CAST({candidate_alias}.{col} AS {cast_type})"),
         None => "NULL".to_string(),
     };
     let first_key = &unique_key[0];
@@ -241,6 +255,7 @@ pub fn keyed_fold_changed_keys_select(
     compared_columns: &[String],
     folds: &[(String, String)],
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
     let predicate = keyed_fold_changed_row_predicate(compared_columns, folds);
     changed_keys_select_over_predicate(
@@ -250,6 +265,7 @@ pub fn keyed_fold_changed_keys_select(
         "delta",
         &predicate,
         partition_column,
+        dialect,
     )
 }
 
@@ -274,6 +290,7 @@ pub(super) fn staged_candidate_changed_keys_select(
     candidate_select: &str,
     compared_columns: &[String],
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
     let predicate = changed_row_predicate("target", "candidate", compared_columns);
     let new_or_changed = changed_keys_select_over_predicate(
@@ -283,18 +300,20 @@ pub(super) fn staged_candidate_changed_keys_select(
         "candidate",
         &predicate,
         partition_column,
+        dialect,
     );
     let departed_on = key
         .iter()
         .map(|k| format!("target.{k} = candidate.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
+    let cast_type = string_cast_type(dialect);
     let key_expr = if key.len() == 1 {
-        format!("CAST(target.{} AS VARCHAR)", key[0])
+        format!("CAST(target.{} AS {cast_type})", key[0])
     } else {
         let parts = key
             .iter()
-            .map(|k| format!("CAST(target.{k} AS VARCHAR)"))
+            .map(|k| format!("CAST(target.{k} AS {cast_type})"))
             .collect::<Vec<_>>()
             .join(", '\u{1}', ");
         format!("CONCAT({parts})")
@@ -399,6 +418,7 @@ async fn execute_column_scoped_write_with_observed_delta(
                 source_select,
                 compared_columns,
                 partition_column,
+                maintenance_dialect(dialect_id),
             );
             let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
                 dialect_id,

@@ -241,6 +241,25 @@ construct and the remedy: run once with `--full-refresh` to materialise the targ
 which every step is a merge the transaction can hold. The condition is the backend's
 transactional-DDL capability, not its dialect.
 
+**Concurrency is the price of the same isolation rule.** BigQuery's protection against a
+double fold is write-conflict detection: a transaction that mutates a table another
+in-flight transaction is also mutating is *cancelled*. Every maintained model's bookkeeping
+transaction mutates the one ledger table, so the guarantee that makes a repeat fold
+impossible also makes two of a run's own models' bookkeeping writes mutually exclusive.
+Two rules follow, and neither weakens the isolation:
+
+- **One run serialises its own ledger transactions.** A backend whose ledger writes are
+  transactional and single-table opens at most one such transaction at a time, so a
+  parallel run (the default `--jobs` is the host's core count) does not race itself. The
+  cost is that maintained models' bookkeeping-bound writes run one at a time on that
+  backend; the alternative is losing models at random to cancellation.
+- **A conflict from anywhere else is transient, and retried.** A cancellation raised by a
+  writer this run does not control — a second `smelt` process, an external job — is a
+  *transient* backend error, not a deterministic one: the engine rolls the whole
+  transaction back before cancelling it, so re-issuing the identical statement group is the
+  documented remedy and the ordinary bounded retry performs it. This is the one backend
+  error class whose remedy is retry by the engine's own definition.
+
 Two rules bind this table to the implementation, and they are the whole point of stating
 it:
 

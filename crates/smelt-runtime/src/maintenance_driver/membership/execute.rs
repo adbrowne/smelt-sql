@@ -101,6 +101,7 @@ pub async fn execute_staged_membership_recompute(
         candidate_select,
         compared_columns,
         partition_column,
+        smelt_backend::maintenance_dialect(dialect_id),
     );
     let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
         dialect_id,

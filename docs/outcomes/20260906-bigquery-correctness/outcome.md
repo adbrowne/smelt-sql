@@ -1,13 +1,14 @@
 # Outcome: Every defect the real pipeline hits on BigQuery is fixed, and DuckDB and BigQuery agree
 
 **Created:** 2026-09-06
-**Status:** in progress (reopened 2026-09-10)
+**Status:** done (2026-09-11; reopened 2026-09-10, closed by phase 16's live run)
 **Driver:** outcome loop (`.claude/outcome-backlog`). Phases 1-10 were loop-ground and are
 `done`. Of the reopening, phases 11-15 are loop-grindable — the emitters and the structural
 gate are provable offline, and phases 12-15 must prove their SQL by unit test and by
 `cargo check -p smelt-cli --features bigquery`, never by reaching a warehouse. Phase 16 is
 **human-gated**: it re-runs `examples/github_activity` live against the dogfood dataset, so
-it must emit `<<PHASE_BLOCKED>>` rather than attempt it.
+it must emit `<<PHASE_BLOCKED>>` rather than attempt it — the gate was given on 2026-09-11
+and the phase ran.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D2), §"Sequencing: models first, punch-list second", §"Findings already banked"
 **Spec anchors:** `docs/specs/multi_backend.md` §"Operator lowering", §"Statement-level lowering", §"Output-schema type conformance", §"Cross-engine emission audit"; `docs/specs/architecture.md` §"Constraints & Invariants" item 14; `docs/reference/dialect-coverage.md`; `docs/specs/state.md` §"The state-structure inventory", §"The degradation contract"; `docs/specs/incremental_shapes.md` §"The transactional frontier write (merge ledger)", §"The tombstone ledger (hidden state)"; `docs/specs/incremental_models.md` §"The graph layer"
 
@@ -140,9 +141,94 @@ rediscovered.
 | 13 | Merge ledger and reconciliation ledger on BigQuery: `ON CONFLICT DO NOTHING` re-expressed as `MERGE … WHEN NOT MATCHED`, plus the `execute_write_with_bookkeeping` override | done |
 | 14 | Additive never-fold-twice on BigQuery without an enforced `PRIMARY KEY`: re-express the constraint-violation refusal transactionally, red-green on a repeat-fold test | done |
 | 15 | Tombstone ledger on BigQuery, so the succession-patch technique runs live rather than downgrading to `DeleteInsert` | done |
-| 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | pending |
+| 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | done |
 
 ## Decision log
+
+- 2026-09-11 (phase 16, the live run that closes the reopening): **BigQuery runs the
+  pipeline's real plan — 14 models, twice, at full parallelism — and the run found four more
+  defects every offline gate had passed.** Eight live runs against `smelt_dogfood`; the
+  headline pair is `smelt run --target bigquery --start 2026-08-06 --end 2026-08-07 -e
+  silver.actor_sessions -e marts.daily_active_contributors`, 14 success / 0 failed / 0
+  skipped both times, the second against the first's committed state. That matches the
+  2026-09-11 baseline exactly, and `silver.actor_sessions` still refuses at compile time over
+  `LAG`/`MAX` under an INTERVAL `RANGE` frame, unchanged. Total billing, eight runs and every
+  verification query: well under a cent.
+
+  **All four defects were in the maintenance/bookkeeping layer, and that is why the BigQuery
+  gap ratchet holds rather than falls.** Not one of them is a registry spelling. Three are the
+  same species — smelt emitting DuckDB SQL to BigQuery: `CAST(<key> AS VARCHAR)` in the
+  driver's changed-key projection (GoogleSQL has no `VARCHAR`, so *every* keyed model with a
+  suppressed write failed its observed-delta record); `<col> >= DATE '<start>'` in the
+  succession window predicate (DuckDB widens `DATE` to `TIMESTAMP` implicitly, GoogleSQL
+  refuses, and both succession models' clock-tie probes died on it); and two direct
+  `ddl_duckdb::generate_ledger_*` calls in `execute/project/mod.rs` — unreachable-and-harmless
+  while the reconciliation ledger was DuckDB-only, DuckDB SQL in a BigQuery job the instant
+  phase 13 declared it realisable there. That third one is the **third** phase to take the
+  same fix (13 took two call sites, 15 took two more), which is the argument for gating the
+  class instead of the instance.
+
+  **The fourth defect is the one nothing offline could have predicted, and it is the
+  guarantee's own shadow.** BigQuery cancels a transaction that mutates a table another
+  in-flight transaction is also mutating, and every maintained model's bookkeeping transaction
+  mutates the one `_smelt_ledger` table — so a parallel run lost models at random to
+  "Transaction is aborted due to concurrent update". The write-conflict detection doing it is
+  *precisely* what phase 14's decision log named as the soundness argument for the additive
+  never-fold-twice refusal on a dialect whose `PRIMARY KEY`s are `NOT ENFORCED`. The guarantee
+  and the failure are one fact, so the fix does not weaken the isolation: a concurrent-update
+  abort becomes `BackendError::TransactionConflict`, classified **transient** (the engine rolls
+  the transaction back before cancelling it, so re-issuing the identical group is the engine's
+  own documented remedy — the only error class in `is_transient`'s exhaustive match where that
+  is true by definition), and `BigQueryBackend::ledger_gate` serialises *this process's* ledger
+  transactions so a run does not race itself. Retry alone was measured insufficient; the gate
+  alone leaves a second writer unhandled; both were needed. The visible cost is honest and
+  stated in `docs/specs/state.md`: 108s where the coarsened baseline took 38s.
+
+  **What is proven live.** The tombstone ledger and the patch `MERGE` (phase 15) — both
+  succession models executed it for the first time anywhere, `silver_repo_naming`/
+  `silver_actor_naming` hold 6,053 rows each and their `__tombstones` tables exist; the
+  untyped `NULL` in the domain union's tombstone arm, which GoogleSQL coerces exactly as phase
+  15 read it would (a set operation type-checks at plan time, so the probe *running* is the
+  measurement); the merge and reconciliation ledgers, read back as 9 rows with no duplicate
+  after two runs of the same window — the idempotent `MERGE … WHEN NOT MATCHED` record works
+  live; and phase 12's observed deltas, read back as one present-and-empty row
+  (`n_keys=0, n_parts=0`) for the fully-suppressed repeat, which is both halves of the
+  empty-versus-absent argument and the `ARRAY<STRING>`-without-`NOT NULL` write at once.
+
+  **What remains proven offline only, with the reason.** Four of the eight inherited checks
+  were not exercised, and none of them because of a defect: the transactional rebuild (check 3)
+  is unreachable because `SourceRetentionExceeded` refuses a whole-table recompute while stored
+  output exists; the `already_reflected` sentinel and `@@row_count = 0` (checks 4 and 5)
+  because **no cell in this model set grades `Grade::Additive`** — proven, not assumed, since
+  run B replayed run A's window against A's ledger and an additive cell would have bailed
+  `KeyedReprocessedWindow`; and the non-atomic creating write (check 6) because every target
+  already existed. All four are blocked by properties of a *long-lived* dataset, and all four
+  are cheaply reachable on the integration suite's ephemeral one. That is the honest shape of
+  what a dogfood dataset can and cannot show, and it is recorded rather than glossed.
+
+  **What the spine still owns.** Dual-target **value** parity — its phase 13. The BigQuery leg
+  holds three days and the DuckDB fixture thirty, so equal row counts are not expected and
+  nothing here compares the populations. What changed for it is that the comparison now weighs
+  one plan on two engines: 14 comparable models, no downgraded cell, no coarsened technique.
+
+  **One residual, named rather than quietly carried.** `repair_keys_literal_select` escapes a
+  string literal DuckDB-style (`'` → `''`), which does not continue a GoogleSQL string while a
+  backslash does escape there — the same portability trap phase 13 fixed for the ledger. The
+  path is not reached by `github_activity` and was not exercised live, so fixing it under a
+  closing row would have been untested new behaviour; it wants the one-line
+  `escape_string_literal` treatment in a phase that can test it.
+
+  **Two pre-existing tests encoded the old claim and were corrected, not deleted** —
+  `repair_keys_literal_select_empty_keys_is_dialect_independent` asserted a hardcoded `VARCHAR`
+  on all three dialects (false, and a live failure waiting for the first BigQuery repair with no
+  affected keys), and `statement_parity::succession`'s fixture restated the typed `DATE '…'`
+  predicate instead of calling its owner.
+
+  **Gates:** `verify-phase.sh` ALL GREEN; `dialect_audit` (coverage table regenerated, no
+  diff); `statement_parity` + `state_guard_census`; `cargo check -p smelt-cli --features
+  bigquery` clean; `large-file-check.sh` OK with **no baseline raised** — `execute/project/
+  mod.rs` shrank by 35 lines into a new `ledger_reset.rs`, and `observed_delta/main.rs` by 130
+  into a new `rules.rs`, rather than either growing past its cap.
 
 - 2026-09-11 (phase 15, implementation): **The tombstone ledger is realised on BigQuery, the
   row flipped, and the census is now empty.**

@@ -16,6 +16,24 @@ use crate::reporter::RunReporter;
 /// since that constant is private to the sibling `driver` module).
 const SUCCESSION_LEDGER_GROUP: &str = "{*}";
 
+/// The half-open `[start, end)` window predicate a succession step's event
+/// delta is filtered by.
+///
+/// The bounds are **untyped string literals**, deliberately. The typed
+/// `DATE '…'` spelling this used to emit is a cross-dialect trap: DuckDB
+/// implicitly widens a `DATE` to `TIMESTAMP` in a comparison, so a
+/// succession model whose partition column is a `TIMESTAMP` compiled and ran
+/// there, while GoogleSQL refuses it outright (`No matching signature for
+/// operator >= for argument types: TIMESTAMP, DATE`) — the defect a live
+/// BigQuery run of `examples/github_activity` hit on `silver.repo_naming`.
+/// An untyped literal is coerced to the column's own type by both dialects
+/// (GoogleSQL's literal coercion covers `STRING` literal → `DATE`/
+/// `DATETIME`/`TIMESTAMP`), so one spelling serves a `DATE` and a
+/// `TIMESTAMP` partition column on every backend.
+pub fn succession_window_predicate(col: &str, start: &str, end: &str) -> String {
+    format!("{col} >= '{start}' AND {col} < '{end}'")
+}
+
 /// Resolve the tombstone ledger's `key_cols ++ [clock_col]` typed columns
 /// from the presented table's own resolved output schema — shared by
 /// [`execute_succession_maintenance`] and [`rebuild_succession_state`],
@@ -125,12 +143,8 @@ pub async fn execute_succession_maintenance(
     let mut total_rows = 0usize;
 
     for step in steps {
-        let window_predicate = format!(
-            "{col} >= DATE '{start}' AND {col} < DATE '{end}'",
-            col = cell.partition_column,
-            start = step.range.start,
-            end = step.range.end,
-        );
+        let window_predicate =
+            succession_window_predicate(&cell.partition_column, &step.range.start, &step.range.end);
         let event_delta = smelt_logical::maintenance::emit::emit_succession_event_delta(
             &cell.source_table,
             &recipe.row_local_projection,

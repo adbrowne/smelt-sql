@@ -208,18 +208,26 @@ fn repair_keys_literal_select_duckdb_and_spark_are_byte_identical() {
     );
 }
 
+/// The empty relation's *shape* is dialect-independent; its cast type is
+/// not. This test used to assert a hardcoded `VARCHAR` on all three
+/// dialects, which was simply wrong — GoogleSQL has no `VARCHAR` at all
+/// (`Type not found: VARCHAR`), so the claim would have failed at the
+/// warehouse the first time a repair with no affected keys ran on BigQuery.
+/// Corrected rather than deleted: the invariant worth holding is that the
+/// relation is well-typed and empty on every dialect, in that dialect's own
+/// unsized string type.
 #[test]
-fn repair_keys_literal_select_empty_keys_is_dialect_independent() {
+fn repair_keys_literal_select_empty_keys_is_well_typed_per_dialect() {
     let empty: Vec<String> = vec![];
-    for dialect in [
-        MaintenanceDialect::DuckDb,
-        MaintenanceDialect::Spark,
-        MaintenanceDialect::BigQuery,
+    for (dialect, cast_type) in [
+        (MaintenanceDialect::DuckDb, "VARCHAR"),
+        (MaintenanceDialect::Spark, "STRING"),
+        (MaintenanceDialect::BigQuery, "STRING"),
     ] {
         let select = repair_keys_literal_select(&empty, dialect);
         assert_eq!(
             select,
-            "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE"
+            format!("SELECT CAST(NULL AS {cast_type}) AS delta_key WHERE FALSE")
         );
     }
 }

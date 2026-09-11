@@ -312,20 +312,19 @@ impl WindowedKeyedRule for CumulativeClassification {
         delta_sql: &str,
         compared_columns: &[String],
         partition_column: Option<&str>,
+        dialect: MaintenanceDialect,
     ) -> Option<String> {
-        let folds: Vec<(String, String)> = self
-            .aggregator_columns
-            .iter()
-            .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
-            .collect();
-        let schema_table = format!("{schema}.{table}");
+        use smelt_logical::maintenance::emit::expand_aggregator_column_folds as expand;
+        let folds: Vec<(String, String)> =
+            self.aggregator_columns.iter().flat_map(expand).collect();
         Some(keyed_fold_changed_keys_select(
-            &schema_table,
+            &format!("{schema}.{table}"),
             &self.unique_key,
             delta_sql,
             compared_columns,
             &folds,
             partition_column,
+            dialect,
         ))
     }
 }

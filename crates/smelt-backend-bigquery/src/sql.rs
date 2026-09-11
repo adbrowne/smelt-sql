@@ -451,9 +451,96 @@ pub fn is_already_reflected(message: &str) -> bool {
     message.contains(ALREADY_REFLECTED_SENTINEL)
 }
 
+/// The table named in a "transaction aborted due to concurrent update"
+/// job error, when the message is one.
+///
+/// BigQuery cancels a multi-statement transaction that mutates a table
+/// another in-flight transaction is also mutating, and says so by name:
+///
+/// ```text
+/// Transaction is aborted due to concurrent update against table
+/// smelt-bq-test-20260816:smelt_dogfood._smelt_ledger. Transaction ID: …
+/// ```
+///
+/// That cancellation is the *mechanism* the additive never-fold-twice
+/// refusal rests on (`docs/specs/state.md`), so it is not an incidental
+/// failure — it is what a parallel run costs. The whole transaction is
+/// rolled back before the cancellation, so the caller's remedy is to
+/// re-issue the identical statement group, and the error is mapped to
+/// `BackendError::TransactionConflict` (transient) rather than
+/// `ExecutionFailed` (deterministic) so the ordinary bounded retry does
+/// exactly that. `None` when the message is any other failure.
+///
+/// Deliberately a substring match, for the same reason
+/// [`is_already_reflected`] is: the adapter hands the message back inside
+/// BigQuery's own job-error envelope.
+pub fn transaction_conflict_table(message: &str) -> Option<String> {
+    const MARKER: &str = "Transaction is aborted due to concurrent update against table ";
+    let rest = message.split_once(MARKER)?.1.trim_start();
+    let table = rest
+        .split(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.');
+    if table.is_empty() {
+        // The engine changed the message shape; still a conflict, and the
+        // caller must not lose that — name the table as unknown rather
+        // than mis-classifying the error as deterministic.
+        return Some("<unknown>".to_string());
+    }
+    Some(table.to_string())
+}
+
+/// Classify a BigQuery job error raised while executing `model`'s SQL.
+///
+/// One place, so the transient/deterministic decision cannot be made
+/// differently by the result-returning and no-result execution paths.
+pub fn classify_job_error(model: &str, message: String) -> smelt_backend::BackendError {
+    match transaction_conflict_table(&message) {
+        Some(table) => smelt_backend::BackendError::transaction_conflict(table, message),
+        None => smelt_backend::BackendError::execution_failed(model, message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact message a live `examples/github_activity` run got when two
+    /// models' bookkeeping transactions hit `_smelt_ledger` at once. It must
+    /// classify as a *transient* transaction conflict, not as a
+    /// deterministic execution failure — otherwise the bounded retry that is
+    /// the engine's own documented remedy never fires and a parallel run
+    /// fails models at random.
+    #[test]
+    fn a_concurrent_update_abort_is_a_transient_transaction_conflict() {
+        let message = "BadRequest: 400 Query error: Transaction is aborted due to concurrent \
+                       update against table                        smelt-bq-test-20260816:smelt_dogfood._smelt_ledger. Transaction ID:                        6ac196bc-0000-286d-a34c-fc41169299c1. at [75:1]";
+        assert_eq!(
+            transaction_conflict_table(message).as_deref(),
+            Some("smelt-bq-test-20260816:smelt_dogfood._smelt_ledger")
+        );
+        let err = classify_job_error("bigquery sql", message.to_string());
+        assert!(
+            matches!(err, smelt_backend::BackendError::TransactionConflict { .. }),
+            "got: {err:?}"
+        );
+        assert!(err.is_transient());
+    }
+
+    /// The negative control: an ordinary SQL failure stays deterministic, so
+    /// the classifier cannot make every failure retryable.
+    #[test]
+    fn an_ordinary_sql_error_stays_a_deterministic_execution_failure() {
+        let message = "BadRequest: 400 Query error: Type not found: VARCHAR at [3:425]";
+        assert_eq!(transaction_conflict_table(message), None);
+        let err = classify_job_error("bigquery sql", message.to_string());
+        assert!(
+            matches!(err, smelt_backend::BackendError::ExecutionFailed { .. }),
+            "got: {err:?}"
+        );
+        assert!(!err.is_transient());
+    }
 
     /// A hyphenated project id must survive quoting — unquoted it parses as
     /// subtraction and the statement fails.

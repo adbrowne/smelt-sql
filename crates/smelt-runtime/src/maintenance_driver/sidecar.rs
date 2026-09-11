@@ -327,7 +327,11 @@ fn repair_group_partition_identity(group_key: &[String], digest_columns: &[Strin
 /// single dialect-aware owner.
 pub fn repair_keys_literal_select(keys: &[String], dialect: MaintenanceDialect) -> String {
     if keys.is_empty() {
-        return "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE".to_string();
+        // The cast type is the dialect's own unsized string type, never a
+        // hardcoded `VARCHAR` — GoogleSQL has none (`Type not found:
+        // VARCHAR`).
+        let cast_type = smelt_logical::maintenance::emit::probe_dialect_string_type(dialect);
+        return format!("SELECT CAST(NULL AS {cast_type}) AS delta_key WHERE FALSE");
     }
     let rows: Vec<Vec<String>> = keys
         .iter()

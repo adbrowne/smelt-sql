@@ -11,6 +11,7 @@ use super::targets::*;
 use super::window::*;
 
 mod dry_run;
+mod ledger_reset;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -3583,62 +3584,30 @@ pub async fn execute_project(
                     // model-edge-restricted recompute, or the external-sidecar-
                     // restricted recompute — resets this batch's own
                     // `[partition.start, partition.end)` slice in `_smelt_ledger`
-                    // (whole-row group `{*}`, nominal input `self`, watermarked to
-                    // the region's own end), run in the SAME backend transaction as
-                    // the write it protects via `Backend::execute_write_with_
-                    // bookkeeping` (state-residency: `.smelt/reconciliation.json`
-                    // no longer exists — this table IS the ledger). Hoisted above
-                    // the three DeleteInsert dispatch arms below (model-edge
-                    // restricted, external-sidecar restricted, plain) so all three
-                    // build the SAME reset from `generate_ledger_recompute_reset_
-                    // sqls`, instead of each constructing (or omitting) its own.
-                    // Not built when a live `ColumnScopedMerge` cell dispatches
-                    // (`column_merge_dispatch.is_some()`) — that technique is not a
-                    // region DeleteInsert and its own MP12 ledger interaction is
-                    // unrelated to this reset. Whether the ledger is available at
-                    // all is now this run's own resolved
-                    // `StateAvailability` (`docs/outcomes/20260904-state-residency/
-                    // outcome.md` phase 5), not a raw dialect check — on a
-                    // ledger-less target this is no longer a silent skip: the
-                    // per-cell technique already carries a recorded
-                    // `state_downgrade` (`smelt-logical`'s
-                    // `resolve_availability`), which `smelt explain` and the
-                    // warning diagnostic surface (phase 6). No reporter
-                    // event is emitted for the skip anymore — that stand-in
-                    // channel is retired.
-                    let ledger_reset_sqls = if column_merge_dispatch.is_none()
-                        && availability.contains(
-                            smelt_logical::maintenance::availability::StateStructure::ReconciliationLedger,
-                        )
-                    {
-                        Some(smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
-                            schema,
-                            &plan.name,
-                            "{*}",
-                            &partition.start,
-                            &partition.end,
-                            "self",
-                            &partition.end,
-                        ))
-                    } else {
-                        if column_merge_dispatch.is_none() {
-                            tracing::debug!(
-                                model = %plan.name,
-                                dialect = backend.dialect().name(),
-                                "region-recompute reset skipped: the reconciliation ledger is \
-                                 unavailable for this target — the affected cell's own \
-                                 recorded state_downgrade is the user-visible channel"
-                            );
-                        }
-                        None
-                    };
-                    let ledger_ensure_sqls: Vec<String> = if ledger_reset_sqls.is_some() {
-                        vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema)]
-                    } else {
-                        Vec::new()
-                    };
-                    let ledger_pre_write_sqls: Vec<String> =
-                        ledger_reset_sqls.clone().unwrap_or_default();
+                    // The reconciliation-ledger reset for this region, hoisted
+                    // above the three DeleteInsert dispatch arms below so all
+                    // three share one derivation. See `ledger_reset::build` for
+                    // what suppresses it and why the skip is not silent.
+                    let ledger = ledger_reset::build(
+                        backend.dialect(),
+                        &availability,
+                        column_merge_dispatch.is_some(),
+                        schema,
+                        &plan.name,
+                        &partition.start,
+                        &partition.end,
+                    )?;
+                    if !ledger.built && column_merge_dispatch.is_none() {
+                        tracing::debug!(
+                            model = %plan.name,
+                            dialect = backend.dialect().name(),
+                            "region-recompute reset skipped: the reconciliation ledger is \
+                             unavailable for this target — the affected cell's own \
+                             recorded state_downgrade is the user-visible channel"
+                        );
+                    }
+                    let ledger_ensure_sqls: Vec<String> = ledger.ensure_sqls;
+                    let ledger_pre_write_sqls: Vec<String> = ledger.pre_write_sqls;
 
                     // T3: re-checked per batch (not hoisted with
                     // `use_delta_restricted_dispatch` above) because

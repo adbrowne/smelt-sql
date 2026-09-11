@@ -298,6 +298,51 @@ emission_ownership`; `smelt-runtime --test dialect_seam --test
 projection_dialect_invariance`; `smelt-maintenance-testkit --test googlesql_render`;
 `large-file-check.sh`.
 
+## Close-out of the reopening (2026-09-11)
+
+`docs/outcomes/20260906-bigquery-correctness` reopened on 2026-09-10 for the T5
+ledger-substrate gap, and its phase 16 closed it by running `examples/github_activity`
+live on BigQuery against `smelt-bq-test-20260816.smelt_dogfood`. One row per criterion,
+naming the artifact and the gate:
+
+| # | Criterion | Artifact | Holding gate |
+|---|---|---|---|
+| 3 | Every fixed construct is gated | The live run's four defects, each with a gate that would have caught it (phase 16) | `cargo test -p smelt-runtime --test maintenance_sql_dialect_purity` (new, 8 tests); `cargo test -p smelt-backend-bigquery --test ledger_gate` (new); the conflict classifier's pair in `smelt-backend-bigquery/src/sql.rs` |
+| 4 | Ratchets move the right way | `dialect_gaps_bigquery` **held** at 42 with a dated note; `duckdb_seed_gaps 0` unchanged; large-file baseline unchanged (two files split, neither raised) | `cargo test -p smelt-db --test dialect_audit -- gap_count_ratchet`; `large-file-check.sh` |
+| 5 | Cross-target agreement | All four defects **fixed**, none registered — each was smelt emitting DuckDB SQL to BigQuery, a bug with a right answer rather than a difference between engines | `cargo test -p smelt-cli --test github_activity_oracle` (registry still empty and still fails closed) |
+| 7 | Gates green | Phase 16's own run | `verify-phase.sh` + the crate gates in `phases/16-summary.md` |
+| 8 | Plan and run layers agree about state | Unchanged from phase 11; no guard was added or removed | `cargo test -p smelt-runtime --test state_guard_census` |
+| 9 | BigQuery runs the pipeline's real plan | 14 models, twice, at default `--jobs`, with observed deltas, both ledgers and the tombstone ledger all realised and read back from the warehouse | the live run itself; `example_diagnostics` holds the no-downgrade claim offline |
+
+**The four defects** (detail in `phases/16-summary.md`): a hardcoded `VARCHAR` in the
+driver's changed-key projection; a typed `DATE '…'` literal in the succession window
+predicate; a DuckDB ledger `CREATE TABLE` reached from `execute/project`; and BigQuery
+cancelling concurrent transactions over `_smelt_ledger`, which made a parallel run lose
+models at random — the same write-conflict detection that makes the never-fold-twice
+refusal sound there.
+
+**The eight inherited checks** — four verified live, four not exercised:
+
+| # | Check | Verdict |
+|---|---|---|
+| 1 | Untyped `NULL` coercion in the domain union | verified (the union type-checks; no delete rows in this source) |
+| 2 | The patch `MERGE` as a whole | verified (both succession models, twice) |
+| 3 | The transactional rebuild is really rejected | not exercised — `SourceRetentionExceeded` refuses `--full-refresh` while stored output exists |
+| 4 | `SMELT_LEDGER_ALREADY_REFLECTED` survives the error envelope | not exercised — no `Grade::Additive` cell in this model set |
+| 5 | `@@row_count = 0` on a repeat `MERGE` | not exercised — same reason |
+| 6 | First-run DDL inside the bookkeeping transaction | not exercised — every target already existed |
+| 7 | Arrow list shape for a `REPEATED STRING` | verified (decoded; the decoder now errors rather than returning empty) |
+| 8 | `ARRAY<STRING>` accepts a fully-suppressed window's row | verified (read back: one row, both arrays empty) |
+
+Checks 3–6 are each blocked by a property of a *long-lived* dataset (stored output exists;
+every target exists), not by a defect. The cheap route for a future phase is the
+integration suite's ephemeral dataset.
+
+**Still not proven, and it is not this outcome's:** dual-target **value** parity. The
+BigQuery leg holds three days and the DuckDB fixture thirty, so equal row counts are not
+expected; comparing the two populations is the spine's phase 13, which now has 14
+comparable models.
+
 ## References
 
 - `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` — outcome header, criteria,

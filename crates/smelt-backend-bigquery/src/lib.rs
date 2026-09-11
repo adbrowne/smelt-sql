@@ -33,6 +33,30 @@ pub struct BigQueryBackend {
     adapter: Py<PyAny>,
     project: String,
     dataset: String,
+    /// Serialises this process's ledger-mutating multi-statement
+    /// transactions against each other.
+    ///
+    /// BigQuery cancels a transaction that mutates a table another in-flight
+    /// transaction is also mutating ("Transaction is aborted due to
+    /// concurrent update against table …"), and **every** maintained model's
+    /// bookkeeping transaction mutates the one `_smelt_ledger` table. That
+    /// write-conflict detection is not incidental — it is precisely what
+    /// makes the additive never-fold-twice refusal sound on a dialect whose
+    /// `PRIMARY KEY`s are `NOT ENFORCED` (`docs/specs/state.md`) — so the
+    /// answer is not to weaken it but to stop racing it: a parallel
+    /// `smelt run` (the default `--jobs` is the host's core count) otherwise
+    /// loses models at random to cancellation, which a live run of
+    /// `examples/github_activity` demonstrated at 14 models.
+    ///
+    /// Scope is deliberately this process only. It removes the conflict a
+    /// single run creates with itself; a second concurrent `smelt` process,
+    /// or another writer entirely, still conflicts, and that is what the
+    /// transient `BackendError::TransactionConflict` classification and the
+    /// ordinary bounded retry are for. The cost is that maintained models'
+    /// bookkeeping-bound writes run one at a time on this backend — the
+    /// throughput the engine's own isolation rule was always going to
+    /// charge.
+    ledger_gate: tokio::sync::Mutex<()>,
 }
 
 // Safety: Py<PyAny> is Send, and we only access it inside `Python::attach`
@@ -101,6 +125,7 @@ impl BigQueryBackend {
             adapter,
             project,
             dataset: dataset.clone(),
+            ledger_gate: tokio::sync::Mutex::new(()),
         };
 
         // Create the dataset before anything selects it (spec: multi_backend.md
@@ -134,9 +159,7 @@ impl BigQueryBackend {
             Python::attach(|py| {
                 let result = adapter
                     .call_method1(py, "execute_sql", (&sql,))
-                    .map_err(|e| {
-                        BackendError::execution_failed("bigquery sql", format!("{}", e))
-                    })?;
+                    .map_err(|e| sql::classify_job_error("bigquery sql", format!("{}", e)))?;
 
                 let table = result.bind(py);
                 let batches_py = table.call_method0("to_batches").map_err(|e| {
@@ -185,9 +208,7 @@ impl BigQueryBackend {
             Python::attach(|py| {
                 adapter
                     .call_method1(py, "execute_sql_no_result", (&sql,))
-                    .map_err(|e| {
-                        BackendError::execution_failed("bigquery sql", format!("{}", e))
-                    })?;
+                    .map_err(|e| sql::classify_job_error("bigquery sql", format!("{}", e)))?;
                 Ok(())
             })
         })
@@ -584,6 +605,9 @@ impl Backend for BigQueryBackend {
         action_sql: &str,
     ) -> Result<(), BackendError> {
         self.py_execute_no_result(ensure_sql).await?;
+        // See `ledger_gate`: two of this process's ledger transactions in
+        // flight at once cancel each other on BigQuery.
+        let _gate = self.ledger_gate.lock().await;
         let script = sql::fold_ledger_delta_script(record_sql, action_sql);
         match self.py_execute_no_result(&script).await {
             Ok(()) => Ok(()),
@@ -613,6 +637,12 @@ impl Backend for BigQueryBackend {
             .map(|s| s.sql.clone())
             .collect();
         let plan = sql::write_with_bookkeeping_plan(ensure_sqls, pre_write_sqls, &write_sqls);
+        // See `ledger_gate`: the bookkeeping record and the write share one
+        // transaction over `_smelt_ledger`, and two of those in flight at
+        // once cancel each other on BigQuery. Held for the whole plan,
+        // including the `ensure` DDL, so the transaction's whole lifetime is
+        // inside the gate.
+        let _gate = self.ledger_gate.lock().await;
         if plan.atomicity == sql::BookkeepingAtomicity::NonAtomicCreatingWrite {
             // Recorded, never silent (`docs/specs/state.md` §"The degradation
             // contract"): GoogleSQL forbids DDL on a permanent entity inside a
