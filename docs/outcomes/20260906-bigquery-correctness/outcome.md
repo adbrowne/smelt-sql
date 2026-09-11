@@ -144,6 +144,53 @@ rediscovered.
 
 ## Decision log
 
+- 2026-09-11 (phase 12's findings, fixed ahead of the ledger-substrate phases): **four of the
+  five findings the first live incremental run produced are closed; the fifth dissolved.**
+  Taken out of order deliberately — none of them needed a BigQuery ledger substrate, and two of
+  them were wrong on *every* backend, so making phases 12-15 wait on them would have been
+  backwards. Commits `ca62743e8` and `4d90ef2d0`.
+
+  1. **The posture baseline is bucketed onto the declared grid** (finding 1a). It grouped by the
+     raw partition column, so a TIMESTAMP column under `granularity: day` recorded one
+     "partition" per *second* — 5,797 for a three-day, 6,053-row source — and the closed-partition
+     reasoning behind the append-only late-arrival classification ran at the wrong unit on every
+     backend. DuckDB never complained; a DATE partition column (the dogfood pipeline's arrival
+     twin) hides it entirely, which is why it took a TIMESTAMP source on a strict planner to
+     surface. New `smelt_logical::classify_partition_bucket` decides from the column's declared
+     type and granularity; week buckets are Monday-based on every dialect, matching
+     `align_output_start` (GoogleSQL's bare `WEEK` is Sunday-based, so `WEEK(MONDAY)` is explicit).
+
+  2. **GoogleSQL's inline row set is one operand, not one per row** (finding 1b). The chained
+     `SELECT … UNION ALL SELECT …` is valid and does not scale; `SELECT * FROM UNNEST([STRUCT(…),
+     …])` is GoogleSQL's own form and has no per-row planning cost. Asserted as a property at
+     5,797 rows, the size the live run actually refused.
+
+  3. **`FILTER (WHERE …)` and `INTERVAL` RANGE frames are refused at compile time** (findings 2
+     and 3), as dialect facts rather than registry verdicts, since neither clause belongs to any
+     one function. Deliberately *not* auto-lowered: the `CASE WHEN` form is equivalent only for
+     NULL-ignoring aggregates (it would change `ARRAY_AGG`) and that property is not yet registry
+     data, and the interval frame's GoogleSQL form needs the `OVER` clause's `ORDER BY` rewritten
+     in a printer seam that does not exist. Both limits are stated in `multi_backend.md`
+     §"Clause-level dialect refusals" rather than left as folklore.
+
+  4. **Finding 5 dissolved rather than being fixed.** It was "no single committed config serves
+     both targets", and the whole reason was finding 1 — the `probes: cadence: off` workaround.
+     With 1a and 1b fixed the workaround is deleted from `examples/github_activity/smelt.yml` and
+     the DuckDB negative control keeps its teeth.
+
+  **What is left of finding 4, stated rather than quietly dropped.** The precision-downgrade
+  skip sites now log at `warn!` instead of `debug!`, so an operator sees them without raising the
+  log level. The *structured* half is not done: no per-model record in the run manifest or report,
+  and `smelt explain` still takes no `--target`, so there is no offline way to ask what a target
+  would give up and no machine-readable record after the fact. The availability layer already
+  knows the answer statically, so this is plumbing rather than derivation. Now a Known Divergence
+  in `docs/specs/state.md`; it wants its own phase with a spec diff, because it adds surface.
+
+  **Not yet proven live.** Every fix above is held by offline tests and the full gate
+  (`verify-phase.sh` green), but no BigQuery run has exercised them — the six models findings 2
+  and 3 blocked, and the probe path finding 1 blocked, are still unproven on the real engine.
+  That proof belongs to the spine's phase 13, or to phase 16 here.
+
 - 2026-09-10 (phase 11, implementation): **both layers now agree, and the agreement is held
   structurally rather than by inspection.** `realisable_state_structures` returns `vec![]`
   for BigQuery and SparkSQL: `ObservedOutputDeltas` and `FingerprintSidecar` were both false
