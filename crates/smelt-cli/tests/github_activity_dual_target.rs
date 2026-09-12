@@ -1,35 +1,50 @@
 #![cfg(feature = "duckdb")]
 //! Dual-target parity for `examples/github_activity/`: does the pipeline
-//! compute the same answers on DuckDB and on BigQuery?
-//! (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` criterion 6.)
+//! compute the same answers on DuckDB and on BigQuery, and separately on
+//! DuckDB and on Databricks?
+//! (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` criterion 6;
+//! `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` criterion 7.)
+//!
+//! Two sweeps, **one shared support module** rather than two comparators that
+//! might disagree about what "equal" means (`parity_support`): the BigQuery
+//! sweep and the Databricks sweep below share the comparator, the landing
+//! seam, the relation-discovery/exclusion rules and the manifest shape, and
+//! differ only in their own side labels, exclusion set and divergence
+//! registry.
 //!
 //! **Almost all of this runs per-PR with no credential and no cloud**: the
-//! comparator, the relation-set totality check, the divergence registry, the
-//! landing seam and the two gates over the committed parity report are all
-//! exercised against synthetic local `.duckdb` files, synthetic NDJSON, and
-//! the checked-in report artifact. Exactly one test reaches for real
-//! snapshots — [`duckdb_and_bigquery_agree_on_every_model`], driven by
-//! `scripts/bq-dogfood-parity.sh`, which runs the fixture's thirty windows on
-//! both targets and leaves a manifest of per-checkpoint snapshots behind.
+//! comparator, the relation-set totality check and the landing seam are all
+//! exercised against synthetic local `.duckdb` files and synthetic NDJSON.
+//! Exactly one test per sweep reaches for real snapshots —
+//! [`duckdb_and_bigquery_agree_on_every_model`], driven by
+//! `scripts/bq-dogfood-parity.sh`, and
+//! [`duckdb_and_databricks_agree_on_every_model`], driven by
+//! `scripts/dbx-dogfood-parity.sh`.
 //!
-//! # The measured result
+//! # The measured results
 //!
 //! `docs/outcomes/20260906-bigquery-dogfood-spine/phases/13-parity.json` is
-//! that sweep's committed output: for every compared checkpoint, every
-//! compared relation's row counts on both targets and the multiset difference
-//! in both directions. [`TARGET_DIVERGENCE_REGISTRY`] is checked against it in
-//! both directions by [`registry_entries_are_all_live`], so a divergence
-//! cannot be registered without evidence and evidence cannot be left
-//! unregistered.
+//! the BigQuery sweep's committed output: for every compared checkpoint,
+//! every compared relation's row counts on both targets and the multiset
+//! difference in both directions. [`TARGET_DIVERGENCE_REGISTRY`] is checked
+//! against it in both directions, so a divergence cannot be registered
+//! without evidence and evidence cannot be left unregistered
+//! ([`registry_entries_are_all_live`]).
+//!
+//! The Databricks sweep has no committed report or liveness ratchet yet — a
+//! second, unresolved divergence surfaced by the live run needs a
+//! root-caused bound before that ratchet can be added without going
+//! permanently red; see `docs/outcomes/20260912-databricks-dogfood-spine/
+//! outcome.md` §Blocked, phase 8.
 //!
 //! # The comparator and the landing seam
 //!
-//! Both are shared, not restated: `bq_parity_support` holds the whole-row
+//! Both are shared, not restated: `parity_support` holds the whole-row
 //! multiset difference, the generic relation discovery and exclusions, and the
-//! typed NDJSON landing step, so this sweep and the BigQuery equivalence sweep
-//! (`github_activity_bq_oracle.rs`) make their two different claims with the
-//! *same* primitive. Read that module's header for what the comparator does
-//! and what the one declared normalisation is.
+//! typed NDJSON landing step, so every sweep in this file and the BigQuery
+//! equivalence sweep (`github_activity_bq_oracle.rs`) make their different
+//! claims with the *same* primitive. Read that module's header for what the
+//! comparator does and what the one declared normalisation is.
 //!
 //! Any tolerance beyond exact value equality — float epsilon, timestamp
 //! truncation, string trimming — is a registered [`RegisteredDivergence`] with a
@@ -39,18 +54,24 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-#[path = "bq_parity_support/mod.rs"]
-mod bq_parity_support;
-use bq_parity_support::{
-    attached_conn, check_agreement_against, check_bound, compare_databases, load_bigquery_snapshot,
-    repo_root, DivergenceBound, RegisteredDivergence, RelationDiff, Side, SideLabels,
-    EXCLUDED_MODELS,
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{
+    attached_conn, check_agreement_against, check_bound, compare_databases, load_exported_snapshot,
+    repo_root, DivergenceBound, ParityManifest, RegisteredDivergence, RelationDiff, Side,
+    SideLabels, BIGQUERY_EXCLUDED_MODELS, DATABRICKS_EXCLUDED_MODELS,
 };
 
-/// The two sides of *this* sweep, for failure messages.
+/// The two sides of the BigQuery sweep, for failure messages.
 const SIDES: SideLabels = SideLabels {
     left: "duckdb",
     right: "bigquery",
+};
+
+/// The two sides of the Databricks sweep, for failure messages.
+const SIDES_DBX: SideLabels = SideLabels {
+    left: "duckdb",
+    right: "databricks",
 };
 
 // ---------------------------------------------------------------------------
@@ -343,7 +364,7 @@ fn a_bound_never_licenses_a_missing_row() {
 /// quietly.
 #[test]
 fn excluded_models_are_exactly_the_compile_refused_pair() {
-    let actual: BTreeSet<&str> = EXCLUDED_MODELS.iter().copied().collect();
+    let actual: BTreeSet<&str> = BIGQUERY_EXCLUDED_MODELS.iter().copied().collect();
     assert_eq!(
         actual,
         BTreeSet::from(["silver.actor_sessions", "marts.daily_active_contributors"]),
@@ -351,7 +372,7 @@ fn excluded_models_are_exactly_the_compile_refused_pair() {
          the INTERVAL RANGE lookback frame — widening it shrinks criterion 6's comparison"
     );
     assert_eq!(
-        EXCLUDED_MODELS.len(),
+        BIGQUERY_EXCLUDED_MODELS.len(),
         actual.len(),
         "EXCLUDED_MODELS lists a model twice"
     );
@@ -436,7 +457,7 @@ fn landing_a_bigquery_snapshot_casts_to_the_duckdb_legs_own_types() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (duck, ndjson_dir) = typed_pair(tmp.path());
     let bq = tmp.path().join("bq.duckdb");
-    load_bigquery_snapshot(&duck, &ndjson_dir, &bq);
+    load_exported_snapshot(&duck, &ndjson_dir, &bq);
 
     let types: Vec<(String, String)> = {
         let conn = attached_conn(&duck, &bq);
@@ -487,7 +508,7 @@ fn a_perturbed_landed_cell_is_still_reported() {
     .expect("write perturbed ndjson");
 
     let bq = tmp.path().join("bq.duckdb");
-    load_bigquery_snapshot(&duck, &ndjson_dir, &bq);
+    load_exported_snapshot(&duck, &ndjson_dir, &bq);
     let err = check_targets_agree(&duck, &bq, "synthetic")
         .expect_err("a one-microsecond difference must not be absorbed by the seam");
     assert!(
@@ -512,7 +533,7 @@ fn a_value_that_will_not_cast_is_a_loud_failure() {
     .expect("write uncastable ndjson");
 
     let bq = tmp.path().join("bq.duckdb");
-    load_bigquery_snapshot(&duck, &ndjson_dir, &bq);
+    load_exported_snapshot(&duck, &ndjson_dir, &bq);
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +638,7 @@ fn the_parity_report_covers_every_model_on_both_targets() {
         "expected the 14 models that run on both targets (16 less the \
          compile-refused pair), got: {names:?}"
     );
-    for excluded in EXCLUDED_MODELS {
+    for excluded in BIGQUERY_EXCLUDED_MODELS {
         let physical = excluded.replace('.', "_");
         assert!(
             !names.contains(&physical),
@@ -658,23 +679,6 @@ fn registry_entries_are_all_live() {
 // ---------------------------------------------------------------------------
 // The live sweep
 // ---------------------------------------------------------------------------
-
-/// One compared checkpoint: the DuckDB leg's database file at that window, and
-/// the directory of per-relation NDJSON the BigQuery leg exported at the same
-/// window. Produced by `scripts/bq-dogfood-parity.sh manifest`.
-#[derive(serde::Deserialize)]
-struct Checkpoint {
-    label: String,
-    window: i64,
-    day: String,
-    duck_db_path: PathBuf,
-    ndjson_dir: PathBuf,
-}
-
-#[derive(serde::Deserialize)]
-struct ParityManifest {
-    checkpoints: Vec<Checkpoint>,
-}
 
 /// The whole sweep over the live snapshots, and the writer of the committed
 /// parity report.
@@ -725,7 +729,7 @@ fn duckdb_and_bigquery_agree_on_every_model() {
             cp.ndjson_dir
         );
         let landed = scratch.path().join(format!("{}.duckdb", cp.label));
-        load_bigquery_snapshot(&cp.duck_db_path, &cp.ndjson_dir, &landed);
+        load_exported_snapshot(&cp.duck_db_path, &cp.ndjson_dir, &landed);
 
         let diffs = match check_targets_agree(&cp.duck_db_path, &landed, &cp.label) {
             Ok(diffs) => diffs,
@@ -757,7 +761,7 @@ fn duckdb_and_bigquery_agree_on_every_model() {
             "days": 30,
             "checkpoints": manifest.checkpoints.iter().map(|c| c.window).collect::<Vec<_>>(),
         },
-        "excluded_models": EXCLUDED_MODELS,
+        "excluded_models": BIGQUERY_EXCLUDED_MODELS,
         "checkpoints": checkpoints_json,
     });
     // `PARITY_REPORT_OUT` exists for the D2 attribution run: the same sweep is
@@ -915,4 +919,314 @@ fn the_two_targets_agree_at_the_final_window() {
             "final window {label}: `{name}` differs between the targets"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The Databricks sweep — the generalised comparator's second leg
+// ---------------------------------------------------------------------------
+// Shares the comparator, landing seam, manifest shape and relation
+// discovery/exclusion rules with the BigQuery sweep above via
+// `parity_support`; only the side labels, the exclusion set and the
+// divergence registry are this sweep's own.
+
+/// The Databricks divergence registry.
+const DBX_DIVERGENCE_REGISTRY: &[RegisteredDivergence] = &[RegisteredDivergence {
+    relation: "gold_events_enriched",
+    // Root cause, not a shrug. `gold.events_enriched`'s `current_repo_name`
+    // is a value-enrichment join against `gold.repo_dim`
+    // (`models/gold/events_enriched.sql`), whose designed healing semantics
+    // (`crates/smelt-runtime/src/execute/enrichment_heal.rs`) run a
+    // `ColumnScopedMerge` cell once per run over the model's UNWINDOWED
+    // output, so a rename anywhere in `gold.repo_dim`'s history heals every
+    // already-written row regardless of when it was written — this is what
+    // DuckDB does. Phase 7b downgraded this cell's Databricks route from
+    // `PerGroupRecompute` (which the key-addressed driver can never dispatch
+    // for an `EnrichmentKeyed` cell) straight to `DeleteInsert`, because
+    // Spark/Delta has no `MergeLedger`
+    // (`docs/outcomes/20260912-databricks-dogfood-spine/phases/07b-plan.md`).
+    // `DeleteInsert` is window-scoped — it recomputes only the rows in the
+    // run's own `[start, end)` — so on Databricks `current_repo_name`
+    // freezes at whatever `gold.repo_dim` held on the day a row was FIRST
+    // written and is never retroactively healed by a later rename.
+    //
+    // Measured: repo 1220549000 renamed `mswae/Peopulse` ->
+    // `Outsaiders-Team/Peopulse` at `created_at` 2026-08-12 04:38:01; both
+    // legs' `gold.repo_dim` and `silver.repo_naming` agree exactly on this
+    // history (verified live, `dbx-query.sh`), and DuckDB's
+    // `current_repo_name` reflects the rename on every row for that repo —
+    // but Databricks' events from 2026-08-05/06 (written before the rename)
+    // still read `mswae/Peopulse`. 7b's own decision log named this exact
+    // trade-off as deferred: "Realising the sidecar on Delta ... is a
+    // correctness feature for the follow-on databricks-correctness outcome".
+    // No column other than `current_repo_name` diverges, and no row is
+    // missing or extra — the bound is unordered (a string rename has no
+    // natural "ahead"/"behind") rather than a `MonotoneDivergence`.
+    reason: "gold.repo_dim enrichment freezes at write time on Databricks: phase 7b downgraded \
+             the EnrichmentKeyed cell to window-scoped DeleteInsert (Spark/Delta has no \
+             MergeLedger), which sacrifices the unwindowed run-level heal DuckDB's \
+             ColumnScopedMerge cell performs. A pre-rename current_repo_name persists on rows \
+             written before the rename until databricks-correctness realises the fingerprint \
+             sidecar on Delta.",
+    bound: DivergenceBound::UnorderedColumnDivergence {
+        key_col: "id",
+        exact_columns: &[
+            "type",
+            "actor_id",
+            "actor_login",
+            "repo_id",
+            "repo_name",
+            "org_id",
+            "public",
+            "created_at",
+            "event_date",
+        ],
+        tolerant_columns: &["current_repo_name"],
+    },
+}];
+
+/// [`check_agreement_against`] over the Databricks registry and side labels.
+fn check_databricks_agree(
+    duck_db: &Path,
+    dbx_db: &Path,
+    window_label: &str,
+) -> Result<Vec<RelationDiff>, String> {
+    check_agreement_against(
+        duck_db,
+        dbx_db,
+        window_label,
+        DBX_DIVERGENCE_REGISTRY,
+        SIDES_DBX,
+    )
+}
+
+/// A synthetic pair agreeing on `gold_repo_dim` except for one row's
+/// `current_repo_name`, which the Databricks leg carries perturbed. Mirrors
+/// [`perturbed_pair`] under Databricks' own side labels.
+fn perturbed_pair_dbx(tmp: &Path) -> (PathBuf, PathBuf) {
+    let duck = tmp.join("duck.duckdb");
+    let dbx = tmp.join("dbx.duckdb");
+    synth_db(
+        &duck,
+        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
+           (1, 'a/one', 10), (2, 'a/two', 20), (3, 'a/three', 30)) \
+           AS t(repo_id, current_repo_name, event_count);",
+    );
+    synth_db(
+        &dbx,
+        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
+           (1, 'a/one', 10), (2, 'a/two_renamed', 20), (3, 'a/three', 30)) \
+           AS t(repo_id, current_repo_name, event_count);",
+    );
+    (duck, dbx)
+}
+
+/// `DATABRICKS_EXCLUDED_MODELS` is empty — phases 6b-6f closed every
+/// construct Spark/Databricks refused, so the Databricks leg runs the whole
+/// 16-model set — kept in lockstep with `scripts/dbx-dogfood-parity.sh`'s own
+/// exclusion array the way `EXCLUDE_MODELS` is kept in lockstep with
+/// `BIGQUERY_EXCLUDED_MODELS`. `silver.actor_sessions`, excluded from the
+/// BigQuery leg by a GoogleSQL compile-time refusal, has no such refusal on
+/// Databricks and is compared by this sweep.
+#[test]
+fn databricks_sweep_compares_every_model() {
+    assert!(
+        DATABRICKS_EXCLUDED_MODELS.is_empty(),
+        "a non-empty exclusion set here would silently narrow criterion 7's comparison \
+         below the 16-model set phases 6b-6f already proved runs clean"
+    );
+    let script = std::fs::read_to_string(repo_root().join("scripts/dbx-dogfood-parity.sh"))
+        .expect("read scripts/dbx-dogfood-parity.sh");
+    assert!(
+        script.contains("EXCLUDE_MODELS=()"),
+        "scripts/dbx-dogfood-parity.sh's own exclusion array must stay empty and in \
+         lockstep with DATABRICKS_EXCLUDED_MODELS"
+    );
+    for excluded in BIGQUERY_EXCLUDED_MODELS {
+        assert!(
+            !DATABRICKS_EXCLUDED_MODELS.contains(excluded),
+            "`{excluded}` is excluded from the BigQuery leg only (a GoogleSQL compile-time \
+             refusal); the Databricks leg has no such refusal and must compare it"
+        );
+    }
+}
+
+/// Negative control on the comparator: a genuine value difference on the
+/// Databricks leg is reported in both directions, and fails the sweep naming
+/// the relation and both counts under `SIDES_DBX`'s own labels.
+#[test]
+fn an_unregistered_databricks_divergence_fails() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (duck, dbx) = perturbed_pair_dbx(tmp.path());
+
+    let err = check_databricks_agree(&duck, &dbx, "synthetic")
+        .expect_err("an unregistered divergence must fail the sweep");
+    assert!(
+        err.contains("gold_repo_dim"),
+        "expected the relation to be named: {err}"
+    );
+    assert!(
+        err.contains("duckdb_only=1") && err.contains("databricks_only=1"),
+        "expected both counts to be named under SIDES_DBX's own labels: {err}"
+    );
+}
+
+/// The Databricks sweep fails closed on an empty registry too — the control
+/// holds whatever [`DBX_DIVERGENCE_REGISTRY`] happens to contain, so adding
+/// or removing an entry can never quietly retire it.
+#[test]
+fn the_databricks_sweep_fails_closed_on_an_empty_registry() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (duck, dbx) = perturbed_pair_dbx(tmp.path());
+
+    let err = check_agreement_against(&duck, &dbx, "synthetic", &[], SIDES_DBX)
+        .expect_err("an empty registry must not make the sweep vacuous");
+    assert!(
+        err.contains("unregistered divergence"),
+        "expected the unregistered-divergence branch, not a registered bound: {err}"
+    );
+}
+
+/// Coverage totality under the empty exclusion set: a relation present on
+/// only one target is a coverage failure naming the relation and the side,
+/// under Databricks' own labels.
+#[test]
+fn databricks_relation_set_mismatch_fails() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let duck = tmp.path().join("duck.duckdb");
+    let dbx = tmp.path().join("dbx.duckdb");
+    synth_db(
+        &duck,
+        "CREATE TABLE main.bronze_events AS SELECT 1 AS id; \
+         CREATE TABLE main.marts_star_growth AS SELECT 1 AS id;",
+    );
+    synth_db(&dbx, "CREATE TABLE main.bronze_events AS SELECT 1 AS id;");
+
+    let err = compare_databases(&duck, &dbx, SIDES_DBX)
+        .expect_err("a relation missing from the Databricks leg must be a coverage failure");
+    assert!(
+        err.contains("marts_star_growth"),
+        "expected the missing relation to be named: {err}"
+    );
+    assert!(
+        err.contains("databricks"),
+        "expected the side it is missing from to be named: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The live Databricks sweep
+// ---------------------------------------------------------------------------
+//
+// Unlike the BigQuery sweep, there is deliberately no committed report or
+// liveness ratchet yet (`dbx_registry_entries_are_all_live` /
+// `registry_entries_are_all_live`'s Databricks counterpart): the live sweep
+// below found a second, unresolved divergence
+// (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` §Blocked,
+// phase 8) that this phase did not root-cause to a checkable bound. Adding
+// that ratchet now, over a report showing an unregistered divergence, would
+// make it permanently red for every future `cargo test`. It is restored once
+// the remaining divergence is registered or fixed.
+
+/// The measured result of the live Databricks sweep. Not yet committed — see
+/// the section comment above.
+const DBX_PARITY_REPORT_PATH: &str =
+    "docs/outcomes/20260912-databricks-dogfood-spine/phases/08-parity.json";
+
+/// The whole sweep over the live Databricks snapshots, and the writer of the
+/// committed parity report. Mirrors
+/// [`duckdb_and_bigquery_agree_on_every_model`]: gated on
+/// `SMELT_DBX_DOGFOOD_LIVE=1`, this **fails** rather than skipping when the
+/// snapshots are absent — a live gate that goes green because nothing was
+/// there is worse than no gate. With the env var unset the test skips.
+#[test]
+fn duckdb_and_databricks_agree_on_every_model() {
+    if std::env::var("SMELT_DBX_DOGFOOD_LIVE").as_deref() != Ok("1") {
+        eprintln!(
+            "SMELT_DBX_DOGFOOD_LIVE is not 1 — skipping the live sweep. Produce the \
+             snapshots with scripts/dbx-dogfood-parity.sh."
+        );
+        return;
+    }
+    let manifest_path = std::env::var("DBX_PARITY_MANIFEST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root().join("target/phase8/parity-manifest.json"));
+    let manifest: ParityManifest = serde_json::from_str(
+        &std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+            panic!("SMELT_DBX_DOGFOOD_LIVE=1 but no parity manifest at {manifest_path:?}: {e}")
+        }),
+    )
+    .unwrap_or_else(|e| panic!("parse {manifest_path:?}: {e}"));
+    assert!(
+        !manifest.checkpoints.is_empty(),
+        "{manifest_path:?} declares no checkpoint — the sweep would pass vacuously"
+    );
+
+    let scratch = tempfile::TempDir::new().expect("tempdir");
+    let mut checkpoints_json = Vec::new();
+    let mut failures = Vec::new();
+
+    for cp in &manifest.checkpoints {
+        assert!(
+            cp.duck_db_path.exists(),
+            "checkpoint {}: no DuckDB snapshot at {:?}",
+            cp.label,
+            cp.duck_db_path
+        );
+        assert!(
+            cp.ndjson_dir.is_dir(),
+            "checkpoint {}: no Databricks snapshot directory at {:?}",
+            cp.label,
+            cp.ndjson_dir
+        );
+        let landed = scratch.path().join(format!("{}.duckdb", cp.label));
+        load_exported_snapshot(&cp.duck_db_path, &cp.ndjson_dir, &landed);
+
+        let diffs = match check_databricks_agree(&cp.duck_db_path, &landed, &cp.label) {
+            Ok(diffs) => diffs,
+            Err(msg) => {
+                failures.push(msg);
+                // Still record the raw numbers, so the report names what
+                // diverged rather than merely that something did.
+                compare_databases(&cp.duck_db_path, &landed, SIDES_DBX)
+                    .unwrap_or_else(|e| panic!("checkpoint {}: {e}", cp.label))
+            }
+        };
+        checkpoints_json.push(serde_json::json!({
+            "label": cp.label,
+            "window": cp.window,
+            "day": cp.day,
+            "relations": diffs.iter().map(|d| serde_json::json!({
+                "relation": d.relation,
+                "duck_rows": d.left_rows,
+                "dbx_rows": d.right_rows,
+                "duck_only": d.left_only,
+                "dbx_only": d.right_only,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
+    let report = serde_json::json!({
+        "schedule": {
+            "start_date": manifest.checkpoints.first().map(|c| c.day.clone()),
+            "days": manifest.checkpoints.last().map(|c| c.window).unwrap_or(0),
+            "checkpoints": manifest.checkpoints.iter().map(|c| c.window).collect::<Vec<_>>(),
+        },
+        "excluded_models": DATABRICKS_EXCLUDED_MODELS,
+        "checkpoints": checkpoints_json,
+    });
+    let out = std::env::var("DBX_PARITY_REPORT_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root().join(DBX_PARITY_REPORT_PATH));
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&report).expect("serialise the parity report") + "\n",
+    )
+    .unwrap_or_else(|e| panic!("write {out:?}: {e}"));
+    eprintln!("wrote {out:?}");
+
+    assert!(
+        failures.is_empty(),
+        "the two targets disagree:\n{}",
+        failures.join("\n\n")
+    );
 }

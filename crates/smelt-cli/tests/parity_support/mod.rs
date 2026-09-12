@@ -1,13 +1,16 @@
-//! Shared comparison primitives for the `examples/github_activity/` BigQuery
-//! sweeps.
+//! Shared comparison primitives for the `examples/github_activity/`
+//! cross-target sweeps. Generalised over the target rather than duplicated
+//! per target: one comparator, one landing seam, one manifest shape, shared
+//! by every sweep below rather than restated per pair.
 //!
-//! Two different claims are made about that pipeline, and they are made by the
-//! **same** primitive rather than by two comparators that might disagree about
-//! what "equal" means:
+//! The claims made about that pipeline are made by the **same** primitive
+//! rather than by comparators that might disagree about what "equal" means:
 //!
-//! - `github_activity_dual_target.rs` — do DuckDB and BigQuery compute the same
-//!   answers? (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`
-//!   criterion 6.)
+//! - `github_activity_dual_target.rs` — do DuckDB and BigQuery, and
+//!   separately DuckDB and Databricks, compute the same answers?
+//!   (`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` criterion 6;
+//!   `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`
+//!   criterion 7.)
 //! - `github_activity_bq_oracle.rs` — does BigQuery's incrementally-maintained
 //!   state equal BigQuery's own full refresh over the inputs seen so far?
 //!   (criterion 7's BigQuery half; `docs/specs/incremental_models.md`
@@ -31,20 +34,30 @@
 //! Sides are named `left` and `right` here because the module serves both
 //! claims; each caller supplies the labels its failure messages should use.
 //!
+//! A third claim reuses the same primitive on a third target:
+//! `github_activity_dual_target.rs`'s Databricks leg — does DuckDB and
+//! Databricks compute the same answers?
+//! (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` criterion 7.)
+//!
 //! # The landing seam
 //!
-//! A BigQuery side reaches the comparator through one pluggable step
-//! ([`load_bigquery_snapshot`]): export the rows to typed NDJSON
-//! (`scripts/bq_dogfood_export.py`, which decodes BigQuery's all-strings REST
-//! encoding using the result schema), then cast each column into the **DuckDB
-//! leg's own** declared type for that column, read from
-//! `information_schema.columns`.
+//! An exported side reaches the comparator through one pluggable step
+//! ([`load_exported_snapshot`]): export the rows to typed NDJSON
+//! (`scripts/bq_dogfood_export.py` for BigQuery, `scripts/dbx_dogfood_export.py`
+//! for Databricks), then cast each column into the **DuckDB leg's own**
+//! declared type for that column, read from `information_schema.columns`. The
+//! seam itself carries no BigQuery- or Databricks-specific branch — it assumes
+//! only the **export encoding contract**: a TIMESTAMP-family column arrives as
+//! epoch seconds (with a fractional part for sub-second precision), and every
+//! other column arrives as text a `CAST` into the reference type accepts. Each
+//! exporter is responsible for producing that encoding from its own source's
+//! native types; this module only consumes it.
 //!
 //! ## Declared normalisation, and nothing else
 //!
 //! That cast is the **only** admissible normalisation: INT64→BIGINT,
 //! FLOAT64→DOUBLE, NUMERIC→DECIMAL, TIMESTAMP→TIMESTAMP at UTC, DATE→DATE,
-//! STRING→VARCHAR, BOOL→BOOLEAN. A BigQuery value that will not cast is a
+//! STRING→VARCHAR, BOOL→BOOLEAN. A source value that will not cast is a
 //! **finding**, not a tolerance — the loader raises rather than coercing.
 //!
 //! Any tolerance beyond exact value equality — float epsilon, timestamp
@@ -84,14 +97,22 @@ pub const EXCLUDED_SUFFIXES: &[&str] = &["__tombstones"];
 ///   DuckDB leg.
 pub const EXCLUDED_EXACT: &[&str] = &["github_events", "github_events_arrival", "_loader_days"];
 
-/// The two models excluded from **every** leg, so the relation sets are equal
-/// by construction rather than by tolerance. Their absence from BigQuery is a
-/// compile-time `UnsupportedOnBackend` refusal on GoogleSQL — the `RANGE
-/// BETWEEN INTERVAL '2 days' PRECEDING` lookback frame, which GoogleSQL
-/// allows only with numeric offsets — not a value divergence:
+/// The two models excluded from every BigQuery leg, so the relation sets are
+/// equal by construction rather than by tolerance. Their absence from
+/// BigQuery is a compile-time `UnsupportedOnBackend` refusal on GoogleSQL —
+/// the `RANGE BETWEEN INTERVAL '2 days' PRECEDING` lookback frame, which
+/// GoogleSQL allows only with numeric offsets — not a value divergence:
 /// `silver.actor_sessions` carries the frame and
 /// `marts.daily_active_contributors` is its only downstream consumer.
-pub const EXCLUDED_MODELS: &[&str] = &["silver.actor_sessions", "marts.daily_active_contributors"];
+pub const BIGQUERY_EXCLUDED_MODELS: &[&str] =
+    &["silver.actor_sessions", "marts.daily_active_contributors"];
+
+/// The models excluded from every Databricks leg. Empty: phases 6b-6f closed
+/// every construct Spark/Databricks refused (the hash-function spelling, the
+/// drop-type-mismatch, the bare-VARCHAR cast target, `epoch_us`, and the
+/// `LAG`/`LEAD` window frame), so the Databricks leg runs the whole 16-model
+/// set.
+pub const DATABRICKS_EXCLUDED_MODELS: &[&str] = &[];
 
 pub fn is_compared(name: &str) -> bool {
     !EXCLUDED_PREFIXES.iter().any(|p| name.starts_with(p))
@@ -226,7 +247,7 @@ pub fn compare_databases(
 }
 
 // ---------------------------------------------------------------------------
-// The landing seam: exported BigQuery rows -> a scratch DuckDB database
+// The landing seam: exported rows (any target) -> a scratch DuckDB database
 // ---------------------------------------------------------------------------
 
 /// Build `out_db` holding one table per compared relation of `types_db`,
@@ -239,17 +260,20 @@ pub fn compare_databases(
 /// exporter's epoch-seconds float via `make_timestamp` over microseconds (so
 /// the conversion is exact and free of any session timezone — `to_timestamp`
 /// would produce a TIMESTAMPTZ and re-interpret it locally), everything else
-/// by a plain `CAST` of the extracted text.
+/// by a plain `CAST` of the extracted text. This is the **export encoding
+/// contract** every exporter (`bq_dogfood_export.py`, `dbx_dogfood_export.py`)
+/// must produce — it is what makes this seam target-agnostic rather than
+/// BigQuery-specific.
 ///
-/// A value that will not cast raises here rather than being coerced: a
-/// BigQuery value the DuckDB-side type cannot hold is a finding about the two
+/// A value that will not cast raises here rather than being coerced: an
+/// exported value the DuckDB-side type cannot hold is a finding about the two
 /// targets, not something for the comparator to absorb.
 ///
 /// `types_db` is the **type reference**, not necessarily a comparison side:
 /// the equivalence sweep lands two BigQuery snapshots and types both from the
 /// same DuckDB database, so the two landed sides are byte-comparable by
 /// construction.
-pub fn load_bigquery_snapshot(types_db: &Path, ndjson_dir: &Path, out_db: &Path) {
+pub fn load_exported_snapshot(types_db: &Path, ndjson_dir: &Path, out_db: &Path) {
     if out_db.exists() {
         std::fs::remove_file(out_db).unwrap_or_else(|e| panic!("remove {out_db:?}: {e}"));
     }
@@ -367,6 +391,20 @@ pub enum DivergenceBound {
     ArrivalLag {
         event_time_column: &'static str,
         behind_side: Side,
+    },
+    /// The two sides may differ **without a direction** on
+    /// `tolerant_columns` — unlike `MonotoneDivergence`, no ordering is
+    /// enforced — while the row-key set matches exactly (no missing or extra
+    /// row) and every column named in `exact_columns` matches exactly. For a
+    /// mutable enrichment value one target freezes at write time rather than
+    /// retroactively healing, so the two sides may show different historical
+    /// values for the same row with no "ahead"/"behind" relationship a
+    /// `MonotoneDivergence` could check (e.g. a string-valued column with no
+    /// natural order).
+    UnorderedColumnDivergence {
+        key_col: &'static str,
+        exact_columns: &'static [&'static str],
+        tolerant_columns: &'static [&'static str],
     },
 }
 
@@ -514,6 +552,55 @@ pub fn check_bound(
             }
             Ok(())
         }
+        DivergenceBound::UnorderedColumnDivergence {
+            key_col,
+            exact_columns,
+            tolerant_columns,
+        } => {
+            let r = entry.relation;
+            let key_only_left = scalar_on(
+                &conn,
+                &format!(
+                    "SELECT count(*) FROM left_db.main.{r} d WHERE NOT EXISTS \
+                     (SELECT 1 FROM right_db.main.{r} b WHERE b.{key_col} = d.{key_col})"
+                ),
+            );
+            let key_only_right = scalar_on(
+                &conn,
+                &format!(
+                    "SELECT count(*) FROM right_db.main.{r} b WHERE NOT EXISTS \
+                     (SELECT 1 FROM left_db.main.{r} d WHERE d.{key_col} = b.{key_col})"
+                ),
+            );
+            if key_only_left != 0 || key_only_right != 0 {
+                return Err(format!(
+                    "row-key-set mismatch on `{key_col}`: {key_only_left} {}-only, \
+                     {key_only_right} {}-only — a divergence bound never licenses a missing \
+                     or extra row",
+                    labels.left, labels.right
+                ));
+            }
+            for col in *exact_columns {
+                let n = scalar_on(
+                    &conn,
+                    &format!(
+                        "SELECT count(*) FROM left_db.main.{r} d \
+                         JOIN right_db.main.{r} b USING ({key_col}) \
+                         WHERE d.{col} IS DISTINCT FROM b.{col}"
+                    ),
+                );
+                if n != 0 {
+                    return Err(format!(
+                        "{n} row(s) differ on `{col}`, which this bound does not license \
+                         to diverge — only {tolerant_columns:?} may differ"
+                    ));
+                }
+            }
+            // `tolerant_columns` are checked for nothing beyond membership in
+            // the two rows already matched above: this bound licenses them to
+            // differ arbitrarily, with no direction.
+            Ok(())
+        }
     }
 }
 
@@ -561,4 +648,96 @@ pub fn check_agreement_against(
         }
     }
     Ok(diffs)
+}
+
+// ---------------------------------------------------------------------------
+// The parity manifest shape, shared by every sweep
+// ---------------------------------------------------------------------------
+
+/// One compared checkpoint: the DuckDB leg's database file at that window,
+/// and the directory of per-relation NDJSON the other leg exported at the
+/// same window. Produced by `scripts/bq-dogfood-parity.sh manifest` or
+/// `scripts/dbx-dogfood-parity.sh manifest` — both sweeps deserialise the
+/// same shape, so a manifest is not restated per target.
+#[derive(serde::Deserialize)]
+pub struct Checkpoint {
+    pub label: String,
+    pub window: i64,
+    pub day: String,
+    pub duck_db_path: PathBuf,
+    pub ndjson_dir: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ParityManifest {
+    pub checkpoints: Vec<Checkpoint>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The landing seam carries no BigQuery-specific branch: a synthetic
+    /// NDJSON directory in the *declared export encoding* (a TIMESTAMP column
+    /// as epoch seconds, everything else as text) lands byte-identically to
+    /// its source table, whatever exporter produced it.
+    #[test]
+    fn landing_seam_is_target_agnostic() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let types_db = tmp.path().join("types.duckdb");
+        let conn = duckdb::Connection::open(&types_db).unwrap_or_else(|e| panic!("open: {e}"));
+        conn.execute_batch(
+            "CREATE TABLE main.some_relation (id BIGINT, name VARCHAR, seen_at TIMESTAMP); \
+             INSERT INTO main.some_relation VALUES (1, 'a', TIMESTAMP '2026-08-05 01:02:03');",
+        )
+        .expect("create source table");
+        drop(conn);
+
+        let ndjson_dir = tmp.path().join("export");
+        std::fs::create_dir_all(&ndjson_dir).expect("mkdir");
+        std::fs::write(
+            ndjson_dir.join("some_relation.ndjson"),
+            r#"{"id": 1, "name": "a", "seen_at": 1785891723.0}"#,
+        )
+        .expect("write ndjson");
+
+        let out_db = tmp.path().join("landed.duckdb");
+        load_exported_snapshot(&types_db, &ndjson_dir, &out_db);
+
+        let landed_conn = attached_conn(&types_db, &out_db);
+        let diffs = compare_databases(
+            &types_db,
+            &out_db,
+            SideLabels {
+                left: "types",
+                right: "landed",
+            },
+        )
+        .expect("relation sets must match");
+        drop(landed_conn);
+        let d = diffs
+            .iter()
+            .find(|d| d.relation == "some_relation")
+            .expect("relation compared");
+        assert_eq!(
+            (d.left_only, d.right_only),
+            (0, 0),
+            "an exported row in the declared encoding must land byte-identical to its source"
+        );
+    }
+
+    /// Both sweeps deserialise the same [`ParityManifest`] shape from this
+    /// module — a compile-level guarantee plus one round-trip assertion.
+    #[test]
+    fn parity_manifest_shape_is_shared() {
+        let json = r#"{"checkpoints": [
+            {"label": "w01", "window": 1, "day": "2026-08-05",
+             "duck_db_path": "/tmp/w01.duckdb", "ndjson_dir": "/tmp/w01"}
+        ]}"#;
+        let manifest: ParityManifest =
+            serde_json::from_str(json).expect("parse a manifest in the shared shape");
+        assert_eq!(manifest.checkpoints.len(), 1);
+        assert_eq!(manifest.checkpoints[0].label, "w01");
+        assert_eq!(manifest.checkpoints[0].window, 1);
+    }
 }
