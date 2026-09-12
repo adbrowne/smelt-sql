@@ -82,6 +82,37 @@ extrapolates to well under a dollar a month, a small fraction of the project's b
 Scheduling the run (rather than invoking it by hand) is still outstanding — nothing here
 sets up a recurring trigger yet.
 
+## The Databricks loader
+
+`scripts/dbx-dogfood-loader.py` (wrapped by `scripts/dbx-dogfood-loader.sh`) is
+**external to smelt**, exactly as the BigQuery loader above is — smelt orders the run,
+it does not author the load. Unlike BigQuery, a Databricks serverless cluster shares no
+filesystem with the client at all, so this loader cannot hand the target engine a query
+that reads the fixture directly: it reads each day's slice locally with the `duckdb`
+CLI, and hands the rows across as Arrow (`docs/specs/multi_backend.md` §"Loading data
+into a backend"). It never restates `load_day.sh`'s redelivery rule — the modulus is
+*parsed* out of that script at runtime, so the two legs cannot silently drift apart.
+
+```bash
+scripts/dbx-dogfood-loader.sh --emit-ddl                          # Delta DDL for the raw tables + ledger
+scripts/dbx-dogfood-loader.sh --emit-sql --date 2026-08-06        # describes one day's append
+scripts/dbx-dogfood-loader.sh --emit-slice-sql --date 2026-08-06  # the DuckDB-executable SELECTs
+scripts/dbx-dogfood-loader.sh --date 2026-08-06                   # execute (needs a workspace)
+```
+
+The first three modes touch no network and need no `databricks-connect` package or
+workspace — they only read `load_day.sh` and the fixture and print SQL — so they are
+checked per-PR with no cloud in the loop
+(`crates/smelt-cli/tests/dbx_dogfood_loader.rs`), including a symmetric-difference check
+against `load_day.sh`'s own DuckDB output for every day of the fixture. The pinned
+client environment (`databricks-connect`, disjoint from the local-Spark `pyspark` venv —
+the two packages conflict) is built with `scripts/dbx-dogfood-venv.sh`; `source
+scripts/dbx-dogfood-env.sh` puts it and the repo's `python/` package on `PYTHONPATH` for
+the PyO3-embedded interpreter, mirroring `scripts/spark-env.sh`. Provisioning the
+workspace and the credential these last two need is phase 4 of
+`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` (human-gated) — with no
+credential configured, the `execute` mode simply refuses.
+
 ## The DuckDB leg
 
 `examples/github_activity/` runs four models against DuckDB with no warehouse and no

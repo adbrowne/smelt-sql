@@ -110,8 +110,15 @@ of the models or the tooling.
     The Databricks CLI is pinned and installed through `mise` the way the Google Cloud SDK
     is (`mise run setup-gcloud`), never assumed on `PATH`. The job runs daily on
     serverless compute with two tasks in order: the loader lands the next fixture day, then
-    `smelt run` processes it. The smelt binary is a released Linux build fetched onto the
-    task (not compiled there); the `databricks` target inside the job authenticates with the
+    `smelt run` processes it. smelt reaches the task as a wheel declared in the bundle's
+    `artifacts:` block — the same `bindings = "bin"` maturin build the PyPI release already
+    uses (root `pyproject.toml`) — which `bundle deploy` builds locally and uploads to
+    workspace files itself, so no Volume and no hand-written fetch step are needed for the
+    binary. This is a placeholder for a PyPI dependency: dev is ahead of the last PyPI
+    release, so the environment installs the freshly-built local wheel rather than a
+    published version; once a release tracks dev the `artifacts:` block is dropped in favour
+    of a pinned `smelt-sql==<version>` in the environment's `dependencies:`. The `databricks`
+    target inside the job authenticates with the
     **ambient** session — no token, no `${ENV}` secret — which the spec records as a second,
     credential-free form of the same target; and the project's `.smelt/` run state (ledger,
     manifests, run reports) persists across runs on a Unity Catalog Volume, so each daily run
@@ -148,7 +155,7 @@ of the models or the tooling.
 |---|-------|--------|
 | 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | done |
 | 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | done |
-| 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | planned |
+| 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | done |
 | 4 | **[human]** Provision: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential encrypted at rest, `scripts/dbx-*.sh` wrappers and settings allow-list, reachability and refusal demonstrated, Free Edition quotas recorded | pending |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
@@ -156,9 +163,19 @@ of the models or the tooling.
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised | pending |
-| 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — released smelt binary fetched onto the task, ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
+| 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (plan 2, addendum): **smelt reaches the job as a locally-built wheel via the
+  bundle's `artifacts:` block, not a PyPI dependency.** smelt already ships a `bindings =
+  "bin"` maturin build published to PyPI as `smelt-sql` (root `pyproject.toml`,
+  `.github/workflows/release.yml`), so no new packaging mechanism is needed — but dev is
+  ahead of the last PyPI release, so pinning a PyPI version would run stale code. DAB's
+  `artifacts:` build-and-upload step (target: workspace files, no Volume) covers exactly
+  this gap: build the same wheel locally, let `bundle deploy` stage it, install it via the
+  job environment's `dependencies:`. This is explicitly a placeholder — once a release
+  tracks dev, drop `artifacts:` and pin `smelt-sql==<version>` from PyPI instead.
 
 - 2026-09-12 (scaffold): **Free Edition, Databricks Connect, `type: databricks`.** The account
   is Databricks Free Edition (serverless-only, Unity Catalog mandatory, no host-visible
@@ -224,6 +241,17 @@ of the models or the tooling.
   identity gate can compare it to `load_day.sh`'s own rows with no workspace and no Python
   client, and per-day idempotence is proved offline via a `--dry-run-store` ledger that runs the
   real guard with the Unity Catalog sink swapped out.
+
+- 2026-09-12 (phase 3 implement): **the pinned `databricks-connect==15.4.5` client's Python
+  API matched `python/smelt/databricks_adapter.py` (phase 2) with no changes needed** —
+  `bash scripts/dbx-dogfood-venv.sh`'s import-verification step passed on the first run.
+  Shipped: `scripts/dbx-dogfood-requirements.txt`, `dbx-dogfood-venv.sh`, `dbx-dogfood-env.sh`,
+  `dbx-dogfood-loader.py`/`.sh`, and `crates/smelt-cli/tests/dbx_dogfood_loader.rs` (8 tests,
+  all offline). One real gap surfaced and is *not* fixed here (out of this phase's boundary):
+  `DatabricksAdapter.load_arrow_table` drops and recreates its target table rather than
+  appending, so the loader's `--date D` execute path would overwrite rather than accumulate
+  days — phase 5 (first live load) must fix this before trusting a multi-day load. See
+  `phases/03-summary.md`.
 
 ## Blocked
 
