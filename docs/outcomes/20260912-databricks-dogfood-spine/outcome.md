@@ -165,6 +165,7 @@ of the models or the tooling.
 | 6c | **[live]** Recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` as the drop-type-mismatch condition in `SparkBackend::drop_view_if_exists`/`drop_table_if_exists` (one pure, tested predicate per direction), then land the first clean full refresh of the whole model set and record what remains | done |
 | 6d | **[live]** Give a *source-written* cast target the same per-dialect spelling the cast-wrap already gets — bare `VARCHAR`/`TEXT` prints as `STRING` on the SparkSQL dialect — through one shared owner outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | done |
+| 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | planned |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -172,6 +173,21 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 6f plan): **reshape — row 6f inserted before row 7.** Phase 6e's summary
+  leaves the live full refresh at 11 success / 1 failed / 4 skipped: `silver.actor_sessions`'s
+  `LAG(...)` calls carry an explicit `RANGE BETWEEN INTERVAL '2 days' PRECEDING` frame, and Spark
+  refuses any frame on `lag`/`lead`. Criteria 6, 7 and 8 are each stated over the whole model set,
+  so four absent models are work that serves the Success criteria and cannot be deferred out; and
+  running three incremental windows (row 7) over a model set that cannot full-refresh would make
+  row 7's evidence untrustworthy, so 6f strictly precedes it. Elision rather than refusal or
+  model-set narrowing: `LAG`/`LEAD` are offset functions the SQL standard defines to ignore the
+  frame, and DuckDB agrees — measured 2026-09-12, a framed `LAG` returns a value nine days back
+  through a two-day frame, identical to the unframed call — so dropping the frame on Spark cannot
+  move criterion 7's parity leg. The source frames stay untouched (they are `sessionize.sql`'s
+  load-bearing `max_lookback` declaration). Fourth phase in the 6c → 6d → 6e → 6f chain, each
+  clearing one construct at the same failure point. Nothing left the outcome; nothing added to
+  `## Out of scope`.
 
 - 2026-09-12 (phase 6e implement): **row 6e done — `epoch_us` registered and confirmed live; a
   new, unrelated blocker now occupies the same failure point.** `EPOCH_US` landed as a normal
