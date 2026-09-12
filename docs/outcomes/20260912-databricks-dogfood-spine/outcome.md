@@ -162,6 +162,7 @@ of the models or the tooling.
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | done |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | done |
 | 6b | **[live]** Unblock the Databricks run path so more than one model can complete: make the maintenance fingerprint's hash spelling dialect-dispatched (`sha2(x, 256)` on Spark/Databricks) behind a single owner plus a structural gate, reconcile the bare-host/scheme mismatch between the wizard's `SMELT_DBX_HOST` and the `type: databricks` target contract, then re-run the full refresh to a clean baseline and record what remains | done |
+| 6c | **[live]** Recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` as the drop-type-mismatch condition in `SparkBackend::drop_view_if_exists`/`drop_table_if_exists` (one pure, tested predicate per direction), then land the first clean full refresh of the whole model set and record what remains | planned |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -169,6 +170,24 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 6c plan): **reshape — inserted row 6c between 6b and the incremental
+  windows.** Criterion 6 has two halves and only the second is rowed: the full refresh of the
+  *whole* model set has still never completed. Phase 6b's re-run was 1 success / 3 failed / 12
+  skipped because `SparkBackend::drop_view_if_exists` swallows only the two vanilla-OSS-Spark
+  error shapes for "DROP VIEW on a TABLE", while Unity Catalog returns a third,
+  `[DROP_COMMAND_TYPE_MISMATCH]`, for the identical condition — so every self-referential
+  bootstrap model (`bronze.events`, `silver.actor_naming`, `silver.repo_naming`) fails on any run
+  against an already-populated schema, which is every run from here on. That is dialect-invariant
+  and would make criteria 6, 7 and 8 vacuous over one model, so it is the outcome's own named
+  exception ("unless the fix is the only way a run completes at all") and gets a row rather than
+  leaving the outcome. It is kept separate from row 7 rather than folded in because the clean
+  full refresh *is* the baseline row 7's three windows are measured against, and row 7 is already
+  a large live phase. `drop_table_if_exists` is fixed symmetrically in the same row since the
+  same gap exists in the opposite direction. Reachability was probed before planning:
+  `scripts/dbx-query.sh "SELECT current_user()"` returned the credential's own principal, so the
+  live gate is open. Rows 7-11 are unchanged; nothing left the outcome; nothing added to
+  `## Out of scope`.
 
 - 2026-09-12 (phase 6b implement): **row 6b done — the hash-dialect fix and host
   reconciliation both confirmed live; one new, unrelated finding recorded rather than fixed.**
