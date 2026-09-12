@@ -167,13 +167,32 @@ of the models or the tooling.
 | 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | done |
-| 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | pending |
+| 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | planned |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 7b plan): **route chosen — downgrade at plan derivation, not sidecar
+  realisation on Delta.** Root cause verified: `availability::required_state_structure` is keyed
+  on `Technique` alone and returns `None` for `PerGroupRecompute`
+  (`crates/smelt-logical/src/maintenance/availability/state_structure.rs:119`), so a
+  key-addressed model-edge cell's sidecar need is never seen by `resolve_availability` and is
+  instead re-discovered at run time by `maintenance_driver/key_addressed/mod.rs:124` — a second
+  source of truth for a plan fact, which maintenance-plan purity forbids. Fix: make the
+  requirement cell-shaped (a `PerGroupRecompute` cell carrying an `UpstreamKeyed` /
+  `DownstreamGrainOverUpstream` `key_scope` requires the `FingerprintSidecar`) and downgrade it
+  to `DeleteInsert`. Realising the sidecar on Delta (Spark emitters in `ddl_spark.rs`, a
+  capability flip, new backend seams) is a correctness feature for the follow-on
+  `databricks-correctness` outcome, beyond this outcome's "only way a run completes at all"
+  licence.
+- 2026-09-12 (phase 7b plan): **no reshape.** Phase 7's one new discovery — run reports'
+  `completed_at`/`duration_ms` are never populated — is a defect the live run surfaced, which
+  this outcome's Out-of-scope section says is recorded rather than fixed; row 10 already
+  commits to listing every such defect in the findings handoff, so it needs no row of its own.
+  Row 7b's scope is unchanged from what row 7 recorded: one cell, one model.
 
 - 2026-09-12 (phase 7): **three incremental windows landed and inspected, all matching the plan's
   predictions exactly.** W1/W2/W3 (`2026-08-07`/`08`/`09`) each ran 14 success / 1 failed
