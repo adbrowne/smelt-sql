@@ -170,12 +170,26 @@ of the models or the tooling.
 | 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | done |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | blocked |
 | 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | done |
-| 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | pending |
+| 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | planned |
 | 9c | **[live]** Close criterion 7's blocker with 9b's evidence: root-cause `silver_actor_naming`'s Databricks-only duplication (the oracle leg says whether it is an incremental write-path defect or shared with the full refresh), take one of `## Blocked`'s three routes, then re-run the parity sweep, commit `08-parity.json` and restore `dbx_registry_entries_are_all_live` | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9b plan): **no reshape; the contingency on a non-clean sweep is fixed in
+  advance.** Phase 9a's summary reports nothing left undone and nothing new surfaced, so the
+  remaining rows (9b, 9c, 10, 11) stand as written. One planning decision was needed: row 8's
+  `silver_actor_naming` divergence makes it likely 9b's sweep is *not* clean, and a hard
+  "report shows no violation" gate over a violating report would leave `cargo test` red. The
+  plan therefore splits 9b's gates in two — the coverage, anti-vacuity and nothing-exempt
+  gates land unconditionally (they pass whatever the numbers say), while the
+  no-violation gate and the two-sided liveness ratchet land only if the sweep is clean and
+  otherwise move into row 9c, which already owns restoring the parallel parity ratchet. The
+  committed report is the deliverable either way, because it is precisely the evidence 9c
+  needs to tell an incremental-write-path defect from one shared with the full refresh. This
+  mirrors phase 8's shape (evidence committed, ratchet deferred to keep the suite green) and
+  adds no work to and removes no work from the outcome.
 
 - 2026-09-13 (phase 9 plan): **row 9 split into 9a/9b, and a new row 9c added to finish
   criterion 7.** (a) *Split.* Row 9 as written bundled a body of offline construction (a new
