@@ -171,11 +171,40 @@ of the models or the tooling.
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | blocked |
 | 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | done |
 | 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
-| 9c | **[live]** Close criterion 7's blocker with 9b's evidence: root-cause `silver_actor_naming`'s Databricks-only duplication (the oracle leg says whether it is an incremental write-path defect or shared with the full refresh), take one of `## Blocked`'s three routes, then re-run the parity sweep, commit `08-parity.json` and restore `dbx_registry_entries_are_all_live` | pending |
+| 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | planned |
+| 9d | **[live]** Re-run the Databricks sweeps with 9c's resolution in place: `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence, a refreshed oracle sweep if 9c changed a maintenance statement, commit `08-parity.json`, restore `dbx_registry_entries_are_all_live`, criterion 7 closed | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9c plan): **row 9c split into 9c (offline) / 9d (live), and 9b's inference
+  corrected.** (a) *The inference.* Row 9's own decision rule was "if the full refresh on
+  Databricks duplicates too, the defect is in the model's own SQL under SparkSQL; if it does
+  not, it is in the succession-patch write path." 9b measured `silver_actor_naming`'s
+  incremental state **equal** to the Databricks full-refresh oracle at all three checkpoints
+  while row 8 measured that same incremental state 520 rows **above** DuckDB — so the Databricks
+  full refresh carries the duplication as well, and 9b's summary drew the inverted conclusion
+  ("confined to the incremental write path"). The defect is shared by both Databricks paths,
+  which rules route 1 (a ledger-transaction/tombstone theory specific to the incremental
+  MERGE) *less* likely, not more. (b) *What that makes checkable offline.* Both Databricks
+  paths fold `(key, clock)` by construction — `emit_succession_patch`'s `__smelt_dedup` CTE and
+  `emit_succession_full_rebuild`'s `ROW_NUMBER() … = 1` — and `incremental_shapes.md`
+  §`SuccessionClockTie` makes the fold normative ("identical rows are a redelivery and fold
+  once"). Databricks' 26,220 rows is exactly the source row count, i.e. *no fold at all*, which
+  says the succession emitters are very likely not the statements this model runs on that
+  target. The maintenance plan is pure data and `smelt explain` reads target metadata, never a
+  connection (`docs/specs/cli.md`), so which technique each target assigns and which statements
+  each emits is a **free offline differential** — the decisive experiment needs no workspace and
+  no token. (c) *The split.* Root-causing and fixing therefore moves to an offline row 9c and
+  only the re-run stays live in 9d, the same shape the 9a/9b split took for the same reason (a
+  one-hour OAuth token is the scarce resource; phases 6-9 each showed it). (d) *Criterion 8
+  closes in 9c.* `gold_events_enriched` is the only violation in the committed equivalence
+  report, and it is understood, bounded and already registered in the dual-target suite, so
+  registering it in the oracle suite's registry and landing 9b's deferred report-driven gates
+  (tests 5/6 — both read the committed JSON, no snapshot) is offline work that finishes
+  criterion 8 rather than waiting on 9d. Nothing left the outcome; nothing added to
+  `## Out of scope`.
 
 - 2026-09-13 (phase 9b implement): **row 9b blocked per its own plan contingency — the
   measurement is complete and committed, and it resolves phase 8's open question.** Two
