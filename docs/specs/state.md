@@ -529,6 +529,30 @@ this spec describes normatively above.
   downgrade (`MaintenanceStateDowngraded`) mid-schedule and asserts the equivalence oracle
   still holds across the switch — the state-deletion leg (§References → Tests) proves ledger
   residency; this residual proves the recompute-family fallback itself.
+- **Detected-inconsistency healing as an alternative to cross-table atomicity.** Some
+  backends will permanently lack a cross-table transaction — Delta's per-table atomicity
+  (§"Which dialects realise which structure") is one instance of a property no per-backend
+  ledger builder (the extension above) can ever change, and a future backend may share it.
+  For those backends the standing degradation is the recompute-family downgrade, chosen for
+  safety over throughput. A narrower alternative is possible in principle: keep the
+  technique's incremental write, drop its atomicity guarantee, and replace it with detection
+  — order the data write before the correctness-structure record, so an interrupted pair
+  fails in the safe direction (an unrecorded write costs a redundant re-run, the same
+  direction BigQuery's create-table degradation already accepts above, rather than a record
+  claiming a write that never landed) — then periodically verify the two agree and heal a
+  mismatch with a one-time full recompute of the divergent window, recorded on the plan as a
+  downgrade exactly like any other. Verification need not be a bespoke probe against smelt's
+  own ledger: a table format that keeps its own commit history (Delta's transaction log, in
+  particular) already records independently whether a given write landed, which is a second
+  source of truth free of an extra write smelt would otherwise have to make and maintain.
+  Open: which structures this is even safe for (the safe-direction ordering above does not
+  by itself cover the tombstone ledger, whose danger is a tombstone record with no matching
+  delete — the presented `MERGE` and the tombstone insert are two writes with no natural
+  data-first ordering between them); where the periodic verification runs (it is a run-time
+  healing step, not a planning-time one — a standing plan-time resolver reading backend state
+  would violate maintenance-plan purity); and whether a backend's transaction-log metadata is
+  a durable enough interface to build on, or only an engine-specific escape hatch. Not
+  decided; no plan targets it.
 
 ## References
 
