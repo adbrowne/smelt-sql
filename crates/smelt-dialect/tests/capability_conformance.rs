@@ -20,6 +20,7 @@ fn every_flag_matches_matrix() {
     let delta = BackendCapabilities::spark_delta();
     let parquet = BackendCapabilities::spark_parquet();
     let bigquery = BackendCapabilities::bigquery();
+    let databricks = BackendCapabilities::databricks();
 
     macro_rules! cell {
         ($caps:expr, $flag:ident, $expected:expr, $backend:literal) => {
@@ -266,6 +267,60 @@ fn every_flag_matches_matrix() {
         "Spark(Parquet)"
     );
     cell!(bigquery, supports_fingerprint_sidecar, false, "BigQuery");
+
+    // Databricks — equal to Spark (Delta) throughout (spec matrix: the
+    // Databricks column matches Spark(Delta) in every flag). Not yet
+    // independently live-verified against a Databricks workspace
+    // (`multi_backend.md` §Known Divergences).
+    cell!(databricks, supports_qualify, false, "Databricks");
+    cell!(
+        databricks,
+        supports_create_or_replace_table,
+        false,
+        "Databricks"
+    );
+    cell!(
+        databricks,
+        supports_create_or_replace_view,
+        true,
+        "Databricks"
+    );
+    cell!(databricks, supports_merge, true, "Databricks");
+    cell!(databricks, supports_pivot, true, "Databricks");
+    cell!(databricks, supports_date_literal, false, "Databricks");
+    cell!(databricks, supports_concat_operator, true, "Databricks");
+    cell!(databricks, supports_array_literal, false, "Databricks");
+    cell!(databricks, supports_transactional_ddl, false, "Databricks");
+    cell!(databricks, supports_double_colon_cast, false, "Databricks");
+    cell!(databricks, supports_trailing_commas, false, "Databricks");
+    cell!(databricks, supports_insert_overwrite, true, "Databricks");
+    cell!(databricks, supports_native_ivm, false, "Databricks");
+    cell!(databricks, supports_retraction, false, "Databricks");
+    cell!(databricks, supports_struct_field_ddl, true, "Databricks");
+    cell!(databricks, supports_alter_column_using, false, "Databricks");
+    cell!(databricks, supports_nested_array_ddl, true, "Databricks");
+    cell!(databricks, supports_merge_schema_write, true, "Databricks");
+    cell!(databricks, supports_column_mapping, true, "Databricks");
+    cell!(databricks, supports_pipe_syntax, false, "Databricks");
+    cell!(
+        databricks,
+        supports_pipe_set_drop_rename,
+        false,
+        "Databricks"
+    );
+    cell!(databricks, requires_schema_init, true, "Databricks");
+    cell!(databricks, supports_column_scoped_merge, true, "Databricks");
+    assert_eq!(
+        databricks.null_safe_equality,
+        NullSafeEqualitySpelling::Spaceship,
+        "Databricks"
+    );
+    cell!(
+        databricks,
+        supports_fingerprint_sidecar,
+        false,
+        "Databricks"
+    );
 }
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a

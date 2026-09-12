@@ -1,5 +1,5 @@
 # Large-file ratchet baseline
-# Updated: 2026-09-11
+# Updated: 2026-09-12
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -9,20 +9,21 @@
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
 crates/smelt-backend-duckdb/src/lib.rs 1902
-crates/smelt-cli/src/commands/explain.rs 1195
-crates/smelt-cli/src/explain.rs 2593
+crates/smelt-cli/src/commands/explain.rs 1196
+crates/smelt-cli/src/explain.rs 2595
 crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1441
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
-crates/smelt-cli/tests/github_activity_oracle.rs 1223
+crates/smelt-cli/tests/github_activity_bq_oracle.rs 1039
+crates/smelt-cli/tests/github_activity_oracle.rs 1069
 crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
 crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
-crates/smelt-cli/tests/resume.rs 1059
+crates/smelt-cli/tests/resume.rs 1061
 crates/smelt-cli/tests/since_upstream.rs 1274
-crates/smelt-core/src/config.rs 3909
+crates/smelt-core/src/config.rs 4304
 crates/smelt-core/src/discovery.rs 1090
-crates/smelt-core/src/graph.rs 1553
+crates/smelt-core/src/graph.rs 1555
 crates/smelt-core/src/metadata.rs 3652
 crates/smelt-core/src/sources.rs 1336
 crates/smelt-datagen/src/config.rs 1354
@@ -85,7 +86,7 @@ crates/smelt-lsp/tests/integration.rs 4810
 crates/smelt-maintenance-testkit/src/link_c_harness.rs 1026
 crates/smelt-maintenance-testkit/src/recipe.rs 2327
 crates/smelt-maintenance-testkit/src/render.rs 1383
-crates/smelt-maintenance-testkit/src/s_tracker.rs 1149
+crates/smelt-maintenance-testkit/src/s_tracker.rs 1150
 crates/smelt-parser/src/ast/declarations.rs 1083
 crates/smelt-parser/src/ast/expr.rs 1475
 crates/smelt-parser/src/ast/select.rs 1214
@@ -95,16 +96,16 @@ crates/smelt-parser/src/parser/select.rs 1455
 crates/smelt-parser/src/parser/smelt_ext.rs 1798
 crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
-crates/smelt-runtime/src/compile.rs 4051
-crates/smelt-runtime/src/cumulative.rs 2179
-crates/smelt-runtime/src/execute/project/mod.rs 4898
+crates/smelt-runtime/src/compile.rs 4060
+crates/smelt-runtime/src/cumulative.rs 2178
+crates/smelt-runtime/src/execute/project/mod.rs 4998
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
 crates/smelt-runtime/src/windowing.rs 1277
 crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1060
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
 crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1147
-crates/smelt-runtime/tests/observed_delta/main.rs 1197
+crates/smelt-runtime/tests/observed_delta/main.rs 1066
 crates/smelt-runtime/tests/repair_lowering.rs 1569
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1120

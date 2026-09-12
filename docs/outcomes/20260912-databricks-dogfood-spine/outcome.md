@@ -147,7 +147,7 @@ of the models or the tooling.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | done |
-| 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | planned |
+| 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | done |
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | pending |
 | 4 | **[human]** Provision: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential encrypted at rest, `scripts/dbx-*.sh` wrappers and settings allow-list, reachability and refusal demonstrated, Free Edition quotas recorded | pending |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
@@ -204,6 +204,17 @@ of the models or the tooling.
   value is unrecoverable), and the Databricks backend reuses `smelt-backend-spark` behind a
   flavor discriminator rather than getting its own crate — the SQL surface is identical and only
   the session builder and capability profile differ.
+
+- 2026-09-12 (phase 2 implement): **`BackendCapabilities::databricks()` is `spark_delta()`
+  verbatim, no field overrides.** Every flag phase 1's spec named for the Databricks column
+  already equals Spark(Delta)'s own value, so the constructor is a direct delegation rather
+  than a field-by-field copy. Shipped: `BackendType::Databricks`, `Target.host`/`.token` with
+  redacting `Debug`/serde, `Config::validate_targets`/`check_literal_secrets`,
+  `smelt-backend-spark`'s `SparkFlavor` discriminator + `plan_session` (pure, no interpreter),
+  `SparkBackend::new_databricks`, `python/smelt/databricks_adapter.py`, the `databricks` cargo
+  feature on `smelt-backends::create_backend`, and a cross-backend-edge refusal in
+  `smelt-runtime` naming both targets. All eight named tests pass with no live workspace; see
+  `phases/02-summary.md`.
 
 ## Blocked
 

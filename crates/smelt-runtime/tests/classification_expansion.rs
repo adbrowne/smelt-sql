@@ -34,6 +34,8 @@ fn duckdb_target() -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 

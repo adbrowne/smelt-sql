@@ -401,7 +401,7 @@ fn default_schema() -> String {
     "main".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Target {
     #[serde(rename = "type")]
     pub target_type: String,
@@ -439,6 +439,58 @@ pub struct Target {
     /// Dataset location (e.g. `US`, `europe-west2`). Must match at query time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    // Databricks fields
+    /// Workspace hostname — no scheme, no trailing slash (Databricks only,
+    /// required). E.g. `my-workspace.cloud.databricks.com`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A `${ENV}` reference to a Databricks personal access token or
+    /// service-principal secret (Databricks only, optional). A literal
+    /// value is rejected before interpolation by
+    /// [`check_literal_secrets`]. Absent means the session authenticates
+    /// with the client's ambient Databricks credentials.
+    ///
+    /// `serialize_with` redacts a present value — every rendering path for a
+    /// `databricks` target's config, not only [`std::fmt::Debug`], must
+    /// never surface the resolved secret (`multi_backend.md` §"Connection
+    /// security").
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "redact_token"
+    )]
+    pub token: Option<String>,
+}
+
+fn redact_token<S>(token: &Option<String>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    debug_assert!(token.is_some(), "skip_serializing_if handles the None case");
+    serializer.serialize_str("<redacted>")
+}
+
+/// Hand-written so a resolved `token` never appears in a log line, panic
+/// message, or debug-formatted error — the connection-security rule for
+/// `databricks` targets (`docs/specs/multi_backend.md` §"Connection
+/// security"). Every other field prints verbatim.
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Target")
+            .field("target_type", &self.target_type)
+            .field("database", &self.database)
+            .field("schema", &self.schema)
+            .field("connect_url", &self.connect_url)
+            .field("catalog", &self.catalog)
+            .field("warehouse", &self.warehouse)
+            .field("format", &self.format)
+            .field("settings", &self.settings)
+            .field("project", &self.project)
+            .field("dataset", &self.dataset)
+            .field("location", &self.location)
+            .field("host", &self.host)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Target {
@@ -452,6 +504,7 @@ impl Target {
             "duckdb" => Ok(BackendType::DuckDB),
             "spark" => Ok(BackendType::Spark),
             "bigquery" => Ok(BackendType::BigQuery),
+            "databricks" => Ok(BackendType::Databricks),
             other => Err(anyhow::anyhow!("unknown backend type `{other}`")),
         }
     }
@@ -464,9 +517,13 @@ impl Target {
     /// format is needed).
     pub fn table_format(&self) -> Option<TableFormat> {
         match self.backend_type() {
-            // Table format is a Spark concept; DuckDB and BigQuery each own their
+            // Table format is a Spark concept; DuckDB, BigQuery, and Databricks
+            // (Free Edition serverless has no format choice) each own their
             // storage and expose no choice.
-            Ok(BackendType::DuckDB) | Ok(BackendType::BigQuery) | Err(_) => None,
+            Ok(BackendType::DuckDB)
+            | Ok(BackendType::BigQuery)
+            | Ok(BackendType::Databricks)
+            | Err(_) => None,
             Ok(BackendType::Spark) => Some(self.format.unwrap_or_default()),
         }
     }
@@ -477,6 +534,7 @@ pub enum BackendType {
     DuckDB,
     Spark,
     BigQuery,
+    Databricks,
 }
 
 /// Table format for Spark targets.
@@ -1437,6 +1495,68 @@ fn interpolate_string(
 /// [`Config::get_incremental_with_metadata`] so every `batched:`-shaped
 /// consumer sees the top-level spellings identically to the retired
 /// sub-block form.
+/// The keys `databricks` hard-errors on, each belonging to another
+/// backend's shape (`smelt_yml.md` §"Target shape"). Table-driven so
+/// [`Config::validate_targets`] names every offending key rather than
+/// stopping at the first.
+type ForeignKeyCheck = (&'static str, fn(&Target) -> bool);
+const DATABRICKS_FOREIGN_KEYS: &[ForeignKeyCheck] = &[
+    ("connect_url", |t| t.connect_url.is_some()),
+    ("warehouse", |t| t.warehouse.is_some()),
+    ("format", |t| t.format.is_some()),
+    ("database", |t| t.database.is_some()),
+    ("settings", |t| t.settings.is_some()),
+    ("project", |t| t.project.is_some()),
+    ("dataset", |t| t.dataset.is_some()),
+    ("location", |t| t.location.is_some()),
+];
+
+/// Pure pre-interpolation pass: a `databricks` target's `token` must be
+/// exactly a `${VAR}` reference, never a literal value (`smelt_yml.md`
+/// §"Target shape") — the value is a whole-workspace credential, and a
+/// literal would sit in a checked-in file. Runs over the **raw** YAML text
+/// because `interpolate_env_vars` is lossy about a value's origin: once
+/// resolved, a literal token and an interpolated one look identical.
+/// Malformed YAML is not reported here — the downstream `Config` parse
+/// produces that diagnostic.
+fn check_literal_secrets(text: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
+        return errors;
+    };
+    let Some(targets) = value.get("targets").and_then(serde_yaml::Value::as_mapping) else {
+        return errors;
+    };
+    for (name, target) in targets {
+        let Some(target_map) = target.as_mapping() else {
+            continue;
+        };
+        let is_databricks = target_map
+            .get(serde_yaml::Value::String("type".to_string()))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("databricks"));
+        if !is_databricks {
+            continue;
+        }
+        let Some(token) = target_map
+            .get(serde_yaml::Value::String("token".to_string()))
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        let is_env_ref =
+            token.starts_with("${") && token.ends_with('}') && token.matches("${").count() == 1;
+        if !is_env_ref {
+            let name = name.as_str().unwrap_or("?");
+            errors.push(format!(
+                "targets.{name}.token: a literal Databricks token is a hard configuration \
+                 error — use `${{ENV_VAR}}` instead, never a checked-in secret"
+            ));
+        }
+    }
+    errors
+}
+
 fn fold_smelt_yml_incremental_keys(model_config: &ModelConfig) -> PartitionGrainConfig {
     let mut batched = PartitionGrainConfig::default();
     if let Some(merge_key) = &model_config.merge_key {
@@ -1457,6 +1577,18 @@ impl Config {
                 source: e.into(),
             })?;
 
+        // Must run on the raw text, before interpolation: once `${VAR}` is
+        // resolved, a literal token and an interpolated one are
+        // indistinguishable (`smelt_yml.md` §"Target shape").
+        let secret_errors = check_literal_secrets(&content);
+        if !secret_errors.is_empty() {
+            return Err(ConfigError::LoadError {
+                path: config_path,
+                source: anyhow::anyhow!("smelt.yml:\n  {}", secret_errors.join("\n  ")),
+            }
+            .into());
+        }
+
         let interpolated = interpolate_env_vars(&content, &|name| std::env::var(name).ok())
             .map_err(|e| ConfigError::LoadError {
                 path: config_path.clone(),
@@ -1465,13 +1597,64 @@ impl Config {
 
         let (config, warnings) =
             Self::parse_with_warnings(&interpolated).map_err(|e| ConfigError::LoadError {
-                path: config_path,
+                path: config_path.clone(),
                 source: e.into(),
             })?;
         for w in &warnings {
             warn!("{}", w);
         }
+
+        if let Err(target_errors) = config.validate_targets() {
+            return Err(ConfigError::LoadError {
+                path: config_path,
+                source: anyhow::anyhow!("smelt.yml:\n  {}", target_errors.join("\n  ")),
+            }
+            .into());
+        }
+
         Ok(config)
+    }
+
+    /// Per-target key-placement validation (`smelt_yml.md` §"Target shape").
+    /// Today this is enforced for `databricks` targets only: `host` is
+    /// required (and must be a bare hostname), and each of the eight keys
+    /// belonging to another backend's shape is a hard error naming both the
+    /// key and the backend — Free Edition's serverless compute has no
+    /// warehouse path or format choice, so a silently-dropped `warehouse:`
+    /// would lose the user's intent rather than reject it.
+    pub fn validate_targets(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        for (name, target) in &self.targets {
+            if !matches!(target.backend_type(), Ok(BackendType::Databricks)) {
+                continue;
+            }
+            match &target.host {
+                None => errors.push(format!(
+                    "targets.{name}: `databricks` target requires `host` (workspace hostname, \
+                     e.g. `my-workspace.cloud.databricks.com`)"
+                )),
+                Some(host) if host.contains("://") || host.ends_with('/') => {
+                    errors.push(format!(
+                        "targets.{name}: `host` must be a bare hostname with no scheme and no \
+                         trailing slash, got `{host}`"
+                    ));
+                }
+                Some(_) => {}
+            }
+            for (key, present) in DATABRICKS_FOREIGN_KEYS {
+                if present(target) {
+                    errors.push(format!(
+                        "targets.{name}: `{key}` is not a valid key on a `databricks` target \
+                         (databricks backend)"
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Parse `smelt.yml` text into a `Config` plus any warnings about
@@ -1947,8 +2130,220 @@ targets:
             project: Some("p".to_string()),
             dataset: Some("d".to_string()),
             location: None,
+            host: None,
+            token: None,
         };
         assert_eq!(target.table_format(), None);
+    }
+
+    /// `type: databricks` resolves to `BackendType::Databricks`; table
+    /// format is `None` (format is a Spark concept); an unknown `type:`
+    /// still errors.
+    #[test]
+    fn backend_type_resolves_databricks() {
+        let yaml = r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    host: my-workspace.cloud.databricks.com
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("databricks target must parse");
+        let target = &config.targets["dbx"];
+        assert!(matches!(
+            target.backend_type().expect("databricks is a known type"),
+            BackendType::Databricks
+        ));
+        assert_eq!(target.table_format(), None);
+
+        let unknown = Target {
+            target_type: "snowflake".to_string(),
+            database: None,
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: None,
+            dataset: None,
+            location: None,
+            host: None,
+            token: None,
+        };
+        unknown
+            .backend_type()
+            .expect_err("unrecognised `type:` must still error");
+    }
+
+    /// A `databricks` target with no `host` is a load error naming the key;
+    /// a `host` carrying a scheme or trailing slash is rejected.
+    #[test]
+    fn databricks_target_requires_host() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path()).expect_err("missing host must be a hard error");
+        assert!(
+            err.to_string().contains("host"),
+            "error must name the missing `host` key: {err}"
+        );
+
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    host: https://my-workspace.cloud.databricks.com/
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path()).expect_err("scheme + trailing slash must be rejected");
+        assert!(
+            err.to_string().contains("host"),
+            "error must name `host`: {err}"
+        );
+    }
+
+    /// Each of the eight keys belonging to another backend's shape is a hard
+    /// error on a `databricks` target, naming both the offending key and the
+    /// backend.
+    #[test]
+    fn databricks_target_refuses_spark_only_keys() {
+        let foreign_keys = [
+            ("connect_url", "connect_url: sc://h:443"),
+            ("warehouse", "warehouse: /tmp/wh"),
+            ("format", "format: delta"),
+            ("database", "database: db.duckdb"),
+            ("settings", "settings:\n      memory_limit: 4GB"),
+            ("project", "project: my-gcp-project"),
+            ("dataset", "dataset: analytics"),
+            ("location", "location: US"),
+        ];
+        for (key, yaml_line) in foreign_keys {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::fs::write(
+                dir.path().join("smelt.yml"),
+                format!(
+                    r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    host: my-workspace.cloud.databricks.com
+    {yaml_line}
+"#
+                ),
+            )
+            .unwrap();
+            let err = Config::load(dir.path())
+                .expect_err(&format!("`{key}` must be refused on a databricks target"));
+            let message = err.to_string();
+            assert!(
+                message.contains(key),
+                "error must name the offending key `{key}`: {message}"
+            );
+            assert!(
+                message.contains("databricks"),
+                "error must name the backend: {message}"
+            );
+        }
+    }
+
+    /// A literal (non-`${VAR}`) `token` is a hard error; `${ENV_VAR}` loads;
+    /// an absent `token` loads (the ambient-credential form).
+    #[test]
+    fn databricks_literal_token_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    host: my-workspace.cloud.databricks.com
+    token: dapi1234567890abcdef
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path()).expect_err("literal token must be a hard error");
+        assert!(
+            err.to_string().contains("token"),
+            "error must name `token`: {err}"
+        );
+
+        std::env::set_var("SMELT_TEST_DBX_TOKEN", "secret-value");
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    host: my-workspace.cloud.databricks.com
+    token: ${SMELT_TEST_DBX_TOKEN}
+"#,
+        )
+        .unwrap();
+        let config = Config::load(dir.path()).expect("${VAR} token must load");
+        assert_eq!(config.targets["dbx"].token.as_deref(), Some("secret-value"));
+        std::env::remove_var("SMELT_TEST_DBX_TOKEN");
+
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    host: my-workspace.cloud.databricks.com
+"#,
+        )
+        .unwrap();
+        let config = Config::load(dir.path()).expect("absent token must load (ambient form)");
+        assert_eq!(config.targets["dbx"].token, None);
+    }
+
+    /// `Debug` and serde renderings of a `Target` holding a resolved token
+    /// contain no substring of the token value.
+    #[test]
+    fn databricks_target_config_render_redacts_token() {
+        let target = Target {
+            target_type: "databricks".to_string(),
+            database: None,
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: None,
+            dataset: None,
+            location: None,
+            host: Some("my-workspace.cloud.databricks.com".to_string()),
+            token: Some("super-secret-token-value".to_string()),
+        };
+        let debug_output = format!("{:?}", target);
+        assert!(
+            !debug_output.contains("super-secret-token-value"),
+            "Debug output must redact the token: {debug_output}"
+        );
+        let serialized = serde_yaml::to_string(&target).expect("target must serialize");
+        assert!(
+            !serialized.contains("super-secret-token-value"),
+            "serialized output must not contain the raw token: {serialized}"
+        );
     }
 
     /// `${VAR}` in a target field resolves against a set (injected) variable.

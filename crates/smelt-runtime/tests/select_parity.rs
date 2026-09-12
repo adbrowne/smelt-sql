@@ -27,6 +27,8 @@ fn make_target(name: &str) -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 

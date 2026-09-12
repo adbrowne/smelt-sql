@@ -401,6 +401,20 @@ impl BackendCapabilities {
             supports_fingerprint_sidecar: false,
         }
     }
+
+    /// Capabilities for a `databricks` target (Databricks Connect, Unity
+    /// Catalog, Delta).
+    ///
+    /// Equal to [`Self::spark_delta`] field-for-field: Databricks and Spark
+    /// share the SparkSQL dialect and Databricks' managed tables are Delta.
+    /// Not yet independently live-verified against a Databricks workspace —
+    /// every flag here is inherited from the Spark(Delta) column rather than
+    /// executed (`docs/specs/multi_backend.md` §Known Divergences "The
+    /// Databricks capability matrix column is inherited, not independently
+    /// verified").
+    pub fn databricks() -> Self {
+        Self::spark_delta()
+    }
 }
 
 #[cfg(test)]

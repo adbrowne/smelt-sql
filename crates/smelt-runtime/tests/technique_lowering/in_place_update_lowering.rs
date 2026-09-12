@@ -35,6 +35,8 @@ fn test_config() -> smelt_core::config::Config {
             project: None,
             dataset: None,
             location: None,
+            host: None,
+            token: None,
         },
     );
     smelt_core::config::Config {

@@ -30,6 +30,8 @@ fn duckdb_target() -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 
@@ -46,6 +48,8 @@ fn spark_target() -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 
@@ -62,6 +66,8 @@ fn bigquery_target() -> Target {
         project: Some("p".to_string()),
         dataset: Some("main".to_string()),
         location: Some("US".to_string()),
+        host: None,
+        token: None,
     }
 }
 

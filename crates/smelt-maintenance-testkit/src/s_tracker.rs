@@ -547,6 +547,7 @@ fn print_body_for_dialect(sql: &str, backend_type: BackendType) -> String {
         BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
         BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
+        BackendType::Databricks => (SqlDialect::SparkSQL, BackendCapabilities::databricks()),
     };
     let parsed = smelt_parser::parse(sql);
     let ctx = PrintContext {

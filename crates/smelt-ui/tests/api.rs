@@ -109,6 +109,8 @@ fn state_from_project(project_root: PathBuf) -> Arc<AppState> {
             project: None,
             dataset: None,
             location: None,
+            host: None,
+            token: None,
         },
     );
     let mut config = config;
@@ -265,6 +267,7 @@ fn assemble_diagnostics_independently(
             smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
+            smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
         })
         .map(smelt_backend::maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);

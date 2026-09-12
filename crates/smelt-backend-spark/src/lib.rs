@@ -19,10 +19,13 @@ use smelt_backend::{
     PartitionRange, Region, SqlDialect,
 };
 
+mod session;
 mod sql;
 
 #[cfg(test)]
 mod tests;
+
+pub use session::{plan_session, SessionArgs, SessionPlan, SparkFlavor};
 
 /// Spark backend for smelt, powered by PySpark via PyO3.
 ///
@@ -34,11 +37,16 @@ pub struct SparkBackend {
     #[allow(dead_code)]
     schema: String,
     /// Base directory for Parquet output (from target config `warehouse` field).
+    /// Always `None` for [`SparkFlavor::Databricks`] — serverless compute has
+    /// no host-visible warehouse directory.
     warehouse: Option<String>,
     /// Whether to create managed tables as Delta (`USING DELTA`) or plain Parquet.
     /// Delta is required for DELETE / MERGE / schema-evolution operations.
     /// Parquet is used for the cross-engine read path (DuckDB reads raw Parquet).
     use_delta: bool,
+    /// Which product this instance's session was built against — drives
+    /// `capabilities()` and `materialized_path()`. See [`SparkFlavor`].
+    flavor: SparkFlavor,
 }
 
 // Safety: Py<PyAny> is Send, and we only access it inside `Python::attach`
@@ -110,6 +118,7 @@ impl SparkBackend {
             schema: schema.clone(),
             warehouse: warehouse.map(|s| s.to_string()),
             use_delta,
+            flavor: SparkFlavor::Spark,
         };
 
         // Create the schema before selecting it (spec: multi_backend.md §Semantics
@@ -123,6 +132,102 @@ impl SparkBackend {
 
         tracing::info!(
             "Spark session established (catalog={}, schema={})",
+            backend.catalog,
+            backend.schema
+        );
+
+        Ok(backend)
+    }
+
+    /// Create a new Databricks backend by initializing a Databricks Connect
+    /// (serverless) session.
+    ///
+    /// # Arguments
+    /// * `host` - Workspace hostname (no scheme, no trailing slash), e.g.
+    ///   `my-workspace.cloud.databricks.com`.
+    /// * `token` - `${ENV}`-resolved personal access token / service-principal
+    ///   secret. `None` selects the client's ambient Databricks credentials
+    ///   (`docs/specs/smelt_yml.md` §"Target shape").
+    /// * `catalog` - Unity Catalog catalog name (defaults to `workspace` at
+    ///   the `smelt-backends::create_backend` call site).
+    /// * `schema` - Unity Catalog schema name.
+    ///
+    /// Never logs `token` — the connection-security rule
+    /// (`docs/specs/multi_backend.md` §"Connection security") requires every
+    /// rendering path for a `databricks` target to redact it.
+    pub async fn new_databricks(
+        host: &str,
+        token: Option<&str>,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<Self, BackendError> {
+        let plan = session::plan_session(SparkFlavor::Databricks, None, Some(host), token);
+        let module = plan.module;
+        let class = plan.class;
+        let session::SessionArgs::Databricks {
+            host: plan_host,
+            token: plan_token,
+        } = plan.args
+        else {
+            unreachable!("plan_session(Databricks, ..) always returns SessionArgs::Databricks");
+        };
+        let catalog = catalog.to_string();
+        let schema = schema.to_string();
+
+        let adapter = tokio::task::spawn_blocking({
+            let catalog = catalog.clone();
+            let plan_host = plan_host.clone();
+            move || {
+                Python::attach(|py| {
+                    let py_module = py.import(module).map_err(|e| {
+                        BackendError::connection_failed(format!(
+                            "Failed to import {}: {}. \
+                             Ensure databricks-connect is installed: pip install databricks-connect",
+                            module, e
+                        ))
+                    })?;
+
+                    let cls = py_module.getattr(class).map_err(|e| {
+                        BackendError::connection_failed(format!("{} class not found: {}", class, e))
+                    })?;
+
+                    let adapter = cls
+                        .call1((&plan_host, &catalog, plan_token.as_deref()))
+                        .map_err(|e| {
+                            BackendError::connection_failed(format!(
+                                "Failed to create DatabricksSession: {}",
+                                e
+                            ))
+                        })?;
+
+                    Ok::<Py<PyAny>, BackendError>(adapter.unbind())
+                })
+            }
+        })
+        .await
+        .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))??;
+
+        let backend = Self {
+            adapter,
+            catalog,
+            schema: schema.clone(),
+            // Free Edition serverless compute has no host-visible warehouse
+            // directory; `materialized_path()` returns `None` for this flavor
+            // regardless (see below), so this field is never read for
+            // Databricks — set to `None` to make that explicit.
+            warehouse: None,
+            use_delta: true,
+            flavor: SparkFlavor::Databricks,
+        };
+
+        if !schema.is_empty() {
+            backend.ensure_schema(&schema).await?;
+            backend.py_select_schema(&schema).await?;
+        }
+
+        tracing::info!(
+            "Databricks session established (host={}, catalog={}, schema={})",
+            plan_host,
             backend.catalog,
             backend.schema
         );
@@ -440,10 +545,20 @@ impl Backend for SparkBackend {
     }
 
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities::spark()
+        match self.flavor {
+            SparkFlavor::Spark => BackendCapabilities::spark(),
+            SparkFlavor::Databricks => BackendCapabilities::databricks(),
+        }
     }
 
     fn materialized_path(&self, schema: &str, name: &str) -> Option<std::path::PathBuf> {
+        // Serverless Databricks compute exposes no host-visible warehouse
+        // directory at all (`docs/specs/multi_backend.md` §"Cross-engine data
+        // exchange") — a cross-backend edge into/out of a `databricks` target
+        // is refused upstream in `smelt-runtime`, never reaches here.
+        if matches!(self.flavor, SparkFlavor::Databricks) {
+            return None;
+        }
         // Spark stores managed tables under {warehouse}/{schema}.db/{table_name} —
         // the ".db" suffix is the Hive metastore convention used by Spark SQL when
         // spark.sql.warehouse.dir is set (empirically verified on Spark 4.1.x, W6·P3).

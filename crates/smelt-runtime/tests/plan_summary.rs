@@ -40,6 +40,8 @@ fn make_config() -> Arc<Config> {
             project: None,
             dataset: None,
             location: None,
+            host: None,
+            token: None,
         },
     );
     Arc::new(Config {

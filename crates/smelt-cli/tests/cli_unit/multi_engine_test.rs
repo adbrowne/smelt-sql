@@ -32,6 +32,8 @@ fn make_duckdb_target(schema: &str) -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 
@@ -48,6 +50,8 @@ fn make_spark_target(schema: &str, warehouse: &str) -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 
