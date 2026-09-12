@@ -114,4 +114,4 @@ crates/smelt-state/src/ddl_duckdb.rs 1883
 crates/smelt-state/src/ddl_spark.rs 1708
 crates/smelt-state/src/file_store.rs 1695
 crates/smelt-state/src/schema_tracking.rs 4611
-crates/smelt-types/src/signatures/tests.rs 2467
+crates/smelt-types/src/signatures/tests.rs 2484

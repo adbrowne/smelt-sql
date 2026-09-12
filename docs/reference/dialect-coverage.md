@@ -96,6 +96,7 @@ the exact reverse.
 | `DAY` | call | native | native | native (gap #179) |
 | `DAYOFWEEK` | call | native | template:DAYOFWEEK({0}) - 1 | native (gap #179) |
 | `DENSE_RANK` | call | native | native | native |
+| `EPOCH_US` | call | native | template:unix_micros({0}) | template:UNIX_MICROS({0}) |
 | `EVERY` | call | rename:BOOL_AND | native | rename:LOGICAL_AND |
 | `EXISTS` | special | native | native | native |
 | `EXP` | call | native | native | native |

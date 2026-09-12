@@ -155,6 +155,7 @@ pub(super) const REGISTRY_MIGRATED: &[&str] = &[
     "DATE_PART",
     "DATE_ADD", // (Date, Interval) → Timestamp (fixed return)
     "DATE_SUB", // (Date, Interval) → Timestamp (fixed return)
+    "EPOCH_US", // (Timestamp) → BigInt (fixed return)
     // ── JSON (fixed return) ─────────────────────────────────────────────────
     "JSON_OBJECT",
     "JSON_ARRAY",

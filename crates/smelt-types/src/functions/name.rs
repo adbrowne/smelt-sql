@@ -73,6 +73,7 @@ impl SqlFunction {
             Self::ToSeconds => "TO_SECONDS",
             Self::DateAdd => "DATE_ADD",
             Self::DateSub => "DATE_SUB",
+            Self::EpochUs => "EPOCH_US",
             Self::Concat => "CONCAT",
             Self::Upper => "UPPER",
             Self::Lower => "LOWER",

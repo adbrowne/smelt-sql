@@ -104,6 +104,7 @@ pub enum SqlFunction {
     ToSeconds,
     DateAdd,
     DateSub,
+    EpochUs,
 
     // String functions
     Concat,
@@ -265,6 +266,7 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::ToSeconds,
     SqlFunction::DateAdd,
     SqlFunction::DateSub,
+    SqlFunction::EpochUs,
     SqlFunction::Concat,
     SqlFunction::Upper,
     SqlFunction::Lower,

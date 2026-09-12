@@ -245,3 +245,33 @@ fn actor_sessions_compiles_without_bare_varchar() {
         "a bare VARCHAR cast target must be spelled STRING on the databricks target: {stdout}"
     );
 }
+
+/// `silver.actor_sessions` calls `epoch_us`, a DuckDB-only builtin with no
+/// `BuiltinRegistry` entry until phase 6e — it reached Databricks printed
+/// verbatim and failed `[UNRESOLVED_ROUTINE]`. Compiling with `--dry-run`
+/// needs no live workspace; it only exercises the registry-driven Spark
+/// emission spelling (`unix_micros`).
+#[test]
+fn actor_sessions_compiles_without_epoch_us() {
+    let out = Command::new(smelt_bin())
+        .args(["run", "--target", DATABRICKS_TARGET, "--dry-run"])
+        .args(["--select", "silver.actor_sessions"])
+        .args(["--project-dir", example_dir().to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run --dry-run`: {e}"));
+    assert!(
+        out.status.success(),
+        "smelt run --target databricks --dry-run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("epoch_us("),
+        "a bare `epoch_us(` must not survive on the databricks target — it must lower to \
+         `unix_micros(`: {stdout}"
+    );
+}

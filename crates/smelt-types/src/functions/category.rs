@@ -71,7 +71,8 @@ impl SqlFunction {
             | Self::Age
             | Self::ToSeconds
             | Self::DateAdd
-            | Self::DateSub => FunctionCategory::DateTime,
+            | Self::DateSub
+            | Self::EpochUs => FunctionCategory::DateTime,
 
             Self::Concat
             | Self::Upper

@@ -164,7 +164,7 @@ of the models or the tooling.
 | 6b | **[live]** Unblock the Databricks run path so more than one model can complete: make the maintenance fingerprint's hash spelling dialect-dispatched (`sha2(x, 256)` on Spark/Databricks) behind a single owner plus a structural gate, reconcile the bare-host/scheme mismatch between the wizard's `SMELT_DBX_HOST` and the `type: databricks` target contract, then re-run the full refresh to a clean baseline and record what remains | done |
 | 6c | **[live]** Recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` as the drop-type-mismatch condition in `SparkBackend::drop_view_if_exists`/`drop_table_if_exists` (one pure, tested predicate per direction), then land the first clean full refresh of the whole model set and record what remains | done |
 | 6d | **[live]** Give a *source-written* cast target the same per-dialect spelling the cast-wrap already gets — bare `VARCHAR`/`TEXT` prints as `STRING` on the SparkSQL dialect — through one shared owner outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
-| 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | planned |
+| 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -172,6 +172,18 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 6e implement): **row 6e done — `epoch_us` registered and confirmed live; a
+  new, unrelated blocker now occupies the same failure point.** `EPOCH_US` landed as a normal
+  `Signature` addition (`(Timestamp) -> BigInt`, registry-first inference, `unix_micros`/
+  `UNIX_MICROS` templates on SparkSQL/BigQuery) — no printer branch, per the Function-registry
+  single-ownership invariant. The live full refresh (run `20260912-121546-c86d9f`) moved from
+  11/1/4 to 11/1/4 again but the failing model's error changed: `silver.actor_sessions`'s `LAG(...)`
+  call carries an explicit window frame, which Spark refuses (`Cannot specify window frame for lag
+  function`) — DuckDB's frame is legitimate there, so this is a Spark-only emission gap, not an
+  `epoch_us`-adjacent issue. Recorded, not fixed, per the outcome's own boundary — same "one
+  construct clears, the next construct at the same failure point is exposed" shape as 6c → 6d →
+  6e. Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-12 (phase 6e plan): **reshape — row 6e inserted before row 7.** Phase 6d's summary shows the full refresh still at 11 success / 1 failed / 4 skipped: `silver.actor_sessions` calls `epoch_us`, a DuckDB-only builtin with *no* `BuiltinRegistry` entry at all, so it reaches Databricks printed verbatim and fails `[UNRESOLVED_ROUTINE]`, skipping three dependents. Criteria 6, 7 and 8 are each stated over "the same model set" / "each model's output", so four models silently absent is work that serves the Success criteria and cannot be deferred out; the alternative 6c/6d posed (excluding `actor_sessions` and its dependents from criteria 6/7/8) would narrow the outcome and is rejected. The fix shape is a normal `Signature` addition (`EPOCH_US`, `Timestamp -> BigInt`, `Emission::Template("unix_micros({0})")` on SparkSQL), not a structural one, so it is one small phase rather than a programme. Running three incremental windows (row 7) over a model set that cannot full-refresh would also make row 7's evidence untrustworthy, so 6e strictly precedes it. Nothing left the outcome; nothing added to `## Out of scope`.
 

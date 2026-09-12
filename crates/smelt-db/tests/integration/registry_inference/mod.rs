@@ -7,6 +7,7 @@
 //! property that must hold under either path.
 
 mod date_functions;
+mod epoch_us;
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;

@@ -393,6 +393,11 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
+        SqlFunction::EpochUs => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: true,
+        }),
+
         SqlFunction::Replace
         | SqlFunction::Translate
         | SqlFunction::Reverse
