@@ -51,7 +51,8 @@ _parent_module_source() {
     fi
     local name
     name="$(basename "$dir")"
-    local sibling="$(dirname "$dir")/$name.rs"
+    local sibling
+    sibling="$(dirname "$dir")/$name.rs"
     [[ -f "$sibling" ]] && echo "$sibling"
 }
 

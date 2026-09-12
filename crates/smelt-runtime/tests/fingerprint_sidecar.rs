@@ -1686,3 +1686,32 @@ async fn sidecar_entry_points_refuse_without_the_capability() {
         BackendError::UnsupportedFeature { .. }
     ));
 }
+
+/// Phase 2 test 8 — the loud-refusal gate: `supports_fingerprint_sidecar` is
+/// declared `true` for DuckDB alone. Flipping it on for another backend
+/// requires that backend's own live value-leg sweep (the fingerprint/repair-
+/// group digest SQL executing and agreeing with DuckDB's own semantics on
+/// real data, not merely parsing) — this test fails offline the moment the
+/// flag moves without that work, so the capability can never silently widen.
+#[test]
+fn sidecar_capability_is_declared_only_where_the_digest_sql_is_verified() {
+    use smelt_dialect::BackendCapabilities;
+
+    assert!(
+        BackendCapabilities::duckdb().supports_fingerprint_sidecar,
+        "DuckDB is the only backend with a live value-leg sweep for the fingerprint/repair-\
+         group digest SQL"
+    );
+    for (name, caps) in [
+        ("spark_delta", BackendCapabilities::spark_delta()),
+        ("spark_parquet", BackendCapabilities::spark_parquet()),
+        ("bigquery", BackendCapabilities::bigquery()),
+    ] {
+        assert!(
+            !caps.supports_fingerprint_sidecar,
+            "{name} declares supports_fingerprint_sidecar even though phase 2 only proved the \
+             emitted SQL well-formed for that dialect, not verified live against a real \
+             backend — flipping this flag requires that backend's own value-leg sweep first"
+        );
+    }
+}

@@ -1,0 +1,15 @@
+external_step:
+  description: >
+    Loads one day of the pinned GitHub Archive sample (`sample.sql`) into
+    both `raw.github_events` (event-time-partitioned) and
+    `raw.github_events_arrival` (arrival-partitioned), plus the previous
+    day's deterministic 2% redelivery slice — the same rule
+    `scripts/bq-dogfood-loader.sh` plays back against BigQuery. smelt orders
+    this step ahead of every model that reads either source and invokes it;
+    it does not author the load (`docs/specs/sources.md` §"Externally-
+    produced sources (black-box steps)").
+  produces:
+    - smelt.sources.raw.github_events
+    - smelt.sources.raw.github_events_arrival
+  command: ["bash", "load_day.sh", "--date", "{run_date}"]
+  cadence: '1 day'

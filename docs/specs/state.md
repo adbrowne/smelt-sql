@@ -55,6 +55,24 @@ declaration the SQL supports is never rejected for lack of state; only a declara
 *semantics themselves* require state (a `contract.deferral` lag budget) fails loudly under a
 posture that cannot supply it.
 
+The degradation contract covers two distinct losses, and conflating them is what produces a
+refusal where a downgrade belongs:
+
+- **Losing a technique.** The structure a technique *needs to be correct* is unavailable, so
+  the cell downgrades to its recompute-family equivalent and records
+  `MaintenanceStateDowngraded`. The maintained table still equals what a full refresh would
+  produce; only the cost changes.
+- **Losing precision.** The structure carries no correctness obligation of its own but lets a
+  downstream consumer narrow its work — the observed output delta is the instance. Here there
+  is no cheaper technique to fall back to and nothing to swap: the write proceeds, the record
+  is skipped, and the consumer takes its already-defined widen-never-narrow path. A run must
+  never refuse for this class of loss. It must also not be silent about it: a skipped record is
+  reported as a run-time warning naming the model, the dialect, and the structure, so an operator
+  sees the precision the run gave up without raising the log level. This is the one asymmetry
+  between the two classes' recording — a lost *technique* is a plan-time fact and reaches
+  `MaintenanceStateDowngraded` and `smelt explain`, while a lost *record* is a per-write fact with
+  no plan-level cell to hang on (see §Known Divergences).
+
 ## Surface
 
 ### The state-structure inventory
@@ -83,6 +101,182 @@ structure's format and semantics; this table owns only its class.
 The class assignment is itself normative: a structure listed as correctness may never be
 realised only in `.smelt/`, and a structure listed as observability may never become a
 correctness dependency without moving classes here first.
+
+#### Which dialects realise which structure
+
+A structure is **realisable** on a dialect when that dialect has emitters for it and a
+backend seam to run them through. Realisability is per-dialect data, not a property of the
+structure:
+
+| Structure | DuckDB | BigQuery | Spark (Delta) |
+|---|---|---|---|
+| Transactional merge ledger | yes | yes | **no** |
+| Reconciliation ledger (frontier record) | yes | yes | **no** |
+| Observed output deltas | yes | yes | **no** |
+| Fingerprint sidecar | yes | not yet | **no** |
+| Tombstone ledger (succession grain) | yes | yes | **no** |
+
+"not yet" is pending work; "**no**" is a permanent, reasoned absence. Spark's is the
+latter: Delta provides per-table atomicity and no cross-table transaction, so a ledger
+write and its data write cannot be made atomic, and the additive fold's never-fold-twice
+refusal has no sound realisation there.
+
+Four facts of BigQuery's **ledger** realisation are load-bearing rather than incidental:
+
+- **The ledger table is addressed by a two-part name.** The ledger lives beside the models
+  it records, in the run's own schema, and is named `` `<schema>._smelt_ledger` `` — one
+  backticked path, resolving against the job's default project, the same shape every other
+  GoogleSQL object this tool emits uses. A schema that already carries a project prefix
+  works unchanged.
+- **Its `PRIMARY KEY` is declared `NOT ENFORCED`.** GoogleSQL requires the suffix, and the
+  declaration is documentation and an optimiser hint — never a constraint. Nothing on
+  BigQuery may rely on the key to refuse a duplicate.
+- **The re-run-tolerant record is a `MERGE … WHEN NOT MATCHED`.** GoogleSQL has no
+  `ON CONFLICT DO NOTHING`, so the idempotent bookkeeping upsert is expressed as a merge
+  against a one-row inline source. The statement is a no-op when the window is already
+  recorded, which is the same observable behaviour the conflict clause gives on DuckDB.
+- **The never-fold-twice refusal is a zero-row abort, not a key violation.** The second
+  fact rules out DuckDB's mechanism entirely: there the refusal *is* the `PRIMARY KEY`
+  violation, and an unenforced key raises nothing. On BigQuery the additive fold's ledger
+  record is the same conditional `MERGE`, and the refusal is its effect — the record, an
+  `IF @@row_count = 0 THEN RAISE`, and the fold action run in one multi-statement
+  transaction, so a repeat aborts before the action is reached and the transaction rolls
+  back. The guarantee is one guarantee with two realisations, not two guarantees.
+
+  This rests on a documented BigQuery property stronger than the snapshot isolation it is
+  usually stated alongside: two transactions that mutate rows in the same table cannot run
+  concurrently, and a conflicting transaction is cancelled. Both folds of the same delta
+  mutate the ledger table, so they cannot both commit — one wins, the other is cancelled
+  loudly, and a later re-run reads the committed row and refuses. Were that property to
+  weaken, the correct response is to withdraw the realisation, not to fall back on a
+  check-then-act probe.
+
+Three facts of BigQuery's **observed-output-delta** realisation are load-bearing in the same
+way:
+
+- **The idempotent replace is a `MERGE`, not a conflict clause.** GoogleSQL has no
+  `ON CONFLICT … DO UPDATE`, so re-recording a window is `MERGE … WHEN MATCHED THEN UPDATE
+  … WHEN NOT MATCHED THEN INSERT` against the same three-column window key — the same
+  observable behaviour as DuckDB's conflict clause, and it does not lean on the unenforced
+  `PRIMARY KEY`.
+- **The delta's key set is `ARRAY_AGG(DISTINCT CAST(… AS STRING) IGNORE NULLS)`.** Three
+  separate GoogleSQL facts collapse into that one expression, and each is a correctness
+  requirement rather than a spelling: there is no `FILTER (WHERE …)` clause; `ARRAY_AGG`
+  **raises** on a NULL element rather than yielding a NULL array, so `IGNORE NULLS` is what
+  keeps an unmatched key from failing the run; and array element types are not coerced on
+  write, so a non-string key — or the literal NULL a model with no partition axis projects
+  as its partition — must be cast before it can enter an `ARRAY<STRING>` column. The
+  `COALESCE` to an empty typed array is kept for the same reason it exists on DuckDB:
+  `ARRAY_AGG` over zero rows is `NULL`, and folding that to `[]` is what makes a
+  fully-suppressed run record present-and-empty.
+- **Empty-versus-absent rests on row presence, never on a column value.** BigQuery cannot
+  represent a NULL array at all — a NULL written to an `ARRAY` column reads back as empty —
+  so a realisation that encoded "never recorded" in a column would lose the distinction the
+  moment it crossed the wire. It does not, and this is a property of the guarantee rather
+  than an implementation detail: *absent* means **no row for the window**
+  (`incremental_models.md` §"The graph layer" — "Empty and absent are distinct"), the upsert
+  always writes exactly one row per recorded window, and the read filters on the window key
+  alone. Array flattening can neither manufacture nor destroy a row. For the same reason the
+  two array columns are declared without `NOT NULL`: nothing depends on it.
+
+**One shape BigQuery degrades rather than binds atomically.** The seam that records
+bookkeeping in the same transaction as its write cannot hold a write group that creates a
+permanent entity, because GoogleSQL does not permit that DDL inside a transaction — and a
+maintained model's *first* run writes `CREATE TABLE … AS` rather than a merge. There the
+statements run unbound: the write first, the bookkeeping record after, and the lost
+atomicity is reported. The ordering is what makes the degradation admissible. A record that
+reads the target's pre-write state has nothing to read when the write is what creates the
+target, so running it second loses nothing; and the surviving exposure — a created table
+whose window went unrecorded — costs a redundant re-run, whereas the reverse (a record
+claiming a write that never happened) could mislead a later run. This is a degradation of
+*atomicity only*: what the cell computes is unchanged.
+
+Four facts of BigQuery's **tombstone-ledger** realisation are load-bearing, and unlike the
+two above they are not confined to a bookkeeping module. The tombstone ledger's table is
+bookkeeping, but every statement it participates in — the idempotent tombstone insert, the
+presented `MERGE`, the rebuild's truncate-and-refill pair, the clock-tie probe — is a
+*maintenance* statement, so its dialect plurality lives in the maintenance emitter that
+single-owns it rather than in a per-dialect DDL module.
+
+- **The touched-key scoping is a correlated `EXISTS`, not a row-constructor `IN`.**
+  GoogleSQL has no row constructor: `(a, b)` is a parenthesised expression there, not a
+  tuple, so a multi-column `IN` subquery is a syntax error. The neighbour domain's
+  restriction to the keys the batch touches is spelled as a correlated `EXISTS` over an
+  aliased relation instead. This is a correctness requirement, not a preference: the
+  single-key case would have parsed and every multi-key model would have failed at the
+  warehouse.
+- **The dedup relation is an explicit `ROW_NUMBER() … WHERE rn = 1`, not `QUALIFY`, and it
+  is nested derived tables rather than a `WITH` inside the `MERGE`'s `USING`.** Both of the
+  constructs it avoids exist in GoogleSQL, and neither's acceptance in this exact position
+  can be established without a warehouse. The nested-derived-table form denotes the same
+  relation and is accepted everywhere, so it is what BigQuery gets — the same shape the
+  full-rebuild fold already uses.
+- **Truncating the ledger says `WHERE TRUE`.** GoogleSQL rejects a `DELETE` with no `WHERE`
+  clause. The rebuild's ledger truncation carries the clause GoogleSQL requires; DuckDB's
+  keeps the bare form.
+- **The ledger table's columns are the model's own inferred types, rendered in GoogleSQL.**
+  A type with no GoogleSQL spelling is refused with the column and the reason named, never
+  substituted — a substituted type is a column the next write cannot fill. The declared
+  `PRIMARY KEY (k…, t)` says `NOT ENFORCED` and, as everywhere else on BigQuery, refuses
+  nothing: the tombstone insert's idempotence is its own anti-join, which never depended on
+  an enforced key in either dialect.
+
+**One shape the succession rebuild degrades on BigQuery.** The `--full-refresh`/`smelt
+rebuild` group re-derives the presented table and the ledger in one transaction on DuckDB.
+It opens with a `CREATE TABLE … AS`, so on BigQuery the same permanent-entity-DDL rule
+applies and the three statements run as separate jobs. This is admissible here in a way it
+is not for an additive fold, and for a reason specific to the statement: the rebuild is a
+pure function of the whole retained source, so a partially-applied rebuild is repaired by
+re-running it, and no bookkeeping row can outlive a write that never happened. It is a
+degradation of *atomicity only* — a rebuild interrupted midway leaves a presented table and
+a ledger that disagree until the next rebuild, and never a ledger that claims a fold that
+did not occur.
+
+**One shape BigQuery refuses rather than realises.** BigQuery does not permit DDL creating
+or dropping permanent entities inside a transaction, and an additive fold's *first* action
+against a not-yet-existing target is a `CREATE TABLE … AS`. There is no safe degradation —
+committing the ledger record and the create separately would let a crash between them leave
+the ledger claiming a fold that never happened — so that first step is refused, naming the
+construct and the remedy: run once with `--full-refresh` to materialise the target, after
+which every step is a merge the transaction can hold. The condition is the backend's
+transactional-DDL capability, not its dialect.
+
+**Concurrency is the price of the same isolation rule.** BigQuery's protection against a
+double fold is write-conflict detection: a transaction that mutates a table another
+in-flight transaction is also mutating is *cancelled*. Every maintained model's bookkeeping
+transaction mutates the one ledger table, so the guarantee that makes a repeat fold
+impossible also makes two of a run's own models' bookkeeping writes mutually exclusive.
+Two rules follow, and neither weakens the isolation:
+
+- **One run serialises its own ledger transactions.** A backend whose ledger writes are
+  transactional and single-table opens at most one such transaction at a time, so a
+  parallel run (the default `--jobs` is the host's core count) does not race itself. The
+  cost is that maintained models' bookkeeping-bound writes run one at a time on that
+  backend; the alternative is losing models at random to cancellation.
+- **A conflict from anywhere else is transient, and retried.** A cancellation raised by a
+  writer this run does not control — a second `smelt` process, an external job — is a
+  *transient* backend error, not a deterministic one: the engine rolls the whole
+  transaction back before cancelling it, so re-issuing the identical statement group is the
+  documented remedy and the ordinary bounded retry performs it. This is the one backend
+  error class whose remedy is retry by the engine's own definition.
+
+Two rules bind this table to the implementation, and they are the whole point of stating
+it:
+
+1. **A claim implies a builder.** Declaring a structure realisable on a dialect that
+   cannot build it is worse than declaring nothing: availability resolution records no
+   downgrade for a structure it believes present, so the run reaches the execution path,
+   finds no builder, and *refuses* — losing exactly the graceful degradation the
+   degradation contract promises.
+2. **An absence implies a downgrade, never a refusal.** Where a structure is unrealisable,
+   the execution path degrades and records the degradation. A technique needing that
+   structure downgrades to its recompute equivalent (below). A structure that only carries
+   *precision* — the observed output delta is the instance — is simply not recorded: the
+   write still happens, and consumers fall back to their widen-never-narrow path, because
+   an absent delta is already defined as a legal fallback trigger
+   (`incremental_models.md` §"The graph layer" — "Empty and absent are distinct"). Costing
+   a downstream recompute its narrowness is a permitted degradation; refusing the run is
+   not.
 
 ### `state.mode` and what each posture provides
 
@@ -284,7 +478,17 @@ lands.
 
 ## Known Divergences / Open Questions
 
-None currently open — `state.mode` is honoured by `execute_project`, the reconciliation ledger
+- **A skipped precision record reaches the operator as a log warning, not as structured run
+  state (#202).** §"The degradation contract"'s precision class is reported per occurrence at warn
+  level, which is what a live BigQuery run showed was missing entirely. It is not yet carried in
+  the run manifest or the run report, and `smelt explain` cannot be asked what a given target
+  would give up (`explain` takes no `--target`), so there is no offline way to see the loss
+  before a run and no machine-readable record of it after one. Both are the same missing piece:
+  a per-model precision-downgrade record derived from the availability layer, which already
+  knows the answer statically. Tracked in #202; found by
+  `docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md` finding 4.
+
+Otherwise none open — `state.mode` is honoured by `execute_project`, the reconciliation ledger
 is engine-resident, and `state.warehouse_tables` is parsed and feeds availability resolution, as
 this spec describes normatively above.
 

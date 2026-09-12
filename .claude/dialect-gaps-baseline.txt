@@ -123,3 +123,30 @@ dialect_gaps_bigquery 42
 # Both dialects now stand at exactly the four rows criterion 5 names:
 # `FIRST`/`LAST` (#175, lexed as keywords) and `EXPLODE`/`UNNEST` (#176,
 # unnest inference returning Unknown). Net: 6 - 2 = 4 on each dialect.
+
+# 2026-09-08 (docs/outcomes/20260906-bigquery-correctness phase 10, sign-off:
+# Andrew Browne): dialect_gaps_bigquery HELD at 42 — not lowered. This
+# outcome's fixes (phases 1-3: threading `dialect` through the fingerprint
+# and repair-group digest emitters, and the punch-list items that followed)
+# all landed in `smelt-logical`'s maintenance-emitter layer, not in
+# `BuiltinRegistry`, so none of them gives any of the 42 no-verdict BigQuery
+# registry entries a verdict. Building any of those speculatively — ahead of
+# a spine model actually reaching them — is forbidden by the outcome's
+# criterion 2 and its Out-of-scope list; they stay on #179 for a future
+# harvest once the dogfood spine's live-BigQuery half (its blocked phase 16)
+# produces evidence. Criterion 4's "fall or hold; neither is raised" is
+# satisfied by holding.
+
+# 2026-09-11 (docs/outcomes/20260906-bigquery-correctness phase 16, the live
+# run that closes the reopening, sign-off: Andrew Browne): HELD again at 42.
+# The live `examples/github_activity` run on BigQuery found four defects, and
+# every one of them was in the maintenance/bookkeeping layer rather than in
+# `BuiltinRegistry`: a hardcoded `VARCHAR` in the driver's changed-key
+# projection, a typed `DATE '…'` literal in the succession window predicate,
+# a DuckDB ledger `CREATE TABLE` reached from `execute/project`, and the
+# concurrent-transaction cancellation on `_smelt_ledger`. None of them gives
+# any of the 42 no-verdict BigQuery registry entries a verdict, and the two
+# constructs the run did meet at the registry boundary (`LAG`/`MAX` under an
+# INTERVAL RANGE frame) are already `Emission::Unsupported` clause-level
+# refusals, not gap rows. Giving the 42 verdicts speculatively remains
+# forbidden by criterion 2; they stay on #179.

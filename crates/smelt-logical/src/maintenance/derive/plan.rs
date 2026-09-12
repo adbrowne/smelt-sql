@@ -10,7 +10,12 @@ use super::*;
 /// into the same proof [`append_model_edge_cells`] already runs for model
 /// edges.
 pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> MaintenancePlan {
-    derive_maintenance_plan_impl(inputs, triggers, &SourceReferentialIntegrity::new())
+    derive_maintenance_plan_impl(
+        inputs,
+        triggers,
+        &SourceReferentialIntegrity::new(),
+        &SourceRetentions::new(),
+    )
 }
 
 /// [`derive_maintenance_plan`], additionally threading `source_referential_
@@ -33,13 +38,42 @@ pub fn derive_maintenance_plan_with_referential_integrity(
     triggers: &[Trigger],
     source_referential_integrity: &SourceReferentialIntegrity,
 ) -> MaintenancePlan {
-    derive_maintenance_plan_impl(inputs, triggers, source_referential_integrity)
+    derive_maintenance_plan_impl(
+        inputs,
+        triggers,
+        source_referential_integrity,
+        &SourceRetentions::new(),
+    )
+}
+
+/// [`derive_maintenance_plan_with_referential_integrity`], additionally
+/// folding every declared `retention:` bound in `retentions` into a
+/// retention-admissibility verdict per source
+/// (`crate::analysis::retention_reach::derive_retention_verdicts`) and
+/// mapping each onto its outcome (`crate::maintenance::retention_outcomes`,
+/// `docs/specs/model_properties.md` §"Reach versus retained history"): a
+/// proven-exceeding reach adds a [`Refusal::SourceRetentionExceeded`]; an
+/// unprovable one adds a recorded
+/// [`crate::maintenance::RetentionDowngrade`] onto
+/// `MaintenancePlan::retention_downgrades`; a proven-fitting reach or a
+/// source with no declared retention records nothing. An empty `retentions`
+/// map behaves byte-identically to
+/// [`derive_maintenance_plan_with_referential_integrity`] — this only *adds*
+/// verdicts for the sources the caller names.
+pub fn derive_maintenance_plan_with_referential_integrity_and_retentions(
+    inputs: &ModelInputs,
+    triggers: &[Trigger],
+    source_referential_integrity: &SourceReferentialIntegrity,
+    retentions: &SourceRetentions,
+) -> MaintenancePlan {
+    derive_maintenance_plan_impl(inputs, triggers, source_referential_integrity, retentions)
 }
 
 fn derive_maintenance_plan_impl(
     inputs: &ModelInputs,
     triggers: &[Trigger],
     source_referential_integrity: &SourceReferentialIntegrity,
+    retentions: &SourceRetentions,
 ) -> MaintenancePlan {
     let mut plan = MaintenancePlan::default();
     if let Some(reason) = skeleton_clause_changed(inputs) {
@@ -132,6 +166,26 @@ fn derive_maintenance_plan_impl(
         for cell in &mut plan.cells {
             cell.fingerprint_projections = projections.clone();
         }
+    }
+
+    // Reach-versus-retention (`model_properties.md` §"Reach versus retained
+    // history"): posed only for the sources the caller actually declared a
+    // `retention:` bound for. `window_age` stays `Seconds::ZERO` here — this
+    // is the model's own plan-time reach, authoring-time, never the run's.
+    // The bounded proof is carried on `retention_reaches` so a run can fold
+    // its own window age onto it later, via `retention_refusals_at_age`,
+    // without re-deriving anything (`docs/outcomes/
+    // 20260906-trimmed-history-sources/outcome.md` criterion 5).
+    if !retentions.is_empty() {
+        let mut ctx = inputs.bound_context();
+        for (source, retention) in retentions {
+            ctx.add_source_retention(source, retention);
+        }
+        let verdicts = derive_retention_verdicts(inputs.sql, &ctx, Seconds::ZERO);
+        let (refusals, downgrades) = retention_outcomes(&verdicts);
+        plan.refusals.extend(refusals);
+        plan.retention_downgrades.extend(downgrades);
+        plan.retention_reaches.extend(retention_reaches(&verdicts));
     }
 
     plan

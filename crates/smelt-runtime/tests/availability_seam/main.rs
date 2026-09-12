@@ -76,10 +76,21 @@ fn availability_for_run_intersects_dialect_and_warehouse_tables() {
     assert!(!duckdb_none.contains(StateStructure::ReconciliationLedger));
     assert!(!duckdb_none.contains(StateStructure::MergeLedger));
 
+    // The dialect leg of the intersection, shown on a dialect that realises
+    // nothing: `warehouse_tables: allowed` cannot conjure a structure the
+    // backend has no builder for. (Before 2026-09-10 this asserted Spark
+    // realised the fingerprint sidecar — it does not, and that false claim
+    // is what suppressed the downgrade the T5 run path needed; see
+    // `docs/outcomes/20260906-bigquery-correctness` decision log.)
     config.state.warehouse_tables = WarehouseTables::Allowed;
     let spark_allowed = availability_for_run(SqlDialect::SparkSQL, &config);
     assert!(!spark_allowed.contains(StateStructure::ReconciliationLedger));
-    assert!(spark_allowed.contains(StateStructure::FingerprintSidecar));
+    assert!(!spark_allowed.contains(StateStructure::FingerprintSidecar));
+    assert!(!spark_allowed.contains(StateStructure::ObservedOutputDeltas));
+    // …while the same `allowed` config over DuckDB does realise them, so the
+    // assertion above is about the dialect and not about `warehouse_tables`.
+    assert!(availability_for_run(SqlDialect::DuckDB, &config)
+        .contains(StateStructure::FingerprintSidecar));
 }
 
 /// A keyed-fold cell derived through [`derive_resolved`] under a

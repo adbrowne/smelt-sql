@@ -77,9 +77,76 @@ const TEMPLATE_MODIFIER_NAMED_PARAM: &str =
     "this built-in's target spelling is a fixed template over positional arguments; a named \
      (`=>`) argument cannot be expressed by a template, which only substitutes by position, and \
      is refused rather than silently dropped";
+/// The target dialect has no aggregate `FILTER (WHERE …)` clause at all
+/// ([`SqlDialect::supports_aggregate_filter_clause`]). Not lowered
+/// automatically: `agg(x) FILTER (WHERE p)` → `agg(CASE WHEN p THEN x END)` is
+/// exactly equivalent only for an aggregate that *ignores* NULL inputs (true
+/// of `MIN`/`MAX`/`SUM`/`AVG`/`COUNT`/`STRING_AGG`, false of `ARRAY_AGG`,
+/// which would gain one NULL element per excluded row), and that property is
+/// not yet registry data — so the author is told the rewrite rather than given
+/// a silently different answer for some aggregates.
+const AGGREGATE_FILTER_UNSUPPORTED: &str =
+    "this dialect has no aggregate FILTER (WHERE …) clause; rewrite it as the portable \
+     equivalent — `agg(CASE WHEN <predicate> THEN <value> END)`, or `COUNT(CASE WHEN \
+     <predicate> THEN 1 END)` for a COUNT(*) — which every supported backend accepts";
+/// The target dialect's `RANGE` frames take a numeric offset only
+/// ([`SqlDialect::supports_interval_range_frame`]).
+///
+/// Not lowered automatically. The equivalent GoogleSQL form exists — wrap the
+/// sole `ORDER BY` key in `UNIX_MICROS(…)` and state the offset in
+/// microseconds, which is exact for a GoogleSQL TIMESTAMP — but applying it
+/// means rewriting the `OVER` clause's `ORDER BY` as well as the frame, and the
+/// dialect printer has no window-spec seam to do that in (window specs print
+/// through `smelt_parser`'s dialect-agnostic `Display`). Refusing at compile
+/// time is what keeps it off the warehouse until that seam exists; the
+/// author's own numeric rewrite is accepted meanwhile, and the planner still
+/// derives `max_lookback` from the source form either way.
+const INTERVAL_RANGE_FRAME_UNSUPPORTED: &str =
+    "this dialect's RANGE window frames take a numeric offset over a numeric ORDER BY and have \
+     no INTERVAL form; state the frame numerically (e.g. ORDER BY UNIX_MICROS(ts) RANGE BETWEEN \
+     172800000000 PRECEDING AND CURRENT ROW for two days), or use a ROWS frame";
 const TEMPLATE_MODIFIER_STAR: &str =
     "this built-in's target spelling is a fixed template over positional arguments; a `*` \
      argument cannot be expressed by a template and is refused rather than silently dropped";
+
+/// Does `node` (a `FUNCTION_CALL`) carry an `INTERVAL`-offset `RANGE` frame in
+/// **its own** `OVER` clause?
+///
+/// A `WINDOW_SPEC` is the call's **sibling** under the wrapping `EXPRESSION`,
+/// not its child (verified against the real parser:
+/// `EXPRESSION(FUNCTION_CALL, WINDOW_SPEC)`), so this looks one level up — and
+/// only one level, never `descendants()`, so a nested call's frame is not
+/// attributed to an enclosing call that has none (the same discipline
+/// [`template_unsupported_modifier`] follows).
+fn has_interval_range_frame(node: &SyntaxNode) -> bool {
+    let Some(spec) = node
+        .parent()
+        .filter(|p| p.kind() == SyntaxKind::EXPRESSION)
+        .and_then(|p| p.children().find(|n| n.kind() == SyntaxKind::WINDOW_SPEC))
+    else {
+        return false;
+    };
+    let Some(frame) = spec
+        .children()
+        .find(|n| n.kind() == SyntaxKind::WINDOW_FRAME)
+    else {
+        return false;
+    };
+    if smelt_parser::ast::WindowFrame::cast(frame.clone()).and_then(|f| f.unit())
+        != Some(smelt_parser::ast::FrameUnit::Range)
+    {
+        return false;
+    }
+    frame
+        .children()
+        .filter(|n| n.kind() == SyntaxKind::FRAME_BOUND)
+        .any(|b| {
+            b.text()
+                .to_string()
+                .to_ascii_uppercase()
+                .contains("INTERVAL")
+        })
+}
 
 /// Is `expr` (an `EXPRESSION` node) wrapping exactly a `STAR` token (`COUNT(*)`'s
 /// argument) rather than some other single-token expression?
@@ -184,6 +251,30 @@ pub fn unsupported_emissions(
                 _ => return None,
             };
             let sig = BuiltinRegistry::resolve(&name)?;
+            // A clause-level refusal, checked before the registry's own
+            // per-name verdict: where the dialect has no aggregate `FILTER
+            // (WHERE …)` clause at all, the call is unsupported whatever the
+            // registry says about the function itself.
+            if !dialect.supports_aggregate_filter_clause()
+                && node
+                    .children()
+                    .any(|n| n.kind() == SyntaxKind::FILTER_CLAUSE)
+            {
+                return Some(UnsupportedEmission {
+                    name: sig.name.as_str(),
+                    dialect: id,
+                    reason: AGGREGATE_FILTER_UNSUPPORTED,
+                    range: trimmed_range(&node),
+                });
+            }
+            if !dialect.supports_interval_range_frame() && has_interval_range_frame(&node) {
+                return Some(UnsupportedEmission {
+                    name: sig.name.as_str(),
+                    dialect: id,
+                    reason: INTERVAL_RANGE_FRAME_UNSUPPORTED,
+                    range: trimmed_range(&node),
+                });
+            }
             let facts = match crate::emission_settle::call_argument_nodes(&node) {
                 Some(args) => crate::emission_settle::call_facts(&args, &type_of),
                 None => CallFacts::unresolved(0),

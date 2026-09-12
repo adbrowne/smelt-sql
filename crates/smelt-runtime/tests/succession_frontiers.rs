@@ -108,6 +108,7 @@ fn request(start: &str, end: &str, rebuild: bool, full_refresh: bool) -> Execute
         retry_backoff_ms: Some(0),
         resume: false,
         technique_overrides: vec![],
+        invoke_external_steps: true,
     }
 }
 

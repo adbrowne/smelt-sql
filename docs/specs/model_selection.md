@@ -80,6 +80,8 @@ Seeds are included in upstream traversal when a model references a seed via `sme
 
 **No depth limit.** Upstream and downstream traversal are unbounded — they walk the entire reachable subgraph, not just N levels.
 
+**External steps are nodes, reached through their sources.** Upstream traversal from a model that reads a source an external step produces (`sources.md` §"Externally-produced sources (black-box steps)") reaches that step, exactly as it reaches the source itself. Downstream traversal from a step reaches every consumer of the sources it produces, and their downstreams in turn. A step is never a `smelt.ref()` target — a model references the source it reads, never the step that produces it — so a step never appears as a direct dependency edge in the model graph; it is reached only through the source(s) it produces.
+
 ### Tag matching
 
 A model matches `tag:X` if tag `X` appears in its effective tag set (the merged union of `smelt.yml` model config tags and frontmatter tags — see `models.md` §"Tag merging" for the merge rule and the case-sensitivity contract).
@@ -89,6 +91,8 @@ If no model in the project has the given tag, the selector matches nothing (no e
 ### Selection methods
 
 The selection methods are `ModelName`, `Tag`, and `GeneratorFile`. There is no glob, regex, or directory-based selection.
+
+A `ModelName` selector may also resolve to an external step's own address, in which case it selects the step (not a model): `--select my_loader` with no traversal modifier selects only the step, contributing no models to the working set on its own. `+my_loader` or `my_loader+` traverses from the step exactly as from a model, per §"Graph traversal".
 
 A `ModelName` selector value is an entity identifier and is resolved through the CLI argument-resolution algorithm (`cli.md` §"Argument resolution algorithm"): any leading/trailing `+` graph operators are stripped first (re-attached to the resolved full path afterwards), then the value is treated as a dot-path argument, expanded against the active scope (`--scope` or cwd-derived), and matched against the workspace's canonical `smelt.<path>` set. A `ModelName` selector that resolves to **no entity is a hard "not found" error** (non-zero exit), not a silent empty match — the same fail-loud behaviour as a bare command argument, so `--select typo_name` fails loudly rather than building nothing. (A `tag:`/`generator_file:` selector that matches no models is a *valid empty selection*, not an error — see §"Tag matching" and §"Selection methods"; this asymmetry is intentional: an entity name that cannot resolve is almost always a typo, whereas a tag with no members is a legitimate state.) A bare-leaf selector value with no active scope that matches **multiple** entities by leaf is an error (the same ambiguity diagnostic CLI argument resolution emits), so `--select events_parsed` never silently picks one of two `events_parsed` models.
 
@@ -112,6 +116,7 @@ A `GeneratorFile` selector takes a workspace-relative path to a generator file (
 4. **No-match is not an error for method selectors.** A `tag:` or `generator_file:` selector that matches no models produces no error; the working set may become empty. A `ModelName` selector that resolves to no entity is the exception — it is a hard "not found" error (§"Selection methods"), because an unresolvable entity name is almost always a typo.
 5. **Tag matching is case-sensitive.** `tag:Revenue` does not match a model tagged `revenue`. The case-sensitivity contract is owned by `models.md` §"Tag merging"; this rule cross-references it.
 6. **`GeneratorFile` selectors match against the post-resolution workspace shape.** The match set is what the workspace actually contains after multi-model production has resolved, including any collision losses. Generator emissions discarded by `ModelDefHandAuthoredCollision` are not selectable via the originating generator's `generator_file:` path.
+7. **A step is a selectable node but never a `smelt.ref()` target.** `--select`/`--exclude` resolve a `ModelName` selector to a step's address exactly as to a model's, and traversal reaches it (§"Graph traversal"). A SQL `smelt.ref()` naming a step's address is not a step reference — it fails `UndefinedModelRef` (`sources.md` §"Externally-produced sources (black-box steps)"), since a model reads the source, never its producer.
 
 ## Known Divergences / Open Questions
 

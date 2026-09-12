@@ -41,6 +41,7 @@ fn fact_edge() -> ModelEdge {
         clock_col_aliases: vec![],
         unique_key: vec![],
         output_shape: None,
+        allow_full_scan: false,
     }
 }
 
@@ -51,6 +52,7 @@ fn dim_edge_with_key() -> ModelEdge {
         clock_col_aliases: vec![],
         unique_key: vec!["id".to_string()],
         output_shape: None,
+        allow_full_scan: false,
     }
 }
 
@@ -61,6 +63,7 @@ fn dim_edge_without_key() -> ModelEdge {
         clock_col_aliases: vec![],
         unique_key: vec![],
         output_shape: None,
+        allow_full_scan: false,
     }
 }
 

@@ -64,12 +64,26 @@ pub fn build_model_source_bounds(
 /// — never re-derived here, maintenance-plan purity). The transparent-slice
 /// fast path (`is_transparent_single_source`) additionally requires
 /// `skew == Skew::ZERO`: for a skewed model the per-source pushdown filter
-/// and the output clamp are genuinely different ranges (the source filter is
-/// built from `run_range`, i.e. this batch's own derived-output-window slice,
-/// while a *different* batch's scan may reach into this one's margin) even
-/// when there is exactly one zero-margin source, so the outer clamp stays
-/// load-bearing (`docs/specs/model_transforms.md` §Semantics "Source-filter
-/// pushdown + the two clamps").
+/// and the output clamp are genuinely different ranges even when there is
+/// exactly one zero-margin source, so the outer clamp stays load-bearing
+/// (`docs/specs/model_transforms.md` §Semantics "Source-filter pushdown + the
+/// two clamps").
+///
+/// `scan_range` — not `run_range` — is what widens the per-source pushdown
+/// (`inject_source_filters`). `run_range` is this batch's own **output**
+/// window (`partition_start`/`partition_end`, unwidened — the output clamp
+/// must equal it exactly); `scan_range` is the model's own skew inversion of
+/// that same batch (`windowing::IncrementalBatch::filter_start`/`filter_end`
+/// — `[bs − before, be + after)`, clamped to the invocation's outer scan
+/// envelope), the reach an interior chunk's own written partitions need read
+/// to see. Passing `run_range` for both was the bug the `github_activity`
+/// `silver_actor_sessions` divergence traced to (`docs/outcomes/
+/// 20260906-bigquery-correctness/phases/06-plan.md`): a skewed model's
+/// interior-chunk scan silently stopped at the chunk's own output boundary,
+/// undercounting a session that crossed it. For a zero-skew model
+/// `scan_range` equals `run_range` exactly (`windowing.rs`'s clamp is a
+/// no-op when `skew == Skew::ZERO`), so callers with no skew of their own
+/// may pass the same `TimeRange` for both without changing behavior.
 ///
 /// `pub`: `smelt-cli`'s `explain --show-sql` statement emission
 /// (`crates/smelt-cli/src/commands/explain.rs`) calls this directly so the
@@ -81,16 +95,17 @@ pub fn derive_batch_filtered_sql(
     partition_col: &str,
     per_model_source_bounds: &HashMap<String, crate::transformer::SourceBound>,
     run_range: &TimeRange,
+    scan_range: &TimeRange,
     run_start: chrono::DateTime<Utc>,
     skew: smelt_logical::analysis::source_bounds::Skew,
 ) -> Result<String> {
     let filtered_sql = if is_transparent_single_source(per_model_source_bounds)
         && skew == smelt_logical::analysis::source_bounds::Skew::ZERO
     {
-        inject_source_filters(clean_sql, per_model_source_bounds, run_range)
+        inject_source_filters(clean_sql, per_model_source_bounds, scan_range)
     } else {
         let filtered_sql = inject_time_filter(clean_sql, partition_col, run_range)?;
-        inject_source_filters(&filtered_sql, per_model_source_bounds, run_range)
+        inject_source_filters(&filtered_sql, per_model_source_bounds, scan_range)
     };
     Ok(pin_run_deterministic_clocks(&filtered_sql, run_start))
 }

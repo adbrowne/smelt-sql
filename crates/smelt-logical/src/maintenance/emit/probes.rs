@@ -3,6 +3,7 @@
 //! append-only baseline snapshot and source-mutation fingerprint.
 
 use super::fingerprint::row_fingerprint_expr;
+use super::partition_bucket::{partition_bucket_expr, PartitionBucket};
 use super::types::*;
 
 /// The out-of-slice match probe for a **checked** route-3 (recurrence-
@@ -76,7 +77,7 @@ fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_cor
 /// `VARCHAR` (`DATATYPE_MISSING_SIZE`), so its unsized string type is
 /// `STRING`. Confirmed live against Spark
 /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
-pub(crate) fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
+pub fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
     match dialect {
         MaintenanceDialect::DuckDb => "VARCHAR",
         MaintenanceDialect::Spark => "STRING",
@@ -553,6 +554,7 @@ pub struct AppendOnlyBaselinePartition {
 pub fn emit_append_only_posture_probe(
     source_table: &str,
     partition_column: &str,
+    bucket: &PartitionBucket,
     digest_columns: &[String],
     baseline: &[AppendOnlyBaselinePartition],
     dialect: MaintenanceDialect,
@@ -566,8 +568,13 @@ pub fn emit_append_only_posture_probe(
         "emit_append_only_posture_probe requires a non-empty recorded baseline for {source_table}"
     );
     let cast_type = probe_dialect_string_type(dialect);
-    let snapshot =
-        emit_append_only_baseline_snapshot(source_table, partition_column, digest_columns, dialect);
+    let snapshot = emit_append_only_baseline_snapshot(
+        source_table,
+        partition_column,
+        bucket,
+        digest_columns,
+        dialect,
+    );
     let baseline_rows: Vec<Vec<String>> = baseline
         .iter()
         .map(|b| {
@@ -701,6 +708,7 @@ pub fn late_appends(
 pub fn emit_append_only_baseline_snapshot(
     source_table: &str,
     partition_column: &str,
+    bucket: &PartitionBucket,
     digest_columns: &[String],
     dialect: MaintenanceDialect,
 ) -> MaintenanceStatement {
@@ -724,11 +732,26 @@ pub fn emit_append_only_baseline_snapshot(
             format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
         }
     };
+    // The grid, not the raw column: a TIMESTAMP partition column under
+    // `granularity: day` holds one value per second, and grouping it raw
+    // would record one "partition" per instant
+    // (`partition_bucket::classify_partition_bucket`).
+    let bucket_expr = partition_bucket_expr(partition_column, bucket, dialect);
+    // The `GROUP BY` repeats the projection **verbatim**, wrapping CAST
+    // included, rather than grouping by the bare bucket expression. GoogleSQL
+    // does not accept a grouped expression referenced from inside a wrapping
+    // expression in the SELECT list: `SELECT CAST(TIMESTAMP_TRUNC(c, DAY) AS
+    // STRING) … GROUP BY TIMESTAMP_TRUNC(c, DAY)` is rejected with "SELECT list
+    // expression references column c which is neither grouped nor aggregated"
+    // (measured live, job 8a576599). Grouping by the cast is the same
+    // partitioning either way — the cast is injective over the bucket's values
+    // — and it is legal on every dialect.
+    let partition_value = format!("CAST({bucket_expr} AS {cast_type})");
     let sql = format!(
-        "SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
+        "SELECT {partition_value} AS partition_value, \
          COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
          FROM {source_table} \
-         GROUP BY {partition_column}"
+         GROUP BY {partition_value}"
     );
     MaintenanceStatement::new(sql)
 }

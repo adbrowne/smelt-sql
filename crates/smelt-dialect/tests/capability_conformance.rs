@@ -198,7 +198,10 @@ fn every_flag_matches_matrix() {
     cell!(bigquery, supports_date_literal, true, "BigQuery");
     cell!(bigquery, supports_concat_operator, true, "BigQuery");
     cell!(bigquery, supports_array_literal, true, "BigQuery");
-    cell!(bigquery, supports_transactional_ddl, true, "BigQuery");
+    // `false`, not `true`: BigQuery's multi-statement transactions cannot hold
+    // DDL on permanent entities (only `CREATE TEMP TABLE` and friends), and
+    // every smelt caller of this flag is asking about a permanent table.
+    cell!(bigquery, supports_transactional_ddl, false, "BigQuery");
     cell!(bigquery, supports_double_colon_cast, false, "BigQuery");
     cell!(bigquery, supports_trailing_commas, true, "BigQuery");
     cell!(bigquery, supports_insert_overwrite, false, "BigQuery");

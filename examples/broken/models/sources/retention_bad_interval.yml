@@ -1,0 +1,16 @@
+description: retention is not a parseable interval.
+columns:
+  - name: id
+    type: BIGINT
+    nullable: false
+  - name: event_ts
+    type: TIMESTAMP
+    nullable: false
+  - name: event_date
+    type: DATE
+    nullable: false
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+retention: 'banana'

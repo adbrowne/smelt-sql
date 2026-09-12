@@ -25,6 +25,7 @@ mod column_scoped;
 mod delta_restriction;
 mod driver;
 mod key_addressed;
+mod ledger;
 mod membership;
 mod observed_delta;
 mod repair;
@@ -39,6 +40,7 @@ pub use column_scoped::*;
 pub use delta_restriction::*;
 pub use driver::*;
 pub use key_addressed::*;
+pub use ledger::*;
 pub use membership::*;
 pub use observed_delta::*;
 pub use repair::*;
@@ -46,5 +48,6 @@ pub use resolve::*;
 pub use sidecar::*;
 pub use succession::{
     build_succession_source_refs, execute_succession_maintenance, resolve_live_succession_cell,
-    resolve_succession_run_axis, SuccessionAxis, SuccessionCell, SuccessionPartitioning,
+    resolve_succession_run_axis, succession_window_predicate, SuccessionAxis, SuccessionCell,
+    SuccessionPartitioning,
 };

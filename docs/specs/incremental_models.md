@@ -691,6 +691,20 @@ snapshot-consuming cells are admitted against the current-snapshot oracle instea
 the rest could one day get a weaker, never-smuggled-in **observer / prefix-consistency
 contract** (§Future Extensions).
 
+**Trimmed history narrows replayability, never `S`.** A source whose declared `retention:`
+(`sources.md` §Semantics 5) bounds how far back it can be re-read stays fully in `S`: a
+partition that has aged out of retention was still scanned by the runs that consumed it, so it
+remains part of the processed-input set and the stored table is still the answer of record over
+it. What retention removes is the *executable* `full_refresh` oracle over the departed region —
+a recompute whose window reaches past the bound cannot produce the invariant's right-hand side
+over that region at all, so it is refused (`SourceRetentionExceeded`, `sources.md` §Semantics 5)
+rather than run to produce a strictly smaller answer. This is the replayability split above,
+applied to a bound that moves: retention shrinks which regions are replayable, never the
+quantifier `S` ranges over. Because the bound advances with every run, a region's replayability
+is a property of *when* the recompute runs, not of the model's code — a backfill admissible last
+month can be refused today with no change to the model, and steady-state maintenance (which
+reads forward only) is unaffected.
+
 **Key departure follows the source posture.** Deletion is derived, never declared: the
 default behaviour is whatever preserves the full-refresh equation for the posture actually
 consumed. An append-only source never loses a key, so nothing departs and nothing is deleted.
@@ -1533,6 +1547,41 @@ downstream's own grain — a `grain: partition` downstream takes it in place of 
 window-forward batch loop for that run, because the cell's bounded read is the affected key
 set and has no partition-interval axis to compose with a run window.
 
+When neither discovery route resolves the downstream's grain against the upstream relation, a
+third, **enrichment-keyed** route is attempted before the edge is refused: a clockless
+`keyed upsert` upstream joined in **value-enrichment position** — a join whose `ON`/`USING`
+equality matches the upstream's own declared `unique_key`, contributing payload columns the
+downstream `SELECT`s, never a row-admission read that governs which rows exist — by a
+partition-addressed downstream contributes a `Trigger::UpstreamMutation` cell with
+`Technique::ColumnScopedMerge` over the edge-provenanced column group (the columns the shared
+mutation-sensitivity walk, §"Per-column mutation-sensitivity / column provenance", attributes
+to the edge, excluding any group the SAME walk also marks membership-sensitive to it — a
+row-admission read stays with the recompute family, never a column-scoped merge). The cell is
+addressed by the join key columns the downstream itself projects in its own output — not by the
+downstream's grain, which this route poses no question about at all. This route's own scan is
+never partition-bounded (`PartitionLocal::No`: a value rename scatters across every output
+partition, not a bounded interval), so it requires the edge's own declared
+`maintenance.scan_bounds.per_source.<edge>.allow_full_scan`; absent that declaration the edge
+refuses `MaintenanceScanUnbounded` instead. This route is attempted only after both key-addressed
+routes decline — `MaintenanceRepairKeysNotDiscoverable` now fires only when all three routes
+decline (no enrichment join is even resolvable against the edge, or the join's own key columns
+are not projected by the downstream's `SELECT` list).
+
+An enrichment-keyed cell's dispatch differs from every other `Technique::ColumnScopedMerge`
+cell's: its write is addressed by the join key the downstream's own output carries, not by a
+partition interval, so it cannot be scoped to a run's `[start, end)` window the way a per-batch
+column-scoped MERGE is — a window-scoped write would heal only rows the current run's window
+happens to rewrite, never an already-written row from an earlier window. It therefore dispatches
+**once per run**, after the model's own creation-trigger writes (never on the creation run — there
+is nothing yet to heal), over the model's whole **unwindowed** compiled output — the read the
+edge's own `allow_full_scan` already licenses — writing a keyed MERGE on the downstream's own
+write key that updates only the cell's own group columns. A model-edge `UpstreamMutation`
+trigger carries no `SourceInfo` (edges are keyed on the upstream model's bare address, never a
+declared source) and therefore no recorded source-mutation baseline, so §"When a mutation cell
+dispatches"'s fingerprint gate has no baseline to compare against and **fails open to dispatch**
+for it, every run — a declared behaviour, with its declared cost (a full-table merge every run),
+not an accident of a lookup returning nothing.
+
 A key-addressed cell's affected-key set is discovered from the **group-grain fingerprint
 sidecar diff** over the upstream's own output table (§"The repair family" — "Obligation 7 over
 a `mutable_snapshot` source"): a clockless keyed upstream is, from the consumer's own view,
@@ -1597,6 +1646,12 @@ source nothing reads, or an empty delta, propagates nothing. A delta on an **unc
 source dirties the **whole model** for every mutation-sensitive consumer — never a silent
 no-op (the cell was only admitted under `allow_full_scan`, so the full-table run is a declared
 cost).
+
+The same reflection an explicit landed delta gets above (`[a, b)` → `[a − after, b + before)`)
+is applied to an ordinary windowed run's in-run upstream output windows too
+(`model_transforms.md` §Semantics "The derived output window propagates within a run."), so
+the two entry points agree on which downstream partitions a Form-B upstream's self-rebase
+dirties.
 
 **Backward resolution — what must exist.** Given a target model and period `[s, e)` (aligned
 outward to the target's grain), walking the ancestor sub-DAG in reverse topological order and
@@ -1952,6 +2007,23 @@ decision-acceptance records in `09-spec-readiness.md` §1 and `10-dependency-pro
 - **Never fold a delta already reflected in the state.** Every fold consults the ledger; every
   region recompute resets the entries it overwrote. No path may merge a window twice. The
   same rule governs definition-delta catch-up.
+
+  **The ledger refuses the repeat — it does not merely report one.** The refusal and the fold
+  share one backend transaction, so a repeat can never leave the fold applied and the ledger
+  disagreeing, and no check-then-act window exists between reading the ledger and writing to
+  it. A separate "does this entry exist?" probe followed by an insert is not an acceptable
+  realisation: two concurrent runs can both read absent and both fold. How the refusal is
+  *mechanised* is a dialect property with two admissible realisations —
+  (a) the ledger's own **enforced key**: the record is a plain insert, a repeat violates the
+  key, and the violation aborts the transaction before the action runs; or
+  (b) a **conditional record whose zero-row outcome aborts** the enclosing transaction, for a
+  dialect whose key is unenforced — sound only where the engine also refuses to commit two
+  concurrent transactions mutating the ledger table.
+  A dialect offering neither does not realise the reconciliation ledger, and a cell needing
+  one downgrades rather than folding unguarded (`state.md` §"Which dialects realise which
+  structure"). Where realisation (b) is in force and the fold's action would be DDL on a
+  permanent entity — the first run's `CREATE TABLE … AS` — the step is refused rather than
+  split across two commits.
 - **Write window = output window**, per cell: the DELETE/merge target and the output clamp
   range over the same output-axis column and window, by construction.
 - **Only proofs prune.** A declared bound is admitted only checked; a guardrail

@@ -78,15 +78,9 @@ fn column_fingerprint_expr(column: &str, cast_type: &str) -> String {
 /// (`IS DISTINCT FROM`). Contrast [`key_expr_for_columns`], which builds
 /// the sidecar's KEY expression and — for a single column — must stay a
 /// literal, un-hashed value instead; see that function's own doc comment
-/// for why.
-fn concat_varchar_expr(columns: &[String]) -> String {
-    concat_varchar_expr_typed(columns, "VARCHAR")
-}
-
-/// [`concat_varchar_expr`], parameterized over the unsized string-cast type
-/// name — DuckDB's `VARCHAR` for every existing (DuckDB-only) caller, or the
-/// dialect's own type via [`probe_dialect_string_type`] for
-/// [`row_fingerprint_expr`]'s dialect-aware probe caller.
+/// for why. Parameterized over the unsized string-cast type name via
+/// [`probe_dialect_string_type`] — DuckDB's `VARCHAR`, Spark/BigQuery's
+/// `STRING`.
 fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
     let per_column = columns
         .iter()
@@ -108,8 +102,8 @@ fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
 /// [`emit_append_only_posture_probe`] can build the identical row-content
 /// hash without re-authoring the hashing SQL. `dialect` selects the
 /// unsized string-cast type ([`probe_dialect_string_type`]) — DuckDB's
-/// `VARCHAR` or Spark's `STRING` — so the fingerprint is well-formed under
-/// either dialect, unlike [`concat_varchar_expr`]'s DuckDB-only default.
+/// `VARCHAR`, Spark/BigQuery's `STRING` — so the fingerprint is well-formed
+/// under any of the three.
 pub(crate) fn row_fingerprint_expr(columns: &[String], dialect: MaintenanceDialect) -> String {
     let concatenated = concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect));
     match dialect {
@@ -165,14 +159,15 @@ const KEY_NULL_SENTINEL: &str = "\u{2}NULL\u{2}";
 /// (`docs/outcomes/20260809-repair-family/phases/09-plan.md`) — one shape,
 /// shared by both the sidecar diff and the append-only clamped-scan path,
 /// never a second, independently-typed key expression.
-pub fn key_expr_for_columns(columns: &[String]) -> String {
+pub fn key_expr_for_columns(columns: &[String], dialect: MaintenanceDialect) -> String {
+    let cast_type = probe_dialect_string_type(dialect);
     if columns.len() == 1 {
         format!(
-            "COALESCE(CAST({} AS VARCHAR), '{KEY_NULL_SENTINEL}')",
+            "COALESCE(CAST({} AS {cast_type}), '{KEY_NULL_SENTINEL}')",
             columns[0]
         )
     } else {
-        concat_varchar_expr(columns)
+        concat_varchar_expr_typed(columns, cast_type)
     }
 }
 
@@ -186,13 +181,18 @@ pub fn key_expr_for_columns(columns: &[String]) -> String {
 /// columns to digest and which key columns identify a row; this emitter
 /// only builds the SQL.
 ///
-/// `dialect` is accepted for signature symmetry with every other emitter in
-/// this module; only the DuckDB shape is built today (`sha256()` is a
-/// DuckDB built-in scalar function) — a Spark digest-select variant is
-/// unbuilt, matching this phase's DuckDB-only sidecar scope. The runtime
-/// caller (`smelt_runtime::maintenance_driver`) gates on the backend's
-/// dialect before ever reaching this function, so a Spark target fails
-/// loud at that call site rather than being handed DuckDB-flavored SQL.
+/// `dialect` selects both halves' shape: the digest expression via
+/// [`row_fingerprint_expr`] — DuckDB's `sha256(...)`, GoogleSQL's
+/// `TO_HEX(SHA256(...))` (its `SHA256` returns `BYTES`), or Spark's
+/// `sha256(...)` over a `STRING` cast — and `delta_key`, from
+/// [`key_expr_for_columns`], whose cast type is the same dialect's own
+/// unsized string type (`VARCHAR`/`STRING`/`STRING`) rather than a
+/// hardcoded `VARCHAR`. The runtime caller (`smelt_runtime::
+/// maintenance_driver`) gates on the backend's `supports_fingerprint_sidecar`
+/// capability before ever reaching this function today, so a non-DuckDB
+/// target does not yet reach this statement in practice
+/// (`docs/outcomes/20260906-bigquery-correctness/outcome.md`'s decision
+/// log, phase 1).
 ///
 /// # Panics
 /// Panics if `source_key` or `digest_columns` is empty — a caller with no
@@ -202,7 +202,7 @@ pub fn emit_fingerprint_digest_select(
     source_table: &str,
     source_key: &[String],
     digest_columns: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> String {
     assert!(
         !source_key.is_empty(),
@@ -212,8 +212,8 @@ pub fn emit_fingerprint_digest_select(
         !digest_columns.is_empty(),
         "emit_fingerprint_digest_select requires a non-empty digest column set for {source_table}"
     );
-    let key_expr = key_expr_for_columns(source_key);
-    let digest_expr = row_fingerprint_expr(digest_columns, MaintenanceDialect::DuckDb);
+    let key_expr = key_expr_for_columns(source_key, dialect);
+    let digest_expr = row_fingerprint_expr(digest_columns, dialect);
     format!("SELECT {key_expr} AS delta_key, {digest_expr} AS delta_digest FROM {source_table}")
 }
 
@@ -347,10 +347,16 @@ fn sidecar_diff_over_digest_select(
 /// assumed SHA-256 collision-soundness invariant `sources.md` §"The
 /// fingerprint sidecar" — "Digest" already relies on).
 ///
-/// `dialect` is accepted for signature symmetry with
-/// [`emit_fingerprint_digest_select`]; only the DuckDB shape (`sha256`,
-/// `hash`, `bit_xor` are all DuckDB built-ins) is built today, matching this
-/// phase's DuckDB-only scope.
+/// `dialect` selects the per-row-then-XOR-combine spelling: DuckDB
+/// `bit_xor(hash(sha256(...)))` (unchanged from the DuckDB-only original);
+/// GoogleSQL `BIT_XOR(FARM_FINGERPRINT(...))` (its `BIT_XOR` is `INT64`-only,
+/// and `FARM_FINGERPRINT` is its `STRING`→`INT64` hash); Spark
+/// `bit_xor(xxhash64(...))`. The result is cast to the dialect's own unsized
+/// string type ([`probe_dialect_string_type`]) rather than a hardcoded
+/// `VARCHAR`. Every dialect still hashes each row independently first via
+/// [`concat_varchar_expr_typed`] before combining, matching this function's
+/// own order-insensitivity contract (see its module doc comment) — only the
+/// combine/cast spelling differs.
 ///
 /// # Panics
 /// Panics if `group_key` or `digest_columns` is empty — mirrors
@@ -359,7 +365,7 @@ pub fn emit_repair_group_digest_select(
     source_table: &str,
     group_key: &[String],
     digest_columns: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> String {
     assert!(
         !group_key.is_empty(),
@@ -370,12 +376,18 @@ pub fn emit_repair_group_digest_select(
         "emit_repair_group_digest_select requires a non-empty digest column set for \
          {source_table}"
     );
-    let key_expr = key_expr_for_columns(group_key);
+    let cast_type = probe_dialect_string_type(dialect);
+    let key_expr = key_expr_for_columns(group_key, dialect);
     let group_by_list = group_key.join(", ");
-    let row_digest_expr = concat_varchar_expr(digest_columns);
+    let row_digest_expr = concat_varchar_expr_typed(digest_columns, cast_type);
+    let combined = match dialect {
+        MaintenanceDialect::DuckDb => format!("bit_xor(hash(sha256({row_digest_expr})))"),
+        MaintenanceDialect::BigQuery => format!("BIT_XOR(FARM_FINGERPRINT({row_digest_expr}))"),
+        MaintenanceDialect::Spark => format!("bit_xor(xxhash64({row_digest_expr}))"),
+    };
     format!(
-        "SELECT {key_expr} AS delta_key, CAST(bit_xor(hash(sha256({row_digest_expr}))) AS \
-         VARCHAR) AS delta_digest FROM {source_table} GROUP BY {group_by_list}"
+        "SELECT {key_expr} AS delta_key, CAST({combined} AS {cast_type}) AS delta_digest FROM \
+         {source_table} GROUP BY {group_by_list}"
     )
 }
 
@@ -438,9 +450,9 @@ pub fn emit_repair_group_sidecar_diff(
 /// (`WHERE FALSE`), never an unrestricted `SELECT DISTINCT`: a run
 /// discovering no changed upstream keys touches nothing.
 ///
-/// `dialect` is accepted for signature symmetry with this module's other
-/// repair-family emitters; only the DuckDB shape is built today, matching
-/// this phase's DuckDB-only discovery-route scope.
+/// `dialect` selects [`key_expr_for_columns`]'s own cast type for both the
+/// upstream and downstream key expressions — the same dialect threading
+/// every other emitter in this file does.
 ///
 /// # Panics
 /// Panics if `upstream_keys` or `downstream_keys` is empty — mirrors
@@ -450,7 +462,7 @@ pub fn emit_key_addressed_affected_keys_select(
     upstream_keys: &[String],
     downstream_keys: &[String],
     changed_keys: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> String {
     assert!(
         !upstream_keys.is_empty(),
@@ -462,13 +474,13 @@ pub fn emit_key_addressed_affected_keys_select(
         "emit_key_addressed_affected_keys_select requires a non-empty downstream key for \
          {upstream_table}"
     );
-    let downstream_key_expr = key_expr_for_columns(downstream_keys);
+    let downstream_key_expr = key_expr_for_columns(downstream_keys, dialect);
     if changed_keys.is_empty() {
         return format!(
             "SELECT {downstream_key_expr} AS delta_key FROM {upstream_table} WHERE FALSE"
         );
     }
-    let upstream_key_expr = key_expr_for_columns(upstream_keys);
+    let upstream_key_expr = key_expr_for_columns(upstream_keys, dialect);
     let literals = changed_keys
         .iter()
         .map(|k| format!("'{}'", k.replace('\'', "''")))
@@ -568,6 +580,93 @@ mod fingerprint_sidecar_tests {
              VARCHAR)) END), sha256(CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier \
              AS VARCHAR)) END))) AS delta_digest"
         ));
+    }
+
+    #[test]
+    fn digest_select_uses_duckdb_hash_spelling_on_duckdb() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(sql.contains("sha256("));
+        assert!(sql.contains("CAST(name AS VARCHAR)"));
+    }
+
+    /// `emit_fingerprint_digest_select` built DuckDB's `sha256` spelling for
+    /// the digest regardless of `dialect`, so a BigQuery caller received SQL
+    /// GoogleSQL cannot run for the row-content hash (`SHA256` returns
+    /// `BYTES` there, so it needs hex-encoding before it can feed a
+    /// `STRING_AGG`). This test pins the `delta_digest` expression's own
+    /// outer wrapping; see `digest_select_delta_key_is_googlesql_clean` for
+    /// the `delta_key` half.
+    #[test]
+    fn digest_select_uses_googlesql_hash_spelling_on_bigquery() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(sql.contains("TO_HEX(SHA256("));
+        assert!(sql.ends_with("AS delta_digest FROM raw.dim_users"));
+        assert!(sql.contains("TO_HEX(SHA256(sha256(CASE WHEN name IS NULL"));
+    }
+
+    #[test]
+    fn digest_select_uses_spark_string_cast_on_spark() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::Spark,
+        );
+        assert!(sql.contains("sha256("));
+        assert!(sql.contains("CAST(name AS STRING)"));
+    }
+
+    /// Pins the invariant that makes the phase-1 defect unrepeatable: the
+    /// emitter never re-authors the hash shape itself, it only ever
+    /// delegates to [`row_fingerprint_expr`] for the caller's own dialect.
+    #[test]
+    fn digest_select_matches_row_fingerprint_expr_for_every_dialect() {
+        let digest_columns = vec!["name".to_string(), "tier".to_string()];
+        for dialect in [
+            MaintenanceDialect::DuckDb,
+            MaintenanceDialect::Spark,
+            MaintenanceDialect::BigQuery,
+        ] {
+            let sql = emit_fingerprint_digest_select(
+                "raw.dim_users",
+                &["user_id".to_string()],
+                &digest_columns,
+                dialect,
+            );
+            let expected_digest_expr = row_fingerprint_expr(&digest_columns, dialect);
+            let expected_suffix =
+                format!("{expected_digest_expr} AS delta_digest FROM raw.dim_users");
+            assert!(
+                sql.ends_with(&expected_suffix),
+                "dialect {dialect:?}: expected suffix {expected_suffix:?} in {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sidecar_diff_inherits_the_callers_dialect() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            "smelt_state.fingerprint_sidecar",
+            "raw.dim_users",
+            "proj-1",
+            "consumer.model",
+            "stamp-1",
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(sql.contains("TO_HEX(SHA256("));
     }
 
     /// Regression for the NULL-vs-empty-string digest collision (the first
@@ -973,5 +1072,117 @@ mod fingerprint_sidecar_tests {
              it, sourced from the sidecar's own stored comparandum, while customer 1's unchanged \
              group must not surface: {keys:?}"
         );
+    }
+
+    /// Phase 2 test 1: the single-column `delta_key` branch casts to each
+    /// dialect's own unsized string type, never a hardcoded `VARCHAR`.
+    #[test]
+    fn key_expr_uses_dialect_string_type_for_every_dialect() {
+        let duckdb = key_expr_for_columns(&["user_id".to_string()], MaintenanceDialect::DuckDb);
+        assert_eq!(
+            duckdb,
+            "COALESCE(CAST(user_id AS VARCHAR), '\u{2}NULL\u{2}')"
+        );
+
+        for dialect in [MaintenanceDialect::BigQuery, MaintenanceDialect::Spark] {
+            let sql = key_expr_for_columns(&["user_id".to_string()], dialect);
+            assert!(
+                sql.contains("CAST(user_id AS STRING)"),
+                "dialect {dialect:?}: expected STRING cast in {sql:?}"
+            );
+            assert!(!sql.contains("VARCHAR"), "dialect {dialect:?}: {sql:?}");
+        }
+    }
+
+    /// Phase 2 test 2: the composite-key branch (`concat_varchar_expr_typed`)
+    /// is dialect-parameterised too, not just the single-column branch.
+    #[test]
+    fn multi_column_key_expr_uses_dialect_string_type() {
+        let columns = vec!["tenant_id".to_string(), "user_id".to_string()];
+        let sql = key_expr_for_columns(&columns, MaintenanceDialect::BigQuery);
+        assert!(sql.contains("CAST(tenant_id AS STRING)"));
+        assert!(sql.contains("CAST(user_id AS STRING)"));
+        assert!(!sql.contains("VARCHAR"));
+    }
+
+    /// Phase 2 test 3: the whole `emit_fingerprint_digest_select` statement
+    /// for BigQuery contains no `VARCHAR` anywhere — the statement-level
+    /// assertion phase 1 could not yet make, since `delta_key` was still
+    /// DuckDB-shaped at that point.
+    #[test]
+    fn digest_select_delta_key_is_googlesql_clean() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(!sql.contains("VARCHAR"), "{sql}");
+        assert!(sql.contains("CAST(user_id AS STRING)"));
+    }
+
+    /// Phase 2 test 4: DuckDB output is byte-identical to today's — no
+    /// regression in the only live path.
+    #[test]
+    fn repair_group_digest_uses_duckdb_bit_xor_hash() {
+        let sql = emit_repair_group_digest_select(
+            "raw.orders",
+            &["customer_id".to_string()],
+            &["amount".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(
+            sql,
+            "SELECT COALESCE(CAST(customer_id AS VARCHAR), '\u{2}NULL\u{2}') AS delta_key, \
+             CAST(bit_xor(hash(sha256(sha256(CASE WHEN amount IS NULL THEN 'N' ELSE \
+             CONCAT('V', CAST(amount AS VARCHAR)) END)))) AS VARCHAR) AS delta_digest FROM \
+             raw.orders GROUP BY customer_id"
+        );
+    }
+
+    /// Phase 2 test 5: BigQuery output uses `BIT_XOR(FARM_FINGERPRINT(` and
+    /// `AS STRING`, and contains no `VARCHAR`/`hash(`.
+    #[test]
+    fn repair_group_digest_uses_googlesql_bit_xor_farm_fingerprint() {
+        let sql = emit_repair_group_digest_select(
+            "raw.orders",
+            &["customer_id".to_string()],
+            &["amount".to_string()],
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(sql.contains("BIT_XOR(FARM_FINGERPRINT("), "{sql}");
+        assert!(sql.contains("AS STRING"), "{sql}");
+        assert!(!sql.contains("VARCHAR"), "{sql}");
+        assert!(!sql.contains("hash("), "{sql}");
+    }
+
+    /// Phase 2 test 6: Spark output uses `xxhash64` and `AS STRING`.
+    #[test]
+    fn repair_group_digest_uses_spark_xxhash64() {
+        let sql = emit_repair_group_digest_select(
+            "raw.orders",
+            &["customer_id".to_string()],
+            &["amount".to_string()],
+            MaintenanceDialect::Spark,
+        );
+        assert!(sql.contains("xxhash64("), "{sql}");
+        assert!(sql.contains("AS STRING"), "{sql}");
+        assert!(!sql.contains("VARCHAR"), "{sql}");
+    }
+
+    /// Phase 2 test 7: the third `_dialect`-ignoring emitter in this file
+    /// also honours its parameter.
+    #[test]
+    fn key_addressed_affected_keys_select_threads_its_dialect() {
+        let sql = emit_key_addressed_affected_keys_select(
+            "raw.upstream",
+            &["upstream_id".to_string()],
+            &["downstream_id".to_string()],
+            &["k1".to_string()],
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(sql.contains("CAST(downstream_id AS STRING)"), "{sql}");
+        assert!(sql.contains("CAST(upstream_id AS STRING)"), "{sql}");
+        assert!(!sql.contains("VARCHAR"), "{sql}");
     }
 }

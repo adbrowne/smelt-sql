@@ -327,7 +327,11 @@ fn repair_group_partition_identity(group_key: &[String], digest_columns: &[Strin
 /// single dialect-aware owner.
 pub fn repair_keys_literal_select(keys: &[String], dialect: MaintenanceDialect) -> String {
     if keys.is_empty() {
-        return "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE".to_string();
+        // The cast type is the dialect's own unsized string type, never a
+        // hardcoded `VARCHAR` — GoogleSQL has none (`Type not found:
+        // VARCHAR`).
+        let cast_type = smelt_logical::maintenance::emit::probe_dialect_string_type(dialect);
+        return format!("SELECT CAST(NULL AS {cast_type}) AS delta_key WHERE FALSE");
     }
     let rows: Vec<Vec<String>> = keys
         .iter()
@@ -450,7 +454,7 @@ pub async fn diff_repair_group_sidecar_changed_keys(
             .map(|k| format!("{output_table}.{k}"))
             .collect();
         let output_key_expr =
-            smelt_logical::maintenance::emit::key_expr_for_columns(&output_key_columns);
+            smelt_logical::maintenance::emit::key_expr_for_columns(&output_key_columns, dialect);
         let stored_keys_sql = format!("SELECT {output_key_expr} AS delta_key FROM {output_table}");
         let stored_batches = backend.execute_sql(&stored_keys_sql).await?;
         keys.extend(extract_delta_keys(&stored_batches));

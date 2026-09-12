@@ -97,6 +97,7 @@ pub(crate) fn model_edges_for(
             clock_col_aliases,
             unique_key,
             output_shape,
+            allow_full_scan: false,
         });
     }
     edges
@@ -189,6 +190,43 @@ pub(crate) async fn resolve_upstream_mutation_gate(
     .await
     .map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(Some((verdict, refreshed)))
+}
+
+/// The mutated dimension's own declared `unique_key` (`sources.md` §"Row
+/// identity") for a `Trigger::UpstreamMutation { source }` cell's join-
+/// contribution proof, resolved from a declared source first (`source_infos`,
+/// the ordinary `mutation_profile: mutable_snapshot` dimension case), falling
+/// back to a model edge's own `ModelEdge::unique_key` when `source` names no
+/// declared source at all (`docs/outcomes/20260906-bigquery-correctness/
+/// phases/05-plan.md`) — an `UpstreamMutation` trigger over a maintained-
+/// model edge has no `SourceInfo` by construction (edges are keyed on the
+/// upstream MODEL's bare address, never a declared source), so the
+/// source-only lookup alone would always come back empty for one. Empty when
+/// neither resolves — the caller's own fail-closed `dimension_unique_key`
+/// default, unchanged.
+pub(crate) fn dimension_unique_key_for(
+    source: &str,
+    source_infos: &[smelt_core::sources::SourceInfo],
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+) -> Vec<String> {
+    source_infos
+        .iter()
+        .find(|info| {
+            let segs = &info.address_segments;
+            let bare = match segs.split_first() {
+                Some((first, rest)) if first == "sources" => rest.join("."),
+                _ => segs.join("."),
+            };
+            bare == source
+        })
+        .and_then(|info| info.unique_key.clone())
+        .or_else(|| {
+            model_edges
+                .iter()
+                .find(|e| e.name == source)
+                .map(|e| e.unique_key.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// Record the refreshed baseline `resolve_upstream_mutation_gate` returned —
@@ -366,4 +404,94 @@ pub(crate) fn build_maint_source_facts(
         }
     }
     (sources, explicitly_mutable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_logical::analysis::output_delta::OutputDelta;
+    use smelt_logical::maintenance::derive::ModelEdge;
+    use tempfile::TempDir;
+
+    fn repo_dim_edge() -> ModelEdge {
+        ModelEdge {
+            name: "gold.repo_dim".to_string(),
+            clock_col: None,
+            clock_col_aliases: vec![],
+            unique_key: vec!["repo_id".to_string()],
+            output_shape: Some(OutputDelta::KeyedUpsert {
+                keys: vec!["repo_id".to_string()],
+            }),
+            allow_full_scan: true,
+        }
+    }
+
+    /// Test 4 (`docs/outcomes/20260906-bigquery-correctness/phases/
+    /// 05-plan.md`): `dimension_unique_key_for` resolves a model-edge
+    /// trigger's unique key from `ModelEdge::unique_key` — there is no
+    /// `SourceInfo` for an edge trigger at all (edges are keyed on the
+    /// upstream MODEL's bare address, never a declared source), so the
+    /// pre-phase-5 source-only lookup always came back empty for one.
+    #[test]
+    fn dimension_unique_key_for_a_model_edge_comes_from_the_edge() {
+        let model_edges = vec![repo_dim_edge()];
+        let key = dimension_unique_key_for("gold.repo_dim", &[], &model_edges);
+        assert_eq!(key, vec!["repo_id".to_string()]);
+
+        // A source name that is neither a declared source nor a model edge
+        // resolves to empty — the caller's existing fail-closed default.
+        let empty = dimension_unique_key_for("no.such.thing", &[], &model_edges);
+        assert!(empty.is_empty());
+    }
+
+    /// Test 3: `resolve_upstream_mutation_gate` returns `None` for a
+    /// model-edge trigger's source name (no matching `SourceInfo` — edges
+    /// are keyed on the upstream MODEL's bare address, never a declared
+    /// source), and the caller's own `mutation_should_dispatch` (`!matches!
+    /// (gate, Some(NoOp))`) therefore evaluates `true` — the declared
+    /// fail-open-to-dispatch posture (`docs/specs/incremental_models.md`
+    /// §"When a mutation cell dispatches") for a trigger with no recorded
+    /// mutation baseline to compare against. The lookup returns before any
+    /// backend or file-store I/O, so an in-memory DuckDB backend and an
+    /// empty scratch `FileStore` never actually get touched.
+    #[tokio::test]
+    async fn a_model_edge_trigger_has_no_mutation_baseline_and_fails_open() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("db.duckdb");
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb backend");
+        let file_store = FileStore::with_state_mode(
+            dir.path(),
+            "dev",
+            smelt_core::config::StateMode::Environments,
+        );
+        let state_io_lock = tokio::sync::Mutex::new(());
+
+        let gate = resolve_upstream_mutation_gate(
+            &backend,
+            "gold.events_enriched",
+            &[],
+            "gold.repo_dim",
+            "dev",
+            "main",
+            &file_store,
+            &state_io_lock,
+        )
+        .await
+        .expect("resolution must not error");
+        assert!(
+            gate.is_none(),
+            "an edge trigger has no SourceInfo, so the gate must resolve to None: {gate:?}"
+        );
+
+        let mutation_should_dispatch = !matches!(
+            gate.as_ref().map(|(v, _)| v),
+            Some(crate::mutation_probe::MutationVerdict::NoOp)
+        );
+        assert!(
+            mutation_should_dispatch,
+            "a None gate must fail OPEN to dispatch, not be treated as NoOp"
+        );
+    }
 }

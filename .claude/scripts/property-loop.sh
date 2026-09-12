@@ -57,7 +57,7 @@ SENTINEL_EXHAUSTED="<<CATALOG_EXHAUSTED>>"
 
 PROMPT="${PROMPT:-$(cat "${SCRIPT_DIR}/../property-loop-prompt.txt")}"
 
-cd "${REPO_ROOT}"
+cd "${REPO_ROOT}" || exit 1
 
 # Assemble the per-iteration memory-bounded scope once (degrade gracefully when
 # systemd-run is unavailable / rejects a property — same pattern as the autonomy

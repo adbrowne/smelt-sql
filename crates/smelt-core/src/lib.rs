@@ -1,6 +1,7 @@
 pub mod baseline;
 pub mod config;
 pub mod discovery;
+pub mod external_step;
 pub mod frontmatter;
 pub mod graph;
 pub mod metadata;
@@ -28,6 +29,10 @@ pub use config::{
 pub use discovery::{
     discover_function_file_paths, parse_sql_file, ModelDiscovery, ModelFile, ModelKind,
     PythonModelQuery,
+};
+pub use external_step::{
+    discover_external_step_errors, discover_external_steps, parse_external_step_yaml,
+    validate_external_steps, ExternalStepError, ExternalStepInfo, StepCadence,
 };
 pub use frontmatter::{
     parse_frontmatter, DeclarationKind, FrontmatterDiagnostic, FrontmatterSeverity,

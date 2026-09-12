@@ -279,6 +279,14 @@ struct RebuildArgs {
     /// Use this only as a temporary escape hatch while fixing the model SQL.
     #[arg(long = "allow-downgrade")]
     allow_downgrade: bool,
+
+    /// License a whole-table recompute over a model whose source declares a
+    /// `retention:` bound, when the model's target already has stored
+    /// output (otherwise refused — `docs/specs/sources.md` §Semantics 5
+    /// "Retention refusal"). The recompute proceeds but loses replayability
+    /// for the source's retained region, reported once as a warning.
+    #[arg(long = "allow-full-refresh")]
+    allow_full_refresh: bool,
 }
 
 #[derive(Parser)]
@@ -417,6 +425,14 @@ struct BuildArgs {
     /// as the positional argument.
     #[arg(long = "include-upstreams", requires = "period")]
     include_upstreams: bool,
+
+    /// License a whole-table recompute over a model whose source declares a
+    /// `retention:` bound, when the model's target already has stored
+    /// output (otherwise refused — `docs/specs/sources.md` §Semantics 5
+    /// "Retention refusal"). The recompute proceeds but loses replayability
+    /// for the source's retained region, reported once as a warning.
+    #[arg(long = "allow-full-refresh")]
+    allow_full_refresh: bool,
 }
 
 #[derive(Parser)]
@@ -779,6 +795,11 @@ async fn main() -> std::process::ExitCode {
     // `3` via `commands::run::exit_code_for` — same pattern as `migrate`
     // above. See `docs/specs/cli.md` §"Exit codes" — `smelt run` specifics.
     let is_run = matches!(cli.command, Commands::Run(_));
+    // `smelt explain <step> --show-sql`/`--period`/`--technique` classify to
+    // exit 2 (usage error) via `commands::explain_external_step::exit_code_for`
+    // — same pattern as `init`/`list`/`migrate`/`run` above. See
+    // `docs/specs/cli.md` §"`smelt explain <external step>`".
+    let is_explain = matches!(cli.command, Commands::Explain(_));
 
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
@@ -819,6 +840,8 @@ async fn main() -> std::process::ExitCode {
                 commands::migrate::exit_code_for(&err)
             } else if is_run {
                 commands::run::exit_code_for(&err)
+            } else if is_explain {
+                commands::explain_external_step::exit_code_for(&err)
             } else {
                 smelt_cli::exit_code_for(&err)
             };

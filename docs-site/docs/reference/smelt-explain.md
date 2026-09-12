@@ -79,6 +79,28 @@ names the diagnostic code a refusal of this shape raises, absent for a refusal t
 diagnostic today; `text` is the report's own rendering of the refusal, verbatim. Empty when the
 model's plan admitted every cell.
 
+## Retention reach
+
+For a model referencing a source that declares a rolling [`retention:`
+bound](sources-yml.md), `smelt explain <model>` prints a `Retention:` section: one row per
+source, naming the retained bound and the model's required reach into it in seconds, and the
+verdict — within bound, exceeding it (`SourceRetentionExceeded`), or unprovable and recorded as
+a downgrade (`SourceRetentionDowngraded`):
+
+```
+Retention:
+  - events: retained 3888000s, required reach 604800s — within bound
+  - events: retained 3888000s, required reach 8640000s — exceeds bound (SourceRetentionExceeded)
+  - events: retained 3888000s, reach unprovable — downgraded (SourceRetentionDowngraded): the model's reach into it is unbounded
+```
+
+A model referencing no `retention:`-bearing source prints no `Retention:` section at all — never
+an empty one. With `--json`, the same rows appear as a top-level `retention` array, omitted
+entirely when empty: `[{"source": "events", "verdict": "within"|"exceeds"|"unprovable",
+"retained_secs": 3888000, "required_lookback_secs": 604800, "reason": "..."}]` —
+`required_lookback_secs` is present only for the bounded verdicts (`within`/`exceeds`), and
+`reason` only for `unprovable`.
+
 ## Probes
 
 A declared world-fact (`functional_dependencies:`, `bounded_domain:`, `assert_monotonic`,

@@ -193,9 +193,354 @@ pub fn is_wrong_type_drop_failure(error_message: &str) -> bool {
         .any(|shape| error_message.contains(shape))
 }
 
+/// The ordered list of statements (each one query job) that realises
+/// `Backend::execute_write_with_bookkeeping` on BigQuery.
+///
+/// The seam's contract is that `pre_write_sqls` and `write_group` share one
+/// backend transaction while `ensure_sqls` run first and **outside** it. That
+/// maps onto GoogleSQL as: one job per `ensure_sqls` entry, then one
+/// multi-statement script holding the transaction.
+///
+/// Three GoogleSQL facts shape the script, each of which would otherwise be a
+/// silent correctness hole:
+///
+/// - **DDL stays out of the transaction.** `ensure_sqls` is idempotent
+///   `CREATE TABLE IF NOT EXISTS` DDL; the trait already documents keeping it
+///   outside for exactly this reason, and BigQuery is the backend that makes
+///   the precedent load-bearing.
+/// - **Rollback is explicit.** BigQuery does not roll a script's transaction
+///   back on its own when a statement fails mid-script, so the transaction is
+///   wrapped in `BEGIN … EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION;
+///   RAISE …; END` — the documented GoogleSQL shape. The `RAISE` re-surfaces
+///   the original error message, so a failure still reaches the caller as a
+///   failure rather than being swallowed by the handler.
+/// - **Statements are `;`-terminated.** A script is a statement list; the
+///   emitters produce unterminated SQL, so this function terminates each one
+///   (and tolerates an already-terminated statement rather than emitting `;;`).
+///
+/// Where there is **no** bookkeeping to bind (`pre_write_sqls` empty), no
+/// transaction is opened: the write statements run as ordinary jobs, exactly
+/// as the trait's default would. The transaction exists to make a bookkeeping
+/// record and its write atomic, and with no record there is nothing to bind.
+///
+/// **And where the write itself is a `CREATE`, the transaction cannot hold
+/// it.** BigQuery does not permit DDL creating or dropping permanent entities
+/// inside a multi-statement transaction (the same documented fact
+/// `BackendCapabilities::supports_transactional_ddl: false` records, and the
+/// reason the additive fold refuses its first step outright). A maintained
+/// model's *first* run writes `CREATE TABLE … AS` rather than a merge, so a
+/// re-run-tolerant cell's ledger record would otherwise be bound into a script
+/// the engine rejects. That case takes [`BookkeepingAtomicity::
+/// NonAtomicCreatingWrite`]: no transaction, the write first and the
+/// bookkeeping after, each its own job — and the caller **reports** the lost
+/// atomicity rather than absorbing it (`docs/specs/state.md` §"The degradation
+/// contract").
+///
+/// Two things make that ordering the right one rather than a coin flip:
+///
+/// - **Record-before-write is vacuous here.** The contract's ordering exists
+///   because a record reads the target's *pre-write* state to compute the
+///   changed-row set. A write that creates the target has no pre-write state
+///   to read — the record's own query would reference a table that does not
+///   exist yet — so nothing is lost by running it after.
+/// - **The surviving exposure is the harmless direction.** A crash between the
+///   two leaves the table created and the window unrecorded, so a re-run
+///   redoes the window. The reverse (a bookkeeping record claiming a window
+///   whose write never happened) is the direction that can mislead a later
+///   run, and this ordering makes it impossible.
+///
+/// Only a leading `CREATE` is treated this way, because that is the only DDL
+/// the maintenance driver ever puts in a write group (`create_group` is
+/// `emit_create_table_as`). Any other DDL reaching a write group would still
+/// be bound into the transaction and rejected by the engine — loudly, and
+/// noted here rather than silently pre-empted, since inventing a degradation
+/// for a shape nothing emits would be untested behaviour.
+pub fn write_with_bookkeeping_plan(
+    ensure_sqls: &[String],
+    pre_write_sqls: &[String],
+    write_sqls: &[String],
+) -> BookkeepingPlan {
+    let mut statements: Vec<String> = ensure_sqls.to_vec();
+    if pre_write_sqls.is_empty() {
+        statements.extend(write_sqls.iter().cloned());
+        return BookkeepingPlan {
+            statements,
+            atomicity: BookkeepingAtomicity::NothingToBind,
+        };
+    }
+    if write_sqls.iter().any(|s| creates_a_permanent_entity(s)) {
+        statements.extend(write_sqls.iter().cloned());
+        statements.extend(pre_write_sqls.iter().cloned());
+        return BookkeepingPlan {
+            statements,
+            atomicity: BookkeepingAtomicity::NonAtomicCreatingWrite,
+        };
+    }
+    let body = pre_write_sqls
+        .iter()
+        .chain(write_sqls.iter())
+        .map(|s| format!("{};", s.trim().trim_end_matches(';').trim_end()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    statements.push(format!(
+        "BEGIN\nBEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;\nEXCEPTION WHEN ERROR THEN\n\
+         ROLLBACK TRANSACTION;\nRAISE USING MESSAGE = @@error.message;\nEND;",
+        body
+    ));
+    BookkeepingPlan {
+        statements,
+        atomicity: BookkeepingAtomicity::Transactional,
+    }
+}
+
+/// The statements [`write_with_bookkeeping_plan`] produces, and how much
+/// atomicity they actually buy. The second half is data, not a log line, so
+/// the caller can report a degradation instead of silently absorbing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookkeepingPlan {
+    /// The ordered statements, each one query job.
+    pub statements: Vec<String>,
+    /// What the plan guarantees about the bookkeeping/write pair.
+    pub atomicity: BookkeepingAtomicity,
+}
+
+/// How much the statement plan binds the bookkeeping record to its write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookkeepingAtomicity {
+    /// The record and the write share one multi-statement transaction — the
+    /// seam's full contract.
+    Transactional,
+    /// There was no bookkeeping to bind; the write ran as ordinary jobs. Not
+    /// a degradation — nothing was promised.
+    NothingToBind,
+    /// **Degraded.** The write group creates a permanent entity, which
+    /// GoogleSQL forbids inside a transaction, so the write and the
+    /// bookkeeping ran as separate jobs (write first). The caller must report
+    /// this; the surviving exposure is a created table whose window is
+    /// unrecorded, which costs a redundant re-run and never correctness.
+    NonAtomicCreatingWrite,
+}
+
+/// Does this statement create a permanent entity — the one DDL shape a write
+/// group produced by the maintenance driver can contain?
+///
+/// `CREATE TEMP`/`CREATE TEMPORARY` are excluded: BigQuery does permit those
+/// inside a transaction, and they are never a maintained model's target.
+fn creates_a_permanent_entity(sql: &str) -> bool {
+    let head = sql.trim_start().to_ascii_uppercase();
+    if !head.starts_with("CREATE") {
+        return false;
+    }
+    let rest = head["CREATE".len()..].trim_start();
+    let rest = rest
+        .strip_prefix("OR REPLACE")
+        .map(str::trim_start)
+        .unwrap_or(rest);
+    !(rest.starts_with("TEMP ") || rest.starts_with("TEMPORARY "))
+}
+
+/// The marker [`fold_ledger_delta_script`] raises when the fold's ledger
+/// record turns out to be a repeat, and the *only* string
+/// [`is_already_reflected`] matches on.
+///
+/// It is emitted and recognised in this one module on purpose: a recogniser
+/// living apart from its emitter is the failure this seam could least afford —
+/// drift would turn "refuse the repeat" into "fail the run with an
+/// unclassified error", or worse, leave a repeat unrecognised. The pairing is
+/// asserted by `sentinel_the_script_emits_is_the_sentinel_the_matcher_knows`.
+///
+/// Shaped so it cannot collide with user data reaching an error message:
+/// screaming snake case, a `SMELT_` namespace prefix, and a token
+/// (`ALREADY_REFLECTED`) that appears in no GoogleSQL keyword, no table name
+/// and no smelt-emitted SQL.
+pub const ALREADY_REFLECTED_SENTINEL: &str = "SMELT_LEDGER_ALREADY_REFLECTED";
+
+/// The GoogleSQL script realising `Backend::fold_ledger_delta`'s
+/// never-fold-twice contract (`docs/specs/incremental_models.md` §Constraints
+/// "Never fold a delta already reflected in the state") on BigQuery.
+///
+/// **Why this exists at all.** On DuckDB the guarantee *is* a storage
+/// constraint: the ledger's `PRIMARY KEY` is enforced, a repeat insert
+/// violates it, and the violation aborts the transaction before the fold runs.
+/// GoogleSQL's `PRIMARY KEY` is `NOT ENFORCED` — it documents row identity and
+/// refuses nothing — so the same two statements would silently double-count an
+/// additive fold. Here the refusal is re-expressed as an *effect* test:
+/// `record_sql` (`smelt_state::ledger::ledger_fold_record_sql`, which on this
+/// dialect is a `MERGE … WHEN NOT MATCHED THEN INSERT`) modifies one row the
+/// first time and zero rows on a repeat, and `@@row_count = 0` aborts the
+/// script before `action_sql` is ever reached.
+///
+/// ```text
+/// BEGIN
+/// BEGIN TRANSACTION;
+/// <record_sql>;
+/// IF @@row_count = 0 THEN
+/// RAISE USING MESSAGE = '<sentinel>: …';
+/// END IF;
+/// <action_sql>;
+/// COMMIT TRANSACTION;
+/// EXCEPTION WHEN ERROR THEN
+/// ROLLBACK TRANSACTION;
+/// RAISE USING MESSAGE = @@error.message;
+/// END;
+/// ```
+///
+/// **The soundness argument, and exactly what it rests on.** Two concurrent
+/// runs must not both see "absent" and both fold — the check-then-act race
+/// that makes `Backend::fold_ledger_delta`'s documented best-effort default
+/// (`exists` → `insert` → `action`, as three separate jobs) unacceptable as
+/// BigQuery's realisation. BigQuery's multi-statement transactions are
+/// documented to "guarantee ACID properties and support snapshot isolation",
+/// and — the load-bearing sentence — "If a transaction mutates (updates or
+/// deletes) rows in a table, then other transactions or DML statements that
+/// mutate rows in the same table cannot run concurrently. Conflicting
+/// transactions are cancelled." (BigQuery docs, "Multi-statement
+/// transactions"). Both folds mutate `_smelt_ledger`, the same table, so they
+/// cannot commit concurrently: one wins and the other is cancelled by the
+/// engine. The winner's fold applies once; the loser is either cancelled (a
+/// loud failure, never a silent second fold) or, on a later re-run, reads the
+/// committed row and refuses here. The property this rests on is therefore
+/// *conflict detection between mutating transactions on one table*, which is
+/// stronger than the snapshot isolation it is usually stated alongside — the
+/// refusal does not need to reason about read skew at all.
+///
+/// Two things offline evidence cannot settle, both inherited by phase 16 of
+/// `docs/outcomes/20260906-bigquery-correctness`: that a live repeat really
+/// surfaces this sentinel through the adapter's error text unmangled, and that
+/// the engine's cancellation of a conflicting transaction is observed as a
+/// failure rather than as a retry that quietly succeeds.
+///
+/// **Rollback is explicit.** BigQuery does not unwind a script's transaction
+/// on its own when a statement fails mid-script, so the body is wrapped in
+/// `BEGIN … EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION; RAISE USING
+/// MESSAGE = @@error.message; END` — the same shape
+/// [`write_with_bookkeeping_plan`] uses. A `RAISE` inside the `BEGIN` section
+/// is caught by that handler, which rolls the transaction back and re-raises
+/// carrying the sentinel, so the refusal still reaches the caller as an error.
+///
+/// **No DDL may appear in `action_sql`.** BigQuery does not permit DDL that
+/// creates or drops permanent entities inside a transaction, so a first-run
+/// `CREATE TABLE … AS` action cannot be folded atomically here. That is
+/// refused *upstream*, at the driver, keyed on
+/// `BackendCapabilities::supports_transactional_ddl` — never discovered inside
+/// this script.
+pub fn fold_ledger_delta_script(record_sql: &str, action_sql: &str) -> String {
+    let terminate = |s: &str| format!("{};", s.trim().trim_end_matches(';').trim_end());
+    format!(
+        "BEGIN\nBEGIN TRANSACTION;\n{}\nIF @@row_count = 0 THEN\n\
+         RAISE USING MESSAGE = '{}: this delta is already recorded in the reconciliation \
+         ledger; the fold was not applied';\nEND IF;\n{}\nCOMMIT TRANSACTION;\n\
+         EXCEPTION WHEN ERROR THEN\nROLLBACK TRANSACTION;\n\
+         RAISE USING MESSAGE = @@error.message;\nEND;",
+        terminate(record_sql),
+        ALREADY_REFLECTED_SENTINEL,
+        terminate(action_sql),
+    )
+}
+
+/// Does this BigQuery error message carry [`fold_ledger_delta_script`]'s
+/// already-reflected sentinel?
+///
+/// The counterpart of `smelt_backend_duckdb`'s `is_constraint_violation`: it
+/// answers "is this failure the ledger refusing a repeat, rather than a
+/// genuine execution failure?", and it is the one place that answer is decided
+/// on this backend. Deliberately a `contains` rather than an equality test —
+/// the adapter wraps the raised message in BigQuery's own job-error envelope
+/// (`400 Query error: …`), so the sentinel arrives embedded, not alone.
+pub fn is_already_reflected(message: &str) -> bool {
+    message.contains(ALREADY_REFLECTED_SENTINEL)
+}
+
+/// The table named in a "transaction aborted due to concurrent update"
+/// job error, when the message is one.
+///
+/// BigQuery cancels a multi-statement transaction that mutates a table
+/// another in-flight transaction is also mutating, and says so by name:
+///
+/// ```text
+/// Transaction is aborted due to concurrent update against table
+/// smelt-bq-test-20260816:smelt_dogfood._smelt_ledger. Transaction ID: …
+/// ```
+///
+/// That cancellation is the *mechanism* the additive never-fold-twice
+/// refusal rests on (`docs/specs/state.md`), so it is not an incidental
+/// failure — it is what a parallel run costs. The whole transaction is
+/// rolled back before the cancellation, so the caller's remedy is to
+/// re-issue the identical statement group, and the error is mapped to
+/// `BackendError::TransactionConflict` (transient) rather than
+/// `ExecutionFailed` (deterministic) so the ordinary bounded retry does
+/// exactly that. `None` when the message is any other failure.
+///
+/// Deliberately a substring match, for the same reason
+/// [`is_already_reflected`] is: the adapter hands the message back inside
+/// BigQuery's own job-error envelope.
+pub fn transaction_conflict_table(message: &str) -> Option<String> {
+    const MARKER: &str = "Transaction is aborted due to concurrent update against table ";
+    let rest = message.split_once(MARKER)?.1.trim_start();
+    let table = rest
+        .split(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.');
+    if table.is_empty() {
+        // The engine changed the message shape; still a conflict, and the
+        // caller must not lose that — name the table as unknown rather
+        // than mis-classifying the error as deterministic.
+        return Some("<unknown>".to_string());
+    }
+    Some(table.to_string())
+}
+
+/// Classify a BigQuery job error raised while executing `model`'s SQL.
+///
+/// One place, so the transient/deterministic decision cannot be made
+/// differently by the result-returning and no-result execution paths.
+pub fn classify_job_error(model: &str, message: String) -> smelt_backend::BackendError {
+    match transaction_conflict_table(&message) {
+        Some(table) => smelt_backend::BackendError::transaction_conflict(table, message),
+        None => smelt_backend::BackendError::execution_failed(model, message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact message a live `examples/github_activity` run got when two
+    /// models' bookkeeping transactions hit `_smelt_ledger` at once. It must
+    /// classify as a *transient* transaction conflict, not as a
+    /// deterministic execution failure — otherwise the bounded retry that is
+    /// the engine's own documented remedy never fires and a parallel run
+    /// fails models at random.
+    #[test]
+    fn a_concurrent_update_abort_is_a_transient_transaction_conflict() {
+        let message = "BadRequest: 400 Query error: Transaction is aborted due to concurrent \
+                       update against table                        smelt-bq-test-20260816:smelt_dogfood._smelt_ledger. Transaction ID:                        6ac196bc-0000-286d-a34c-fc41169299c1. at [75:1]";
+        assert_eq!(
+            transaction_conflict_table(message).as_deref(),
+            Some("smelt-bq-test-20260816:smelt_dogfood._smelt_ledger")
+        );
+        let err = classify_job_error("bigquery sql", message.to_string());
+        assert!(
+            matches!(err, smelt_backend::BackendError::TransactionConflict { .. }),
+            "got: {err:?}"
+        );
+        assert!(err.is_transient());
+    }
+
+    /// The negative control: an ordinary SQL failure stays deterministic, so
+    /// the classifier cannot make every failure retryable.
+    #[test]
+    fn an_ordinary_sql_error_stays_a_deterministic_execution_failure() {
+        let message = "BadRequest: 400 Query error: Type not found: VARCHAR at [3:425]";
+        assert_eq!(transaction_conflict_table(message), None);
+        let err = classify_job_error("bigquery sql", message.to_string());
+        assert!(
+            matches!(err, smelt_backend::BackendError::ExecutionFailed { .. }),
+            "got: {err:?}"
+        );
+        assert!(!err.is_transient());
+    }
 
     /// A hyphenated project id must survive quoting — unquoted it parses as
     /// subtraction and the statement fails.
@@ -329,5 +674,263 @@ mod tests {
     fn wrong_type_does_not_match_not_found() {
         let msg = "404 Not found: Table project:dataset.does_not_exist";
         assert!(!is_wrong_type_drop_failure(msg));
+    }
+
+    /// The seam's contract, asserted against the recorded statement plan
+    /// rather than a live warehouse: `ensure_sqls` run first, each as its own
+    /// job and **outside** the transaction (BigQuery does not accept the
+    /// idempotent DDL inside one), and the bookkeeping record and the write
+    /// share exactly one transaction.
+    #[test]
+    fn bookkeeping_keeps_ensure_ddl_outside_one_transaction_with_the_write() {
+        let plan = write_with_bookkeeping_plan(
+            &["CREATE TABLE IF NOT EXISTS `ds._smelt_ledger` (a STRING)".to_string()],
+            &[
+                "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS a) S ON T.a = S.a WHEN NOT \
+               MATCHED THEN INSERT (a) VALUES (S.a)"
+                    .to_string(),
+            ],
+            &[
+                "MERGE `ds.t` USING (SELECT 1) ON FALSE WHEN NOT MATCHED THEN INSERT ROW"
+                    .to_string(),
+            ],
+        );
+        let plan = plan.statements;
+        assert_eq!(plan.len(), 2, "{plan:#?}");
+        assert_eq!(
+            plan[0],
+            "CREATE TABLE IF NOT EXISTS `ds._smelt_ledger` (a STRING)"
+        );
+        assert!(!plan[0].contains("TRANSACTION"), "{}", plan[0]);
+
+        let script = &plan[1];
+        assert_eq!(script.matches("BEGIN TRANSACTION;").count(), 1, "{script}");
+        assert_eq!(script.matches("COMMIT TRANSACTION;").count(), 1, "{script}");
+        assert!(script.contains("_smelt_ledger` T USING"), "{script}");
+        assert!(script.contains("MERGE `ds.t`"), "{script}");
+        assert!(
+            !script.contains("CREATE TABLE IF NOT EXISTS"),
+            "the idempotent DDL must not be inside the transaction: {script}"
+        );
+        // The record is before the write — it reads pre-write target state.
+        let record_at = script.find("_smelt_ledger` T USING").expect("record");
+        let write_at = script.find("MERGE `ds.t`").expect("write");
+        assert!(record_at < write_at, "{script}");
+    }
+
+    /// A failure mid-script must roll the transaction back and still surface
+    /// as a failure — the handler re-raises rather than swallowing the error.
+    #[test]
+    fn bookkeeping_rolls_back_explicitly_and_re_raises() {
+        let plan = write_with_bookkeeping_plan(
+            &[],
+            &["INSERT INTO x VALUES (1)".to_string()],
+            &["INSERT INTO y VALUES (2)".to_string()],
+        );
+        assert_eq!(plan.atomicity, BookkeepingAtomicity::Transactional);
+        let script = &plan.statements[0];
+        assert!(script.starts_with("BEGIN\nBEGIN TRANSACTION;"), "{script}");
+        assert!(script.contains("EXCEPTION WHEN ERROR THEN"), "{script}");
+        assert!(script.contains("ROLLBACK TRANSACTION;"), "{script}");
+        assert!(
+            script.contains("RAISE USING MESSAGE = @@error.message;"),
+            "{script}"
+        );
+        assert!(script.ends_with("END;"), "{script}");
+    }
+
+    /// Every statement in the script is `;`-terminated exactly once — a
+    /// script is a statement list, and `;;` is a syntax error.
+    #[test]
+    fn bookkeeping_terminates_each_statement_once() {
+        let plan = write_with_bookkeeping_plan(
+            &[],
+            &["INSERT INTO x VALUES (1);".to_string()],
+            &["INSERT INTO y VALUES (2)".to_string()],
+        );
+        let plan = plan.statements;
+        assert!(!plan[0].contains(";;"), "{}", plan[0]);
+        assert!(
+            plan[0].contains("INSERT INTO x VALUES (1);\n"),
+            "{}",
+            plan[0]
+        );
+        assert!(
+            plan[0].contains("INSERT INTO y VALUES (2);\n"),
+            "{}",
+            plan[0]
+        );
+    }
+
+    /// With nothing to bind, no transaction is opened — the plan is the
+    /// trait default's own sequence.
+    #[test]
+    fn bookkeeping_opens_no_transaction_when_there_is_no_record() {
+        let plan = write_with_bookkeeping_plan(
+            &["CREATE TABLE IF NOT EXISTS `ds.t` (a STRING)".to_string()],
+            &[],
+            &["INSERT INTO `ds.t` VALUES ('a')".to_string()],
+        );
+        assert_eq!(plan.atomicity, BookkeepingAtomicity::NothingToBind);
+        assert_eq!(
+            plan.statements,
+            vec![
+                "CREATE TABLE IF NOT EXISTS `ds.t` (a STRING)".to_string(),
+                "INSERT INTO `ds.t` VALUES ('a')".to_string(),
+            ]
+        );
+    }
+
+    /// A first run's write group is a `CREATE TABLE … AS`, and GoogleSQL does
+    /// not permit DDL on a permanent entity inside a transaction — so binding
+    /// the bookkeeping record to it would produce a script the engine rejects.
+    /// The plan degrades instead: no transaction, write first, record after,
+    /// and the lost atomicity is *reported* rather than absorbed.
+    #[test]
+    fn a_creating_write_group_is_not_bound_into_a_transaction() {
+        let plan = write_with_bookkeeping_plan(
+            &["CREATE TABLE IF NOT EXISTS `ds._smelt_ledger` (a STRING)".to_string()],
+            &[
+                "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS a) S ON T.a = S.a WHEN NOT \
+               MATCHED THEN INSERT (a) VALUES (S.a)"
+                    .to_string(),
+            ],
+            &["CREATE OR REPLACE TABLE `ds.t` AS SELECT 1 AS a".to_string()],
+        );
+        assert_eq!(
+            plan.atomicity,
+            BookkeepingAtomicity::NonAtomicCreatingWrite,
+            "the degradation must be reported, not silent: {plan:#?}"
+        );
+        assert!(
+            plan.statements.iter().all(|s| !s.contains("TRANSACTION")),
+            "GoogleSQL rejects permanent-entity DDL inside a transaction: {:#?}",
+            plan.statements
+        );
+        assert_eq!(plan.statements.len(), 3, "{:#?}", plan.statements);
+        assert!(plan.statements[0].starts_with("CREATE TABLE IF NOT EXISTS `ds._smelt_ledger`"));
+        assert!(
+            plan.statements[1].starts_with("CREATE OR REPLACE TABLE `ds.t`"),
+            "the write runs first — a created table with an unrecorded window costs a re-run; \
+             the reverse could mislead a later run: {:#?}",
+            plan.statements
+        );
+        assert!(plan.statements[2].starts_with("MERGE `ds._smelt_ledger`"));
+    }
+
+    /// Non-vacuity for the case above: an ordinary DML write group with the
+    /// same bookkeeping still gets the full transaction.
+    #[test]
+    fn a_dml_write_group_still_shares_one_transaction_with_its_record() {
+        let plan = write_with_bookkeeping_plan(
+            &[],
+            &[
+                "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS a) S ON T.a = S.a WHEN NOT \
+               MATCHED THEN INSERT (a) VALUES (S.a)"
+                    .to_string(),
+            ],
+            &[
+                "MERGE `ds.t` USING (SELECT 1) ON FALSE WHEN NOT MATCHED THEN INSERT ROW"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(plan.atomicity, BookkeepingAtomicity::Transactional);
+        assert_eq!(plan.statements.len(), 1);
+        assert!(plan.statements[0].contains("BEGIN TRANSACTION;"));
+    }
+
+    /// A temporary table is not a permanent entity, and BigQuery does allow
+    /// it inside a transaction — so it must not trip the degradation.
+    #[test]
+    fn a_temp_create_is_not_treated_as_permanent_ddl() {
+        assert!(creates_a_permanent_entity(
+            "CREATE OR REPLACE TABLE `ds.t` AS SELECT 1"
+        ));
+        assert!(creates_a_permanent_entity("create table `ds.t` (a STRING)"));
+        assert!(!creates_a_permanent_entity(
+            "CREATE TEMP TABLE t AS SELECT 1"
+        ));
+        assert!(!creates_a_permanent_entity(
+            "CREATE OR REPLACE TEMPORARY TABLE t AS SELECT 1"
+        ));
+        assert!(!creates_a_permanent_entity(
+            "MERGE `ds.t` USING (SELECT 1) ON FALSE WHEN NOT MATCHED THEN INSERT ROW"
+        ));
+    }
+
+    // ── never-fold-twice (`fold_ledger_delta_script`) ────────────────────
+
+    /// The emitter and the recogniser must never drift apart: the string the
+    /// script raises is the string [`is_already_reflected`] matches, asserted
+    /// in one place so a rename of either half fails here rather than silently
+    /// downgrading a refusal into an unclassified execution failure.
+    #[test]
+    fn sentinel_the_script_emits_is_the_sentinel_the_matcher_knows() {
+        let script = fold_ledger_delta_script(
+            "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS model_name) S ON T.model_name = \
+             S.model_name WHEN NOT MATCHED THEN INSERT (model_name) VALUES (S.model_name)",
+            "MERGE INTO `ds.t` USING (SELECT 1)",
+        );
+        assert!(
+            script.contains(ALREADY_REFLECTED_SENTINEL),
+            "the script must raise the sentinel: {script}"
+        );
+        // The shape the adapter actually hands back: BigQuery's job-error
+        // envelope wrapped around the raised message.
+        let live_shaped_error = format!(
+            "400 Query error: {}: this delta is already recorded in the reconciliation ledger; \
+             the fold was not applied at [4:1]",
+            ALREADY_REFLECTED_SENTINEL
+        );
+        assert!(is_already_reflected(&live_shaped_error));
+        assert!(!is_already_reflected(
+            "404 Not found: Table project:dataset.orders"
+        ));
+    }
+
+    /// The atomicity shape, asserted against the pure builder rather than a
+    /// warehouse: the record, the zero-row abort and the action all sit inside
+    /// exactly one `BEGIN TRANSACTION … COMMIT TRANSACTION`, in that order,
+    /// and the abort is positioned so the action cannot be reached on a
+    /// repeat.
+    #[test]
+    fn record_abort_and_action_share_exactly_one_transaction_in_that_order() {
+        let script = fold_ledger_delta_script(
+            "MERGE `ds._smelt_ledger` T USING (SELECT 'm' AS model_name) S ON T.model_name = \
+             S.model_name WHEN NOT MATCHED THEN INSERT (model_name) VALUES (S.model_name)",
+            "MERGE INTO `ds.t` USING (SELECT 1)",
+        );
+        assert_eq!(script.matches("BEGIN TRANSACTION;").count(), 1, "{script}");
+        assert_eq!(script.matches("COMMIT TRANSACTION;").count(), 1, "{script}");
+        assert_eq!(
+            script.matches("ROLLBACK TRANSACTION;").count(),
+            1,
+            "{script}"
+        );
+
+        let begin = script.find("BEGIN TRANSACTION;").unwrap();
+        let record = script.find("_smelt_ledger").unwrap();
+        let abort = script.find("IF @@row_count = 0 THEN").unwrap();
+        let action = script.find("MERGE INTO `ds.t`").unwrap();
+        let commit = script.find("COMMIT TRANSACTION;").unwrap();
+        assert!(
+            begin < record && record < abort && abort < action && action < commit,
+            "record → abort → action must all fall inside the one transaction: {script}"
+        );
+        assert!(
+            script.contains("EXCEPTION WHEN ERROR THEN\nROLLBACK TRANSACTION;"),
+            "BigQuery does not unwind a script's transaction on its own: {script}"
+        );
+    }
+
+    /// Statements arrive unterminated from the emitters and must be
+    /// `;`-terminated exactly once — an already-terminated statement must not
+    /// become `;;`, which is a script syntax error.
+    #[test]
+    fn fold_script_terminates_each_statement_exactly_once() {
+        let script = fold_ledger_delta_script("MERGE `ds._smelt_ledger` X;", "MERGE INTO `ds.t` Y");
+        assert!(!script.contains(";;"), "{script}");
+        assert!(script.contains("MERGE `ds._smelt_ledger` X;\n"), "{script}");
+        assert!(script.contains("MERGE INTO `ds.t` Y;\n"), "{script}");
     }
 }

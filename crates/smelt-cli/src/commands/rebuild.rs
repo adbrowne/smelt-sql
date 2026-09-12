@@ -60,7 +60,7 @@ fn build_rebuild_request(
         dry_run: args.dry_run,
         enforce_safety: !args.allow_downgrade,
         allow_column_removal: false,
-        allow_full_refresh: false,
+        allow_full_refresh: args.allow_full_refresh,
         ephemeral_seed_ctes,
         run_checks: false,
         checks: vec![],
@@ -69,6 +69,7 @@ fn build_rebuild_request(
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        invoke_external_steps: true,
     }
 }
 
@@ -249,6 +250,7 @@ mod tests {
             batch_size: None,
             per_partition: false,
             allow_downgrade: false,
+            allow_full_refresh: false,
         }
     }
 
@@ -263,5 +265,16 @@ mod tests {
             "rebuild is a distinct signal from full_refresh"
         );
         assert_eq!(request.select, vec!["+my_model".to_string()]);
+    }
+
+    #[test]
+    fn allow_full_refresh_flag_reaches_the_execute_request() {
+        let mut args = test_args();
+        args.allow_full_refresh = true;
+        let request = build_rebuild_request(&args, vec!["+my_model".to_string()], vec![]);
+        assert!(
+            request.allow_full_refresh,
+            "smelt rebuild --allow-full-refresh must reach the ExecuteRequest, not hardcode false"
+        );
     }
 }

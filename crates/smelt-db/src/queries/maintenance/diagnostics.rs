@@ -199,15 +199,22 @@ pub fn maintenance_plan_diagnostics(
                     message: message.clone(),
                 })
             }
-            // The repair family's two obligation refusals
-            // (`MaintenanceRepairKeysNotDiscoverable`/
-            // `MaintenanceRepairSliceUnbounded`) — `derive_new_data`
-            // (`smelt-logical/src/maintenance/derive.rs`) already pushes
-            // both when `repair::admit_per_group_recompute` refuses, but
-            // neither has a `DiagnosticCode` variant yet. Left unmapped
-            // exactly as `ReachNotDerivable` above, for the same reason: a
-            // future phase's own diagnostic lands it.
-            smelt_logical::maintenance::Refusal::RepairKeysNotDiscoverable { .. } => None,
+            // The repair family's affected-key-discovery obligation
+            // (`MaintenanceRepairKeysNotDiscoverable`) — `derive_new_data`
+            // and `derive::append_model_edge_cells` both push this when no
+            // admissible discovery route resolves a finite key set.
+            smelt_logical::maintenance::Refusal::RepairKeysNotDiscoverable { source, why } => {
+                Some(MaintenanceRefusal::RepairKeysNotDiscoverable {
+                    source: source.clone(),
+                    why: why.clone(),
+                })
+            }
+            // The repair family's bounded-read-footprint obligation
+            // (`MaintenanceRepairSliceUnbounded`) — `derive_new_data`
+            // already pushes it when `repair::admit_per_group_recompute`
+            // refuses, but it has no `DiagnosticCode` variant yet. Left
+            // unmapped exactly as `ReachNotDerivable` above, for the same
+            // reason: a future phase's own diagnostic lands it.
             smelt_logical::maintenance::Refusal::RepairSliceUnbounded { .. } => None,
             smelt_logical::maintenance::Refusal::DefinitionChangeNotBackfillable {
                 columns,
@@ -230,6 +237,35 @@ pub fn maintenance_plan_diagnostics(
                     reason: reason.clone(),
                 })
             }
+            smelt_logical::maintenance::Refusal::SourceRetentionExceeded {
+                source,
+                required_lookback_secs,
+                retained_secs,
+            } => Some(MaintenanceRefusal::SourceRetentionExceeded {
+                source: source.clone(),
+                required_lookback_secs: *required_lookback_secs,
+                retained_secs: *retained_secs,
+            }),
+        })
+        .collect();
+    let retention_downgrades: Vec<RetentionDowngradeDiagnostic> = result
+        .plan
+        .retention_downgrades
+        .iter()
+        .map(|d| RetentionDowngradeDiagnostic {
+            source: d.source.clone(),
+            retained_secs: d.retained.0,
+            reason: match d.reason {
+                smelt_logical::analysis::retention_reach::UnprovableReason::UnboundedReach => {
+                    "the source requires reading unbounded history (e.g. a cumulative \
+                     aggregation)"
+                        .to_string()
+                }
+                smelt_logical::analysis::retention_reach::UnprovableReason::ReachNotDerivable => {
+                    "the required reach could not be derived from the SQL patterns present"
+                        .to_string()
+                }
+            },
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -338,5 +374,6 @@ pub fn maintenance_plan_diagnostics(
         state_downgrades,
         contract_state_refusals,
         succession_advisories: result.succession_advisories,
+        retention_downgrades,
     }
 }

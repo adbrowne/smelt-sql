@@ -8,10 +8,22 @@
 //! failed that run: the actual COMPILED MODEL SQL (`smelt-runtime`'s
 //! `ephemeral_seed_ctes` path, real product code) emitted a `FROM (VALUES
 //! ...) AS t(cols)` table constructor GoogleSQL rejects — see `main.rs`'s
-//! doc comment point 2. That path now routes through
+//! doc comment point 2. `composed_keyed_pool_upholds_equivalence_on_bigquery`
+//! had no mechanism of its own: it was collateral from three already-closed
+//! gaps reached together in one case — the keyed-fold `MERGE`'s
+//! not-matched arm hardcoding `INSERT *` (`0178e6bd4`), `Backend::execute_model`'s
+//! unconditional `DROP VIEW`/`DROP TABLE` across an object-type mismatch
+//! (`d84320a44`), and this row set (`e028596e3`/`aee113753`, routed through
 //! `smelt_core::build_row_set_table`, the single dialect-aware row-set
-//! owner, so the compiled SQL no longer contains the rejected construct;
-//! this has not yet been re-confirmed with a live re-run of this wrapper.
+//! owner). Confirmed live in the 2026-08-19 sweep (this case in the
+//! passing set) and again by the whole-sweep measurements of 2026-08-21
+//! (21/21) and 2026-08-22 (22 cases, 4-way concurrent) — the last all-green
+//! live sweep against a real warehouse is 2026-08-22; every commit since is
+//! verified offline only (`googlesql_render.rs`'s composed-pool coverage),
+//! and a re-sweep is owed whenever maintenance emission or the shared
+//! testkit render surface changes again
+//! (`docs/outcomes/20260906-bigquery-correctness/phases/09-plan.md`,
+//! `docs/specs/multi_backend.md` §"Known Divergences").
 
 use smelt_maintenance_testkit::families::{gate_composed, ConformanceBackend};
 

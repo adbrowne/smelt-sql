@@ -62,8 +62,12 @@ pub async fn execute_key_addressed_model_edge_cell(
     if changed_keys.is_empty() {
         return Ok(None);
     }
-    let candidate_select =
-        repair_candidate_select(compiled_model_sql, downstream_keys, &affected_keys_select);
+    let candidate_select = repair_candidate_select(
+        compiled_model_sql,
+        downstream_keys,
+        &affected_keys_select,
+        smelt_backend::maintenance_dialect(backend.dialect()),
+    );
     let sidecar_refresh = RepairSidecarRefresh {
         schema,
         source_address: upstream_source_address,
@@ -91,8 +95,12 @@ pub async fn execute_key_addressed_model_edge_cell(
             compared_columns,
             delete_leg,
         } => {
-            let slice_predicate =
-                repair_slice_predicate(table, downstream_keys, &affected_keys_select);
+            let slice_predicate = repair_slice_predicate(
+                table,
+                downstream_keys,
+                &affected_keys_select,
+                smelt_backend::maintenance_dialect(backend.dialect()),
+            );
             execute_diff_patch(
                 backend,
                 schema,

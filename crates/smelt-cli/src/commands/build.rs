@@ -43,7 +43,6 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         Config, ModelDiscovery, SourcesConfig,
     };
     use smelt_core::graph::DependencyGraph;
-    use smelt_runtime::types::ExecuteRequest;
     use smelt_state::generate_run_id;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -161,29 +160,15 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         &args.target,
     )?;
 
-    let request = ExecuteRequest {
-        target: args.target.clone(),
-        select: resolved_select,
-        exclude: resolved_exclude,
-        start: start_val,
-        end: end_val,
-        batch_size_days: None,
-        per_partition: false,
-        full_refresh: args.full_refresh,
-        rebuild: false,
-        dry_run: false,
-        enforce_safety: !args.allow_downgrade,
-        allow_column_removal: false,
-        allow_full_refresh: false,
+    let request = build_request(
+        &args,
+        resolved_select,
+        resolved_exclude,
+        start_val,
+        end_val,
         ephemeral_seed_ctes,
-        run_checks: true,
-        checks: check_files,
-        jobs: None,
-        retry_max: None,
-        retry_backoff_ms: None,
-        resume: false,
-        technique_overrides: vec![],
-    };
+        check_files,
+    );
 
     let run_id = generate_run_id();
     let config_arc = Arc::new(config);
@@ -215,6 +200,46 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
     };
 
     report_check_results(&outcome.check_results)
+}
+
+/// Build `smelt build`'s `ExecuteRequest`, factored out from
+/// `run_build_with_checks` for testability — `allow_full_refresh` must pass
+/// `args.allow_full_refresh` through rather than being hardcoded `false`
+/// (`docs/outcomes/20260906-trimmed-history-sources/phases/06-plan.md` test
+/// 11), since the whole-table-recompute retention gate reads it.
+fn build_request(
+    args: &BuildArgs,
+    resolved_select: Vec<String>,
+    resolved_exclude: Vec<String>,
+    start_val: Option<String>,
+    end_val: Option<String>,
+    ephemeral_seed_ctes: Vec<(String, String, String)>,
+    check_files: Vec<smelt_cli::ModelFile>,
+) -> ExecuteRequest {
+    ExecuteRequest {
+        target: args.target.clone(),
+        select: resolved_select,
+        exclude: resolved_exclude,
+        start: start_val,
+        end: end_val,
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: args.full_refresh,
+        rebuild: false,
+        dry_run: false,
+        enforce_safety: !args.allow_downgrade,
+        allow_column_removal: false,
+        allow_full_refresh: args.allow_full_refresh,
+        ephemeral_seed_ctes,
+        run_checks: true,
+        checks: check_files,
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
+        invoke_external_steps: true,
+    }
 }
 
 fn report_check_results(results: &[CheckOutcome]) -> Result<()> {
@@ -418,6 +443,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            invoke_external_steps: true,
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(
@@ -517,4 +543,50 @@ fn show_plan(args: BuildArgs) -> Result<()> {
 
     print!("{}", format_plan(&optimised));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_args(allow_full_refresh: bool) -> BuildArgs {
+        BuildArgs {
+            file: None,
+            project_dir: ".".into(),
+            database: None,
+            target: "dev".to_string(),
+            show_results: false,
+            verbose: false,
+            event_time_start: None,
+            event_time_end: None,
+            select: vec![],
+            exclude: vec![],
+            show_plan: false,
+            allow_downgrade: false,
+            full_refresh: false,
+            period: None,
+            include_upstreams: false,
+            allow_full_refresh,
+        }
+    }
+
+    #[test]
+    fn allow_full_refresh_flag_reaches_the_execute_request() {
+        let request = build_request(&test_args(true), vec![], vec![], None, None, vec![], vec![]);
+        assert!(
+            request.allow_full_refresh,
+            "smelt build --allow-full-refresh must reach the ExecuteRequest, not hardcode false"
+        );
+
+        let request_off = build_request(
+            &test_args(false),
+            vec![],
+            vec![],
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        assert!(!request_off.allow_full_refresh);
+    }
 }

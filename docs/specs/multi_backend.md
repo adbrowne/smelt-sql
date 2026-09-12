@@ -183,9 +183,16 @@ seed's CTE, a repair's affected-key list, an append-only baseline probe's record
 (`smelt_core::build_row_set_table` / `row_set_body`, `crates/smelt-core/src/sql/row_set.rs`)
 rather than formatting `VALUES (…)` itself. DuckDB and Spark accept a `VALUES (…),
 (…)` table-value constructor directly, unchanged. GoogleSQL has none: `FROM (VALUES (1), (2))`
-is a syntax error. The owner renders BigQuery's row set as the portable chained `SELECT … UNION
-ALL SELECT …` instead — column names come from the first branch's aliased projections, since
-that branch is the only one carrying them on a `UNION ALL` chain. Deciding what an *empty* row
+is a syntax error. The owner renders BigQuery's row set as `SELECT * FROM UNNEST([STRUCT(… AS
+col), (…)])` instead — GoogleSQL's own array-of-structs form, whose cost to the query planner is
+one operand regardless of how many rows the set carries. Column names come from the first array
+element's field aliases, which is also what types the array; later elements are bare tuples. The
+chained `SELECT … UNION ALL SELECT …` rewrite is equally valid GoogleSQL and is **not** used,
+because it costs one query operand *per row*: a 5,797-row baseline renders as a 692,597-character
+statement BigQuery refuses outright ("Not enough resources for query planning - too many
+subqueries or query is too complex"). A caller whose first row may hold an untyped `NULL` casts
+it, since GoogleSQL types a bare `NULL` as `INT64` and the first element types the array.
+Deciding what an *empty* row
 set means (an always-false guard row, a `WHERE FALSE` predicate with no row at all, …) stays a
 per-caller business decision, not a row-set construction detail — the owner requires at least one
 row and callers handle the empty case themselves before reaching it.
@@ -248,6 +255,51 @@ The `POWER` lowerings are exact: DuckDB's power operator returns a double for ev
 negative base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They
 diverge only at `0 ^ -1`, where DuckDB yields infinity and GoogleSQL raises — a loud failure,
 not a wrong answer.
+
+### Clause-level dialect refusals
+Not every dialect difference is a built-in's spelling. Two SQL *clauses* smelt's grammar accepts
+are absent from GoogleSQL entirely, and neither has a registry entry to carry a verdict, because
+neither belongs to any one function:
+
+- **The aggregate `FILTER (WHERE …)` clause.** DuckDB and Spark SQL have it; GoogleSQL has no such
+  clause and answers `Syntax error: Expected ")" but got "("`.
+- **An `INTERVAL`-offset `RANGE` window frame** (`RANGE BETWEEN INTERVAL '2 days' PRECEDING`).
+  DuckDB and Spark SQL have it; GoogleSQL's `RANGE` frames take a numeric offset over a numeric
+  `ORDER BY` only, and answer `Syntax error: Unexpected keyword PRECEDING`.
+
+Both are declared as dialect facts (`SqlDialect::supports_aggregate_filter_clause`,
+`SqlDialect::supports_interval_range_frame`) and refused at **compile time** with
+`UnsupportedOnBackend`, naming the construct, the backend, and the portable rewrite — never
+emitted verbatim and left to the engine. The refusal is checked on the call that carries the
+clause, not on an enclosing or nested one.
+
+Neither is lowered automatically, and in both cases the reason is that the automatic lowering
+would be unsound or unreachable rather than merely unwritten:
+
+- `agg(x) FILTER (WHERE p)` → `agg(CASE WHEN p THEN x END)` is exactly equivalent only for an
+  aggregate that **ignores NULL inputs** — true of `MIN`/`MAX`/`SUM`/`AVG`/`COUNT`/`STRING_AGG`,
+  false of `ARRAY_AGG`, which would gain one NULL element per excluded row. That property is not
+  yet registry data, so the author is told the rewrite rather than handed a silently different
+  answer for some aggregates.
+- The interval frame's GoogleSQL equivalent exists — wrap the sole `ORDER BY` key in
+  `UNIX_MICROS(…)` and state the offset in microseconds, which is exact for a GoogleSQL
+  TIMESTAMP — but applying it means rewriting the `OVER` clause's `ORDER BY` as well as the frame,
+  and window specs print through `smelt-parser`'s dialect-agnostic `Display` with no dialect seam
+  to do that in. The author's own numeric rewrite is accepted meanwhile, and because bound
+  derivation reads the **source** CST before any lowering, a later print-time lowering would not
+  disturb `max_lookback` derivation.
+
+### Refusal covers function bodies
+A `smelt.define` function call is opaque in the calling model's own CST — the body is inlined at
+print time — so a walk over the model tree alone cannot see a refused construct declared *inside*
+a function. The compile-path refusal therefore walks **both** the model's tree and the
+expanded-source tree, the latter being the model with its function calls inlined. That expansion
+is still smelt SQL, before any dialect lowering, so this is not a re-parse of printed output
+(`architecture.md` §"Source-derived projection") — it is the same expanded-source pass the
+lookback-bound deriver already makes over function bodies. Refusals are deduplicated by
+(construct, reason), and the model-tree occurrence is preferred because its span points at the
+user's own file rather than into expanded text. This applies to every `Emission::Unsupported`
+verdict and every clause-level refusal alike: a body is not an exemption.
 
 ### Emission is scoped to call position
 A built-in's emission verdict is stated per `(dialect, position)`, not per dialect alone, because a
@@ -961,12 +1013,37 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
+- **The BigQuery conformance leg's live evidence has a date.** The last all-green live sweep of
+  `crates/smelt-cli/tests/maintenance_conformance_bigquery/` against a real warehouse is
+  2026-08-22 (22 cases, 621.61s, 4-way concurrent); every commit since is verified offline
+  only. A re-sweep is owed whenever maintenance emission or the shared
+  `smelt-maintenance-testkit` render surface changes again. Between sweeps, the offline gates
+  standing in for a live re-run are `cargo test -p smelt-maintenance-testkit --test
+  googlesql_render` (every DAG-body and composed-pool rendered body prints clean GoogleSQL),
+  `cargo test -p smelt-dialect --test modulo_lowering --test power_lowering` (the `%`/`^`
+  lowerings those bodies depend on), `cargo test -p smelt-backend --test
+  merge_columns_guard` (`require_merge_columns`), and
+  `no_family_hardcodes_a_backend_dialect` (`crates/smelt-maintenance-testkit/src/families/mod.rs`,
+  `dags.rs`) — none of them substitutes for the live leg itself, only for the specific defect
+  classes a prior live sweep found and fixed.
+
 - **`%` on BigQuery still lowers to `MOD` for every operand (#173).** GoogleSQL's `MOD` accepts only
   `INT64`/`NUMERIC` and fails at the warehouse on a floating-point operand; `Emission::Conditional`
   exists and is populated for `//`, `LOG`, `TRUNC` and `TO_JSON` on Spark, but `%` on BigQuery has
   not yet been given the same operand-conditional treatment. `//`'s own per-class arms are stated
   and verified live (`docs/outcomes/20260904-dialect-emission-vocabulary` phase 7); BigQuery's
   remains open, tracked in the same outcome.
+
+- **A clause GoogleSQL lacks is refused rather than lowered (#200, #201).** Both
+  §"Clause-level dialect refusals" constructs stop at compile time on BigQuery, so a model valid
+  on DuckDB and Spark stays unrunnable there until its author rewrites it. The aggregate
+  `FILTER (WHERE …)` clause waits on a null-input disposition in `BuiltinRegistry` — the
+  `CASE WHEN` rewrite changes `ARRAY_AGG`'s answer, so it cannot be applied blindly (#200). The
+  `INTERVAL`-offset `RANGE` frame waits on a window-spec dialect seam — the exact GoogleSQL form
+  needs the `OVER` clause's `ORDER BY` rewritten too, and window specs print through
+  `smelt-parser`'s dialect-agnostic `Display` (#201). The concrete cost is two models of
+  `examples/github_activity` (`silver.actor_sessions` and its downstream) that build on DuckDB
+  and not on BigQuery.
 
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,

@@ -41,6 +41,27 @@ fn web_analytics_no_diagnostics() {
     check_workspace_no_diagnostics("examples/web_analytics");
 }
 
+/// `examples/github_activity` deliberately declares both a `dev` (DuckDB) and
+/// a `bigquery` target (`docs/outcomes/20260906-bigquery-dogfood-spine/
+/// phases/11-summary.md`), so a `MaintenanceStateDowngraded` here would be
+/// legitimate rather than a bug — which is exactly what makes the **empty**
+/// diagnostic set the load-bearing claim.
+///
+/// Every state structure this workspace's cells need is now realised on
+/// BigQuery as well as DuckDB (`docs/specs/state.md` §"Which dialects realise
+/// which structure"): the transactional merge ledger, the reconciliation
+/// ledger with its never-fold-twice refusal, the observed-delta record, and —
+/// since this outcome's phase 15 — the tombstone ledger. So the
+/// `ColumnScopedMerge` cell, the `KeyedFold` cell and both `SuccessionPatch`
+/// cells all keep their technique on the `bigquery` target, and the
+/// cross-target comparison weighs one plan on two engines rather than two
+/// plans. A downgrade reappearing here means a dialect row was flipped off,
+/// or an availability claim lost its backing.
+#[test]
+fn github_activity_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/github_activity");
+}
+
 #[test]
 fn fn_tableexpr_star_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_tableexpr_star");

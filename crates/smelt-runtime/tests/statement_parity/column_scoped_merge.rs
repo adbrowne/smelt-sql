@@ -41,6 +41,7 @@ pub(super) fn select_request(target: &str, model: &str, start: &str, end: &str) 
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        invoke_external_steps: true,
     }
 }
 

@@ -14,7 +14,7 @@ use smelt_cli::{
     find_project_root, parse_selector, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
-use smelt_core::{discover_seed_infos, load_workspace, ModelFile};
+use smelt_core::{discover_external_steps, discover_seed_infos, load_workspace, ModelFile};
 use thiserror::Error;
 
 use crate::ListArgs;
@@ -48,6 +48,7 @@ enum EntityKind {
     Model,
     Seed,
     Source,
+    ExternalStep,
     Test,
     Check,
 }
@@ -58,6 +59,7 @@ impl std::fmt::Display for EntityKind {
             EntityKind::Model => "model",
             EntityKind::Seed => "seed",
             EntityKind::Source => "source",
+            EntityKind::ExternalStep => "external_step",
             EntityKind::Test => "test",
             EntityKind::Check => "check",
         };
@@ -71,6 +73,8 @@ struct ListEntry {
     kind: EntityKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     materialization: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    produces: Option<Vec<String>>,
 }
 
 /// Whether `model` is a `smelt.define`/`smelt.extern` function declaration —
@@ -111,28 +115,36 @@ pub async fn list(args: ListArgs, scope: Option<&str>) -> Result<()> {
                 address: format!("smelt.{}", model.canonical_path()),
                 kind: EntityKind::Test,
                 materialization: None,
+                produces: None,
             });
         } else if model.is_check() {
             check_entries.push(ListEntry {
                 address: format!("smelt.{}", model.canonical_path()),
                 kind: EntityKind::Check,
                 materialization: None,
+                produces: None,
             });
         } else if !is_function(model) {
             model_files.push(model.clone());
         }
     }
 
-    // --select/--exclude narrow the model set, same selector surface as
-    // `smelt run`/`smelt build` (`docs/specs/model_selection.md`).
-    let selected_model_names: Option<std::collections::HashSet<String>> = if args.select.is_empty()
-        && args.exclude.is_empty()
-    {
-        None
+    let external_steps = discover_external_steps(&project_dir, &loaded.config.paths);
+
+    // --select/--exclude narrow the model and external-step sets, same
+    // selector surface as `smelt run`/`smelt build`
+    // (`docs/specs/model_selection.md`). Seeds and sources are not part of
+    // this graph — they are always listed in full, below.
+    let selected_model_names: Option<std::collections::HashSet<String>>;
+    let selected_step_names: Option<std::collections::HashSet<String>>;
+    if args.select.is_empty() && args.exclude.is_empty() {
+        selected_model_names = None;
+        selected_step_names = None;
     } else {
         let sources = SourcesConfig::load(&project_dir).ok();
-        let graph = DependencyGraph::build(model_files.clone(), sources.as_ref())
+        let mut graph = DependencyGraph::build(model_files.clone(), sources.as_ref())
             .with_context(|| "Failed to build dependency graph")?;
+        graph.add_external_steps(&external_steps);
 
         let mut db = smelt_db::Database::default();
         let ingested = smelt_db::workspace_ingest::ingest_loaded_workspace(&mut db, &loaded);
@@ -159,8 +171,11 @@ pub async fn list(args: ListArgs, scope: Option<&str>) -> Result<()> {
         )
         .map_err(|e| ListError::UnresolvableSelector(e.to_string()))?;
 
-        let mut selected = if resolved_select.is_empty() {
-            graph.all_model_names()
+        let (mut selected_models, mut selected_steps) = if resolved_select.is_empty() {
+            (
+                graph.all_model_names(),
+                graph.iter_external_steps().map(str::to_string).collect(),
+            )
         } else {
             let selectors: Vec<_> = resolved_select
                 .iter()
@@ -168,9 +183,10 @@ pub async fn list(args: ListArgs, scope: Option<&str>) -> Result<()> {
                     parse_selector(s).map_err(|e| ListError::UnresolvableSelector(e.to_string()))
                 })
                 .collect::<Result<_, _>>()?;
-            graph
-                .select_models(&selectors, &loaded.config)
-                .map_err(|e| ListError::UnresolvableSelector(e.to_string()))?
+            let selection = graph
+                .select_nodes(&selectors, &loaded.config)
+                .map_err(|e| ListError::UnresolvableSelector(e.to_string()))?;
+            (selection.models, selection.steps)
         };
         if !resolved_exclude.is_empty() {
             let selectors: Vec<_> = resolved_exclude
@@ -180,11 +196,13 @@ pub async fn list(args: ListArgs, scope: Option<&str>) -> Result<()> {
                 })
                 .collect::<Result<_, _>>()?;
             let excluded = graph
-                .select_models(&selectors, &loaded.config)
+                .select_nodes(&selectors, &loaded.config)
                 .map_err(|e| ListError::UnresolvableSelector(e.to_string()))?;
-            selected.retain(|m| !excluded.contains(m));
+            selected_models.retain(|m| !excluded.models.contains(m));
+            selected_steps.retain(|s| !excluded.steps.contains(s));
         }
-        Some(selected)
+        selected_model_names = Some(selected_models);
+        selected_step_names = Some(selected_steps);
     };
 
     let mut model_entries: Vec<ListEntry> = model_files
@@ -202,6 +220,7 @@ pub async fn list(args: ListArgs, scope: Option<&str>) -> Result<()> {
                 address: format!("smelt.{}", m.canonical_path()),
                 kind: EntityKind::Model,
                 materialization: Some(format!("{:?}", materialization).to_lowercase()),
+                produces: None,
             }
         })
         .collect();
@@ -214,6 +233,7 @@ pub async fn list(args: ListArgs, scope: Option<&str>) -> Result<()> {
             address: format!("smelt.{}", seed.address_segments.join(".")),
             kind: EntityKind::Seed,
             materialization: None,
+            produces: None,
         })
         .collect();
 
@@ -225,15 +245,33 @@ pub async fn list(args: ListArgs, scope: Option<&str>) -> Result<()> {
                     address: format!("smelt.sources.{}.{}", source.name, table.name),
                     kind: EntityKind::Source,
                     materialization: None,
+                    produces: None,
                 });
             }
         }
     }
 
+    let mut step_entries: Vec<ListEntry> = external_steps
+        .iter()
+        .filter(|step| {
+            let addr = step.address_segments.join(".");
+            selected_step_names
+                .as_ref()
+                .is_none_or(|s| s.contains(&addr))
+        })
+        .map(|step| ListEntry {
+            address: format!("smelt.{}", step.address_segments.join(".")),
+            kind: EntityKind::ExternalStep,
+            materialization: None,
+            produces: Some(step.produces.clone()),
+        })
+        .collect();
+
     let mut entries: Vec<ListEntry> = Vec::new();
     entries.append(&mut model_entries);
     entries.append(&mut seed_entries);
     entries.append(&mut source_entries);
+    entries.append(&mut step_entries);
     entries.append(&mut test_entries);
     entries.append(&mut check_entries);
     entries.sort_by(|a, b| a.address.cmp(&b.address));

@@ -47,6 +47,21 @@ pub enum BackendError {
     #[error("delta already reflected in the reconciliation ledger: {message}")]
     AlreadyReflected { message: String },
 
+    /// A multi-statement transaction was cancelled by the engine because
+    /// another transaction mutated one of the same tables concurrently.
+    ///
+    /// Distinct from [`BackendError::ExecutionFailed`] because the SQL is
+    /// not at fault and the transaction left **nothing** behind: the engine
+    /// rolled it back before cancelling it, so re-issuing the identical
+    /// statement group is the designed recovery, not a partial-write replay.
+    /// BigQuery raises it by name ("Transaction is aborted due to
+    /// concurrent update against table …"); the same write-conflict
+    /// detection is what makes the additive never-fold-twice refusal sound
+    /// there (`docs/specs/state.md`), so this is the cost of that guarantee
+    /// rather than an incidental failure.
+    #[error("transaction conflict on {table}: {message}")]
+    TransactionConflict { table: String, message: String },
+
     /// Generic backend error.
     #[error("{0}")]
     Other(#[from] anyhow::Error),
@@ -81,6 +96,15 @@ impl BackendError {
         Self::UnsupportedFeature {
             dialect: dialect.into(),
             feature: feature.into(),
+        }
+    }
+
+    /// Create a transaction-conflict error (a concurrently-cancelled
+    /// multi-statement transaction — see the variant's own doc comment).
+    pub fn transaction_conflict(table: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::TransactionConflict {
+            table: table.into(),
+            message: message.into(),
         }
     }
 
@@ -124,6 +148,10 @@ impl BackendError {
     ///   deterministic.
     /// - `AlreadyReflected` — a deliberate never-fold-twice refusal, not a
     ///   failure to retry past; deterministic.
+    /// - `TransactionConflict` — the engine cancelled a multi-statement
+    ///   transaction because another transaction mutated the same table
+    ///   concurrently, and rolled it back entirely: **transient**, and the
+    ///   only such case whose remedy the engine itself documents as retry.
     /// - `Other` — an unclassified `anyhow` error from a backend-specific
     ///   code path (e.g. seed loading, ledger bookkeeping). Without a typed
     ///   variant to inspect, treating it as transient would risk masking a
@@ -141,6 +169,11 @@ impl BackendError {
             BackendError::NullInNonNullableColumn { .. } => false,
             BackendError::ConfigurationError { .. } => false,
             BackendError::AlreadyReflected { .. } => false,
+            // The engine rolled the whole transaction back before
+            // cancelling it, so the identical statement group is safe to
+            // re-issue — the one case where "retry" is the engine's own
+            // documented remedy.
+            BackendError::TransactionConflict { .. } => true,
             BackendError::Other(_) => false,
         }
     }

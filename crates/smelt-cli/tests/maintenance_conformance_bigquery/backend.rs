@@ -247,3 +247,93 @@ impl ConformanceBackend for BigQueryConformanceBackend {
         ))
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "duckdb")]
+mod oracle_relation_tests {
+    //! `bigquery_oracle_relation_issues_no_ddl_and_returns_an_inline_subquery`
+    //! (`docs/outcomes/20260906-bigquery-correctness/phases/09-plan.md` test
+    //! 5) — proves `BigQueryConformanceBackend::oracle_relation` itself
+    //! (not a stand-in fake; `families::mod.rs`'s own
+    //! `oracle_relation_bigquery_shape_emits_no_ddl_and_returns_a_derived_table`
+    //! already covers the generic shape) never issues a statement against
+    //! the backend it is handed, against a REAL backend rather than a
+    //! panic-on-touch stub. Needs no warehouse and no `SMELT_BQ_PROJECT` —
+    //! `oracle_relation`'s `_backend` parameter is unused by construction.
+
+    use smelt_backend::Backend;
+    use smelt_backend_duckdb::DuckDbBackend;
+    use smelt_maintenance_testkit::families::ConformanceBackend;
+    use smelt_maintenance_testkit::recipe::{KeyShape, SourcePosture, SourceRecipe};
+    use smelt_maintenance_testkit::s_tracker::STracker;
+
+    use super::BigQueryConformanceBackend;
+
+    #[tokio::test]
+    async fn bigquery_oracle_relation_issues_no_ddl_and_returns_an_inline_subquery() {
+        let source = SourceRecipe {
+            name: "events".to_string(),
+            clock_column: "d".to_string(),
+            key_column: "id".to_string(),
+            payload_column: "val".to_string(),
+            key_shape: KeyShape::Single,
+            posture: SourcePosture::AppendOnly,
+            key_recurrence: None,
+            partition_column: None,
+            delete_flag_column: None,
+            retention: None,
+        };
+        let mut tracker = STracker::new(&source);
+        let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+        let k = tracker.record_run(
+            d,
+            d + chrono::Duration::days(1),
+            vec![smelt_maintenance_testkit::schedule_gen::GenRow {
+                d,
+                id: 1,
+                val: Some(10),
+            }],
+        );
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open a fresh in-memory-equivalent DuckDB backend");
+
+        let bq = BigQueryConformanceBackend::new("oracle_relation_test");
+        let relation = bq
+            .oracle_relation(&backend, &tracker, k)
+            .await
+            .expect("BigQuery's oracle_relation must succeed without issuing DDL");
+
+        let expected_suffix = format!(") AS {}", tracker.oracle_table_name());
+        assert!(
+            relation.starts_with('(') && relation.ends_with(&expected_suffix),
+            "expected an inline derived-table subquery aliased to the oracle table name, got: {relation:?}"
+        );
+        assert_eq!(
+            relation,
+            format!(
+                "({}) AS {}",
+                tracker.s_select_sql(k),
+                tracker.oracle_table_name()
+            ),
+            "must reproduce s_select_sql(k) verbatim, not a re-derived query"
+        );
+
+        // No DDL was issued against the backend: the schema this backend
+        // opened has no tables at all.
+        let rows = backend
+            .execute_sql(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'",
+            )
+            .await
+            .expect("query information_schema for the main schema");
+        let total_rows: usize = rows.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total_rows, 0,
+            "oracle_relation must issue no DDL/table creation on the backend it is handed"
+        );
+    }
+}

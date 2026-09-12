@@ -1,4 +1,5 @@
 use super::*;
+use crate::maintenance::{KeyDiscovery, KeyScope};
 
 /// One upstream **maintained-model** edge (`incremental_models.md` §"Upstream
 /// model edges"): a downstream maintained model's ref to another maintained
@@ -45,6 +46,15 @@ pub struct ModelEdge {
     /// never narrows one incorrectly). `None` when the caller has not
     /// derived one — today's default, unaffected clock-only admission.
     pub output_shape: Option<crate::analysis::output_delta::OutputDelta>,
+    /// The downstream's own declared
+    /// `maintenance.scan_bounds.per_source.<edge>.allow_full_scan`
+    /// acceptance for this edge (`docs/specs/incremental_models.md`
+    /// §"Partition-local maintenance (the K8 guardrail)"), threaded through
+    /// so the enrichment-keyed route (`admit_enrichment_keyed_merge`) can
+    /// read the declared scan-bound acceptance without a second lookup.
+    /// `false` (fail-closed) at every construction site that does not
+    /// thread a real declared value.
+    pub allow_full_scan: bool,
 }
 
 /// Append the creation-trigger cells (and refusals) for `model_edges` to an
@@ -171,6 +181,37 @@ pub fn append_model_edge_cells(
                 });
             }
             Err(refusal) => {
+                // The enrichment-keyed route (`admit_enrichment_keyed_merge`,
+                // `docs/specs/incremental_models.md` §"Upstream model
+                // edges"): attempted only when the key-addressed route
+                // declined with `KeysNotDiscoverable` — not
+                // `SliceUnbounded`, which names a different obligation this
+                // route poses no answer to either.
+                if let (repair::RepairRefusal::KeysNotDiscoverable { .. }, Some(partition_col)) =
+                    (&refusal, output_partition_col)
+                {
+                    match admit_enrichment_keyed_merge(
+                        sql,
+                        partition_col,
+                        edge,
+                        &identity,
+                        &enrichment_closure,
+                    ) {
+                        Ok(Some(cells)) => {
+                            plan.cells.extend(cells);
+                            continue;
+                        }
+                        Ok(None) => {
+                            // No column group is even sensitive to this
+                            // edge — nothing to merge. Fall through to the
+                            // original refusal below.
+                        }
+                        Err(enrichment_refusal) => {
+                            plan.refusals.push(enrichment_refusal);
+                            continue;
+                        }
+                    }
+                }
                 let (source, why) = match refusal {
                     repair::RepairRefusal::KeysNotDiscoverable { source, why } => (source, why),
                     repair::RepairRefusal::SliceUnbounded { source, why } => (source, why),
@@ -290,6 +331,167 @@ pub fn append_model_edge_cells(
             state_downgrade: None,
         });
     }
+}
+
+/// The enrichment-keyed route (`docs/specs/incremental_models.md` §"Upstream
+/// model edges"): attempted only when the key-addressed loop above already
+/// declined `edge` with `KeysNotDiscoverable` — not a per-group recompute
+/// over a change-feed identity, but a value-enrichment join (parity with the
+/// `ColumnScopedMerge` technique already derived for a declared
+/// `mutation_profile: mutable_snapshot` dimension,
+/// [`super::mutation::derive_mutation`]) whose deltas touch only the columns
+/// actually provenanced from it, addressed by the join key the downstream
+/// itself carries in its own output rather than the downstream's grain.
+///
+/// Derivation: synthesize a `MutableSnapshot` [`SourceFacts`] for `edge` and
+/// run it through [`crate::maintenance::grouping::derive_column_groups`]
+/// exactly as an external mutable-snapshot source would be — the shared
+/// membership-vs-value-sensitivity walk (and its closure-pruning check over
+/// a provably one-to-one enrichment join) does the real work of telling a
+/// value-enrichment read apart from a row-admission one; a group whose
+/// sensitivity to `edge.name` is (also) membership-sensitive is excluded
+/// (a row-admission read stays with the recompute family, never a
+/// column-scoped merge). `Ok(None)` when no group is even value-sensitive to
+/// `edge` — the caller then keeps the original `KeysNotDiscoverable`
+/// refusal. `Err(Refusal::ScanUnbounded)` when `edge.allow_full_scan` was not
+/// declared (this route poses no partition clamp at all — a value-enrichment
+/// rename scatters across every output partition). `Err(Refusal::
+/// RepairKeysNotDiscoverable)` when the enrichment join's own key cannot be
+/// resolved, or none of its columns are projected by the downstream's own
+/// SELECT list (nothing to address the merge write by).
+fn admit_enrichment_keyed_merge(
+    sql: &str,
+    output_partition_col: &str,
+    edge: &ModelEdge,
+    identity: &RowIdentityVerdict,
+    enrichment_closure: &Option<crate::analysis::skeleton_closure::SkeletonSourceClosure>,
+) -> Result<Option<Vec<PlanCell>>, Refusal> {
+    // This route only ever applies to an actual enrichment JOIN — a plain
+    // `FROM smelt.<edge>` driving relation (no join at all) is a direct
+    // read, not value enrichment, and has nothing for this route to
+    // address a merge write by.
+    if crate::analysis::skeleton_closure::enrichment_join_clause(sql, &edge.name).is_none() {
+        return Ok(None);
+    }
+    let skeleton_cols =
+        crate::maintenance::skeleton::skeleton_columns(sql, &[], Some(output_partition_col));
+    let synthesized = SourceFacts {
+        name: edge.name.clone(),
+        mutation: MutationProfile::MutableSnapshot,
+        partition_col: None,
+        unique_key: edge.unique_key.clone(),
+        allow_full_scan: edge.allow_full_scan,
+    };
+    let grouping =
+        crate::maintenance::grouping::derive_column_groups(sql, &[synthesized], &skeleton_cols);
+    let eligible_groups: Vec<&ColumnGroup> = grouping
+        .groups
+        .iter()
+        .filter(|g| {
+            g.mutation_sensitivity.contains(&edge.name)
+                && !g.membership_sensitivity.contains(&edge.name)
+        })
+        .collect();
+    if eligible_groups.is_empty() {
+        return Ok(None);
+    }
+    if !edge.allow_full_scan {
+        return Err(Refusal::ScanUnbounded {
+            source: edge.name.clone(),
+            why: format!(
+                "value-enrichment join against upstream maintained model '{}' scatters across \
+                 every output partition; declare allow_full_scan to accept the full-table merge",
+                edge.name
+            ),
+        });
+    }
+    let Some(key_scope) = enrichment_join_key_scope(sql, edge) else {
+        return Err(Refusal::RepairKeysNotDiscoverable {
+            source: edge.name.clone(),
+            why: format!(
+                "upstream maintained model '{}' is joined for value enrichment but the join key \
+                 could not be resolved, or none of its columns are projected by this model's own \
+                 SELECT list",
+                edge.name
+            ),
+        });
+    };
+    Ok(Some(
+        eligible_groups
+            .into_iter()
+            .map(|group| PlanCell {
+                group: group.name(),
+                trigger: Trigger::UpstreamMutation {
+                    source: edge.name.clone(),
+                },
+                corner: Corner::ColumnMerge,
+                technique: Technique::ColumnScopedMerge,
+                // The spec's own honesty rule for this route: a
+                // value-enrichment rename scatters across every output
+                // partition, so this cell claims no partition-interval
+                // scan at all — its bounded write is `key_scope` instead.
+                partition_local: PartitionLocal::No {
+                    source: edge.name.clone(),
+                    why: format!(
+                        "value-enrichment join against upstream maintained model '{}' is \
+                         addressed by its own join key, not a partition interval",
+                        edge.name
+                    ),
+                },
+                scans: vec![],
+                ledger_catch_up: false,
+                row_identity: identity.clone(),
+                skeleton_source_closure: enrichment_closure.clone(),
+                fingerprint_projections: BTreeMap::new(),
+                key_scope: Some(key_scope.clone()),
+                state_downgrade: None,
+            })
+            .collect(),
+    ))
+}
+
+/// Resolve the enrichment-keyed route's [`KeyScope`]: the local (downstream-
+/// side) columns of `edge`'s own enrichment join's `ON`/`USING` equality,
+/// kept only where the downstream's own outermost SELECT list actually
+/// projects a column of that name — the join key the write can actually
+/// address by, not the upstream's own key spelling. `None` when the edge is
+/// not resolvable as an enrichment join at all, or none of its local join
+/// columns survive the projection filter.
+fn enrichment_join_key_scope(sql: &str, edge: &ModelEdge) -> Option<KeyScope> {
+    use crate::analysis::join_shape::local_equality_columns_against;
+    use crate::analysis::skeleton_closure::enrichment_join_clause;
+
+    let (join, alias) = enrichment_join_clause(sql, &edge.name)?;
+    let table_ref = join.table_ref()?;
+    let base_name = table_ref.identifier();
+    let condition = join.condition()?;
+    let local_cols = local_equality_columns_against(&condition, Some(&alias), base_name.as_deref());
+    if local_cols.is_empty() {
+        return None;
+    }
+
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let items = select_stmt_items(&select)?;
+    let output_aliases: BTreeSet<String> = items
+        .iter()
+        .map(|item| item_alias(item).to_ascii_lowercase())
+        .collect();
+
+    let keys: Vec<String> = local_cols
+        .into_iter()
+        .filter(|c| output_aliases.contains(&c.to_ascii_lowercase()))
+        .collect();
+    if keys.is_empty() {
+        return None;
+    }
+    Some(KeyScope {
+        keys,
+        from: edge.name.clone(),
+        discovery: KeyDiscovery::EnrichmentKeyed,
+    })
 }
 
 /// Build the [`JoinContext`] `analysis::join_shape::fan_out`'s one-to-one

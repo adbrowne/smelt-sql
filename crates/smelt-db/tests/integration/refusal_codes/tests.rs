@@ -31,6 +31,7 @@ fn refusal_code_names_are_real_variants_and_agree_with_smelt_db() {
             DiagnosticCode::MaintenanceSkeletonChanged,
             DiagnosticCode::MaintenancePartitionColumnChanged,
             DiagnosticCode::MaintenanceScanUnbounded,
+            DiagnosticCode::MaintenanceRepairKeysNotDiscoverable,
             DiagnosticCode::MaintenanceNoAdmissibleTechnique,
             DiagnosticCode::MaintenanceUnsupportedGrain,
             DiagnosticCode::KeyedForbidsTimeseries,

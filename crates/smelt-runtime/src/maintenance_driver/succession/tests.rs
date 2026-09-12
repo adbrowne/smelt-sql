@@ -206,6 +206,7 @@ async fn run_rebuild(
         &presented_columns(),
         model_select_sql,
         &no_retry_policy(),
+        &probe_policy(),
         &NO_OP_REPORTER,
         "run-rebuild",
     )

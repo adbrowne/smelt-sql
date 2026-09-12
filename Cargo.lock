@@ -4076,6 +4076,7 @@ dependencies = [
  "pyo3",
  "smelt-backend",
  "smelt-dialect",
+ "smelt-state",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

@@ -1,0 +1,73 @@
+name: github_activity
+version: 1
+paths:
+  - models
+# Explicit default: without this, adding the `bigquery` target below would
+# silently become the CLI/LSP's no-`--target` default the moment it sorted
+# alphabetically ahead of `dev` (`smelt-runtime/src/profile.rs`'s
+# `default_target` falls back to the alphabetically-first target name when
+# `target:` is unset) — flipping every no-`--target` test and tool invocation
+# onto a dialect with no transactional merge ledger. Pin it explicitly so
+# `dev` (DuckDB) stays the default; `bigquery` is only ever selected via
+# `--target bigquery`.
+target: dev
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+  bigquery:
+    # The long-lived dogfood dataset (`docs/outcomes/
+    # 20260906-bigquery-dogfood-spine/outcome.md`), NOT the ephemeral
+    # per-run integration-suite dataset. `smelt_dogfood` is populated
+    # out-of-band by `scripts/bq-dogfood-loader.sh` (phase 10); this
+    # target's job is to compile+run the model set against it, not to load
+    # it. See `scripts/bq-dogfood-env.sh` for the credentials this target
+    # needs at runtime.
+    type: bigquery
+    project: smelt-bq-test-20260816
+    dataset: smelt_dogfood
+    location: US
+    schema: smelt_dogfood
+  bigquery_oracle:
+    # The full-refresh oracle's own dataset. The equivalence invariant
+    # (`docs/specs/incremental_models.md` §"The equivalence invariant") is
+    # checked on BigQuery by refreshing every model from scratch over the
+    # inputs seen so far and comparing against the incrementally-maintained
+    # state in `smelt_dogfood` — so the oracle needs somewhere to write that
+    # is NOT the state it is judging. It reads the same physical source
+    # tables (see the `bigquery_oracle:` entries in
+    # `models/sources/raw/github_events.yml` and `github_events_arrival.yml`);
+    # only the outputs are separate.
+    #
+    # Scaffolding, not history: the dataset is created without a default table
+    # expiration and dropped once a sweep has been recorded. Selected only via
+    # `--target bigquery_oracle`; `target: dev` above keeps it off the
+    # no-`--target` default, which it would otherwise take by sorting first.
+    type: bigquery
+    project: smelt-bq-test-20260816
+    dataset: smelt_dogfood_oracle
+    location: US
+    schema: smelt_dogfood_oracle
+default_materialization: view
+unstable_schema: true
+# Run manifests, run reports and the interval ledger are the evidence this
+# pipeline's live runs are judged on (`docs/specs/run_state.md`): under the
+# default `mode: stateless` nothing is written at all, so a live run leaves no
+# artifact beyond its console transcript. `intervals` is the lowest posture that
+# persists them. Project-wide by construction (`docs/specs/smelt_yml.md`), so the
+# DuckDB target writes `.smelt/targets/dev/` too; `examples/*/.smelt/` is
+# gitignored. The reconciliation ledger is NOT controlled by this key — it is
+# engine-resident, required whenever the plan is, and on BigQuery declared
+# unrealisable (`docs/specs/state.md`).
+state:
+  mode: intervals
+# Probe dispatch stays at its default cadence on BOTH targets. The live
+# BigQuery run of phase 12 needed `probes: { cadence: off }` to complete at all,
+# because the posture baseline was grouped by a raw TIMESTAMP partition column
+# (5,797 per-second "partitions") and GoogleSQL's row set inlined that as a
+# 5,797-branch UNION ALL chain its planner refused. Both defects are fixed —
+# the baseline is bucketed onto the declared `granularity: day`
+# (`smelt_logical::classify_partition_bucket`) and the GoogleSQL row set is a
+# single `UNNEST` over an array literal (`smelt_core::sql::row_set`) — so the
+# workaround is gone and one committed configuration serves both targets again.

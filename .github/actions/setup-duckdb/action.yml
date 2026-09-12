@@ -1,5 +1,5 @@
 name: Setup DuckDB System Library
-description: Install DuckDB shared library for linking without bundled compilation
+description: Install the DuckDB shared library and CLI for linking without bundled compilation
 
 inputs:
   version:
@@ -25,3 +25,24 @@ runs:
         cd /tmp && unzip -o libduckdb.zip libduckdb.so
         sudo cp /tmp/libduckdb.so /usr/local/lib/
         sudo ldconfig
+
+    # The `duckdb` CLI (distinct from the shared library above) is needed by
+    # examples/github_activity/load_day.sh, the external step
+    # crates/smelt-cli/tests/github_activity_{loader,replay,oracle}.rs drive
+    # `smelt run` through — CI installs only libduckdb.so otherwise, with
+    # neither the CLI nor the DuckDB Python module on PATH.
+    - name: Cache DuckDB CLI
+      id: cache-duckdb-cli
+      uses: actions/cache@v5
+      with:
+        path: /usr/local/bin/duckdb
+        key: duckdb-cli-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
+
+    - name: Install DuckDB CLI
+      if: steps.cache-duckdb-cli.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl -sL "https://github.com/duckdb/duckdb/releases/download/${{ inputs.version }}/duckdb_cli-linux-amd64.zip" -o /tmp/duckdb_cli.zip
+        cd /tmp && unzip -o duckdb_cli.zip duckdb
+        sudo cp /tmp/duckdb /usr/local/bin/duckdb
+        sudo chmod +x /usr/local/bin/duckdb

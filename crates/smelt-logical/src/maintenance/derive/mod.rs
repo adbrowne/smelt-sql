@@ -12,10 +12,11 @@ use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{ColumnRef, Expr};
 use smelt_types::SqlFunction;
 
+pub use super::SourceRetentions;
 use super::{
-    ColumnGroup, Corner, FingerprintProjection, Grain, MaintenancePlan, MutationProfile,
-    OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp,
-    SourceFacts, Technique, Trigger,
+    retention_outcomes, retention_reaches, ColumnGroup, Corner, FingerprintProjection, Grain,
+    MaintenancePlan, MutationProfile, OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity,
+    RowIdentityVerdict, ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::definition_change::{
     classify_definition_change, DefinitionChangeClass, DefinitionChangeCtx,
@@ -33,6 +34,7 @@ use crate::analysis::join_shape::{
 use crate::analysis::locality_projection::{locality_verdict, LocalityVerdict};
 use crate::analysis::model_diff::ColumnDef;
 use crate::analysis::output_delta::OutputDelta;
+use crate::analysis::retention_reach::derive_retention_verdicts;
 use crate::analysis::source_bounds::{
     derive_cross_axis_links, derive_model_bounds, resolve_table_ref_source_name, BoundContext,
     BoundResult, CrossAxisLink, Seconds,
@@ -219,7 +221,10 @@ pub use column_added::{column_def_from_sql, diff_deployed_columns};
 pub use fold::{source_contributes_to_fold, FoldSpec};
 pub use inputs::{project_source_link, LocalityInputs, ModelInputs, SourceLink};
 pub use model_edge::{append_model_edge_cells, ModelEdge, SourceReferentialIntegrity};
-pub use plan::{derive_maintenance_plan, derive_maintenance_plan_with_referential_integrity};
+pub use plan::{
+    derive_maintenance_plan, derive_maintenance_plan_with_referential_integrity,
+    derive_maintenance_plan_with_referential_integrity_and_retentions,
+};
 
 use backfill::{derive_backfill, read_locality};
 use column_added::{derive_column_added, partition_column_changed, skeleton_clause_changed};

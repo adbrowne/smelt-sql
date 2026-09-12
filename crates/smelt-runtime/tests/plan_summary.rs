@@ -151,6 +151,7 @@ fn dry_run_request(target: &str) -> ExecuteRequest {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        invoke_external_steps: true,
     }
 }
 

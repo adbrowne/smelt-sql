@@ -65,6 +65,7 @@ impl KeyedEnrichedRecipe {
                 key_recurrence: None,
                 partition_column: None,
                 delete_flag_column: None,
+                retention: None,
             },
             dimension: SourceRecipe::mutable_dimension("keyed_enrich_dim"),
         }

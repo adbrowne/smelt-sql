@@ -81,11 +81,21 @@ A run manifest is a JSON document recording what one execution did:
       },
       "deferred_cells": ["event_count@raw.events"]  // omitted if empty; cell addresses this run licensed to skip
     }
+  },
+  "external_steps": {                     // omitted entirely if no step ran this run
+    "<step_address>": {
+      "command": ["bash", "loader.sh", "2026-06-04"],  // the resolved argv, after placeholder substitution
+      "produces": ["smelt.sources.raw_events"],
+      "duration_ms": 1204,
+      "outcome": "success"                // always "success" — a failed step aborts before this exists
+    }
   }
 }
 ```
 
 Every model smelt attempted or considered in a run has an entry keyed by `outcome`: `success` (completed without error), `failed` (the model's execution raised an error), or `skipped` (not attempted — upstream failure, selector exclusion, `--resume` short-circuit, or a `contract.deferral` skip). `definition_hash` is recorded for every entry regardless of outcome; it is what `--resume` compares against to decide whether a `success` from a prior run still applies (see "`--resume` semantics" below). `error` carries the failure's display text for every `failed` entry; `retry_count` records how many retry attempts (`docs/specs/architecture.md`, `RunReporter::model_retrying`) were made for that model before its final outcome, `0` if it succeeded or failed on the first attempt. `probes` records, per declared-fact probe this model's run consulted, the fact (`model_properties.md` §"Probe obligation" registry key), the probe's named diagnostic code, whether the project's `probes:` cadence policy (`smelt_yml.md` §"Top-level keys") actually dispatched it (`"dispatched"`) or skipped it this run (`"skipped"` — the declaration was trusted, not verified), and an optional `observed`: the probe's recorded scalar measurement (e.g. the retained-departed key count `contract.retain_departed`'s reconcile anti-join probe observes, `incremental_models.md` §"Retention (`retain_departed`)"; or the append-only posture probe's late-append partition count, `model_properties.md` §"Probe obligation"). `observed` is omitted for a probe that records no count, and absent entirely on manifests written before this field existed. Defaulted to empty for manifests written before probe dispatch was wired in. `strategy` additionally carries two deferral-specific values for a `skipped` entry: `"skipped_deferral"` (this cell's own measured lag licensed the skip, `incremental_models.md` §"The contract lattice") and `"skipped_deferral_upstream"` (a selected dependent of a deferral-skipped cell, skipped with it). `subsumed` is present only on a `success` entry whose own write range proved it folded a window a prior run had recorded `skipped_deferral` for — `maintained_exclusive`/`input_inclusive` are that pending window's dated bounds (`incremental_models.md` §"The contract lattice"). `deferred_cells` names, per `contract.cells[].deferral` entry this run licensed to skip, the cell's own stable address (`{sorted columns joined by ","}@{on}` — `incremental_models.md` §"The contract lattice") — the per-cell counterpart of the model-level `skipped_deferral` strategy value; empty when the model declares no per-cell deferral, or when every declaring cell folded this run.
+
+`external_steps` (`sources.md` §"Externally-produced sources (black-box steps)") is a map from step address to a record of every step this run **successfully** invoked: `command` is the resolved argv (placeholders substituted, e.g. `{run_date}`), `produces` is the list of source addresses the step declares, `duration_ms` is the invocation's wall time, and `outcome` is always `"success"` — a step's non-zero exit or refusal (`ExternalStepFailed`, `ExternalStepNotInvocable`) aborts the run before any manifest exists (see "Abort semantics" below), so a failed or refused step never appears here; it is surfaced by the run's own reporter output and exit status instead. The key is omitted entirely (not an empty object) for a run that invoked no step, so a manifest written before this field existed still round-trips.
 
 **Abort semantics: the in-flight wave finishes, every failure is recorded, then the run aborts.** A run executes selected models in topologically-ordered waves (`docs/specs/architecture.md` §"Run Pipeline Parity"); models within one wave may run concurrently. When a model's execution raises an error, smelt does not abort the instant the first error is observed — it lets every model already dispatched in that wave finish, and every one that also errors gets its own `failed` entry with its own `error` text. Only once the wave has fully drained does the run stop dispatching further waves. This means a run where two independent models fail concurrently in the same wave never silently downgrades the second failure to `skipped` — both are `failed`, each with its own recorded error. Every other selected model that never got a manifest entry (a later wave that never started, or a model mid-flight when the abort happened) is recorded `skipped`.
 
@@ -113,11 +123,19 @@ A run report is a summary artifact written alongside the run manifest at `.smelt
   "failures": [                             // one entry per `failed` model, empty if none
     { "model": "bad_a", "error": "Conversion Error: ...", "retry_count": 0 },
     { "model": "bad_b", "error": "Conversion Error: ...", "retry_count": 1 }
-  ]
+  ],
+  "external_steps": {                       // mirrors the manifest's field; omitted if no step ran
+    "<step_address>": {
+      "command": ["bash", "loader.sh", "2026-06-04"],
+      "produces": ["smelt.sources.raw_events"],
+      "duration_ms": 1204,
+      "outcome": "success"
+    }
+  }
 }
 ```
 
-A report is written at every point a manifest is persisted — successful completion, cancellation, and abort — so a partial report (derived from an incomplete manifest, `completed_at: null`) is available immediately after a failed or cancelled run, not only after a subsequent successful one. Per "Abort semantics" above, `failures` names every model that failed in the aborting wave, never just the first.
+A report is written at every point a manifest is persisted — successful completion, cancellation, and abort — so a partial report (derived from an incomplete manifest, `completed_at: null`) is available immediately after a failed or cancelled run, not only after a subsequent successful one. Per "Abort semantics" above, `failures` names every model that failed in the aborting wave, never just the first. A run that fails **during** the external-step pass aborts before any manifest exists at all, exactly as any other pre-execution failure does (a bad selection target, a selector error) — its report is therefore absent, not a report with an empty `external_steps`, and the step's failure is surfaced by the run's own reporter output and exit status instead.
 
 ### `--resume` semantics
 

@@ -12,6 +12,7 @@ use smelt_logical::maintenance::{
 };
 use smelt_types::SqlFunction;
 
+mod realisation;
 mod resolution;
 mod succession;
 

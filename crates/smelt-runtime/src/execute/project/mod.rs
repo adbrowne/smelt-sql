@@ -1,5 +1,6 @@
 use super::backend::*;
 use super::bootstrap::*;
+use super::enrichment_heal::*;
 use super::key_addressed::*;
 use super::outcome::*;
 use super::plan::*;
@@ -10,6 +11,7 @@ use super::targets::*;
 use super::window::*;
 
 mod dry_run;
+mod ledger_reset;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -77,7 +79,19 @@ pub async fn execute_project(
     }
 
     // ── Selection ───────────────────────────────────────────────────────
-    let graph_lock = graph.lock().await;
+    let mut graph_lock = graph.lock().await;
+
+    // External steps are registered on the graph before selection so a
+    // selector can reach a step node the same way it reaches any other
+    // (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    // steps)"). `add_external_steps` is idempotent (map inserts), mirroring
+    // the existing inline `discover_source_infos` precedent below.
+    let external_steps = smelt_core::discover_external_steps(project_dir, &config.paths);
+    graph_lock.add_external_steps(&external_steps);
+    let external_steps_by_addr: HashMap<String, smelt_core::ExternalStepInfo> = external_steps
+        .into_iter()
+        .map(|s| (s.address_segments.join("."), s))
+        .collect();
 
     let selection_request = SelectionRequest {
         select: request.select.clone(),
@@ -88,6 +102,28 @@ pub async fn execute_project(
     let selected = selection.ordered_models;
     let target_assignments = selection.target_assignments;
     let cross_edges = selection.cross_engine_edges;
+    let required_steps = selection.required_steps;
+
+    // ── External-step invocation ─────────────────────────────────────────
+    // Runs before `build_model_plans` so both the dry-run branch and the
+    // real run below refuse or invoke identically (`docs/specs/sources.md`
+    // §Semantics 9, 11, 12) — a required step's `command:` runs to
+    // completion, sequentially, before any model builds.
+    let invoked_external_steps = crate::execute::external_steps::invoke_required_steps(
+        &required_steps,
+        &external_steps_by_addr,
+        project_dir,
+        &smelt_core::external_step::StepRunContext {
+            run_date: request.start.clone(),
+            run_end: request.end.clone(),
+        },
+        request.dry_run,
+        request.invoke_external_steps,
+        &cancel,
+        reporter,
+        &run_id,
+    )
+    .await?;
 
     // The run's availability-resolution input (`docs/specs/state.md` §"The
     // degradation contract" step 2): one `StateAvailability` per target this
@@ -263,6 +299,28 @@ pub async fn execute_project(
 
     let all_models: Vec<smelt_core::ModelFile> =
         graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
+    // Composed-upstream candidate map for the per-model retention re-check
+    // below (`docs/outcomes/20260906-trimmed-history-sources/
+    // phases/09-plan.md` task 6): a `grain: key` model whose sole clocked
+    // candidate is an upstream maintained model's own composed output must
+    // resolve `driving_source_granularity` from that candidate too, not
+    // just its own declared `sources:` refs — see
+    // `retention_admission::derive_model_retention_plan`'s doc comment for
+    // why. Gated on at least one referenced source declaring `retention:`
+    // so a workspace with no trimmed source pays nothing for the
+    // fixed-point derivation (`crate::propagation::derive_clamp_and_locality`
+    // is otherwise-unneeded work on this path).
+    let composed_source_granularities: std::collections::BTreeMap<
+        String,
+        (
+            smelt_logical::maintenance::SourceFacts,
+            smelt_core::config::Granularity,
+        ),
+    > = if source_infos.iter().any(|s| s.retention.is_some()) {
+        crate::propagation::composed_source_granularities(&all_models, &source_infos)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     // T3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
     // Phase E3): keyed by canonical address so the real per-batch loop
     // below can build each model's `ModelEdge` list (`model_edges_for`)
@@ -756,6 +814,7 @@ pub async fn execute_project(
         started_at: run_start,
         completed_at: None,
         models: HashMap::new(),
+        external_steps: invoked_external_steps.into_iter().collect(),
     };
 
     let mut total_rows_overall: usize = 0;
@@ -802,6 +861,7 @@ pub async fn execute_project(
     let compilers = &compilers;
     let ephemeral_resolvers = &ephemeral_resolvers;
     let source_infos = &source_infos;
+    let composed_source_granularities = &composed_source_granularities;
     let model_by_addr = &model_by_addr;
     let source_timeseries = &source_timeseries;
     let source_key_recurrence = &source_key_recurrence;
@@ -986,6 +1046,38 @@ pub async fn execute_project(
         }
 
         reporter.model_started(run_id, &plan.name, model_idx, models_total);
+
+        // Reach-versus-retention rolling re-evaluation (`docs/specs/sources.md`
+        // §Semantics 5 "Retention refusal", `docs/outcomes/
+        // 20260906-trimmed-history-sources/outcome.md` criterion 5): before any
+        // statement is emitted or executed for this model, re-check its derived
+        // reach against every declared `retention:` source's bound, aged by
+        // THIS run's own window — a region admissible last month can stop being
+        // admissible with no change to the model. `start_date` is `None` for a
+        // forward-only run (age zero, steady-state maintenance unaffected);
+        // `run_start` (never `Utc::now()` inline) is the run's own clock.
+        if let Some(retention_plan) =
+            crate::execute::retention_admission::derive_model_retention_plan(
+                &plan.model_file,
+                source_infos,
+                composed_source_granularities,
+            )
+        {
+            if let Err(err) = crate::execute::retention_admission::check_retention_admission(
+                &retention_plan,
+                start_date,
+                run_start.date_naive(),
+            ) {
+                return Err(anyhow::anyhow!(err));
+            }
+            for downgrade in &retention_plan.retention_downgrades {
+                reporter.maintenance_warning(
+                    run_id,
+                    &plan.name,
+                    &crate::execute::retention_admission::downgrade_warning_message(downgrade),
+                );
+            }
+        }
 
         let model_start = Instant::now();
         let mut total_rows = 0usize;
@@ -1304,6 +1396,53 @@ pub async fn execute_project(
             }
         }
 
+        // ── Whole-table-recompute retention gate (`docs/specs/sources.md`
+        // §Semantics 5 "Retention refusal") ───────────────────────────────
+        // A whole-table recompute reaches past every finite `retention:`
+        // bound by construction, so it is decided from the model's declared
+        // sources directly rather than a derived reach — placed here,
+        // immediately after `force_full_refresh` has finished settling
+        // (every gate above that can set it has already run) and before the
+        // keyed dispatch below, so the smelt-forced case is visible to the
+        // license and no data statement has yet executed for this model.
+        // Non-incremental (`table`/`view`) models are outside the gate:
+        // recomputed from scratch every run by construction, they hold no
+        // answer of record for a recompute to destroy. Gated on `plan.refresh`
+        // rather than `plan.incremental.is_some()`: a whole-table
+        // `--full-refresh` with no explicit window collapses `plan.incremental`
+        // to `None` (`build_model_plans`' own window-resolution fallback) for
+        // exactly the runs this gate must catch, so `plan.incremental` cannot
+        // be the signal for "is this an incremental model" here.
+        if plan.refresh == smelt_core::config::RefreshStrategy::Incremental {
+            let full_refresh_run = request.full_refresh || request.rebuild || force_full_refresh;
+            if full_refresh_run {
+                let license = if request.allow_full_refresh {
+                    smelt_logical::maintenance::FullRefreshLicense::Explicit
+                } else if force_full_refresh {
+                    smelt_logical::maintenance::FullRefreshLicense::Forced
+                } else {
+                    smelt_logical::maintenance::FullRefreshLicense::None
+                };
+                let stored_state = backend
+                    .table_exists(schema, &plan.model_file.db_name_owned())
+                    .await
+                    .unwrap_or(false);
+                match crate::execute::retention_admission::check_full_refresh_retention(
+                    &plan.model_file,
+                    source_infos,
+                    stored_state,
+                    license,
+                ) {
+                    Ok(warnings) => {
+                        for warning in &warnings {
+                            reporter.maintenance_warning(run_id, &plan.name, warning);
+                        }
+                    }
+                    Err(err) => return Err(anyhow::anyhow!(err)),
+                }
+            }
+        }
+
         // Keyed dispatch — handled separately from the incremental /
         // full-refresh branches because it has its own per-partition merge
         // loop (see `smelt_runtime::cumulative` and
@@ -1339,6 +1478,9 @@ pub async fn execute_project(
                 .table_exists(schema, &db_table_name)
                 .await
                 .unwrap_or(false);
+            // Hoisted above `resolve_live_column_scoped_cell` below (phase 5) so
+            // its enrichment-keyed route is visible.
+            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
             let column_scoped_cell = match plan.model_file.metadata.as_deref() {
                 Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
                     &clean_sql_for_merge,
@@ -1346,6 +1488,7 @@ pub async fn execute_project(
                     metadata,
                     &maint_source_facts,
                     &explicitly_mutable,
+                    &keyed_model_edges,
                     backend.capabilities().supports_column_scoped_merge,
                     &request.technique_overrides,
                     &availability,
@@ -1420,7 +1563,7 @@ pub async fn execute_project(
             // upstream's affected key set rather than a source's `ScanClamp` —
             // the sibling of `per_group_recompute_cell` above for this
             // model's upstream MODEL edges rather than its declared sources.
-            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+            // (`keyed_model_edges` is hoisted above, ~L1346.)
             let key_edge_dispatch = resolve_and_dispatch_key_addressed_edge_cell(
                 backend,
                 schema,
@@ -1597,6 +1740,7 @@ pub async fn execute_project(
                                             key,
                                             Some(slice),
                                             &region,
+                                            smelt_backend::maintenance_dialect(backend.dialect()),
                                         );
                                     (select, None)
                                 }
@@ -1668,6 +1812,7 @@ pub async fn execute_project(
                                     &compiled.sql,
                                     key,
                                     &affected_keys_select,
+                                    smelt_backend::maintenance_dialect(backend.dialect()),
                                 );
                             match write {
                                 crate::maintenance_driver::RepairWrite::TargetedDeleteInsert => {
@@ -1693,6 +1838,7 @@ pub async fn execute_project(
                                             &db_table_name,
                                             key,
                                             &affected_keys_select,
+                                            smelt_backend::maintenance_dialect(backend.dialect()),
                                         );
                                     // A group whose PRESENTED value is
                                     // unchanged but whose hidden state moved
@@ -1920,21 +2066,10 @@ pub async fn execute_project(
                     );
                     if mutation_should_dispatch {
                     // The mutated dimension's own declared `unique_key`
-                    // (`sources.md` §"Row identity") — same lookup the
-                    // non-keyed incremental branch performs, needed only for
-                    // the horizon-clamped corner's join-contribution proof.
-                    let dimension_unique_key: Vec<String> = source_infos
-                        .iter()
-                        .find(|info| {
-                            let segs = &info.address_segments;
-                            let bare = match segs.split_first() {
-                                Some((first, rest)) if first == "sources" => rest.join("."),
-                                _ => segs.join("."),
-                            };
-                            &bare == source
-                        })
-                        .and_then(|info| info.unique_key.clone())
-                        .unwrap_or_default();
+                    // (`sources.md` §"Row identity"), edge-aware (falls back
+                    // to `ModelEdge::unique_key` for a model-edge trigger).
+                    let dimension_unique_key =
+                        dimension_unique_key_for(source, source_infos, &keyed_model_edges);
                     let contribution = if matches!(
                         cell.partition_local,
                         smelt_logical::maintenance::PartitionLocal::Yes
@@ -2036,6 +2171,44 @@ pub async fn execute_project(
                             state_io_lock,
                         )
                         .await;
+                    } else if let Some(metadata) = plan.model_file.metadata.as_deref() {
+                        // `dispatch` is `None` for an `EnrichmentKeyed` cell
+                        // (excluded above) — dispatch the run-level heal.
+                        if let Some(heal_result) = dispatch_enrichment_keyed_heal_for_run(
+                            backend,
+                            schema,
+                            &plan.name,
+                            &db_table_name,
+                            table_exists_before_run,
+                            &clean_sql_for_merge,
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &keyed_model_edges,
+                            &availability,
+                            column_scoped_cell.as_ref(),
+                            &model_unique_key,
+                            &plan.model_file,
+                            compiler,
+                            resolver,
+                            start_date,
+                            end_date,
+                            request,
+                            run_id,
+                            reporter,
+                        )
+                        .await?
+                        {
+                            used_column_scoped_merge = true;
+                            total_rows = heal_result.row_count;
+                            record_upstream_mutation_baseline(
+                                mutation_gate,
+                                source,
+                                file_store,
+                                state_io_lock,
+                            )
+                            .await;
+                        }
                     }
                     }
                 }
@@ -2368,6 +2541,7 @@ pub async fn execute_project(
                                 &columns,
                                 &compiled.sql,
                                 &succession_retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
                                 reporter,
                                 run_id,
                             )
@@ -2710,6 +2884,7 @@ pub async fn execute_project(
                         metadata,
                         &maint_source_facts,
                         &explicitly_mutable,
+                        &model_edges,
                         backend.capabilities().supports_column_scoped_merge,
                         &request.technique_overrides,
                         &availability,
@@ -2829,26 +3004,10 @@ pub async fn execute_project(
                                 smelt_logical::maintenance::PartitionLocal::Yes
                             ) {
                                 // The mutated dimension's own declared
-                                // `unique_key` (`sources.md` §"Row identity")
-                                // — never `SourceFacts`' always-empty
-                                // `unique_key` field (`smelt-db`'s
-                                // `source_facts()` does not populate it
-                                // yet), read straight off the
-                                // already-resolved `source_infos`.
-                                let dimension_unique_key: Vec<String> = source_infos
-                                    .iter()
-                                    .find(|info| {
-                                        let segs = &info.address_segments;
-                                        let bare = match segs.split_first() {
-                                            Some((first, rest)) if first == "sources" => {
-                                                rest.join(".")
-                                            }
-                                            _ => segs.join("."),
-                                        };
-                                        &bare == source
-                                    })
-                                    .and_then(|info| info.unique_key.clone())
-                                    .unwrap_or_default();
+                                // `unique_key`, edge-aware (see
+                                // `dimension_unique_key_for`'s doc comment).
+                                let dimension_unique_key =
+                                    dimension_unique_key_for(source, source_infos, &model_edges);
                                 crate::maintenance_driver::dimension_join_contribution(
                                     &sql_for_bounds,
                                     source,
@@ -3144,21 +3303,38 @@ pub async fn execute_project(
                         end: batch.partition_end.to_string(),
                         axis: smelt_logical::PartitionAxis::Calendar,
                     };
+                    // The scan-side skew inversion of this same batch
+                    // (`windowing::IncrementalBatch::scan_start`/`scan_end` —
+                    // `docs/specs/model_transforms.md` §Semantics "The output
+                    // window is derived, never assumed"): equals `run_range`
+                    // for a zero-skew model, wider for a Form-B model's
+                    // interior chunk. Deliberately not `filter_start`/
+                    // `filter_end`, which already carries the SQL-inferred
+                    // lookback/lookahead `derive_batch_filtered_sql` widens
+                    // again per source below — folding both into one range
+                    // would double that margin.
+                    let scan_range = TimeRange {
+                        start: batch.scan_start.to_string(),
+                        end: batch.scan_end.to_string(),
+                        axis: smelt_logical::PartitionAxis::Calendar,
+                    };
 
                     // Two-layer widened-scan + exact output clamp
                     // (`docs/specs/model_transforms.md` §Semantics — "Source-filter
                     // pushdown + the two clamps"): the *scan* may read a margin
                     // (handled per-source by `inject_source_filters`, which widens
-                    // each bounded source independently), but the *output clamp*
-                    // must equal the output window exactly — the margin is read but
-                    // never re-written. B0 (unified pushdown-depth walk,
-                    // `docs/research/20260703-model-updates.md` §3.3/§3.5): for the
-                    // transparent slice — a single bounded source with no lookback
-                    // margin AND zero partition-column skew — the source-level filter
-                    // on the exact output-window batch *is* the output clamp; the
-                    // outer `inject_time_filter` wrap would inject a textually
-                    // identical, redundant filter. Skip it and rely solely on the
-                    // source-level filter (`derive_batch_filtered_sql`'s
+                    // each bounded source independently, folded onto `scan_range`
+                    // above), but the *output clamp* must equal the output window
+                    // exactly — the margin is read but never re-written. B0
+                    // (unified pushdown-depth walk, `docs/research/
+                    // 20260703-model-updates.md` §3.3/§3.5): for the transparent
+                    // slice — a single bounded source with no lookback margin AND
+                    // zero partition-column skew — the source-level filter on the
+                    // exact output-window batch *is* the output clamp (`scan_range
+                    // == run_range` when `skew == Skew::ZERO`); the outer
+                    // `inject_time_filter` wrap would inject a textually identical,
+                    // redundant filter. Skip it and rely solely on the source-level
+                    // filter (`derive_batch_filtered_sql`'s
                     // `is_transparent_single_source(...) && skew == Skew::ZERO` gate).
                     // A model with a real lookback margin, a genuine partition-column
                     // skew, or more than one source keeps both layers, but the outer
@@ -3178,6 +3354,7 @@ pub async fn execute_project(
                         &inc_plan.timeseries.partition_column,
                         &per_model_source_bounds,
                         &run_range,
+                        &scan_range,
                         run_start,
                         inc_plan.skew,
                     )?;
@@ -3407,62 +3584,30 @@ pub async fn execute_project(
                     // model-edge-restricted recompute, or the external-sidecar-
                     // restricted recompute — resets this batch's own
                     // `[partition.start, partition.end)` slice in `_smelt_ledger`
-                    // (whole-row group `{*}`, nominal input `self`, watermarked to
-                    // the region's own end), run in the SAME backend transaction as
-                    // the write it protects via `Backend::execute_write_with_
-                    // bookkeeping` (state-residency: `.smelt/reconciliation.json`
-                    // no longer exists — this table IS the ledger). Hoisted above
-                    // the three DeleteInsert dispatch arms below (model-edge
-                    // restricted, external-sidecar restricted, plain) so all three
-                    // build the SAME reset from `generate_ledger_recompute_reset_
-                    // sqls`, instead of each constructing (or omitting) its own.
-                    // Not built when a live `ColumnScopedMerge` cell dispatches
-                    // (`column_merge_dispatch.is_some()`) — that technique is not a
-                    // region DeleteInsert and its own MP12 ledger interaction is
-                    // unrelated to this reset. Whether the ledger is available at
-                    // all is now this run's own resolved
-                    // `StateAvailability` (`docs/outcomes/20260904-state-residency/
-                    // outcome.md` phase 5), not a raw dialect check — on a
-                    // ledger-less target this is no longer a silent skip: the
-                    // per-cell technique already carries a recorded
-                    // `state_downgrade` (`smelt-logical`'s
-                    // `resolve_availability`), which `smelt explain` and the
-                    // warning diagnostic surface (phase 6). No reporter
-                    // event is emitted for the skip anymore — that stand-in
-                    // channel is retired.
-                    let ledger_reset_sqls = if column_merge_dispatch.is_none()
-                        && availability.contains(
-                            smelt_logical::maintenance::availability::StateStructure::ReconciliationLedger,
-                        )
-                    {
-                        Some(smelt_state::ddl_duckdb::generate_ledger_recompute_reset_sqls(
-                            schema,
-                            &plan.name,
-                            "{*}",
-                            &partition.start,
-                            &partition.end,
-                            "self",
-                            &partition.end,
-                        ))
-                    } else {
-                        if column_merge_dispatch.is_none() {
-                            tracing::debug!(
-                                model = %plan.name,
-                                dialect = backend.dialect().name(),
-                                "region-recompute reset skipped: the reconciliation ledger is \
-                                 unavailable for this target — the affected cell's own \
-                                 recorded state_downgrade is the user-visible channel"
-                            );
-                        }
-                        None
-                    };
-                    let ledger_ensure_sqls: Vec<String> = if ledger_reset_sqls.is_some() {
-                        vec![smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema)]
-                    } else {
-                        Vec::new()
-                    };
-                    let ledger_pre_write_sqls: Vec<String> =
-                        ledger_reset_sqls.clone().unwrap_or_default();
+                    // The reconciliation-ledger reset for this region, hoisted
+                    // above the three DeleteInsert dispatch arms below so all
+                    // three share one derivation. See `ledger_reset::build` for
+                    // what suppresses it and why the skip is not silent.
+                    let ledger = ledger_reset::build(
+                        backend.dialect(),
+                        &availability,
+                        column_merge_dispatch.is_some(),
+                        schema,
+                        &plan.name,
+                        &partition.start,
+                        &partition.end,
+                    )?;
+                    if !ledger.built && column_merge_dispatch.is_none() {
+                        tracing::debug!(
+                            model = %plan.name,
+                            dialect = backend.dialect().name(),
+                            "region-recompute reset skipped: the reconciliation ledger is \
+                             unavailable for this target — the affected cell's own \
+                             recorded state_downgrade is the user-visible channel"
+                        );
+                    }
+                    let ledger_ensure_sqls: Vec<String> = ledger.ensure_sqls;
+                    let ledger_pre_write_sqls: Vec<String> = ledger.pre_write_sqls;
 
                     // T3: re-checked per batch (not hoisted with
                     // `use_delta_restricted_dispatch` above) because
@@ -3872,6 +4017,41 @@ pub async fn execute_project(
                         exec_result.row_count,
                         batch_duration,
                     );
+                }
+
+                // An `EnrichmentKeyed` cell was excluded from every batch's
+                // window-scoped dispatch above — dispatch the run-level heal
+                // once here instead (see `enrichment_heal.rs`'s doc comment).
+                if let Some(metadata) = plan.model_file.metadata.as_deref() {
+                    if let Some(heal_result) = dispatch_enrichment_keyed_heal_for_run(
+                        backend,
+                        schema,
+                        &plan.name,
+                        &plan.model_file.db_name_owned(),
+                        table_exists_before_run,
+                        &sql_for_bounds,
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &model_edges,
+                        &availability,
+                        column_scoped_cell.as_ref(),
+                        &inc_plan.config.unique_key,
+                        &plan.model_file,
+                        compilers.get(model_target),
+                        &ephemeral_resolvers[model_target],
+                        start_date,
+                        end_date,
+                        request,
+                        run_id,
+                        reporter,
+                    )
+                    .await?
+                    {
+                        used_column_scoped_merge = true;
+                        total_rows += heal_result.row_count;
+                        total_rows_overall += heal_result.row_count;
+                    }
                 }
 
                 // Recorded once for the whole run — the observed fingerprint

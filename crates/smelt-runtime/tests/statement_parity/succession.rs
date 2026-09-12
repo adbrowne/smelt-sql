@@ -11,6 +11,43 @@ use std::path::PathBuf;
 const SOURCE_TABLE: &str = "main.sources_customer_changes";
 const PRESENTED_TABLE: &str = "main.customer_history";
 
+/// The fixture's own resolved output schema, in the model's own projection
+/// order — `customer_id` key, `changed_at` clock, `tier` payload, `valid_to`
+/// `{lead}`-derived, matching `column_scoped_merge`'s succession fixture SQL
+/// (`SELECT customer_id, changed_at, tier, LEAD(...) AS valid_to`).
+const OUTPUT_COLUMNS: &[&str] = &["customer_id", "changed_at", "tier", "valid_to"];
+
+/// The fixture's own `lead_derived` pairs — `valid_to` is a raw `{lead}`
+/// passthrough, so it feeds `emit_succession_full_rebuild`'s tie-break.
+fn lead_derived() -> Vec<(String, String)> {
+    vec![("valid_to".to_string(), "{lead}".to_string())]
+}
+
+/// Recover the model's own compiled `SELECT` from a real run's executed
+/// `CREATE TABLE ... AS SELECT ... FROM (SELECT *, ROW_NUMBER() OVER (...) \
+/// AS __smelt_rn FROM (<model select>) AS __smelt_model) AS __smelt_ranked \
+/// WHERE __smelt_rn = 1` statement, by stripping the fold wrapper this
+/// fixture's own key/clock/derived columns fully determine — the same
+/// reconstruct-from-what-executed idiom `extract_affected_keys_select` uses
+/// elsewhere in this suite, proving the emitter reproduces the exact SQL a
+/// real run compiled and sent, cast-wrapping included.
+fn recover_folded_model_select_sql(executed_sql: &str) -> String {
+    let cols = OUTPUT_COLUMNS.join(", ");
+    let prefix = format!(
+        "CREATE TABLE {PRESENTED_TABLE} AS SELECT {cols} FROM (SELECT *, ROW_NUMBER() OVER \
+         (PARTITION BY customer_id, changed_at ORDER BY (CASE WHEN valid_to = changed_at THEN \
+         1 ELSE 0 END) ASC) AS __smelt_rn FROM ("
+    );
+    let suffix = ") AS __smelt_model) AS __smelt_ranked WHERE __smelt_rn = 1";
+    executed_sql
+        .strip_prefix(&prefix)
+        .and_then(|s| s.strip_suffix(suffix))
+        .unwrap_or_else(|| {
+            panic!("executed presented statement did not match the expected fold wrapper: {executed_sql}")
+        })
+        .to_string()
+}
+
 fn succession_fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/succession")
@@ -97,7 +134,16 @@ async fn succession_patch_executed_statements_match_the_emitters() {
         .find(|s| s.contains("violation_count"))
         .expect("the clock-tie probe must have executed via execute_sql");
 
-    let window_predicate = "arrival_date >= DATE '2026-01-01' AND arrival_date < DATE '2026-01-02'";
+    // Built by the same single owner the driver uses, rather than restated:
+    // the typed `DATE '…'` spelling this used to hardcode is a GoogleSQL type
+    // error against a TIMESTAMP partition column, and restating it here would
+    // let the expectation and the driver drift apart again.
+    let window_predicate = smelt_runtime::maintenance_driver::succession_window_predicate(
+        "arrival_date",
+        "2026-01-01",
+        "2026-01-02",
+    );
+    let window_predicate = window_predicate.as_str();
     let projection = vec![
         ("customer_id".to_string(), "customer_id".to_string()),
         ("changed_at".to_string(), "changed_at".to_string()),
@@ -131,7 +177,8 @@ async fn succession_patch_executed_statements_match_the_emitters() {
         None,
         &expected_event_delta.sql,
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     assert_eq!(
         patch_group.statements.len(),
         expected_patch_group.statements.len()
@@ -229,26 +276,29 @@ async fn succession_full_refresh_executed_statements_match_the_emitters() {
     let rebuild_group = &groups[0];
 
     // Recover the compiled SELECT the run actually used, from the executed
-    // `CREATE TABLE ... AS <select>` statement's own text — the same
-    // reconstruct-from-what-executed idiom `extract_affected_keys_select`
-    // uses elsewhere in this suite, proving the emitter reproduces the
-    // exact SQL a real run compiled and sent, cast-wrapping included.
-    let create_prefix = format!("CREATE TABLE {PRESENTED_TABLE} AS ");
-    let model_select_sql = rebuild_group.statements[0]
-        .sql
-        .strip_prefix(&create_prefix)
-        .expect("rebuild group's first statement is the presented CREATE TABLE AS");
+    // presented statement's own text — the same reconstruct-from-what-
+    // executed idiom `extract_affected_keys_select` uses elsewhere in this
+    // suite, proving the emitter reproduces the exact SQL a real run
+    // compiled and sent, cast-wrapping included.
+    let model_select_sql = recover_folded_model_select_sql(&rebuild_group.statements[0].sql);
 
     let expected_group = smelt_logical::maintenance::emit::emit_succession_full_rebuild(
         PRESENTED_TABLE,
-        model_select_sql,
+        &model_select_sql,
         SOURCE_TABLE,
         &["customer_id".to_string()],
         "changed_at",
+        &OUTPUT_COLUMNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        &lead_derived(),
+        &[],
         None,
         "FALSE",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     assert_eq!(
         rebuild_group.statements.len(),
         expected_group.statements.len()
@@ -345,22 +395,25 @@ async fn succession_rebuild_executed_statements_match_the_emitters() {
     );
     let rebuild_group = &groups[0];
 
-    let create_prefix = format!("CREATE TABLE {PRESENTED_TABLE} AS ");
-    let model_select_sql = rebuild_group.statements[0]
-        .sql
-        .strip_prefix(&create_prefix)
-        .expect("rebuild group's first statement is the presented CREATE TABLE AS");
+    let model_select_sql = recover_folded_model_select_sql(&rebuild_group.statements[0].sql);
 
     let expected_group = smelt_logical::maintenance::emit::emit_succession_full_rebuild(
         PRESENTED_TABLE,
-        model_select_sql,
+        &model_select_sql,
         SOURCE_TABLE,
         &["customer_id".to_string()],
         "changed_at",
+        &OUTPUT_COLUMNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        &lead_derived(),
+        &[],
         None,
         "FALSE",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     assert_eq!(
         rebuild_group.statements.len(),
         expected_group.statements.len()

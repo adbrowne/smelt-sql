@@ -20,6 +20,7 @@ mod emitted_model_body_diagnostics;
 mod emitted_model_consumer_typing;
 mod emitted_model_typed_schema;
 mod expr_kind;
+mod external_step_diagnostics;
 mod extract_alias_extraction;
 mod fn_path_call_diagnostics;
 mod fragment_context_binding;

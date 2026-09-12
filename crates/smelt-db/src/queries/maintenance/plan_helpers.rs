@@ -143,6 +143,27 @@ pub fn build_source_referential_integrity(
     out
 }
 
+/// Build the [`smelt_logical::maintenance::SourceRetentions`] map (bare
+/// source name → declared `retention:` world-fact)
+/// [`derive_model_maintenance_plan`]'s `retentions` parameter needs, over the
+/// same `(ref_string, source_info)` pairs [`build_source_facts`] consumes.
+/// Sourced independently of `SourceFacts` (rather than adding a field
+/// there) so the many existing `SourceFacts` literal-construction call
+/// sites across the workspace stay unaffected by a route this phase alone
+/// introduces — the same rationale [`build_source_referential_integrity`]
+/// documents for its own sibling map.
+pub fn build_source_retentions(
+    refs: &[(String, Option<SourceInfo>)],
+) -> smelt_logical::maintenance::SourceRetentions {
+    let mut out = smelt_logical::maintenance::SourceRetentions::new();
+    for (name, info) in refs {
+        if let Some(retention) = info.as_ref().and_then(|s| s.retention.clone()) {
+            out.insert(name.clone(), retention);
+        }
+    }
+    out
+}
+
 /// Build the [`SuccessionContext`] the keyed-succession leaf classifier
 /// (`smelt_logical::analysis::walk::model_keyed_succession`) reads, over the
 /// same `(ref_string ↔ bare source name, source_info)` pairs

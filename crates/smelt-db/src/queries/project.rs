@@ -233,6 +233,24 @@ pub fn project_sources(db: &dyn salsa::Database, project: ProjectInput) -> Arc<V
     Arc::new(smelt_core::discover_source_infos(&project_root, &paths))
 }
 
+/// Discover external-step declaration files for a project root.
+///
+/// Mirrors `project_sources`: discovery is project-wide and disk-based
+/// (restart-scoped — a step file's *content* change requires a tool restart,
+/// same as sources), keyed on `ProjectInput` so it re-runs when `smelt.yml`
+/// changes (e.g. `paths:` updated).
+#[salsa::tracked]
+pub fn project_external_steps(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Arc<Vec<smelt_core::ExternalStepInfo>> {
+    let project_root = project.root(db).clone();
+    let paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.paths)
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+    Arc::new(smelt_core::discover_external_steps(&project_root, &paths))
+}
+
 /// A diagnostic anchored in a per-entity source `.yml` file.
 ///
 /// Source YAML files are not registered as `SourceFile` inputs (they have no SQL
@@ -324,8 +342,54 @@ pub fn project_source_diagnostics(
                 });
             }
         }
-        diags.sort_by(|a, b| a.path.cmp(&b.path));
     }
+
+    // Third pass: external-step declarations (sources.md §"Externally-produced
+    // sources (black-box steps)"). Per-file shape errors first, mirroring the
+    // source parse-error scan above; then the cross-entity checks that need
+    // the whole project's step and source sets (a `produces:` address naming
+    // no declared source, or two steps naming the same source).
+    for (path, err) in smelt_core::discover_external_step_errors(&project_root) {
+        let code = match err {
+            smelt_core::ExternalStepError::ProducerConflict { .. } => {
+                DiagnosticCode::SourceProducerConflict
+            }
+            _ => DiagnosticCode::MalformedExternalStep,
+        };
+        diags.push(SourceDiagnostic {
+            path,
+            diagnostic: crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: err.to_string(),
+                range: TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(code),
+                data: None,
+            },
+        });
+    }
+
+    let steps = project_external_steps(db, project);
+    let sources = smelt_core::discover_source_infos(&project_root, &paths);
+    for (path, err) in smelt_core::validate_external_steps(&steps, &sources) {
+        let code = match err {
+            smelt_core::ExternalStepError::ProducerConflict { .. } => {
+                DiagnosticCode::SourceProducerConflict
+            }
+            _ => DiagnosticCode::MalformedExternalStep,
+        };
+        diags.push(SourceDiagnostic {
+            path,
+            diagnostic: crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: err.to_string(),
+                range: TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(code),
+                data: None,
+            },
+        });
+    }
+
+    diags.sort_by(|a, b| a.path.cmp(&b.path));
 
     Arc::new(diags)
 }
@@ -388,8 +452,9 @@ pub fn project_address_collisions(
     // cause `project_address_collisions` to re-run.
     let seeds = project_seeds(db, project);
     let sources = project_sources(db, project);
+    let external_steps = project_external_steps(db, project);
 
-    let (_, collisions) = resolve_address_map(&sql_files, &seeds, &sources);
+    let (_, collisions) = resolve_address_map(&sql_files, &seeds, &sources, &external_steps);
 
     let diags = collisions
         .into_iter()

@@ -26,6 +26,7 @@ The surface is the set of properties and their verdicts. Callers are the planner
 | Event-time monotonicity trace | `EventTimeTrace` = `Traceable{source, source_column, offset, monotonicity}` \| `StaticSeed{reason}` \| `NotTraceable{reason, kind}`: does the projected `event_time` expression trace monotone-non-decreasing to exactly one source column, folding constant `INTERVAL` shifts and constant integer shifts over a monotone, non-temporal partition key (`offset` = `Seconds` \| `Symbolic` \| `Integer`; `monotonicity` = ClickHouse-style `{is_monotonic, is_positive, is_always_monotonic, is_strict}`). `kind` = `Disproven` (the classifier positively knows the shape is not monotone — never widened) \| `Undecidable` (no rule for the shape, e.g. an opaque function — the only kind the declared-monotonicity guarantee below may widen) | built |
 | Column nullability gate | downgrades `Traceable → NotTraceable` when the traced leaf column is nullable or its nullability is unknown, so a pushed filter cannot silently drop `NULL` rows | built |
 | Unified bound / reach derivation | `BoundResult` = `Bounded{source_partition_col, before, after}` \| `Unbounded` \| `NotDerivable`: the finite backward (`before`) / forward (`after`) reach in seconds a frame or interval band forces around the run window, per source; splits *computation-reach* (derived) from declared *source-lateness* | built |
+| Retention admissibility | `RetentionVerdict` = `NoDeclaredBound` \| `Within{required_lookback, retained}` \| `Exceeds{required_lookback, retained}` \| `UnprovableWithin{retained, reason}`: the walk's per-source backward reach plus the run window's own age, compared against the source's declared `retention:` (verdict only — the refusal that consumes it is `not-yet` until the follow-on phase) | built (verdict); refusal not-yet |
 | Maintained-window / horizon derivation | the clamp bound — the far edge of the maintained window, past which inputs are no longer folded in — composed from the reach (`before`/`after`) and any join contribution, per source. **Derived**, never trusted from a declaration: a declared horizon *ceiling* only warns when the derived value would exceed it and never relaxes the clamp, because an under-estimate would silently drop in-reach rows (`incremental_models.md` §"Windowed maintenance and the horizon"). The horizon-ceiling warning compares against the per-source reach (the row above) today; composing every source's reach plus join contribution into one model-wide horizon number remains the `not-yet` gap | not-yet |
 | Injection-point / pushdown-depth | `InjectionPoint` = `Source` (zero-margin transparent slice, push filter to the scan) \| `OuterClamp` (nonzero margin / `Unbounded` / `NotDerivable`): the deepest safe placement for the event-time filter | partial |
 | Frame-reach taxonomy | `RANGE … INTERVAL` → derivable reach `k`; `ROWS`/`GROUPS`/bare `LAG`/`LEAD` → `NotDerivable`; `UNBOUNDED` → ∞ | built (RANGE/ROWS/LAG); `GROUPS` conservative |
@@ -126,6 +127,54 @@ For each source ref, `derive_model_bounds(sql, ctx)` computes how far outside th
 Every `INTERVAL '<value>'` literal this walk encounters is parsed by one shared parser into `Offset::Seconds` (seconds/minutes/hours/days/weeks — uniform durations) or `Offset::Symbolic` (month/year — non-uniform: a month is 28-31 days, a year 365-366). A symbolic literal in a bound-relevant position cannot populate a `Bounded{before, after}` value, so per the fail-closed constraint below it forces `NotDerivable` for that source rather than an approximate fixed-day guess. The same parser backs the driving-fact/anchor trace's constant-shift folding (below), so a `col ± INTERVAL '<n> month'` shift and a `RANGE BETWEEN INTERVAL '<n> month' PRECEDING` frame are classified identically.
 
 Both consumers that need "SQL + source list → bound + injection point" — the planner's pushdown-eligibility rule and the runtime's SQL compiler — call the same entry point (`derive_and_classify_bounds`) rather than re-deriving the bound independently; the planner additionally narrows the source list for UNION/JOIN/derived-table constructs before calling it.
+
+### Reach versus retained history
+
+A source may declare a rolling retention bound (`sources.md`'s `retention:` row): how far back it
+can still be re-read, anchored to the current run rather than a fixed calendar date. Whether a
+model's own required reach into that source fits inside the bound is a **fold over the unified
+bound/reach derivation's own output**, never a second scan of the model's SQL — the walk has
+already produced the per-source backward reach (`BoundResult`'s `before`) as the composition
+walk's product, so the comparison only needs to add the run window's own age and compare against
+the declared bound.
+
+`RetentionVerdict` is `NoDeclaredBound` (the source declares no `retention:` — trusted replayable,
+`sources.md` §Semantics 5) \| `Within{required_lookback, retained}` \| `Exceeds{required_lookback,
+retained}` \| `UnprovableWithin{retained, reason}`. `required_lookback = before + window_age`, where
+`window_age` is how far the current run's window has drifted from the point a backfill or replay
+was declared — carrying this term is what makes the verdict a **rolling** re-evaluation against the
+bound in effect at plan time on every run, rather than a value fixed at the point the model was
+authored (`sources.md` §Semantics 5). Concretely, the quantity a run compares against `retention:`
+is the model's derived reach plus the age of the oldest region the run writes, aged against the
+run's own clock: a forward-only run has age zero, so steady-state maintenance is never affected,
+while a backfill of an old region ages into the bound. A reach the unified derivation could not bound at all
+(`Unbounded` or `NotDerivable`) fails closed to `UnprovableWithin` rather than an optimistic
+`Within` — absence of a proof is a rejection, never a pass. A source declared in the model's
+`BoundContext` but absent from the walk's output (the model never actually reads it) carries no
+verdict at all, rather than a phantom `NoDeclaredBound`.
+
+This verdict is a **proof only** — it names no diagnostic and takes no plan-time action. The
+refusal or degradation it licenses (`sources.md`'s `SourceRetentionExceeded` and the degradation
+contract, `state.md` §"The degradation contract") is a separate consumer's concern, layered on top
+of this fold rather than folded into it.
+
+The consumer's mapping from verdict to outcome is total and admits exactly three shapes, no
+others: `Exceeds` refuses (`sources.md`'s `SourceRetentionExceeded`) — a proof that the reach does
+not fit is never silently admitted. `UnprovableWithin` takes a recorded downgrade
+(`SourceRetentionDowngraded`, Warning) rather than an optimistic admission — the absence of a proof
+of fit is not evidence of fit, so the model's pre-bound region stops being claimed replayable,
+mirroring the degradation contract's own posture for a missing state structure (`state.md`
+§"The degradation contract") applied here to a missing proof instead. `Within` and
+`NoDeclaredBound` record nothing — an honoured bound, or a source with no bound to honour, is not
+news, and recording one anyway would train operators to ignore the diagnostic that matters. This
+totality is itself the no-silent-under-read property: every verdict this fold can produce lands in
+exactly one of refusal, recorded downgrade, or silence, so no path can compute a smaller answer
+without one of the first two having fired.
+
+A whole-table recompute is decided differently: its reach into every source is unbounded by
+construction, so there is no `RetentionVerdict` to fold — the decision is read directly from the
+model's declared `retention:` sources rather than derived from this walk (`sources.md` §Semantics
+5 "Retention refusal").
 
 ### Algebraic discriminants (the raw facts, not the ladder)
 

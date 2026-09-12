@@ -27,6 +27,28 @@ pub struct DependencyGraph {
     models: HashMap<String, ModelFile>,
     /// External sources (from sources.yml)
     sources: HashSet<String>,
+    /// External-step canonical address -> the source addresses it produces
+    /// (`sources.md` §"Externally-produced sources (black-box steps)"),
+    /// populated by [`Self::add_external_steps`].
+    external_steps: HashMap<String, Vec<String>>,
+    /// Source address (`"sources.raw.users"` form, matching a model ref's
+    /// path segments joined with `.`) -> the step that produces it.
+    source_producer: HashMap<String, String>,
+    /// Step canonical address -> the model names whose own `smelt.sources.*`
+    /// refs directly name one of that step's produced sources. Derived from
+    /// `models`/`source_producer`, recomputed whenever either changes.
+    step_consumers: HashMap<String, Vec<String>>,
+}
+
+/// The result of [`DependencyGraph::select_nodes`]: the selected model set,
+/// unioned with the selected/reached external-step set. A step is a
+/// selectable node (`model_selection.md` §"Selection methods") but never a
+/// `smelt.ref()` target, so it is tracked separately from `models` rather
+/// than folded into one address space.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeSelection {
+    pub models: HashSet<String>,
+    pub steps: HashSet<String>,
 }
 
 impl DependencyGraph {
@@ -127,6 +149,9 @@ impl DependencyGraph {
             dependencies,
             models: models_map,
             sources: source_set,
+            external_steps: HashMap::new(),
+            source_producer: HashMap::new(),
+            step_consumers: HashMap::new(),
         })
     }
 
@@ -148,6 +173,98 @@ impl DependencyGraph {
                 self.sources.insert(seed.name.clone());
             }
         }
+    }
+
+    /// Register external-step declarations as DAG nodes: one node per step,
+    /// keyed on its canonical address, with an edge to each source it
+    /// produces (`sources.md` §"Externally-produced sources (black-box
+    /// steps)"). Recomputes `step_consumers` — the models whose own
+    /// `smelt.sources.*` refs directly name a produced source — so it stays
+    /// in sync with the newly-registered producers.
+    ///
+    /// A model never refs a step directly (§"Constraints & Invariants" —
+    /// a step is a selectable node but never a `smelt.ref()` target), so
+    /// consumers are derived from the model's own source refs, not from any
+    /// step-side declaration.
+    pub fn add_external_steps(&mut self, steps: &[crate::external_step::ExternalStepInfo]) {
+        for step in steps {
+            let step_addr = step.address_segments.join(".");
+            let mut produces = Vec::with_capacity(step.produces.len());
+            for p in &step.produces {
+                if let Some(addr) = p.strip_prefix("smelt.") {
+                    produces.push(addr.to_string());
+                    self.source_producer
+                        .insert(addr.to_string(), step_addr.clone());
+                }
+            }
+            self.external_steps.insert(step_addr, produces);
+        }
+
+        self.step_consumers.clear();
+        for (name, model) in &self.models {
+            for r in &model.refs {
+                let crate::refs::SmeltRef::Path(segs) = &r.smelt_ref;
+                if segs.first().map(String::as_str) != Some("sources") {
+                    continue;
+                }
+                let addr = segs.join(".");
+                if let Some(step_addr) = self.source_producer.get(&addr) {
+                    self.step_consumers
+                        .entry(step_addr.clone())
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
+    }
+
+    /// Iterate every registered external-step canonical address.
+    pub fn iter_external_steps(&self) -> impl Iterator<Item = &str> {
+        self.external_steps.keys().map(|s| s.as_str())
+    }
+
+    /// The step that produces `source_address` (dot-joined, e.g.
+    /// `"sources.raw.users"`), if any.
+    pub fn producing_step_of_source(&self, source_address: &str) -> Option<&str> {
+        self.source_producer.get(source_address).map(|s| s.as_str())
+    }
+
+    /// The models whose own `smelt.sources.*` refs directly name a source
+    /// `step_addr` produces (`smelt explain <step>`'s "consumers" field).
+    /// Empty when the step is unregistered or has no direct consumer yet.
+    pub fn consumers_of_step(&self, step_addr: &str) -> &[String] {
+        self.step_consumers
+            .get(step_addr)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The set of external steps that must run before `selected` can be
+    /// built: the producers of every source a model in `selected` reads
+    /// directly via `smelt.sources.*`. `selected` is an arbitrary model set
+    /// (what the run path holds), not a selector — unlike `select_nodes`'s
+    /// upstream traversal, this does not expand `selected` itself. Sorted for
+    /// deterministic ordering.
+    pub fn steps_required_by(&self, selected: &HashSet<String>) -> Vec<String> {
+        let mut steps: HashSet<String> = HashSet::new();
+        for name in selected {
+            let Some(model) = self.models.get(name) else {
+                continue;
+            };
+            for r in &model.refs {
+                let crate::refs::SmeltRef::Path(segs) = &r.smelt_ref;
+                if segs.first().map(String::as_str) != Some("sources") {
+                    continue;
+                }
+                let addr = segs.join(".");
+                if let Some(step_addr) = self.source_producer.get(&addr) {
+                    steps.insert(step_addr.clone());
+                }
+            }
+        }
+        let mut v: Vec<String> = steps.into_iter().collect();
+        v.sort();
+        v
     }
 
     /// Validate all references exist (either as models or sources)
@@ -287,34 +404,63 @@ impl DependencyGraph {
     /// Select models matching the given selectors, with optional upstream/downstream expansion.
     ///
     /// Returns the set of selected model names. The result is the union of all selectors.
+    /// Thin wrapper over [`Self::select_nodes`] — every existing caller sees the
+    /// model-only result unchanged whether or not external steps are registered.
     pub fn select_models(
         &self,
         selectors: &[Selector],
         config: &Config,
     ) -> Result<HashSet<String>> {
-        let mut selected = HashSet::new();
+        Ok(self.select_nodes(selectors, config)?.models)
+    }
+
+    /// Select models and external steps matching the given selectors, with
+    /// optional upstream/downstream expansion.
+    ///
+    /// A `ModelName` selector matches a model or, failing that, a registered
+    /// external step's own address (`model_selection.md` §"Selection
+    /// methods"); it is a hard "not found" error only if neither matches.
+    /// `Tag` and `GeneratorFile` selectors never match a step directly — a
+    /// step has no tags and is not generator-emitted.
+    ///
+    /// Upstream traversal (`+name`) from a model reaches the producing step
+    /// of any source the resulting upstream model closure reads directly
+    /// (`model_selection.md` §"Graph traversal"), mirroring how it already
+    /// reaches seeds. Downstream traversal (`name+`) from a step reaches
+    /// every direct consumer of the sources it produces, and their
+    /// downstreams in turn. A bare step selector with no `+` selects only the
+    /// step — no models are added.
+    pub fn select_nodes(&self, selectors: &[Selector], config: &Config) -> Result<NodeSelection> {
+        let mut models: HashSet<String> = HashSet::new();
+        let mut steps: HashSet<String> = HashSet::new();
         let dependents = self.build_dependents_map();
 
         for selector in selectors {
-            // Find directly matching models
-            let direct_matches: Vec<String> = match &selector.method {
+            let mut direct_models: Vec<String> = Vec::new();
+            let mut direct_steps: Vec<String> = Vec::new();
+
+            match &selector.method {
                 SelectionMethod::ModelName(name) => {
                     if self.models.contains_key(name) {
-                        vec![name.clone()]
+                        direct_models.push(name.clone());
+                    } else if self.external_steps.contains_key(name) {
+                        direct_steps.push(name.clone());
                     } else {
                         return Err(anyhow!("Model '{}' not found", name));
                     }
                 }
-                SelectionMethod::Tag(tag) => self
-                    .models
-                    .iter()
-                    .filter(|(name, model)| {
-                        let tags =
-                            config.get_tags(name, model.metadata.as_ref().map(|b| b.as_ref()));
-                        tags.contains(tag)
-                    })
-                    .map(|(name, _)| name.clone())
-                    .collect(),
+                SelectionMethod::Tag(tag) => {
+                    direct_models = self
+                        .models
+                        .iter()
+                        .filter(|(name, model)| {
+                            let tags =
+                                config.get_tags(name, model.metadata.as_ref().map(|b| b.as_ref()));
+                            tags.contains(tag)
+                        })
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                }
                 // Match emitted models whose virtual path was produced by the
                 // named generator file. Virtual paths have the form
                 // `<abs-gen-dir>/<gen-filename>::<smelt-name>` — the `::` marker
@@ -326,7 +472,8 @@ impl DependencyGraph {
                     let sel_os = path
                         .to_string_lossy()
                         .replace('/', std::path::MAIN_SEPARATOR_STR);
-                    self.models
+                    direct_models = self
+                        .models
                         .iter()
                         .filter(|(_, model)| {
                             let p = model.path.to_string_lossy();
@@ -338,30 +485,61 @@ impl DependencyGraph {
                             }
                         })
                         .map(|(name, _)| name.clone())
-                        .collect()
+                        .collect();
                 }
             };
 
-            for model_name in &direct_matches {
-                selected.insert(model_name.clone());
+            for model_name in &direct_models {
+                models.insert(model_name.clone());
+            }
+            for step_addr in &direct_steps {
+                steps.insert(step_addr.clone());
             }
 
-            // Expand upstream
+            // Expand upstream: the usual model closure, plus the producing
+            // step of any source directly read by a model in that closure.
             if selector.include_upstream {
-                for model_name in &direct_matches {
-                    self.collect_upstream(model_name, &mut selected);
+                let mut closure: HashSet<String> = HashSet::new();
+                for model_name in &direct_models {
+                    closure.insert(model_name.clone());
+                    self.collect_upstream(model_name, &mut closure);
                 }
+                for model_name in &closure {
+                    if let Some(model) = self.models.get(model_name) {
+                        for r in &model.refs {
+                            let crate::refs::SmeltRef::Path(segs) = &r.smelt_ref;
+                            if segs.first().map(String::as_str) != Some("sources") {
+                                continue;
+                            }
+                            let addr = segs.join(".");
+                            if let Some(step_addr) = self.source_producer.get(&addr) {
+                                steps.insert(step_addr.clone());
+                            }
+                        }
+                    }
+                }
+                models.extend(closure);
             }
 
-            // Expand downstream
+            // Expand downstream: the usual model closure, plus — for a step —
+            // every direct consumer of its produced sources and their own
+            // downstream closures.
             if selector.include_downstream {
-                for model_name in &direct_matches {
-                    self.collect_downstream(model_name, &dependents, &mut selected);
+                for model_name in &direct_models {
+                    self.collect_downstream(model_name, &dependents, &mut models);
+                }
+                for step_addr in &direct_steps {
+                    if let Some(consumers) = self.step_consumers.get(step_addr) {
+                        for consumer in consumers {
+                            models.insert(consumer.clone());
+                            self.collect_downstream(consumer, &dependents, &mut models);
+                        }
+                    }
                 }
             }
         }
 
-        Ok(selected)
+        Ok(NodeSelection { models, steps })
     }
 
     /// Remove models matching the given exclude selectors from the selected set.
@@ -625,6 +803,48 @@ mod tests {
             kind: crate::discovery::ModelKind::Sql,
             address_segments: vec![layer.to_string(), name.to_string()],
         }
+    }
+
+    /// A step producing `sources.raw.events`, consumed by a model whose
+    /// only ref is that source.
+    #[test]
+    fn consumers_of_step_returns_source_readers() {
+        let source_ref = RefInfo {
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![
+                "sources".to_string(),
+                "raw".to_string(),
+                "events".to_string(),
+            ]),
+        };
+        let path: std::path::PathBuf = "models/consumer.sql".into();
+        let consumer = ModelFile {
+            name: "consumer".to_string(),
+            model_id: crate::model_id::ModelId::from_path(path.clone()),
+            path,
+            content: String::new(),
+            refs: vec![source_ref],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            address_segments: vec!["consumer".to_string()],
+        };
+        let bystander = make_model("bystander", vec![]);
+
+        let mut graph = DependencyGraph::build(vec![consumer, bystander], None).unwrap();
+        let step = crate::external_step::ExternalStepInfo {
+            path: "models/loader.yml".into(),
+            address_segments: vec!["loader".to_string()],
+            description: None,
+            produces: vec!["smelt.sources.raw.events".to_string()],
+            command: vec!["bash".to_string(), "loader.sh".to_string()],
+            cadence: None,
+        };
+        graph.add_external_steps(&[step]);
+
+        assert_eq!(graph.consumers_of_step("loader"), &["consumer".to_string()]);
+        assert!(graph.consumers_of_step("unregistered").is_empty());
     }
 
     #[test]

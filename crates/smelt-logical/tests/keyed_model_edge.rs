@@ -20,6 +20,7 @@ fn keyed_edge(name: &str, keys: &[&str]) -> ModelEdge {
         output_shape: Some(OutputDelta::KeyedUpsert {
             keys: keys.iter().map(|s| s.to_string()).collect(),
         }),
+        allow_full_scan: false,
     }
 }
 
@@ -100,6 +101,7 @@ fn clockless_non_keyed_upstream_still_refuses() {
         output_shape: Some(OutputDelta::AppendOnlyWindow {
             axis: "d".to_string(),
         }),
+        allow_full_scan: false,
     }];
     append_model_edge_cells(
         &mut plan,
@@ -247,6 +249,7 @@ fn grain_from_another_relation_is_still_refused() {
         output_shape: Some(OutputDelta::KeyedUpsert {
             keys: vec!["user_id".to_string()],
         }),
+        allow_full_scan: false,
     }];
     append_model_edge_cells(
         &mut plan,

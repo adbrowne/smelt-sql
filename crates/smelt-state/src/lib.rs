@@ -6,16 +6,19 @@ pub mod frozen_band_baselines;
 pub mod history;
 pub mod intervals;
 pub mod landed_deltas;
+pub mod ledger;
 pub mod migration_approvals;
+pub mod observed_delta;
 pub mod reconciliation;
 pub mod schema_tracking;
 pub mod snapshot_store;
 pub mod source_mutations;
 pub mod source_postures;
+pub mod tombstone;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A single run manifest recording what smelt did during an execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +27,30 @@ pub struct RunManifest {
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub models: HashMap<String, ModelRunRecord>,
+    /// Every external step this run **successfully** invoked
+    /// (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)"), keyed by step address. A step's failure or refusal aborts
+    /// the run before any manifest exists, so only successes ever appear
+    /// here. Omitted (not an empty map) for a run that invoked no step, so a
+    /// manifest written before this field existed round-trips unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_steps: BTreeMap<String, ExternalStepRunRecord>,
+}
+
+/// Record of one external step a run successfully invoked
+/// (`docs/specs/run_state.md` §"Run manifest").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalStepRunRecord {
+    /// The resolved argv — placeholders (`{run_date}`, `{run_end}`)
+    /// substituted, as actually invoked.
+    pub command: Vec<String>,
+    /// Source addresses the step declares in `produces:`.
+    pub produces: Vec<String>,
+    pub duration_ms: u64,
+    /// Always `Success` — a failed step aborts before this record is
+    /// created. Kept as `RunOutcomeKind` rather than a bare unit so it
+    /// mirrors `ModelRunRecord::outcome` and serializes the same way.
+    pub outcome: RunOutcomeKind,
 }
 
 /// Record of a single model's execution within a run.
@@ -170,6 +197,10 @@ pub struct RunReport {
     /// One entry per `failed` model, carrying its manifest-recorded error
     /// text and retry count. Empty when nothing failed.
     pub failures: Vec<ModelFailure>,
+    /// Mirrors `RunManifest::external_steps` — copied verbatim, never
+    /// re-derived (`docs/specs/run_state.md` §"Run report").
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_steps: BTreeMap<String, ExternalStepRunRecord>,
 }
 
 /// Count of models by outcome (`docs/specs/run_state.md` §"Run report").
@@ -233,6 +264,7 @@ impl RunReport {
             duration_ms,
             outcome_counts: counts,
             failures,
+            external_steps: manifest.external_steps.clone(),
         }
     }
 }
@@ -311,5 +343,47 @@ mod tests {
         let serialized =
             serde_json::to_string(&with_observed).expect("probe record must serialize");
         assert!(serialized.contains("\"observed\":3"), "{serialized}");
+    }
+
+    /// `RunReport::from_manifest` copies external-step entries verbatim —
+    /// pure, no backend (`docs/specs/run_state.md` §"Run report").
+    #[test]
+    fn report_from_manifest_carries_external_steps() {
+        let mut external_steps = BTreeMap::new();
+        external_steps.insert(
+            "loader".to_string(),
+            ExternalStepRunRecord {
+                command: vec!["bash".to_string(), "loader.sh".to_string()],
+                produces: vec!["smelt.sources.raw_events".to_string()],
+                duration_ms: 1204,
+                outcome: RunOutcomeKind::Success,
+            },
+        );
+        let manifest = RunManifest {
+            run_id: "run-1".to_string(),
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            models: HashMap::new(),
+            external_steps,
+        };
+
+        let report = RunReport::from_manifest(&manifest);
+        assert_eq!(report.external_steps, manifest.external_steps);
+    }
+
+    /// A manifest JSON predating the `external_steps` field loads with an
+    /// empty map, no error (`docs/specs/run_state.md` §"Manifest evolution
+    /// is backward-compatible").
+    #[test]
+    fn manifest_without_external_steps_deserializes() {
+        let legacy_json = r#"{
+            "run_id": "run-1",
+            "started_at": "2026-06-04T14:12:33Z",
+            "completed_at": null,
+            "models": {}
+        }"#;
+        let manifest: RunManifest =
+            serde_json::from_str(legacy_json).expect("legacy manifest must still parse");
+        assert!(manifest.external_steps.is_empty());
     }
 }

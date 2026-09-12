@@ -218,6 +218,8 @@ pub fn derive_succession_plan(verdict: &SuccessionVerdict, table: &str) -> Succe
                     cells: vec![cell],
                     refusals: Vec::new(),
                     key_locality: None,
+                    retention_downgrades: Vec::new(),
+                    retention_reaches: Vec::new(),
                 },
                 advisories: advisories.clone(),
                 recipe: SuccessionRecipe::from_verdict(verdict),

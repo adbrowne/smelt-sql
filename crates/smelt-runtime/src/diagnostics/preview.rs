@@ -536,6 +536,7 @@ fn build_technique_statements(
                 &key,
                 Some(clamp),
                 &region,
+                dialect,
             );
             // The fold's own create/merge path already carries a decomposed
             // combiner's hidden state columns in the physical table (P10,
@@ -580,6 +581,7 @@ fn build_technique_statements(
                 &compiled.sql,
                 &key,
                 &affected_keys_select,
+                dialect,
             );
             Ok(emit_per_group_recompute(
                 &table_name,

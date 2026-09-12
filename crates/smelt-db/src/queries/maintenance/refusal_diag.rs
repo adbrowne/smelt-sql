@@ -75,12 +75,29 @@ pub enum MaintenanceRefusal {
         columns: Vec<String>,
         why: String,
     },
+    /// `MaintenanceRepairKeysNotDiscoverable` — an upstream model edge's
+    /// affected-key discovery (both key-addressed routes, then the
+    /// enrichment-keyed route) could not resolve a finite key set
+    /// (`incremental_models.md` §"Upstream model edges").
+    RepairKeysNotDiscoverable {
+        source: String,
+        why: String,
+    },
     /// One of ten `Succession*` codes, 1:1 with the classifier's
     /// `NotSuccessionReason` (`docs/specs/diagnostics.md` §"Succession
     /// grain") — an undeclared-grain `refresh: incremental` model's SQL did
     /// not prove the keyed-succession shape.
     SuccessionNotRecognized {
         reason: smelt_logical::analysis::succession::NotSuccessionReason,
+    },
+    /// `SourceRetentionExceeded` — a model's derived required reach into a
+    /// declared-`retention:` source is proven to exceed the source's
+    /// retained bound (`docs/specs/model_properties.md` §"Reach versus
+    /// retained history").
+    SourceRetentionExceeded {
+        source: String,
+        required_lookback_secs: u64,
+        retained_secs: u64,
     },
 }
 
@@ -210,6 +227,14 @@ pub fn diagnostic_for_refusal(
                 columns.join(", "),
             ),
         ),
+        MaintenanceRefusal::RepairKeysNotDiscoverable { source, why } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::MaintenanceRepairKeysNotDiscoverable,
+            format!(
+                "maintenance repair over '{source}' cannot resolve a finite affected-key set: \
+                 {why}",
+            ),
+        ),
         MaintenanceRefusal::SuccessionNotRecognized { reason } => {
             use smelt_logical::analysis::succession::NotSuccessionReason::*;
             let (code, detail) = match reason {
@@ -248,6 +273,20 @@ pub fn diagnostic_for_refusal(
                 format!("{code:?}: {detail}"),
             )
         }
+        MaintenanceRefusal::SourceRetentionExceeded {
+            source,
+            required_lookback_secs,
+            retained_secs,
+        } => (
+            DiagnosticSeverity::Error,
+            DiagnosticCode::SourceRetentionExceeded,
+            format!(
+                "maintenance over '{source}' requires {required_lookback_secs}s of history but \
+                 only {retained_secs}s is retained — a recompute reaching past the retained \
+                 bound would silently rebuild from partial input \
+                 (docs/specs/sources.md §\"Retention refusal\")",
+            ),
+        ),
     })
 }
 
@@ -284,6 +323,19 @@ pub struct StateDowngradeDiagnostic {
     /// (`write_pin_diagnostics`'s own one-per-cell posture).
     pub backend: String,
     /// [`smelt_logical::maintenance::availability::StateDowngrade::reason`].
+    pub reason: String,
+}
+
+/// One recorded retention downgrade
+/// ([`smelt_logical::maintenance::RetentionDowngrade`]), rendered for
+/// `SourceRetentionDowngraded` (`docs/specs/sources.md` §Semantics 5). Salsa-
+/// safe (`PartialEq`) projection — mirrors [`StateDowngradeDiagnostic`]'s own
+/// reason for existing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionDowngradeDiagnostic {
+    pub source: String,
+    pub retained_secs: u64,
+    /// Rendered from [`smelt_logical::analysis::retention_reach::UnprovableReason`].
     pub reason: String,
 }
 
@@ -349,4 +401,10 @@ pub struct MaintenancePlanDiagnostics {
     /// `file_diagnostics`, alongside the `state_downgrades` loop. Never
     /// changes admission.
     pub succession_advisories: Vec<smelt_logical::analysis::succession::SuccessionAdvisory>,
+    /// Every recorded retention downgrade
+    /// (`smelt_logical::maintenance::MaintenancePlan::retention_downgrades`,
+    /// `docs/specs/model_properties.md` §"Reach versus retained history") —
+    /// folded into a `SourceRetentionDowngraded` Warning diagnostic per
+    /// source (`docs/specs/sources.md` §Semantics 5).
+    pub retention_downgrades: Vec<RetentionDowngradeDiagnostic>,
 }

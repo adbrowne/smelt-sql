@@ -18,9 +18,12 @@ use pyo3::prelude::*;
 use smelt_backend::{
     emit_delete_insert, execute_model_default, Backend, BackendCapabilities, BackendError,
     ExecutionResult, MaintenanceDialect, Materialization, PartitionRange, Region, SqlDialect,
+    StatementGroup,
 };
 
-mod sql;
+/// GoogleSQL statement and script builders, kept pure so their contracts can
+/// be asserted against the text they produce rather than against a warehouse.
+pub mod sql;
 
 /// BigQuery backend for smelt, powered by google-cloud-bigquery via PyO3.
 ///
@@ -30,6 +33,30 @@ pub struct BigQueryBackend {
     adapter: Py<PyAny>,
     project: String,
     dataset: String,
+    /// Serialises this process's ledger-mutating multi-statement
+    /// transactions against each other.
+    ///
+    /// BigQuery cancels a transaction that mutates a table another in-flight
+    /// transaction is also mutating ("Transaction is aborted due to
+    /// concurrent update against table …"), and **every** maintained model's
+    /// bookkeeping transaction mutates the one `_smelt_ledger` table. That
+    /// write-conflict detection is not incidental — it is precisely what
+    /// makes the additive never-fold-twice refusal sound on a dialect whose
+    /// `PRIMARY KEY`s are `NOT ENFORCED` (`docs/specs/state.md`) — so the
+    /// answer is not to weaken it but to stop racing it: a parallel
+    /// `smelt run` (the default `--jobs` is the host's core count) otherwise
+    /// loses models at random to cancellation, which a live run of
+    /// `examples/github_activity` demonstrated at 14 models.
+    ///
+    /// Scope is deliberately this process only. It removes the conflict a
+    /// single run creates with itself; a second concurrent `smelt` process,
+    /// or another writer entirely, still conflicts, and that is what the
+    /// transient `BackendError::TransactionConflict` classification and the
+    /// ordinary bounded retry are for. The cost is that maintained models'
+    /// bookkeeping-bound writes run one at a time on this backend — the
+    /// throughput the engine's own isolation rule was always going to
+    /// charge.
+    ledger_gate: tokio::sync::Mutex<()>,
 }
 
 // Safety: Py<PyAny> is Send, and we only access it inside `Python::attach`
@@ -98,6 +125,7 @@ impl BigQueryBackend {
             adapter,
             project,
             dataset: dataset.clone(),
+            ledger_gate: tokio::sync::Mutex::new(()),
         };
 
         // Create the dataset before anything selects it (spec: multi_backend.md
@@ -131,9 +159,7 @@ impl BigQueryBackend {
             Python::attach(|py| {
                 let result = adapter
                     .call_method1(py, "execute_sql", (&sql,))
-                    .map_err(|e| {
-                        BackendError::execution_failed("bigquery sql", format!("{}", e))
-                    })?;
+                    .map_err(|e| sql::classify_job_error("bigquery sql", format!("{}", e)))?;
 
                 let table = result.bind(py);
                 let batches_py = table.call_method0("to_batches").map_err(|e| {
@@ -182,9 +208,7 @@ impl BigQueryBackend {
             Python::attach(|py| {
                 adapter
                     .call_method1(py, "execute_sql_no_result", (&sql,))
-                    .map_err(|e| {
-                        BackendError::execution_failed("bigquery sql", format!("{}", e))
-                    })?;
+                    .map_err(|e| sql::classify_job_error("bigquery sql", format!("{}", e)))?;
                 Ok(())
             })
         })
@@ -526,6 +550,118 @@ impl Backend for BigQueryBackend {
             MaintenanceDialect::BigQuery,
         );
         self.execute_statement_group(&group).await
+    }
+
+    /// Overrides the trait default so a bookkeeping record and the write it
+    /// describes commit or fail together, instead of running as separate,
+    /// independently-committing jobs.
+    ///
+    /// BigQuery has real multi-statement transactions, so the seam is realised
+    /// as one script job: `ensure_sqls` first, each its own job and outside the
+    /// transaction (idempotent DDL, kept out for the reason the trait
+    /// documents), then `pre_write_sqls` + `write_group` inside one
+    /// `BEGIN TRANSACTION … COMMIT TRANSACTION`. Rollback is **explicit** — a
+    /// `BEGIN … EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION; RAISE … END`
+    /// wrapper, so a mid-script failure both unwinds the transaction and still
+    /// reaches this method as an error.
+    ///
+    /// The statement list is built by the pure
+    /// [`sql::write_with_bookkeeping_plan`], which is where the ordering and
+    /// transaction-boundary contract is asserted; this method only executes it.
+    /// It authors no bookkeeping or write text of its own — every statement
+    /// comes from the caller (`docs/specs/incremental_models.md` §"Statement
+    /// emission (single owner)"; the ledger's own DDL/DML from
+    /// `smelt_state::ledger`, the bookkeeping exclusion in `CLAUDE.md`
+    /// §"Maintenance-plan purity").
+    /// Real transactional override of the never-fold-twice seam
+    /// (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
+    /// already reflected in the state").
+    ///
+    /// The trait's default is a documented best-effort, **non-atomic**
+    /// `exists` → `insert` → `action` fallback: two concurrent runs can both
+    /// read "absent" and both fold, which for an additive fold is a silent
+    /// double-count. That is precisely the defect this structure exists to
+    /// prevent, so BigQuery does not use it. The refusal is re-expressed as a
+    /// zero-row abort inside the same multi-statement transaction as the
+    /// action — see [`sql::fold_ledger_delta_script`] for the script and for
+    /// the isolation argument it rests on.
+    ///
+    /// `ensure_sql` (idempotent `CREATE TABLE IF NOT EXISTS`) runs first and
+    /// **outside** the transaction, the precedent the trait sets and BigQuery
+    /// makes load-bearing: GoogleSQL does not permit DDL on permanent entities
+    /// inside a transaction at all.
+    ///
+    /// `exists_sql` is **dead on this dialect** and deliberately unused rather
+    /// than issued and ignored. A separate existence check is exactly the
+    /// check-then-act window this override exists to close; the record
+    /// statement's own row count answers the same question atomically, so
+    /// running the probe would cost a job and buy nothing. It stays in the
+    /// signature because DuckDB's trait default still has a use for it.
+    async fn fold_ledger_delta(
+        &self,
+        ensure_sql: &str,
+        record_sql: &str,
+        _exists_sql: &str,
+        action_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.py_execute_no_result(ensure_sql).await?;
+        // See `ledger_gate`: two of this process's ledger transactions in
+        // flight at once cancel each other on BigQuery.
+        let _gate = self.ledger_gate.lock().await;
+        let script = sql::fold_ledger_delta_script(record_sql, action_sql);
+        match self.py_execute_no_result(&script).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let message = e.to_string();
+                if sql::is_already_reflected(&message) {
+                    // The script raised before `action_sql` was reached and
+                    // the EXCEPTION handler rolled the transaction back, so
+                    // the ledger row and the fold are both un-applied.
+                    Err(BackendError::already_reflected(message))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    async fn execute_write_with_bookkeeping(
+        &self,
+        ensure_sqls: &[String],
+        pre_write_sqls: &[String],
+        write_group: &StatementGroup,
+    ) -> Result<(), BackendError> {
+        let write_sqls: Vec<String> = write_group
+            .statements
+            .iter()
+            .map(|s| s.sql.clone())
+            .collect();
+        let plan = sql::write_with_bookkeeping_plan(ensure_sqls, pre_write_sqls, &write_sqls);
+        // See `ledger_gate`: the bookkeeping record and the write share one
+        // transaction over `_smelt_ledger`, and two of those in flight at
+        // once cancel each other on BigQuery. Held for the whole plan,
+        // including the `ensure` DDL, so the transaction's whole lifetime is
+        // inside the gate.
+        let _gate = self.ledger_gate.lock().await;
+        if plan.atomicity == sql::BookkeepingAtomicity::NonAtomicCreatingWrite {
+            // Recorded, never silent (`docs/specs/state.md` §"The degradation
+            // contract"): GoogleSQL forbids DDL on a permanent entity inside a
+            // transaction, so a first run's `CREATE TABLE … AS` and its
+            // bookkeeping record cannot be bound together. `warn!`, matching
+            // the observed-delta skip sites — a live BigQuery run proved
+            // `debug!` invisible to an operator.
+            tracing::warn!(
+                statements = plan.statements.len(),
+                "bookkeeping record and write could not share a transaction: the write group \
+                 creates a permanent entity, which GoogleSQL does not permit inside one. The \
+                 write runs first and the record after, so a failure between them leaves the \
+                 window unrecorded (a redundant re-run) rather than recorded-but-unwritten."
+            );
+        }
+        for stmt in plan.statements {
+            self.py_execute_no_result(&stmt).await?;
+        }
+        Ok(())
     }
 
     async fn load_table(

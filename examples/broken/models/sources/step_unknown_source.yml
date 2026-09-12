@@ -1,0 +1,5 @@
+external_step:
+  description: produces names a source address that no source YAML declares.
+  produces:
+    - smelt.sources.no_such_declared_source
+  command: ["bash", "scripts/loader.sh"]

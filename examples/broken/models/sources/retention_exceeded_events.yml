@@ -1,0 +1,14 @@
+description: well-formed retention (7 days) — a model reaching further back than this must refuse with SourceRetentionExceeded.
+columns:
+  - name: id
+    type: BIGINT
+    nullable: false
+  - name: event_date
+    type: DATE
+    nullable: false
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+mutation_profile: append_only
+retention: '7 days'

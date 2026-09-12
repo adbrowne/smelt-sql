@@ -11,7 +11,7 @@ use duckdb::Connection;
 use smelt_logical::maintenance::emit::{
     emit_append_only_posture_probe, emit_bounded_domain_probe,
     emit_count_preservation_probe_from_body, emit_functional_dependency_probe,
-    emit_monotonicity_probe, AppendOnlyBaselinePartition, MaintenanceDialect,
+    emit_monotonicity_probe, AppendOnlyBaselinePartition, MaintenanceDialect, PartitionBucket,
 };
 
 fn probe_result(conn: &Connection, sql: &str) -> (i64, Option<String>) {
@@ -243,6 +243,7 @@ fn append_only_posture_probe_returns_zero_on_conforming_data() {
     let stmt = emit_append_only_posture_probe(
         "raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["payload".to_string()],
         &baseline,
         MaintenanceDialect::DuckDb,
@@ -273,6 +274,7 @@ fn append_only_posture_probe_returns_nonzero_with_samples_on_violating_data() {
     let stmt = emit_append_only_posture_probe(
         "raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["payload".to_string()],
         &baseline,
         MaintenanceDialect::DuckDb,
@@ -314,6 +316,7 @@ fn append_only_posture_probe_ignores_a_pure_late_append() {
     let stmt = emit_append_only_posture_probe(
         "raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["payload".to_string()],
         &baseline,
         MaintenanceDialect::DuckDb,
@@ -357,6 +360,7 @@ fn append_into_open_partition_does_not_violate() {
     let stmt = emit_append_only_posture_probe(
         "raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["payload".to_string()],
         &baseline,
         MaintenanceDialect::DuckDb,
@@ -401,6 +405,7 @@ fn in_place_update_of_closed_partition_violates() {
     let stmt = emit_append_only_posture_probe(
         "raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["payload".to_string()],
         &baseline,
         MaintenanceDialect::DuckDb,
@@ -446,6 +451,7 @@ fn count_decrease_violates_even_when_fingerprint_unchecked() {
     let stmt = emit_append_only_posture_probe(
         "raw_events",
         "event_date",
+        &PartitionBucket::Exact,
         &["payload".to_string()],
         &baseline,
         MaintenanceDialect::DuckDb,

@@ -42,6 +42,7 @@ pub mod succession;
 
 mod plan;
 mod refusal;
+mod retention;
 mod types;
 mod write_pattern;
 
@@ -51,6 +52,11 @@ pub use plan::{
     MaintenancePlan,
 };
 pub use refusal::{refusal_code, Refusal};
+pub use retention::{
+    full_refresh_retention_verdict, retention_outcomes, retention_reaches,
+    retention_refusals_at_age, run_window_age, FullRefreshLicense, FullRefreshRetention,
+    RetainedSource, RetentionDowngrade, RetentionReach, SourceRetentions,
+};
 pub use types::{
     cell_trigger_address, ColumnGroup, Corner, Grain, KeyDiscovery, KeyScope, MutationProfile,
     OutputSpec, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, ScanClamp, SourceFacts,

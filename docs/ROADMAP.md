@@ -219,11 +219,11 @@ row-local columns plus `LEAD(t)`/`LAG(t) OVER (PARTITION BY k ORDER BY t)` over 
   is a pure leaf the composition walk invokes; eleven `Succession*` diagnostic codes fire on
   every refused shape, with `SuccessionPreFilterNegatesFlag` as an admission-neutral warning.
 - **Plan and emitters**: `Grain::Succession` + `Technique::SuccessionPatch`
-  (`crates/smelt-logical/src/maintenance/succession.rs`, `emit/succession.rs`) derive the
+  (`crates/smelt-logical/src/maintenance/succession.rs`, `emit/succession/`) derive the
   event-delta `SELECT`, the succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and
-  the clock-tie probe; a target with no ledger builder (Spark, BigQuery,
-  `state.warehouse_tables: none`) downgrades to full refresh (`MaintenanceStateDowngraded`)
-  rather than a ledger-less patch.
+  the clock-tie probe, in every dialect that realises the ledger (DuckDB and BigQuery,
+  September 2026); a target with no ledger builder (Spark, `state.warehouse_tables: none`)
+  downgrades to full refresh (`MaintenanceStateDowngraded`) rather than a ledger-less patch.
 - **Runtime**: the window-forward driver (`crates/smelt-runtime/src/maintenance_driver/succession/`)
   writes the ledger and the presented `MERGE` transactionally, dispatches the append-only posture
   probe, records the maintained frontier for `contract.deferral`, and rolls back with

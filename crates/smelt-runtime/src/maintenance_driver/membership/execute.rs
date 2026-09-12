@@ -1,9 +1,7 @@
 use super::*;
 use anyhow::Result;
-use smelt_backend::{maintenance_dialect, Backend, BackendError, ExecutionResult, PartitionRange};
-use smelt_dialect::SqlDialect;
+use smelt_backend::{maintenance_dialect, Backend, ExecutionResult, PartitionRange};
 use smelt_logical::maintenance::emit::emit_staged_candidate_conditional_recompute;
-use smelt_state::ddl_duckdb;
 use std::time::Instant;
 
 /// Execute a live, membership-sensitive `Technique::DeleteInsert` cell
@@ -27,9 +25,11 @@ use std::time::Instant;
 /// sound lowering and is skipped before reaching here), so its observed
 /// output delta is recorded in the SAME backend transaction as the write
 /// (T5, `docs/specs/incremental_models.md` §"The graph layer" — "Observed
-/// deltas on model edges") unconditionally, matching
+/// deltas on model edges") wherever that structure is realisable, matching
 /// [`execute_column_scoped_write_with_observed_delta`]'s posture for its
-/// own `Suppressed` arm. `window` identifies the run window this write
+/// own `Suppressed` arm. Where it is not
+/// (`crate::maintenance_driver::records_observed_deltas`), the write still
+/// happens and only the record is skipped — never a refusal. `window` identifies the run window this write
 /// covers — the observed-delta table's own idempotent-replace key.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_staged_membership_recompute(
@@ -54,16 +54,42 @@ pub async fn execute_staged_membership_recompute(
         compared_columns,
         dialect,
     );
-    if backend.dialect() != SqlDialect::DuckDB {
-        return Err(anyhow::anyhow!(
-            "{}",
-            BackendError::unsupported(
-                backend.dialect().name(),
-                "observed-delta recording for a staged-candidate membership recompute (T5)",
-            )
-        ));
+    // Skipped, not refused, where the structure is unrealisable
+    // (`crate::maintenance_driver::records_observed_deltas`): the staged
+    // conditional recompute still runs, and only the delta record is lost.
+    // Refusing here was the third leg of the 2026-09-10 hard stop
+    // (`docs/outcomes/20260906-bigquery-correctness` decision log).
+    if !crate::maintenance_driver::records_observed_deltas(backend.dialect()) {
+        // `warn!`, not `debug!` — see `column_scoped.rs`'s twin site: the
+        // precision half of the degradation contract has to reach an operator
+        // without raising the log level.
+        tracing::warn!(
+            schema,
+            table,
+            dialect = backend.dialect().name(),
+            "staged-candidate membership recompute's observed-delta record (T5) skipped: \
+             observed output deltas are not realisable on this dialect — the recompute \
+             proceeds and downstream delta restriction widens"
+        );
+        crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "staged-candidate membership recompute failed for '{full_table}': {e}"
+                )
+            })?;
+        let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+        return Ok(ExecutionResult {
+            model_name: table.to_string(),
+            duration: start.elapsed(),
+            row_count,
+            preview: None,
+        });
     }
-    let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+    // Routed through the one dialect dispatch point
+    // (`smelt_state::observed_delta`) rather than a named DuckDB builder.
+    let dialect_id = backend.dialect();
+    let ensure_sql = smelt_state::observed_delta::observed_delta_table_ddl(dialect_id, schema)?;
     let partition_column = if window.column.is_empty() {
         None
     } else {
@@ -75,14 +101,16 @@ pub async fn execute_staged_membership_recompute(
         candidate_select,
         compared_columns,
         partition_column,
+        smelt_backend::maintenance_dialect(dialect_id),
     );
-    let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+    let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
+        dialect_id,
         schema,
         table,
         &window.start,
         &window.end,
         &changed_keys_query,
-    );
+    )?;
     crate::execute::retry_backend_call(retry, || {
         backend.execute_conditional_write_and_record_observed_delta(
             &ensure_sql,

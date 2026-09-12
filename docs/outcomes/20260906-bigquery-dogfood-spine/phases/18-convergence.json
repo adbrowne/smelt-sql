@@ -1,0 +1,127 @@
+{
+  "claim": "two different valid run sequences over identical inputs reach identical state: the coarse schedule's end state (six 5-day windows) equals the fine schedule's (thirty daily windows, phase 13)",
+  "comparator": "github_activity_bq_oracle::bigquery_incremental_matches_its_oracle_at_every_window (crates/smelt-cli/tests/bq_parity_support), relabelled: its `incr` side is the coarse schedule, its `oracle` side the fine one",
+  "target": "bigquery",
+  "dataset": "smelt_dogfood",
+  "coarse_schedule": {
+    "start_date": "2026-08-05",
+    "days": 30,
+    "window_days": 5,
+    "windows": 6,
+    "first_window_full_refresh": true,
+    "snapshot": "target/phase18/bq/w06"
+  },
+  "fine_schedule": {
+    "start_date": "2026-08-05",
+    "days": 30,
+    "window_days": 1,
+    "windows": 30,
+    "first_window_full_refresh": false,
+    "snapshot": "target/phase13/bq/w30",
+    "source": "docs/outcomes/20260906-bigquery-dogfood-spine/phases/13-summary.md"
+  },
+  "excluded_models": [
+    "silver.actor_sessions",
+    "marts.daily_active_contributors"
+  ],
+  "relations": [
+    {
+      "relation": "bronze_events",
+      "coarse_rows": 65583,
+      "fine_rows": 65583,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "gold_events_enriched",
+      "coarse_rows": 64313,
+      "fine_rows": 64313,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "gold_repo_activity_daily",
+      "coarse_rows": 9997,
+      "fine_rows": 9997,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "gold_repo_dim",
+      "coarse_rows": 5016,
+      "fine_rows": 5016,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "marts_naming_history",
+      "coarse_rows": 42,
+      "fine_rows": 42,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "marts_repo_leaderboard",
+      "coarse_rows": 5016,
+      "fine_rows": 5016,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "marts_star_growth",
+      "coarse_rows": 22,
+      "fine_rows": 22,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "silver_actor_naming",
+      "coarse_rows": 64168,
+      "fine_rows": 64168,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "silver_events_deduped",
+      "coarse_rows": 64313,
+      "fine_rows": 64313,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "silver_issue_events",
+      "coarse_rows": 128,
+      "fine_rows": 128,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "silver_pr_events",
+      "coarse_rows": 366,
+      "fine_rows": 366,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "silver_push_events",
+      "coarse_rows": 60643,
+      "fine_rows": 60643,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "silver_repo_naming",
+      "coarse_rows": 64174,
+      "fine_rows": 64174,
+      "coarse_only": 0,
+      "fine_only": 0
+    },
+    {
+      "relation": "silver_star_events",
+      "coarse_rows": 47,
+      "fine_rows": 47,
+      "coarse_only": 0,
+      "fine_only": 0
+    }
+  ]
+}

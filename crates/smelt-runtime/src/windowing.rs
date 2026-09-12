@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{Datelike, Duration, NaiveDate};
+use tracing::warn;
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, PartitionGrainConfig};
@@ -149,15 +150,23 @@ impl PartitionPoint {
 /// `partition_start/end` is the unwidened batch window — used for manifest
 /// recording. `filter_start/end` is widened by the effective lookback/lookahead —
 /// used for both the time-filter WHERE clause and the DELETE partition range
-/// (DELETE must cover exactly what the INSERT writes). All four fields share
-/// one [`PartitionPoint`] variant per batch — the model's resolved
-/// `partition_column` axis, never mixed.
+/// (DELETE must cover exactly what the INSERT writes). `scan_start/end` is
+/// `partition_start/end` widened by the model's own declared partition-column
+/// skew alone — **never** by the SQL-inferred lookback/lookahead `filter_start/
+/// end` also carries, since that margin is independently re-derived and
+/// applied per source by `derive_batch_filtered_sql`/`inject_source_filters`
+/// (`crate::execute::sources`); folding it into the base range handed to that
+/// function as well would double-widen every bounded source's scan. All six
+/// fields share one [`PartitionPoint`] variant per batch — the model's
+/// resolved `partition_column` axis, never mixed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncrementalBatch {
     pub partition_start: PartitionPoint,
     pub partition_end: PartitionPoint,
     pub filter_start: PartitionPoint,
     pub filter_end: PartitionPoint,
+    pub scan_start: PartitionPoint,
+    pub scan_end: PartitionPoint,
 }
 
 /// The full set of incremental batches for a run, plus the effective temporal window.
@@ -184,6 +193,65 @@ pub struct IncrementalWindows {
     /// eligible reads this field directly rather than re-deriving it from the
     /// SQL a second time.
     pub skew: Skew,
+}
+
+impl IncrementalWindows {
+    /// The batch tiling envelope — `(first.partition_start, last.partition_end)`
+    /// across `batches`, or `None` for an empty batch list. This is the
+    /// model's own derived output window for this invocation (`docs/specs/
+    /// model_transforms.md` §Semantics "The derived output window propagates
+    /// within a run."): what a downstream reading this model verbatim widens
+    /// its own requested window by, via [`widen_run_window_for_upstream_outputs`].
+    pub fn output_window(&self) -> Option<(PartitionPoint, PartitionPoint)> {
+        let first = self.batches.first()?;
+        let last = self.batches.last()?;
+        Some((first.partition_start, last.partition_end))
+    }
+}
+
+/// Widen `requested` to cover every in-run upstream's derived output window
+/// (`docs/specs/model_transforms.md` §Semantics "The derived output window
+/// propagates within a run."): a model's run window is the union of the
+/// requested run window and the derived output window of every upstream
+/// maintained model selected in the same invocation, aligned outward to
+/// `granularity` so [`validate_run_window_against_partition_grid`] still
+/// accepts the result. An upstream window on a different [`PartitionAxis`]
+/// than `requested` contributes nothing — points of different axes are
+/// never mixed — and is logged rather than silently dropped. An upstream
+/// window already inside `requested` (the common zero-skew case) leaves it
+/// byte-identical.
+pub fn widen_run_window_for_upstream_outputs(
+    requested: (PartitionPoint, PartitionPoint),
+    upstream_outputs: &[(PartitionPoint, PartitionPoint)],
+    granularity: &Granularity,
+) -> (PartitionPoint, PartitionPoint) {
+    let (mut start, mut end) = requested;
+    let axis = start.axis();
+    for (u_start, u_end) in upstream_outputs {
+        if u_start.axis() != axis {
+            warn!(
+                "upstream output window ({u_start}, {u_end}) is on a different partition axis \
+                 ({:?}) than the downstream's requested window ({:?}); not propagated",
+                u_start.axis(),
+                axis,
+            );
+            continue;
+        }
+        if *u_start < start {
+            start = *u_start;
+        }
+        if *u_end > end {
+            end = *u_end;
+        }
+    }
+
+    match (start, end) {
+        (PartitionPoint::Date(s), PartitionPoint::Date(e)) => (
+            PartitionPoint::Date(align_output_start(s, granularity)),
+            PartitionPoint::Date(align_output_end(e, granularity)),
+        ),
+        other => other,
+    }
 }
 
 /// Warn when a single FullyBatchSafe batch spans more than this many
@@ -226,6 +294,17 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 /// range and the output clamp key off (`crate::execute`) — already reflect
 /// the derived output window; the execute loop needs no window math of its
 /// own.
+///
+/// The same skew bound also inverts the **scan** side, per batch rather than
+/// once for the whole invocation: to compute partitions `[bs, be)` a Form B
+/// model's own reach requires driving dates `[bs − before, be + after)`, so
+/// every batch's `scan_start`/`scan_end` — kept separate from `filter_start`/
+/// `filter_end`, which the SQL-inferred lookback/lookahead already owns, so
+/// `derive_batch_filtered_sql`'s per-source widening is never applied twice
+/// — carries the skew, clamped to the invocation's own outer scan envelope
+/// so a single-chunk run's literals are unchanged. A written output is
+/// invariant under chunk count — `--batch-size`/batch-safety sizing changes
+/// performance, never results.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_incremental_windows(
     timeseries: &TimeseriesConfig,
@@ -375,6 +454,8 @@ fn compute_calendar_windows(
     // from `sql` unmodified.
     let skew = skew_override
         .unwrap_or_else(|| model_partition_skew(&stripped, &timeseries.partition_column));
+    let skew_after_days = days_ceil(skew.after);
+    let skew_before_days = days_ceil(skew.before);
 
     // Invert the run window through the skew bound
     // (`docs/specs/model_transforms.md` §Semantics "The output window is
@@ -386,8 +467,8 @@ fn compute_calendar_windows(
     // `Skew::ZERO` (a no-op here) for both an identity model and an `Ordered`
     // model whose only bounding relation is its own self-edge.
     let (output_start, output_end) = {
-        let raw_start = start_date - Duration::days(days_ceil(skew.after));
-        let raw_end = end_date + Duration::days(days_ceil(skew.before));
+        let raw_start = start_date - Duration::days(skew_after_days);
+        let raw_end = end_date + Duration::days(skew_before_days);
         (
             align_output_start(raw_start, &timeseries.granularity),
             align_output_end(raw_end, &timeseries.granularity),
@@ -464,9 +545,30 @@ fn compute_calendar_windows(
         };
         let filter_start = batch_start - Duration::days(filter_lookback as i64);
         let filter_end = batch_end + Duration::days(filter_lookahead as i64);
+        // Scan-side skew inversion (`docs/specs/model_transforms.md` §Semantics
+        // "The output window is derived, never assumed"): to compute partitions
+        // `[batch_start, batch_end)` a Form B model's own reach requires driving
+        // dates `[batch_start - before, batch_end + after)`, not only the
+        // SQL-inferred lookback/lookahead `filter_start/end` above already
+        // carries. A single-chunk invocation gets this incidentally from the
+        // write-side widening above (its batch bounds are the output-window
+        // bounds); every interior chunk boundary does not, so the widening is
+        // applied per batch here — clamped to the invocation's own outer scan
+        // envelope so a single-chunk run's literals are unchanged (`bs`/`be`
+        // at the outer edges already equal `output_start`/`output_end`,
+        // making the clamp a no-op there). Deliberately **not** folded into
+        // `filter_start`/`filter_end`: `derive_batch_filtered_sql` widens
+        // each bounded source's own scan by its independently-derived
+        // lookback/lookahead margin on top of `scan_start`/`scan_end` — doing
+        // that atop the already lookback-widened `filter_start`/`filter_end`
+        // would double the lookback component.
+        let scan_start = (batch_start - Duration::days(skew_before_days)).max(output_start);
+        let scan_end = (batch_end + Duration::days(skew_after_days)).min(output_end);
         batches.push(IncrementalBatch {
             partition_start: PartitionPoint::Date(batch_start),
             partition_end: PartitionPoint::Date(batch_end),
+            scan_start: PartitionPoint::Date(scan_start),
+            scan_end: PartitionPoint::Date(scan_end),
             filter_start: PartitionPoint::Date(filter_start),
             filter_end: PartitionPoint::Date(filter_end),
         });
@@ -621,6 +723,8 @@ fn compute_integer_windows(
             partition_end: PartitionPoint::Integer(batch_end),
             filter_start: PartitionPoint::Integer(batch_start),
             filter_end: PartitionPoint::Integer(batch_end),
+            scan_start: PartitionPoint::Integer(batch_start),
+            scan_end: PartitionPoint::Integer(batch_end),
         });
         batch_start = batch_end;
     }

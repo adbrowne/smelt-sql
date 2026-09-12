@@ -1,6 +1,5 @@
 use anyhow::Result;
 use smelt_backend::{maintenance_dialect, Backend, BackendError, ExecutionResult, PartitionRange};
-use smelt_dialect::SqlDialect;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
@@ -8,8 +7,7 @@ use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, MaintenanceDialect,
 };
-use smelt_logical::maintenance::{PartitionLocal, PlanCell, ScanClamp};
-use smelt_state::ddl_duckdb;
+use smelt_logical::maintenance::{KeyDiscovery, PartitionLocal, PlanCell, ScanClamp};
 use std::time::Instant;
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an
@@ -99,6 +97,16 @@ pub fn changed_row_predicate(left: &str, right: &str, compared_columns: &[String
         .join(" OR ")
 }
 
+/// The unsized string type a key/partition value is cast to when it is
+/// projected into an observed-delta record. Delegated to
+/// [`smelt_logical::maintenance::emit::probe_dialect_string_type`] — the one
+/// owner of that per-dialect spelling — rather than restated here: GoogleSQL
+/// has no `VARCHAR` at all (`Type not found: VARCHAR`), and a hardcoded one
+/// here made every keyed model's observed-delta record fail on BigQuery.
+fn string_cast_type(dialect: MaintenanceDialect) -> &'static str {
+    smelt_logical::maintenance::emit::probe_dialect_string_type(dialect)
+}
+
 /// The changed-key `SELECT` a conditional column-scoped MERGE's observed
 /// delta is recorded from: every row the guarded matched arm actually
 /// updates (its compared columns differ) plus every unmatched row the
@@ -115,7 +123,7 @@ pub fn changed_row_predicate(left: &str, right: &str, compared_columns: &[String
 /// partition axis.
 ///
 /// **Known limitation, deliberately not fixed here.** For a multi-column
-/// `unique_key`, `key_expr` joins each `CAST(... AS VARCHAR)` column with an
+/// `unique_key`, `key_expr` joins each string-cast key column with an
 /// unescaped `\u{1}` separator — the same collision shape
 /// `smelt_logical::maintenance::emit::concat_varchar_expr` had before its
 /// own fix (a column value containing a literal `\u{1}` byte can make two
@@ -138,6 +146,7 @@ pub fn changed_keys_select(
     source_select: &str,
     compared_columns: &[String],
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
     let predicate = changed_row_predicate("target", "source", compared_columns);
     changed_keys_select_over_predicate(
@@ -147,6 +156,7 @@ pub fn changed_keys_select(
         "source",
         &predicate,
         partition_column,
+        dialect,
     )
 }
 
@@ -163,24 +173,26 @@ fn changed_keys_select_over_predicate(
     candidate_alias: &str,
     predicate: &str,
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
+    let cast_type = string_cast_type(dialect);
     let on = unique_key
         .iter()
         .map(|k| format!("target.{k} = {candidate_alias}.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
     let key_expr = if unique_key.len() == 1 {
-        format!("CAST({candidate_alias}.{} AS VARCHAR)", unique_key[0])
+        format!("CAST({candidate_alias}.{} AS {cast_type})", unique_key[0])
     } else {
         let parts = unique_key
             .iter()
-            .map(|k| format!("CAST({candidate_alias}.{k} AS VARCHAR)"))
+            .map(|k| format!("CAST({candidate_alias}.{k} AS {cast_type})"))
             .collect::<Vec<_>>()
             .join(", '\u{1}', ");
         format!("CONCAT({parts})")
     };
     let partition_expr = match partition_column {
-        Some(col) => format!("CAST({candidate_alias}.{col} AS VARCHAR)"),
+        Some(col) => format!("CAST({candidate_alias}.{col} AS {cast_type})"),
         None => "NULL".to_string(),
     };
     let first_key = &unique_key[0];
@@ -243,6 +255,7 @@ pub fn keyed_fold_changed_keys_select(
     compared_columns: &[String],
     folds: &[(String, String)],
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
     let predicate = keyed_fold_changed_row_predicate(compared_columns, folds);
     changed_keys_select_over_predicate(
@@ -252,6 +265,7 @@ pub fn keyed_fold_changed_keys_select(
         "delta",
         &predicate,
         partition_column,
+        dialect,
     )
 }
 
@@ -276,6 +290,7 @@ pub(super) fn staged_candidate_changed_keys_select(
     candidate_select: &str,
     compared_columns: &[String],
     partition_column: Option<&str>,
+    dialect: MaintenanceDialect,
 ) -> String {
     let predicate = changed_row_predicate("target", "candidate", compared_columns);
     let new_or_changed = changed_keys_select_over_predicate(
@@ -285,18 +300,20 @@ pub(super) fn staged_candidate_changed_keys_select(
         "candidate",
         &predicate,
         partition_column,
+        dialect,
     );
     let departed_on = key
         .iter()
         .map(|k| format!("target.{k} = candidate.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
+    let cast_type = string_cast_type(dialect);
     let key_expr = if key.len() == 1 {
-        format!("CAST(target.{} AS VARCHAR)", key[0])
+        format!("CAST(target.{} AS {cast_type})", key[0])
     } else {
         let parts = key
             .iter()
-            .map(|k| format!("CAST(target.{k} AS VARCHAR)"))
+            .map(|k| format!("CAST(target.{k} AS {cast_type})"))
             .collect::<Vec<_>>()
             .join(", '\u{1}', ");
         format!("CONCAT({parts})")
@@ -354,13 +371,42 @@ async fn execute_column_scoped_write_with_observed_delta(
                 columns,
                 dialect,
             );
-            if backend.dialect() != SqlDialect::DuckDB {
-                return Err(BackendError::unsupported(
-                    backend.dialect().name(),
-                    "observed-delta recording for a change-suppressed column-scoped MERGE (T5)",
-                ));
+            // Skipped, not refused, where the structure is unrealisable
+            // (`super::records_observed_deltas`): the conditional write still
+            // happens, and only the delta record is lost — a downstream
+            // precision cost the read side already absorbs, never a
+            // correctness one. Refusing here was half of the 2026-09-10 hard
+            // stop (`docs/outcomes/20260906-bigquery-correctness` decision
+            // log).
+            if !super::records_observed_deltas(backend.dialect()) {
+                // `warn!`, not `debug!`: this is the precision half of the
+                // degradation contract, and a live BigQuery run proved it
+                // invisible to an operator at `debug!`
+                // (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md`
+                // finding 4).
+                tracing::warn!(
+                    schema,
+                    table,
+                    dialect = backend.dialect().name(),
+                    "change-suppressed column-scoped MERGE's observed-delta record (T5) \
+                     skipped: observed output deltas are not realisable on this dialect — \
+                     the write proceeds and downstream delta restriction widens"
+                );
+                return crate::execute::retry_backend_call(retry, || {
+                    backend.execute_statement_group(&group)
+                })
+                .await;
             }
-            let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+            // Routed through the one dialect dispatch point
+            // (`smelt_state::observed_delta`) rather than a named DuckDB
+            // builder — the guard above has already established that this
+            // dialect realises the structure, so an error here is a caller
+            // bug and fails loud rather than degrading a second time.
+            let dialect_id = backend.dialect();
+            let ensure_sql =
+                smelt_state::observed_delta::observed_delta_table_ddl(dialect_id, schema).map_err(
+                    |e| smelt_backend::BackendError::unsupported(dialect_id.name(), e.to_string()),
+                )?;
             let partition_column = if window.column.is_empty() {
                 None
             } else {
@@ -372,14 +418,19 @@ async fn execute_column_scoped_write_with_observed_delta(
                 source_select,
                 compared_columns,
                 partition_column,
+                maintenance_dialect(dialect_id),
             );
-            let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+            let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
+                dialect_id,
                 schema,
                 table,
                 &window.start,
                 &window.end,
                 &changed_keys_query,
-            );
+            )
+            .map_err(|e| {
+                smelt_backend::BackendError::unsupported(dialect_id.name(), e.to_string())
+            })?;
             crate::execute::retry_backend_call(retry, || {
                 backend.execute_conditional_write_and_record_observed_delta(
                     &ensure_sql,
@@ -573,6 +624,22 @@ pub fn decide_column_merge_dispatch(
     contribution: &ContributionVerdict,
 ) -> Option<ColumnMergeDispatch> {
     if !table_exists || !model_declares_unique_key {
+        return None;
+    }
+    // An enrichment-keyed cell's write is addressed by its own join key, not
+    // a partition interval (`admit_enrichment_keyed_merge`'s `PartitionLocal::
+    // No { why: "addressed by its own join key, not a partition interval" }`)
+    // — the per-batch window-scoped dispatch this function decides for would
+    // MERGE only the batch's `[start, end)`-filtered rows and never revisit
+    // an already-written row from an earlier batch, leaving a stale value
+    // forever unhealed. `execute_enrichment_keyed_heal` dispatches it once
+    // per run instead, over the model's unwindowed output
+    // (`docs/outcomes/20260906-bigquery-correctness/phases/05-plan.md`).
+    if cell
+        .key_scope
+        .as_ref()
+        .is_some_and(|scope| scope.discovery == KeyDiscovery::EnrichmentKeyed)
+    {
         return None;
     }
     match &cell.partition_local {

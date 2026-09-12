@@ -490,6 +490,26 @@ decimal. When an operand's type cannot be resolved at compile time, smelt refuse
 number, not fail loudly. See [Diagnostics reference: a verdict that depends on operand
 type](../reference/diagnostics.md#a-verdict-that-depends-on-operand-type).
 
+### Clauses a dialect doesn't have
+
+Two clauses smelt's SQL accepts are absent from GoogleSQL, and neither belongs to any one
+function, so neither can be lowered by a per-built-in rule. Both are refused at compile time on
+the `bigquery` target — naming the construct, the backend, and the rewrite — rather than being
+sent to the warehouse to fail there:
+
+| You wrote | On BigQuery | Write instead |
+|---|---|---|
+| `MAX(x) FILTER (WHERE p)` | GoogleSQL has no aggregate `FILTER` clause | `MAX(CASE WHEN p THEN x END)`, or `COUNT(CASE WHEN p THEN 1 END)` for a `COUNT(*)` |
+| `RANGE BETWEEN INTERVAL '2 days' PRECEDING` | GoogleSQL's `RANGE` frames take a numeric offset over a numeric `ORDER BY` | `ORDER BY UNIX_MICROS(ts) RANGE BETWEEN 172800000000 PRECEDING`, or a `ROWS` frame |
+
+Neither is rewritten for you. The `FILTER` rewrite is exactly equivalent only for aggregates that
+ignore NULLs (`MIN`, `MAX`, `SUM`, `AVG`, `COUNT`, `STRING_AGG`) and would change the answer for
+`ARRAY_AGG`, so smelt tells you the rewrite rather than picking one that is wrong for some
+aggregates. Both clauses keep working unchanged on DuckDB and Spark.
+
+A construct declared inside a `smelt.define` function body is refused the same way, naming the
+built-in that carries it — writing it in a function is not a way around the check.
+
 ## Further reading
 
 - [Materializations](materializations.md) for how tables and views are created in each target

@@ -535,6 +535,10 @@ the output window's own reach, never the run window's. DELETE range and output c
 from one window so the contract is idempotent for any write-window width; the output window is
 a range to be **covered**, not one mandated statement — backfill chunking (§"First-run and
 backfill") splits it into sequential DELETE+INSERT pairs, each sized from its own chunk's reach.
+A chunk's own reach is the skew inversion of that chunk's own partition range — scanning
+`[bs − before, be + after)` to write partitions `[bs, be)` — not only the SQL-inferred frame
+margin; a run's written output is invariant under chunk count, clamped to the invocation's own
+outer scan envelope so the outer edge never reads past the run window's own margin.
 
 #### Strategy enum (backend-internal)
 
@@ -834,7 +838,13 @@ mode supports it (`state.md`), so `--auto` staleness always has a record to cons
 backend offers no ledger substrate, availability resolution downgrades the cell to its
 recompute-family equivalent and records the downgrade as `MaintenanceStateDowngraded`
 (`state.md` §"The degradation contract") rather than skipping the bookkeeping write or refusing
-the run. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
+the run. "The ledger substrate" is per-dialect *and* per-grade: the re-run-tolerant
+bookkeeping record and the additive fold's refusal are separate realisations
+(`state.md` §"Which dialects realise which structure"), so a dialect can hold the
+re-run-tolerant frontier while an additive-fold cell on the same dialect still downgrades.
+The statement spelling is the dialect's own — `INSERT … ON CONFLICT DO NOTHING` where the
+dialect has one, `MERGE … WHEN NOT MATCHED` where it does not — and the observable behaviour
+(recording a window once, re-recording it as a no-op) is identical across them. Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
 describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
 state-structure inventory"), distinct from the opt-in run-state observability surface
 (`run_state.md`), and the model realisation of `state.md` §"The residency rule".
@@ -1135,9 +1145,33 @@ touches the key, the clock, the delete flag, or the pre-window filter changes wh
 §"Skeleton changes are a new relation"). A definition delta that touches only row-local
 payload columns leaves the ledger untouched. The ledger-rebuild `SELECT` is the third emitter
 output of the succession-patch technique (`model_transforms.md`), never authored by a
-backend. Ledger size is proportional to the number of delete events ever folded and is never
+backend — and the same is true of every other statement the ledger takes part in: the
+idempotent tombstone insert, the presented `MERGE`, the rebuild's truncate-and-refill pair
+and the clock-tie probe are all outputs of that one emitter, in whichever dialect the target
+speaks. A backend runs them; it never writes its own. Where an engine cannot express the
+rebuild group atomically — an engine that forbids table-creating DDL inside a transaction is
+the live instance — the rebuild runs unbound rather than being refused, because it is a pure
+function of the whole retained source and a re-run repairs any partial application; what is
+lost is atomicity, never what the model computes. Ledger size is proportional to the number of delete events ever folded and is never
 compacted: a tombstone stays load-bearing for as long as a later-arriving event could splice
 next to it, which under the default contract point is forever.
+
+The presented table's own rebuild is folded on `(k, t)` — the same addressing the patch
+loop's `MERGE ... ON` clause uses — rather than a bare passthrough of the model's compiled
+`SELECT`: one whole physical row is kept per `(k, t)` tie, never a per-column aggregate
+across the tied rows. `LEAD`/`LAG` are evaluated by the model's own compiled `SELECT` over
+the unfolded physical rows, so two rows tied at one `t` can carry genuinely different
+derived-column values — one row's `LEAD` sees its own tied sibling as the "next" event (a
+same-`t` artifact of ordering two content-identical physical rows), while another row in the
+same tie correctly sees the true next event or `NULL`. A per-column aggregate would combine
+these into a value no physical row ever held, and would prefer the artifact over the
+genuinely correct `NULL`; picking one physical row cannot manufacture a new combination.
+Without this fold a full rebuild would present one physical source row per tie while the
+patch loop converges ties to a single presented row, so the two run shapes would disagree
+row-for-row on any key with a same-`t` tie. Before the rebuild's presented write, the same
+clock-tie probe the patch loop runs (§"Run shape and late events" — "Clock ties") runs over
+the rebuild's own full-source scope, refusing a content-disagreeing tie rather than silently
+resolving it by an arbitrary row pick.
 
 **Physical shape.** The ledger is a **per-model sibling table**, never the shared
 `_smelt_ledger`: the neighbour lookup runs `LEAD`/`LAG` over the union of presented rows and
@@ -1152,6 +1186,17 @@ key `(k, t)`; no payload, no delete flag (every row is a delete by construction)
 run-metadata column. Its lifecycle is tied to the presented table: created with it, dropped with
 it, rebuilt from the whole source in the same transaction on `--full-refresh` and `smelt
 rebuild`, and replaced wholesale by a skeleton change, per the Lifecycle paragraph above.
+
+The shape is dialect-plural where the engine requires it, and identical in meaning
+everywhere. Two differences are worth stating because they are requirements rather than
+spellings. **The declared primary key is advisory on an engine that does not enforce one**
+— nothing in the technique depends on it, because the tombstone insert's idempotence is its
+own anti-join on `(k, t)` rather than a constraint violation. And **a column type with no
+spelling in the target engine's type system is a refusal**, naming the column and the type:
+the ledger's columns must be the model's own inferred types, so a substituted type would be
+a column the next fold cannot write. Where the engine has no realisation of the ledger at
+all, the cell downgrades to full refresh and says so, per `state.md` §"Which dialects
+realise which structure".
 
 #### The maintenance theorem (bounded footprint)
 
@@ -2067,10 +2112,12 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-logical/src/maintenance/succession.rs` — `Grain::Succession`,
     `Technique::SuccessionPatch`, the pure succession-plan/refusal deriver and `SuccessionRecipe`
     assembler
-  - `crates/smelt-logical/src/maintenance/emit/succession.rs` — the event-delta `SELECT`, the
-    succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and the clock-tie probe
-  - `crates/smelt-state/src/ddl_duckdb.rs` — `generate_tombstone_table_ddl`,
-    `generate_tombstone_table_drop_ddl` (ledger DDL, bookkeeping only)
+  - `crates/smelt-logical/src/maintenance/emit/succession/mod.rs` — the event-delta `SELECT`,
+    the succession-patch `MERGE`, the tombstone-ledger rebuild `SELECT`, and the clock-tie
+    probe, in every dialect that realises the ledger
+  - `crates/smelt-state/src/tombstone.rs` — the per-dialect dispatch for the ledger table's own
+    DDL, over `crates/smelt-state/src/ddl_duckdb.rs` and
+    `crates/smelt-state/src/ddl_bigquery/tombstone.rs` (bookkeeping only; never a statement)
   - `crates/smelt-runtime/src/maintenance_driver/succession/` — the window-forward driver
     dispatch, transactional ledger write, frontier recording, and append-only posture probes
   - `crates/smelt-db` — the `resolved_grain()`-is-`None` branch of `derive_model_maintenance_plan`

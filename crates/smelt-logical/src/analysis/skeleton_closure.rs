@@ -286,6 +286,23 @@ pub(crate) fn enrichment_join_alias(sql: &str, enrichment_source: &str) -> Optio
     find_enrichment_join(&from_clause, enrichment_source).map(|(_, alias)| alias)
 }
 
+/// Like [`enrichment_join_alias`], but returns the whole [`JoinClause`] too —
+/// the enrichment-keyed model-edge route
+/// (`crate::maintenance::derive::model_edge::admit_enrichment_keyed_merge`)
+/// needs the join's own `ON`/`USING` condition to resolve the local (downstream-side)
+/// join key columns, which the alias alone does not carry.
+pub(crate) fn enrichment_join_clause(
+    sql: &str,
+    enrichment_source: &str,
+) -> Option<(JoinClause, String)> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let from_clause = select.from_clause()?;
+    find_enrichment_join(&from_clause, enrichment_source)
+}
+
 /// Find the top-level join in `from_clause` whose `smelt.<path>` table ref
 /// resolves to `enrichment_source` (`sources.`-prefix optional, matching
 /// [`resolve_table_ref_source_name`]'s convention), plus the alias (or bare

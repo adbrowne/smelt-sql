@@ -19,6 +19,9 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
     }
 
     if let Some(model_name) = args.model_name.clone() {
+        if crate::commands::explain_external_step::dispatch(&args, &model_name, scope).await? {
+            return Ok(());
+        }
         return explain_maintenance_plan(&args, &model_name, scope).await;
     }
 
@@ -81,9 +84,12 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
         models.extend(python_models);
     }
 
+    let external_steps = smelt_core::discover_external_steps(&project_dir, &config.paths);
+
     let mut graph = DependencyGraph::build(models, sources.as_ref())
         .with_context(|| "Failed to build dependency graph")?;
     graph.add_seeds(&seeds);
+    graph.add_external_steps(&external_steps);
 
     graph
         .validate()
@@ -91,6 +97,11 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
 
     // Apply --select filtering if provided.  Must happen before
     // build_explain_output so the output reflects the filtered model set.
+    // `select_nodes` narrows both models and steps through the same pass
+    // `smelt list` uses; a bare `--select` run's `.models` half is
+    // byte-identical to the old `select_models` result, so the model-only
+    // rendering below is unchanged.
+    let mut selected_steps: Option<std::collections::HashSet<String>> = None;
     let execution_order: Vec<String> = if args.select.is_empty() {
         graph.execution_order()?
     } else {
@@ -103,11 +114,12 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
             .iter()
             .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
             .collect::<Result<_, _>>()?;
-        let selected = graph
-            .select_models(&selectors, &config)
+        let selection = graph
+            .select_nodes(&selectors, &config)
             .with_context(|| "Failed to select models")?;
+        selected_steps = Some(selection.steps);
         graph
-            .filtered_execution_order(&selected)
+            .filtered_execution_order(&selection.models)
             .with_context(|| "Failed to determine execution order")?
     };
 
@@ -119,7 +131,14 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
     // incremental_shapes.md` §"Observing the per-source clamp") — the same
     // parse `--show-sql`'s literal rendering uses.
     let period = args.period.as_deref().map(parse_period).transpose()?;
-    let mut output = build_explain_output(&graph, &config, &fn_bodies, &origins, period.as_ref())?;
+    let mut output = build_explain_output(
+        &graph,
+        &config,
+        &fn_bodies,
+        &origins,
+        period.as_ref(),
+        &external_steps,
+    )?;
     // Narrow the output's execution_order to the filtered set so the
     // human-readable and JSON output reflects --select.
     output.execution_order = execution_order.clone();
@@ -127,6 +146,10 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
     output
         .models
         .retain(|name, _| execution_order.contains(name));
+    // Narrow the step map by the same `--select`/`--exclude` pass, when given.
+    if let Some(steps) = &selected_steps {
+        output.external_steps.retain(|addr, _| steps.contains(addr));
+    }
 
     // Build physical section via planner (no backends needed for explain).
     let mut opt_graph = ModelGraph::new();
@@ -221,6 +244,13 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
                 }
 
                 println!();
+            }
+        }
+
+        if !output.external_steps.is_empty() {
+            println!("\nExternal steps:");
+            for (addr, step) in &output.external_steps {
+                println!("  {} → produces: {}", addr, step.produces.join(", "));
             }
         }
 
@@ -827,6 +857,8 @@ async fn explain_maintenance_plan(
             own_output_delta.as_ref(),
             result.plan.key_locality.as_ref(),
             succession_view.as_ref(),
+            &result.plan.retention_reaches,
+            &result.plan.retention_downgrades,
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

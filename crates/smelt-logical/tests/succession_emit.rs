@@ -128,7 +128,8 @@ fn apply_window(
         delete_flag_expr,
         &event_delta.sql,
         MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     batch_group(conn, &group);
 }
 
@@ -556,7 +557,8 @@ fn recipe_feeds_emitters_end_to_end() {
             recipe.delete_flag_expr.as_deref(),
             &event_delta.sql,
             MaintenanceDialect::DuckDb,
-        );
+        )
+        .expect("a realisable succession dialect");
         batch_group(&conn, &group);
     };
 
@@ -625,10 +627,19 @@ fn full_rebuild_executes_against_duckdb_and_matches_the_oracle() {
         SOURCE,
         &["customer_id".to_string()],
         "changed_at",
+        &[
+            "customer_id".to_string(),
+            "changed_at".to_string(),
+            "tier".to_string(),
+            "valid_to".to_string(),
+        ],
+        &[("valid_to".to_string(), "{lead}".to_string())],
+        &[],
         None,
         "is_deleted",
         MaintenanceDialect::DuckDb,
-    );
+    )
+    .expect("a realisable succession dialect");
     batch_group(&conn, &group);
 
     assert!(
@@ -646,5 +657,134 @@ fn full_rebuild_executes_against_duckdb_and_matches_the_oracle() {
             &format!("SELECT customer_id, changed_at FROM {SOURCE} WHERE is_deleted"),
         ),
         "the rebuilt ledger must equal the delete-flagged rows of the whole source"
+    );
+}
+
+/// Test 1 (phase 3, `docs/outcomes/20260906-bigquery-correctness/phases/
+/// 03-plan.md`): a physically duplicated, content-agreeing tie at one
+/// `(customer_id, changed_at)` — the fixture measured on the real spine
+/// (`docs/handoffs/2026-09-08-github-activity-findings.md` root cause 1) —
+/// folds to exactly one presented row after `emit_succession_full_rebuild`,
+/// matching what the window-forward patch loop already converges to, rather
+/// than presenting both physical rows of the tie.
+#[test]
+fn full_rebuild_folds_on_key_and_clock() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-02 00:00:00", "silver"),
+        ],
+    );
+
+    let model_select_sql = oracle_sql(false);
+    let group = emit_succession_full_rebuild(
+        PRESENTED,
+        &model_select_sql,
+        SOURCE,
+        &["customer_id".to_string()],
+        "changed_at",
+        &[
+            "customer_id".to_string(),
+            "changed_at".to_string(),
+            "tier".to_string(),
+            "valid_to".to_string(),
+        ],
+        &[("valid_to".to_string(), "{lead}".to_string())],
+        &[],
+        None,
+        "FALSE",
+        MaintenanceDialect::DuckDb,
+    )
+    .expect("a realisable succession dialect");
+    let presented_sql = &group.statements[0].sql;
+    assert_ne!(
+        presented_sql,
+        &format!("CREATE TABLE {PRESENTED} AS {model_select_sql}"),
+        "no bare passthrough of the model select may remain: {presented_sql}"
+    );
+    conn.execute_batch(&format!("DROP TABLE {PRESENTED}"))
+        .expect("drop presented table");
+    batch_group(&conn, &group);
+
+    assert_eq!(
+        row_count(
+            &conn,
+            &format!(
+                "SELECT * FROM {PRESENTED} WHERE changed_at = TIMESTAMP '2026-01-01 00:00:00'"
+            )
+        ),
+        1,
+        "the tied (customer_id, changed_at) pair must present exactly one row, not one per \
+         physical source duplicate"
+    );
+    assert_eq!(row_count(&conn, &format!("SELECT * FROM {PRESENTED}")), 2);
+}
+
+/// Test 6 (phase 3): the clock-tie probe — the same emitter the patch loop
+/// already runs — correctly distinguishes a content-agreeing tie (silent,
+/// what the fold above resolves) from a content-*disagreeing* tie (fires)
+/// when run over the full-rebuild's own whole-source scope, proving the
+/// mechanism this phase wires onto the rebuild path
+/// (`crates/smelt-runtime/src/maintenance_driver/succession/execute.rs::
+/// rebuild_succession_state`) is sound before any presented write.
+#[test]
+fn full_rebuild_probes_clock_ties() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    stage(&conn, false);
+
+    // A content-agreeing tie must stay silent — this is exactly what the
+    // fold above resolves, not a corruption.
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-01 00:00:00", "gold"),
+        ],
+    );
+    let whole_source = emit_succession_event_delta(
+        SOURCE,
+        &[
+            ("customer_id".to_string(), "customer_id".to_string()),
+            ("changed_at".to_string(), "changed_at".to_string()),
+            ("tier".to_string(), "tier".to_string()),
+        ],
+        None,
+        "TRUE",
+    );
+    let probe = emit_succession_clock_tie_probe(
+        PRESENTED,
+        &["customer_id".to_string()],
+        "changed_at",
+        &["tier".to_string()],
+        None,
+        &whole_source.sql,
+        MaintenanceDialect::DuckDb,
+    );
+    let violations: i64 = conn
+        .query_row(&probe.sql, [], |row| row.get(0))
+        .expect("probe query");
+    assert_eq!(violations, 0, "a content-agreeing tie must be silent");
+
+    // A content-*disagreeing* tie at the same (key, clock) must fire.
+    conn.execute_batch(&format!("DELETE FROM {SOURCE}"))
+        .expect("clear source");
+    insert_events(
+        &conn,
+        &[
+            (1, "2026-01-01 00:00:00", "gold"),
+            (1, "2026-01-01 00:00:00", "platinum"),
+        ],
+    );
+    let violations: i64 = conn
+        .query_row(&probe.sql, [], |row| row.get(0))
+        .expect("probe query");
+    assert_eq!(
+        violations, 1,
+        "a content-disagreeing tie must fire, so a full rebuild refuses rather than silently \
+         folding an arbitrary aggregate"
     );
 }

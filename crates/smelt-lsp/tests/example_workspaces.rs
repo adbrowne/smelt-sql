@@ -352,6 +352,15 @@ fn examples_root() -> PathBuf {
 /// diagnostic so the diff against `Missing required argument` (or whatever
 /// surfaces) is immediately actionable.
 async fn assert_example_workspace_clean(name: &str) {
+    assert_example_workspace_clean_except(name, &[]).await;
+}
+
+/// Like [`assert_example_workspace_clean`], but additionally filters out
+/// diagnostics whose `code` is in `extra_excluded_codes` — for a workspace
+/// whose declared config makes a diagnostic legitimately fire, not a bug to
+/// chase away. Used narrowly, the same way `property-downgrade` is already
+/// filtered below for every workspace.
+async fn assert_example_workspace_clean_except(name: &str, extra_excluded_codes: &[&str]) {
     let workspace = examples_root().join(name);
     assert!(
         workspace.exists(),
@@ -408,6 +417,12 @@ async fn assert_example_workspace_clean(name: &str) {
                             "property-downgrade".to_string(),
                         ))
                 })
+                .filter(|d| match &d.code {
+                    Some(lsp_types::NumberOrString::String(s)) => {
+                        !extra_excluded_codes.contains(&s.as_str())
+                    }
+                    _ => true,
+                })
                 .collect();
             (uri, filtered)
         })
@@ -452,6 +467,23 @@ async fn assert_example_workspace_clean(name: &str) {
 #[tokio::test]
 async fn web_analytics() {
     assert_example_workspace_clean("web_analytics").await;
+}
+
+/// `examples/github_activity` deliberately declares both a `dev` (DuckDB)
+/// and a `bigquery` target (`docs/outcomes/20260906-bigquery-dogfood-spine/
+/// phases/11-summary.md`), so `maintenance-state-downgraded` legitimately
+/// fires for every `grain: key`/succession cell whose ledger structure is
+/// DuckDB-only (`crates/smelt-db/src/queries/maintenance/diagnostics.rs`'s
+/// "Checked against every declared backend" posture) — exactly the
+/// cross-crate counterpart of
+/// `check_workspace_diagnostics_are_exactly` in
+/// `crates/smelt-cli/tests/example_diagnostics/support.rs`. Excluded here by
+/// code, the same way `property-downgrade` is excluded for every workspace
+/// above: it is advisory-shaped, not a statement that the model is invalid.
+#[tokio::test]
+async fn github_activity() {
+    assert_example_workspace_clean_except("github_activity", &["maintenance-state-downgraded"])
+        .await;
 }
 
 #[tokio::test]

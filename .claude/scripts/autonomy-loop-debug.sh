@@ -59,7 +59,7 @@ SENTINEL_PHASE="<<PHASE_COMPLETE>>"
 SENTINEL_DONE="<<ALL_DONE>>"
 SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
 
-cd "${REPO_ROOT}"
+cd "${REPO_ROOT}" || exit 1
 
 echo "===== Autonomy loop (DEBUG) starting ====="
 echo "Repo:             ${REPO_ROOT}"

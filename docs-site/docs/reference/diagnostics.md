@@ -120,6 +120,22 @@ UnsupportedOnBackend: this model uses 1 construct the Spark SQL backend cannot e
 or wrapping the operand in an explicit `CAST` — or rewrite the expression as a typed `FLOOR(a / b)`
 or `DIV(a, b)` call.
 
+## Source retention
+
+A source may declare a rolling `retention:` bound (`../guide/sources.md#bounded-history-retention`).
+smelt reasons about a model's required reach into that source against the declared bound, and
+either refuses or records a downgrade — never silently computes over less history than the model
+asked for. Full semantics: [`docs/specs/sources.md`
+§"Retention refusal"](https://github.com/brownie/smelt/blob/main/docs/specs/sources.md).
+
+| Code | Severity | Trigger |
+|---|---|---|
+| `SourceRetentionExceeded` | Error | A model's derived required reach into a declared-`retention:` source is proven to exceed the source's retained bound, or a whole-table recompute over a declared-`retention:` source is attempted with stored output already present and no license. |
+| `SourceRetentionDowngraded` | Warning | A model's derived required reach into a declared-`retention:` source could not be proven to fit inside the bound (an unbounded or otherwise underivable reach) — admitted, but the model's pre-bound region stops being claimed replayable. |
+
+`smelt explain <model>` renders both the bound and the required reach for every declared-`retention:`
+source under `Retention:` (`--json`: the `retention` array) — see [`smelt explain`](smelt-explain.md).
+
 ## Succession grain
 
 The [succession grain](../guide/scd2-succession.md) is recognised from a model's SQL shape, never

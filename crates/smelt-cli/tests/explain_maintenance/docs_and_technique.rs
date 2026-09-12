@@ -73,6 +73,8 @@ fn text_report_technique_matches_the_profile_technique() {
             cells: vec![cell],
             refusals: vec![],
             key_locality: None,
+            retention_downgrades: Vec::new(),
+            retention_reaches: Vec::new(),
         },
         column_groups: vec![ColumnGroup {
             columns: vec!["amount".to_string()],
@@ -240,4 +242,61 @@ fn succession_guide_page_is_navigated_and_covers_the_grain() {
         page.to_lowercase().contains("tombstone ledger"),
         "expected the tombstone ledger named: {page}"
     );
+}
+
+/// Every `SourceRetention*` code named in `docs/specs/diagnostics.md`
+/// §"Sources" must appear on the docs-site diagnostics reference, and vice
+/// versa — mirrors `docs_site_diagnostics_reference_lists_every_succession_code`,
+/// two-sided (`docs/outcomes/20260906-trimmed-history-sources/phases/10-plan.md`).
+#[test]
+fn docs_site_diagnostics_reference_lists_every_source_retention_code() {
+    let spec = std::fs::read_to_string(repo_root().join("docs/specs/diagnostics.md"))
+        .expect("read docs/specs/diagnostics.md");
+    let section_start = spec
+        .find("### Sources")
+        .expect("diagnostics.md has a `### Sources` section");
+    let section_end = spec[section_start..]
+        .find("\n## ")
+        .map(|i| section_start + i)
+        .unwrap_or(spec.len());
+    let section = &spec[section_start..section_end];
+
+    let mut spec_codes: Vec<&str> = section
+        .split('`')
+        .filter(|s| s.starts_with("SourceRetention"))
+        .collect();
+    spec_codes.sort();
+    spec_codes.dedup();
+    assert!(
+        !spec_codes.is_empty(),
+        "expected at least one `SourceRetention*` code in diagnostics.md's Sources section"
+    );
+
+    let docs_site =
+        std::fs::read_to_string(repo_root().join("docs-site/docs/reference/diagnostics.md"))
+            .expect("read docs-site/docs/reference/diagnostics.md");
+
+    for code in &spec_codes {
+        assert!(
+            docs_site.contains(code),
+            "docs-site diagnostics reference is missing `{code}` (present in the spec's \
+             Sources section)"
+        );
+    }
+
+    // Two-sided: every `SourceRetention*` name on the docs-site page must be
+    // one of the spec's own codes (no stale/invented name on the docs-site
+    // side).
+    for word in docs_site.split(['`', '\n', ' ']) {
+        if word.starts_with("SourceRetention")
+            && word != "SourceRetention"
+            && word.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            assert!(
+                spec_codes.contains(&word),
+                "docs-site diagnostics reference names `{word}`, which is not one of the \
+                 spec's SourceRetention* codes: {spec_codes:?}"
+            );
+        }
+    }
 }

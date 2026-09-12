@@ -175,6 +175,16 @@ pub struct ExecuteRequest {
     /// overrides at all.
     #[serde(default)]
     pub technique_overrides: Vec<CellTechniqueOverride>,
+
+    /// Whether this run may invoke a reached external step
+    /// (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)"). `true` (the default) is the CLI's posture — no flag exists
+    /// to turn this off. An embedder (e.g. the UI's plan-preview endpoint)
+    /// that cannot or should not shell out sets this to `false`; a run that
+    /// reaches a step with this `false` refuses with `ExternalStepNotInvocable`
+    /// rather than proceeding against the step's possibly-stale output.
+    #[serde(default = "default_true")]
+    pub invoke_external_steps: bool,
 }
 
 fn default_true() -> bool {

@@ -138,6 +138,18 @@ run window verbatim:
   equivalence violation; a model that must not truncate widens its declared
   relation, which widens the derived output window with it.
 
+**The derived output window propagates within a run.** A model's run window is
+the union of the requested run window and the derived output window of every
+upstream maintained model **selected in the same invocation**, aligned
+outward to the downstream's own granularity; the downstream's own skew
+inversion above then applies to that union. Without this, a Form-B upstream's
+rebase of an earlier partition leaves a Form-A downstream that reads it
+verbatim frozen at first-write time, which is an equivalence violation, not a
+chunking artifact. An upstream *not* selected in the invocation writes
+nothing and contributes nothing; a zero-skew upstream's output window equals
+the run window, so the union is a no-op — every zero-skew fixture's literals
+are unchanged.
+
 When the model has a **finite frame reach `k`** (a `RANGE … INTERVAL` window,
 an interval join), the two-layer widened-scan reads a margin **relative to the
 derived output window** — `[out_start − k − offset, out_end + k′)` — wide
@@ -152,6 +164,17 @@ zero-skew case the pushdown filter *is* the clamp (same window by
 construction) and the outer clamp is dropped as textually redundant.
 UNION-branch wrap-and-filter is the same pushdown distributed independently
 over each set-operation branch.
+
+When the derived output window is split into chunks (backfill/batch
+execution, `incremental_shapes.md` §"First-run and backfill"), each chunk's
+own scan margin is sized relative to *that chunk's* partition range, not the
+run's outer output window: to write partitions `[bs, be)` the scan reads
+driving dates skew-inverted from that same range, `[bs − before, be +
+after)`, folded on top of any frame-reach margin — clamped to the
+invocation's own outer scan envelope so the outermost chunk never reads past
+the run window's own trailing edge. `--batch-size`/batch-safety sizing
+changes only how many statements a run issues, never the rows a written
+partition ends up with — the output is invariant under chunk count.
 
 **Hidden decomposed state + presentation view.** The stored column is a monoid
 element that is not itself the user value; the user value is a pure function

@@ -31,7 +31,7 @@ owners: [andrew]
 | `smelt type [model]` | Show model function signature (offline) |
 | `smelt status [model]` | Show incremental interval coverage and gaps |
 | `smelt history [model]` | Show past run records |
-| `smelt list` | List discovered project entities (models, seeds, sources, tests, checks) with kind and materialization (offline) |
+| `smelt list` | List discovered project entities (models, seeds, sources, external steps, tests, checks) with kind and materialization (offline) |
 | `smelt clean` | Remove build artifacts under `target/` (compiled docs, catalog output); never touches state (`.smelt/`) or the target database |
 | `smelt explain` | Output model graph as JSON for orchestrators |
 | `smelt bakeoff <model>` | Measure per-cell technique cost against a replayed window of real data; `--pin` emits the winning choice |
@@ -135,6 +135,8 @@ Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly
 `--dry-run` does **not** exist on `smelt build`. Use `smelt run --dry-run` to parse and validate without executing.
 
 **`smelt explain` excludes tests.** `smelt explain` (with or without `--json`) filters out all `smelt.test` declarations from its output via the test-kind predicate applied to every discovered entity. Tests never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
+
+Whole-project `smelt explain` narrows both the model set and the external-step set by `--select`/`--exclude` through the same `select_nodes` pass `smelt list` uses (`model_selection.md` §"Selection methods") — a selector reaching a step (directly, or via upstream traversal from a model that reads one of its produced sources) keeps that step in the `external_steps` map; one that does not, drops it.
 
 ### `smelt ui`
 
@@ -299,6 +301,63 @@ row. With `--json`, a downgraded cell's entry in `cells[]` carries a `state_down
 that was not downgraded omits the key entirely, never `null` — the same append-stable posture
 (§Constraints item 5) as `contract_point`.
 
+**Retention reach.** Each declared-`retention:` source's bounded reach-versus-retention proof
+(`model_properties.md` §"Reach versus retained history") is read verbatim from
+`MaintenancePlan::retention_reaches`/`retention_downgrades` — `smelt explain` derives no
+retention verdict of its own (maintenance-plan purity). A model referencing no `retention:`
+source prints no `Retention:` section at all. Otherwise the report prints a `Retention:`
+section with one row per source carrying a bounded proof or a recorded downgrade, in the
+`retention_reaches`-then-`retention_downgrades` order the plan already fixes (both lists sorted
+by source), rendered in seconds — the same unit `SourceRetentionExceeded`'s own diagnostic text
+already renders, so no second interval formatter exists for the same quantity:
+
+- `<source>: retained <n>s, required reach <n>s — within bound`
+- `<source>: retained <n>s, required reach <n>s — exceeds bound (SourceRetentionExceeded)`
+- `<source>: retained <n>s, reach unprovable — downgraded (SourceRetentionDowngraded): <reason>`
+
+With `--json`, the per-model report gains an append-stable `retention` array (§Constraints item
+5), omitted entirely when empty, never `null`: `{"source": "...", "verdict":
+"within"|"exceeds"|"unprovable", "retained_secs": n, "required_lookback_secs": n, "reason":
+"..."}` — `required_lookback_secs` present only for the bounded verdicts (`within`/`exceeds`)
+and `reason` only for `unprovable`.
+
+### `smelt explain <external step>`
+
+The positional argument `smelt explain` accepts also resolves to a discovered external step
+(`sources.md` §"Externally-produced sources (black-box steps)") — the same `resolve_node_path`
+resolution `smelt list`/`smelt run` use, which reaches a step address alongside a model's. When
+the resolved address is a step, `smelt explain` prints the step's report instead of a maintenance
+plan: the source addresses it `produces:`, the literal `command:` argv exactly as declared
+(unsubstituted — `explain` has no run window, so `{run_date}`/`{run_end}` placeholders are shown
+raw, never resolved against a live date), the cadence when declared, the description when
+declared, the models that directly consume a produced source, and a fixed sentence that smelt
+does not author or parse the step's program (`sources.md` §Semantics 13). `explain` never spawns
+the `command:` — this is what lets `sources.md` §Semantics 12 name `smelt explain` the
+non-refusing preview surface for a step, unlike a dry run, which refuses.
+
+`--show-sql`, `--period`, and `--technique` are maintenance-plan flags with no meaning for a step
+that has no plan; each is rejected as a usage error (exit `2`) naming the step and the flag,
+rather than silently ignored or treated as "model not found". `--select` is ignored when a
+positional argument is given, matching the existing model-report behavior.
+
+With `--json`, `smelt explain <step>` emits one object:
+
+```json
+{
+  "kind": "external_step",
+  "address": "smelt.<step_address>",
+  "produces": ["smelt.<source_address>", ...],
+  "command": ["<argv0>", "<argv1>", ...],
+  "cadence": "<declared interval string>",     // omitted when unset
+  "description": "<string>",                   // omitted when unset
+  "consumers": ["<model_name>", ...]
+}
+```
+
+An address that resolves to neither a model nor a step keeps the existing "Model '<name>' not
+found" error — this positional-argument branch adds no new failure mode for an unrecognized
+target.
+
 ### `smelt bakeoff <model>` flags
 
 | Flag | Default | Description |
@@ -354,13 +413,29 @@ scratch-target and pin semantics.
     },
     "ephemerals": ["<model_name>", ...],
     "transformations": ["<string>", ...]    // omitted if empty
+  },
+  "external_steps": {                       // omitted entirely when the project declares none
+    "<step_address>": {
+      "produces": ["smelt.<source_address>", ...],
+      "command": ["<argv0>", "<argv1>", ...],
+      "cadence": "<declared interval string>",   // omitted when unset
+      "description": "<string>",                 // omitted when unset
+      "consumers": ["<model_name>", ...]          // bare canonical names, matching `models` keys / `dependencies`
+    }
   }
 }
 ```
 
 - `models` keys are in alphabetical (BTreeMap) order.
 - `dependencies` lists only direct upstream dependencies, not transitive.
-- `execution_order` is a valid topological sort of all included models.
+- `execution_order` is a valid topological sort of all included models. External steps are never
+  entries in `execution_order` or `models` — a step is not a model, and `execution_order` is the
+  list orchestrators feed to model-shaped tasks (§Constraints item 5); a step is ordered ahead of
+  its consumers structurally by the run path (`sources.md` §Semantics 11), not through this list.
+  `external_steps` is its own top-level, append-stable map, keyed by the step's canonical address
+  (no `smelt.` prefix on the key, matching `models`'/`physical.nodes`' own keying; the addresses
+  inside `produces`/consuming-model entries carry the full `smelt.<path>` form used elsewhere in
+  this schema).
 
 ## Semantics
 
@@ -534,7 +609,7 @@ The cwd-derived scope is informational at command start and does not change mid-
 
 ### `smelt list` — enumerate discovered entities
 
-`smelt list` prints every entity `smelt` discovers in the project — models, seeds, sources, tests, and checks — one per line, in canonical `smelt.<path>` form (§"Canonical-display rule"), alongside its kind and, for models, its materialization. `smelt list` is **offline**: it performs discovery and parsing only, the same project-wide scan `smelt explain` uses, and makes no database connection. It accepts the same `--select`/`--exclude` selector flags as `smelt run`/`smelt build` (`model_selection.md`) to narrow the listed set, and respects `--scope` for shorthand selector arguments exactly as every other command does.
+`smelt list` prints every entity `smelt` discovers in the project — models, seeds, sources, external steps, tests, and checks — one per line, in canonical `smelt.<path>` form (§"Canonical-display rule"), alongside its kind and, for models, its materialization. `smelt list` is **offline**: it performs discovery and parsing only, the same project-wide scan `smelt explain` uses, and makes no database connection. It accepts the same `--select`/`--exclude` selector flags as `smelt run`/`smelt build` (`model_selection.md`) to narrow the listed set, and respects `--scope` for shorthand selector arguments exactly as every other command does. An external step is listed with kind `external_step` and, in `--json` output, a `produces` array naming the source addresses it produces (`sources.md` §"Externally-produced sources (black-box steps)"). Unlike seeds and sources (always listed in full), a step is narrowed by `--select`/`--exclude` through the same selector pass as models (`model_selection.md` §"Selection methods") — a step reached by `+consumer`'s upstream expansion, or directly named, is listed; one that is not is omitted.
 
 ### `smelt clean` — remove build artifacts
 

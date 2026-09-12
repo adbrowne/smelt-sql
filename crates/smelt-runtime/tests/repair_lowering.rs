@@ -505,8 +505,13 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
     // values are unrecoverable by construction.
     let delta_key_expr = "COALESCE(CAST(customer_id AS VARCHAR), '\u{2}NULL\u{2}')";
 
-    let clamped =
-        repair_affected_keys_select("main.sources_raw_orders", &key, Some(&clamp), &region);
+    let clamped = repair_affected_keys_select(
+        "main.sources_raw_orders",
+        &key,
+        Some(&clamp),
+        &region,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
     assert_eq!(
         clamped,
         format!(
@@ -520,7 +525,13 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
     // Only reachable where admission already proved the slice by another
     // route — an unclamped scan is the unpredicated read, never a
     // silently-narrowed one.
-    let unclamped = repair_affected_keys_select("main.sources_raw_orders", &key, None, &region);
+    let unclamped = repair_affected_keys_select(
+        "main.sources_raw_orders",
+        &key,
+        None,
+        &region,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
     assert_eq!(
         unclamped,
         format!("SELECT DISTINCT {delta_key_expr} AS delta_key FROM main.sources_raw_orders")
@@ -528,7 +539,12 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
 
     // The candidate carries NO clamp of its own — the group is recomputed
     // whole, semi-joined to the affected keys.
-    let candidate = repair_candidate_select("SELECT customer_id, 1 AS v", &key, &clamped);
+    let candidate = repair_candidate_select(
+        "SELECT customer_id, 1 AS v",
+        &key,
+        &clamped,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
     assert!(
         !candidate.contains("INTERVAL '86400 seconds' AND order_date <")
             || candidate.matches("86400 seconds").count() == 1,
@@ -551,6 +567,7 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
         "main.customer_max_amount",
         &key,
         &clamped,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
     assert_eq!(
         slice_predicate,
@@ -641,8 +658,14 @@ fn repair_candidate_select_carries_hidden_state_columns() {
             start: "'2025-01-12'".to_string(),
             end: "'2025-01-13'".to_string(),
         },
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
-    let candidate = repair_candidate_select(&augmented, &key, &affected_keys_select);
+    let candidate = repair_candidate_select(
+        &augmented,
+        &key,
+        &affected_keys_select,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
 
     // `repair_candidate_select` wraps its input verbatim in `SELECT
     // __smelt_repair_candidate.*` — the augmented input's extra select
@@ -882,6 +905,7 @@ pub fn select_request(
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        invoke_external_steps: true,
     }
 }
 

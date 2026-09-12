@@ -211,6 +211,7 @@ async fn second_run_over_appended_source_holds_and_refreshes_the_baseline() {
     let snapshot_sql = smelt_logical::maintenance::emit::emit_append_only_baseline_snapshot(
         "raw.events",
         "event_date",
+        &smelt_logical::maintenance::emit::PartitionBucket::Exact,
         &["payload".to_string()],
         MaintenanceDialect::DuckDb,
     )
@@ -335,6 +336,7 @@ async fn snapshot_and_record_baseline(backend: &DuckDbBackend, store: &mut Sourc
     let snapshot_sql = smelt_logical::maintenance::emit::emit_append_only_baseline_snapshot(
         "raw.events",
         "event_date",
+        &smelt_logical::maintenance::emit::PartitionBucket::Exact,
         &["payload".to_string()],
         MaintenanceDialect::DuckDb,
     )
@@ -522,4 +524,114 @@ async fn in_place_update_in_closed_partition_still_fails_the_run() {
         message.contains("SourceMutationProfileViolated"),
         "{message}"
     );
+}
+
+/// The defect a live BigQuery run surfaced
+/// (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/12-summary.md`
+/// finding 1a): a source whose `partition_column` is a TIMESTAMP under
+/// `granularity: day` had its posture baseline grouped by the **raw**
+/// column, recording one "partition" per distinct *second* — 5,797 of them
+/// for a three-day, 6,053-row source. The per-partition "closed partition"
+/// reasoning behind the append-only late-arrival classification is then
+/// being done per-second, which is wrong on every backend; GoogleSQL
+/// additionally cannot plan the resulting row set.
+///
+/// Both dialects are asserted, because the two truncation spellings differ
+/// and the BigQuery one is the leg that could not run at all.
+#[test]
+fn a_timestamp_partition_column_is_bucketed_onto_the_declared_grid() {
+    let model = make_model("m", "SELECT * FROM smelt.sources.raw.events");
+    let mut source = append_only_source(&["sources", "raw", "events"], "created_at");
+    // The partition column is declared, and it is a TIMESTAMP — one value
+    // per second, not per day.
+    source.columns.push(SourceColumn {
+        name: "created_at".to_string(),
+        data_type: DataType::Timestamp {
+            with_timezone: false,
+        },
+        nullable: false,
+        description: None,
+    });
+
+    // The GROUP BY repeats the projection verbatim, wrapping CAST included —
+    // GoogleSQL rejects a grouped expression referenced from inside a wrapping
+    // expression in the SELECT list (measured live; see
+    // `emit_append_only_baseline_snapshot`).
+    for (dialect, expected_bucket) in [
+        (
+            MaintenanceDialect::DuckDb,
+            "CAST(DATE_TRUNC('day', created_at) AS VARCHAR)",
+        ),
+        (
+            MaintenanceDialect::BigQuery,
+            "CAST(TIMESTAMP_TRUNC(created_at, DAY) AS STRING)",
+        ),
+    ] {
+        let probes = append_only_posture_probes(
+            "m",
+            "m creation",
+            &model,
+            std::slice::from_ref(&source),
+            &SourcePostureStore::default(),
+            "dev",
+            "raw",
+            dialect,
+        );
+        assert_eq!(probes.len(), 1, "one eligible source");
+        let sql = match &probes[0].action {
+            smelt_runtime::source_probes::SourcePostureAction::Establish { snapshot_sql } => {
+                snapshot_sql.clone()
+            }
+            smelt_runtime::source_probes::SourcePostureAction::Verify { .. } => {
+                panic!("an empty baseline store must build Establish")
+            }
+        };
+        assert!(
+            sql.contains(&format!("GROUP BY {expected_bucket}")),
+            "{dialect:?} snapshot must group by the declared day grid, got: {sql}"
+        );
+        assert!(
+            !sql.contains("GROUP BY created_at"),
+            "{dialect:?} snapshot must not group by the raw timestamp, got: {sql}"
+        );
+    }
+}
+
+/// The counterpart: a DATE partition column under `granularity: day` is
+/// already its own bucket, so no truncation is introduced and the emitted
+/// SQL is unchanged from what every existing baseline recorded. (The
+/// dogfood pipeline's arrival twin is exactly this shape, which is why the
+/// bug above was invisible on it.)
+#[test]
+fn a_date_partition_column_under_a_day_grid_is_left_alone() {
+    let model = make_model("m", "SELECT * FROM smelt.sources.raw.events");
+    let mut source = append_only_source(&["sources", "raw", "events"], "ingested_date");
+    source.columns.push(SourceColumn {
+        name: "ingested_date".to_string(),
+        data_type: DataType::Date,
+        nullable: false,
+        description: None,
+    });
+
+    let probes = append_only_posture_probes(
+        "m",
+        "m creation",
+        &model,
+        std::slice::from_ref(&source),
+        &SourcePostureStore::default(),
+        "dev",
+        "raw",
+        MaintenanceDialect::BigQuery,
+    );
+    let sql = match &probes[0].action {
+        smelt_runtime::source_probes::SourcePostureAction::Establish { snapshot_sql } => {
+            snapshot_sql.clone()
+        }
+        smelt_runtime::source_probes::SourcePostureAction::Verify { .. } => unreachable!(),
+    };
+    assert!(
+        sql.contains("GROUP BY CAST(ingested_date AS STRING)"),
+        "a DATE column at day granularity needs no truncation, got: {sql}"
+    );
+    assert!(!sql.contains("_TRUNC("), "no truncation introduced: {sql}");
 }

@@ -1,0 +1,268 @@
+# github_activity
+
+A GitHub-events pipeline that runs on **both** DuckDB and BigQuery over the same rows.
+DuckDB is not a fallback here: it is the cheap oracle that makes a dual-target diff the
+least expensive way to find defects the offline gates cannot see.
+
+Outcome: `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`.
+
+## The sample
+
+`sample.sql` is the contract. It selects a stable 0.1% slice of GitHub Archive —
+`MOD(repo.id, 1000) = 0`, 30 days, `payload` projected as the raw JSON string the archive
+stores — and **both legs must see exactly these rows**: the DuckDB leg reads the Parquet
+export of it, and the BigQuery
+loader reproduces the same query into `raw.github_events`. Two targets over different
+populations are not comparable, so the parity check would be measuring nothing.
+
+`seeds/github_events_sample.parquet` is that export, committed so the DuckDB leg runs in
+ordinary CI with no warehouse and no credentials. Regenerate it with:
+
+```bash
+bash scripts/bigquery-auth.sh                     # mint a 1h token
+bash examples/github_activity/refresh_sample.sh   # ~6.3 GB scanned, about US$0.03
+```
+
+At the pinned range that is 64,313 events over 2026-08-05 … 2026-09-03: 4,491 actors,
+5,016 repos, 13 event types, 34 repos observed under more than one name.
+
+Three properties of the data worth knowing before reading any output:
+
+- **The upstream feed contains no duplicate event ids.** Deduplication is needed because
+  the *loader* is declared at-least-once, not because GitHub Archive repeats itself
+  (`raw.github_events` measured at 64,313 rows, 64,313 distinct ids). So the loader
+  deliberately redelivers on purpose: each day's load re-appends a deterministic 2% slice
+  of the *previous* day's rows (`MOD(CAST(id AS BIGINT), 50) = 0`), byte-identical to the
+  original including `created_at`. `raw.github_events` therefore permanently contains
+  synthetic duplicates, and `bronze.events`, being a passthrough, carries them — this is
+  correct, not a bug, and is what makes the bronze→silver boundary mean anything. A run
+  that never replays a day never exercises `silver.events_deduped`.
+  (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/02-plan.md` §"Redelivery is not
+  free".)
+- **The sample skews to newly-created repositories.** `repo.id` is uniform over ids, and
+  recent ids are dominated by bulk repo creation, so 92% of events are `PushEvent` and the
+  median repo has a single event. Sessionization and dedup are unaffected; anything
+  shaped like a leaderboard will look odd, and that is the sample, not a bug.
+- **`repo.id` rather than a `repo.name` prefix is what makes the sample stable**: a name
+  prefix would silently drop a repository the moment it was renamed, corrupting exactly
+  the rename history this pipeline exists to model.
+
+## The BigQuery loader
+
+`scripts/bq-dogfood-loader.sh` is **external to smelt** — smelt orders the run, it does
+not author the load — and is at-least-once by construction, matching
+`raw.github_events`'s declared `mutation_profile`. It never restates `sample.sql`'s
+projection or filter: it *derives* the load SQL from that file, splicing in only the
+`_TABLE_SUFFIX` day range, so a re-pin of `sample.sql` (the `payload` column landed this
+way) cannot silently drift out of step with what actually lands in BigQuery.
+
+```bash
+scripts/bq-dogfood-loader.sh --emit-ddl                        # raw.github_events{,_arrival} DDL
+scripts/bq-dogfood-loader.sh --emit-sql --date 2026-08-06       # one day's load SQL
+```
+
+Both modes touch no network and need no `bq`/`gcloud` on `PATH` — they only read
+`sample.sql` and this file and print SQL, so they are checked per-PR with no warehouse
+(`crates/smelt-cli/tests/github_activity_loader.rs`). Each day's load appends the real
+day's rows plus a deterministic redelivery of the previous day's — the same rule
+`run_incremental.py` plays back on DuckDB, so the two legs cannot silently diverge either.
+
+Retention: `partition_expiration_days = 45` on both `raw.github_events` and
+`raw.github_events_arrival`. Why 45: the fixture only spans the pinned 30-day range, and
+45 leaves headroom for a late backfill without trimming rows the DuckDB leg still expects
+to see. This bounds the *table's* partitions; the dataset's own default table expiration
+stays unset (criterion 1) — the two are independent BigQuery knobs.
+
+Deployed against the dogfood project's `smelt_dogfood` dataset (the script's own
+`raw.` names are the logical source name; a deploy resolves them to the live dataset, the
+same mapping DuckDB already makes for `schema: main`). A single day's load bills roughly
+3.5-3.7 GB (~US$0.02 at on-demand rates) across both `INSERT`s, growing slightly through
+the pinned range as GitHub Archive's own daily volume grows; at one run per day that
+extrapolates to well under a dollar a month, a small fraction of the project's budget.
+Scheduling the run (rather than invoking it by hand) is still outstanding — nothing here
+sets up a recurring trigger yet.
+
+## The DuckDB leg
+
+`examples/github_activity/` runs four models against DuckDB with no warehouse and no
+credentials: `bronze.events` (a typed passthrough of the source), `silver.events_deduped`
+(dedup on `id`), `silver.actor_sessions` (30-minute-gap sessionization per actor, ported
+from `examples/web_analytics/functions/sessionize.sql`), and
+`marts.daily_active_contributors`. `run_incremental.py` replays the fixture day by day and
+finishes with `smelt test`:
+
+```bash
+python3 examples/github_activity/run_incremental.py
+```
+
+Unlike the BigQuery loader above, **the DuckDB leg's day loader is itself a node in
+smelt's DAG**, not something the driver script invokes directly:
+`models/sources/raw/github_loader.yml` declares `load_day.sh` as an `external_step:`
+producing both `raw.github_events` and `raw.github_events_arrival`
+(`docs/specs/sources.md` §"Externally-produced sources (black-box steps)"). `smelt run`
+orders the step ahead of every model that reads either source and invokes it with
+`--date {run_date}` — smelt orders and invokes the load, it does not author it. The one
+implementation is why the incremental replay (`run_incremental.py`, driving `smelt run`
+day by day) and the full-refresh oracle (`crates/smelt-cli/tests/github_activity_oracle.rs`,
+staging many days directly) can share it without drifting apart: `load_day.sh` carries its
+own per-day ledger (`main._loader_days`) and is idempotent per day, since a run may
+legitimately invoke it more than once for the same day (the oracle stages a day directly
+before `--full-refresh` also reaches the step, and a multi-region run invokes
+`execute_project` — and therefore the step — once per region).
+
+`silver.events_deduped` is `grain: key` with `timeseries: { partition_column:
+first_seen_date }` — the composed key-addressed-and-time-partitioned shape
+(`docs/specs/incremental_shapes.md` §"Key temporal locality"). Locality is established via
+**route 3 (recurrence-bounded)**: `raw.github_events` declares
+`mutation_profile.key_recurrence: { key: [id], window: '0 days' }` (a genuine redelivered
+duplicate always shares its original's `created_at` exactly), checked at merge time
+— a duplicate pair that violates it fails the run transactionally
+(`KeyedRecurrenceBoundViolated`) rather than silently mis-dedupping, which
+`crates/smelt-cli/tests/github_activity_replay.rs` exercises as a negative control. Unlike
+`examples/web_analytics/silver/events_parsed.sql`'s arrival-based lateness filter, there is
+no independent ingestion-time column here to derive a WHERE-clause lookback from — one
+arrives with a loader-stamped `ingested_date` in a later phase — so the model's
+`maintenance.scan_bounds` declares `allow_full_scan: true` on `raw.github_events` instead;
+the keyed `MERGE` this model compiles to is idempotent regardless of window width, so the
+full scan costs re-read, never correctness.
+
+## The rename stream: two succession models, two partition postures
+
+`silver.repo_naming` and `silver.actor_naming` are recognised as the succession grain
+(`docs/specs/incremental_shapes.md` §"The succession grain") from their SQL shape alone —
+neither declares `grain:`, `unique_key:` or `timeseries:`. Each is one row per
+`(key, created_at)` carrying the name in force at that event, not one row per rename:
+"only the rows where the name changed" needs `LAG`, and the classifier admits exactly one
+row-local pre-window filter, so that reduction happens downstream in
+`marts.naming_history` instead, which unions both histories and keeps the rows where
+`LAG(name)` differs from the current name.
+
+The two models exercise both succession partition postures from one pipeline
+(`docs/outcomes/20260906-bigquery-dogfood-spine/phases/03-plan.md`):
+
+- `silver.repo_naming` reads `raw.github_events` directly — **event-time-partitioned**
+  (`timeseries.partition_column == event_time_column == created_at`). The loader's
+  deliberate previous-day redelivery lands in a **closed** partition here, exercising the
+  append-only probe's late-arrival classification.
+- `silver.actor_naming` reads `raw.github_events_arrival` — a second physical relation,
+  same columns plus a loader-stamped `ingested_date`, **arrival-partitioned**
+  (`partition_column: ingested_date` differs from `event_time_column: created_at`). The
+  same redelivered rows are stamped with *today's* `ingested_date` there, landing in the
+  **open** partition instead.
+
+Both `created_at` clock columns are projected verbatim (not aliased away): the
+succession-patch technique's tombstone ledger resolves the clock column's type from the
+model's own output schema by name, so the clock column must survive under its source name.
+
+**A divergence discovered and since fixed here**: `silver.repo_naming` and
+`silver.actor_naming` originally failed to satisfy the full-refresh/incremental equivalence
+invariant (criterion 7) at the raw row-count level. The window-forward patch loop addresses
+the presented table by `(key, clock)` (its `MERGE ... ON` condition), so a redelivered
+duplicate or a same-second tie whose payload agrees converges to one presented row;
+`--full-refresh` re-ran the model's raw compiled `SELECT` with no such addressing, so it kept
+every tied row — measured exactly at the fixture's own tie counts (139 extra rows for
+`repo_naming`, 145 for `actor_naming`). `docs/outcomes/20260906-bigquery-correctness/
+phases/03-plan.md` folded `emit_succession_full_rebuild`'s presented rebuild on
+`(key_cols, clock_col)`, so the two legs now compare exactly equal on both relations;
+`crates/smelt-cli/tests/github_activity_oracle.rs`'s `DIVERGENCE_REGISTRY` no longer carries
+an entry for either. `marts.naming_history` was unaffected throughout, since its `LAG`-based
+"only where the name changed" filter drops a duplicated tie row identically on both legs.
+
+## Gold and marts
+
+`gold.repo_dim` (one row per repo, current name from `silver.repo_naming`'s `is_current`
+flag), `gold.events_enriched` (every deduped event enriched with the repo's current name —
+the `LEFT JOIN`-against-a-`unique_key`-declaring-dimension shape), `gold.repo_activity_daily`
+(per-`(repo, day)` event and distinct-actor counts), and two marts over it:
+`marts.repo_leaderboard` (total events per repo — reproduces the sample's documented skew
+rather than hiding it: the top row is a single bot repo with 1,750 of the fixture's 64,313
+events) and `marts.star_growth` (a cumulative daily `WatchEvent` count, thin on purpose — the
+fixture holds only 47 `WatchEvent`s over 30 days).
+
+**A genuine derivation gap, discovered and recorded rather than fixed here**: no maintenance
+cell is ever derived for `gold.repo_dim`'s mutation sensitivity — a repo rename does not
+re-derive `gold.events_enriched.current_repo_name` on already-written rows through any
+tracked technique. `gold.repo_dim` is a clockless upstream model (no `timeseries:`), and
+`gold.events_enriched` is `grain: partition`; the only route open to a clockless
+upstream (`append_model_edge_cells`'s key-addressed route) needs the *downstream's own*
+declared `unique_key` to scope the recompute, and a `grain: partition` output has none by
+construction. `smelt explain gold.events_enriched --json` shows the resulting
+`RepairKeysNotDiscoverable` refusal rather than an `UpstreamMutation(gold.repo_dim)` cell —
+characterised by `events_enriched_dimension_mutation_cell_technique` in
+`crates/smelt-cli/tests/github_activity_replay.rs`. This is a criterion-8 finding for
+`docs/outcomes/20260906-bigquery-correctness`, not fixed in this pipeline.
+
+## The typed silver fan-out
+
+`silver.push_events`, `silver.pr_events`, `silver.issue_events` and `silver.star_events`
+extract typed fields out of `payload` — the raw JSON string `sample.sql` projects
+verbatim — for GitHub's four commonest event types. Each is a plain `WHERE type = `
+filter over `silver.events_deduped` (Form A relative to it: `event_date` is a passthrough
+of the exact column that model already computes), so none of the four needs a window
+function or `safety_overrides`. `silver.events_deduped` itself grew a `payload` column
+(folded under the same `MIN` every other column already uses — a redelivered duplicate is
+byte-identical, so it converges the same way) purely so the fan-out has one deduped
+relation to read instead of re-deriving dedup itself.
+
+Extraction uses `JSON_EXTRACT_TEXT`, the function-registry's canonical name
+(`crates/smelt-types/src/signatures/builtins/remaining.rs`): it emits as
+`JSON_EXTRACT_STRING` on DuckDB, `GET_JSON_OBJECT` on Spark and `JSON_VALUE` on BigQuery,
+and returns `Text` on every dialect, so a numeric field (`push_id`, `pr_number`,
+`pr_id`, `issue_number`) is `CAST` to its real type explicitly rather than inferred from
+the JSON. The field lists are deliberately small — each model exists to prove typed
+extraction from JSON works end to end, not to mirror the whole GitHub payload schema —
+and every field was confirmed present at 100% across its event type by probing the fixture
+directly (`duckdb ... json_keys(payload)`) rather than assumed from GitHub's public schema
+docs, which this trimmed BigQuery Archive payload does not fully match (no `commits` array
+on `PushEvent`, no `title`/`user`/`merged` on `pull_request`, for example).
+
+## Gold and marts
+
+`crates/smelt-cli/tests/github_activity_oracle.rs` compares every materialised relation
+between the incremental replay and a full-refresh oracle over the identical loaded rows —
+row-for-row, not by row count, and via a comparator that discovers the relation set from
+the databases themselves rather than a hardcoded model list. This pipeline originally
+surfaced four measured root causes, each traced to a real smelt defect rather than a
+fixture artifact, all now fixed by `docs/outcomes/20260906-bigquery-correctness` — the
+two legs compare exactly equal on every relation and `DIVERGENCE_REGISTRY` is empty:
+
+- `silver.repo_naming` / `silver.actor_naming` — a redelivered duplicate or same-second tie
+  folded to one presented row on the incremental leg but survived on the full-refresh leg.
+  Fixed by folding `emit_succession_full_rebuild`'s presented rebuild on `(key_cols,
+  clock_col)`, the same addressing the incremental patch loop's `MERGE ... ON` clause uses.
+- `gold.events_enriched` — a renamed repo never refreshed `current_repo_name` on
+  already-written rows through any tracked technique; the stale-row count only grew.
+  Fixed by a new enrichment-keyed maintenance route addressed by the join key the
+  downstream itself carries, dispatched once per run over the model's unwindowed output.
+- `silver.actor_sessions` — `compute_calendar_windows` rebased a Form-B partition column's
+  forward reach only at the two outer edges of a single multi-day invocation, never at an
+  interior chunk boundary, so **the full-refresh oracle itself under-counted** a
+  cross-midnight session inside a wide `--full-refresh`. Fixed by folding the skew into
+  every interior chunk's own source-scan pushdown.
+- `marts.daily_active_contributors` — this Form-A downstream of `silver.actor_sessions` has
+  no rebase of its own and never revisited an already-written partition, so it never
+  learned when its upstream's own (correct) Form-B rebase rewrote an earlier partition;
+  `total_events` froze at first-write time. Fixed by widening a model's run window to cover
+  the derived output window of every upstream maintained model selected in the same
+  invocation (`docs/specs/model_transforms.md` §Semantics "The derived output window
+  propagates within a run.").
+
+The comparator, discovery, and registry-liveness machinery are exercised and green
+(`oracle_comparison_covers_every_materialised_relation`, `an_unregistered_divergence_fails`,
+`succession_divergence_is_exactly_tied_row_multiplicity`, `registry_entries_are_all_live`).
+The centrepiece test, `every_window_matches_the_full_refresh_oracle`, checks after **every**
+one of the 30 incremental windows (measured at ~110s for the full sweep, well under the
+5-minute budget) and is green.
+
+The full writeup of these findings is banked at
+`docs/handoffs/2026-09-08-github-activity-findings.md`, and it is complete: the offline half
+(the four root causes and the requirements handed to the two downstream feature outcomes)
+plus the live-BigQuery half — every compile refusal, runtime failure and cross-target
+comparison the runs against `smelt-bq-test-20260816.smelt_dogfood` surfaced, with the model
+and statement behind each, and the punch-list they hand on.
+
+Both targets ran the fixture's thirty windows over one shared population: fourteen relations
+byte-equal between targets at the final window, and byte-equal to their own full refresh
+there. Two models — `silver.actor_sessions` and its downstream
+`marts.daily_active_contributors` — are refused at compile time on GoogleSQL over an
+INTERVAL `RANGE` lookback frame and run on DuckDB only.

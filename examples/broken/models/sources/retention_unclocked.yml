@@ -1,0 +1,6 @@
+description: retention is declared without timeseries, so it has no clock to compare against.
+columns:
+  - name: id
+    type: BIGINT
+    nullable: false
+retention: '45 days'

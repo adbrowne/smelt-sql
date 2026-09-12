@@ -685,6 +685,7 @@ fn print_checked_for(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     ctx: PrintContext,
     type_ctx: Option<&TypeContext>,
+    expanded: Option<&smelt_parser::syntax_kind::SyntaxNode>,
 ) -> Result<String> {
     // Settle every `Emission::Conditional` entry on the source CST *before*
     // printing — the printer holds no type context and cannot resolve an arm
@@ -703,6 +704,26 @@ fn print_checked_for(
     let settled = smelt_dialect::settle_emissions(syntax, *dialect, type_of);
 
     let mut refused = smelt_dialect::unsupported_emissions(syntax, *dialect, type_of);
+
+    // A `smelt.define` call is opaque in the model's own CST — the printer
+    // inlines the body — so a refused construct declared inside a function body
+    // is invisible to the walk above unless the caller also hands in the
+    // **expanded source** tree (`multi_backend.md` §"Refusal covers function
+    // bodies"). Still smelt SQL, pre-lowering: not a re-parse of printed output.
+    // Types are deliberately unresolved against it (the `TypeContext` belongs to
+    // the other tree), so every conditional lands on its `otherwise` arm — the
+    // documented fail-safe direction. Deduplicated by (name, reason): the
+    // model-tree occurrence is the one whose span points at the user's file.
+    if let Some(expanded) = expanded {
+        for refusal in smelt_dialect::unsupported_emissions(expanded, *dialect, |_| None) {
+            if !refused
+                .iter()
+                .any(|seen| seen.name == refusal.name && seen.reason == refusal.reason)
+            {
+                refused.push(refusal);
+            }
+        }
+    }
 
     let plans = match smelt_dialect::plan_restructure(syntax, *dialect) {
         Ok(plans) => plans,
@@ -1672,7 +1693,20 @@ impl SqlCompiler {
         // §"Operand-conditional verdicts").
         let type_ctx =
             File::cast(syntax.clone()).map(|file| self.build_projection_type_context(&file));
-        print_checked_for(&self.dialect, syntax, ctx, type_ctx.as_ref())
+        // The expanded-source tree, so a refused construct declared inside a
+        // `smelt.define` body is caught rather than printed. Identity (and
+        // skipped) when the project declares no functions.
+        let source_text = syntax.text().to_string();
+        let expanded_text = self.expand_function_calls(&source_text);
+        let expanded_parse =
+            (expanded_text != source_text).then(|| smelt_parser::parse(&expanded_text).syntax());
+        print_checked_for(
+            &self.dialect,
+            syntax,
+            ctx,
+            type_ctx.as_ref(),
+            expanded_parse.as_ref(),
+        )
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -2158,8 +2192,10 @@ impl EphemeralResolver {
         };
         // No upstream `TypeContext` is available on this lighter ephemeral
         // compile path; every conditional entry settles from arity alone,
-        // same as the printer's own lookup-miss fallback.
-        let compiled = print_checked_for(dialect, &parse.syntax(), ctx, None)?;
+        // same as the printer's own lookup-miss fallback. This path has no
+        // `FnBodyMap` either (`smelt_fn: None` above — a `smelt.define` call
+        // cannot appear here), so there is no expanded tree to check.
+        let compiled = print_checked_for(dialect, &parse.syntax(), ctx, None, None)?;
 
         // Check for internal CTEs by parsing the compiled output
         let file = File::cast(parse.syntax());

@@ -34,6 +34,17 @@ pub enum DiagnosticCode {
     YamlParseError,
     SourceTypeError,
     MalformedSource,
+    /// An `external_step:` block violates the shape rules in
+    /// `docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)": `produces:` absent or empty; an entry that does not resolve
+    /// to a declared source; `columns:` present alongside `external_step:`;
+    /// a malformed `command:`; an unparseable `cadence:`. Anchored at the
+    /// offending `.yml` (whole-file, offset 0).
+    MalformedExternalStep,
+    /// Two declared external steps name the same source in their
+    /// `produces:` list (`sources.md` §"A source has at most one producing
+    /// step"). Anchored at the later-sorted (second-seen) step's `.yml`.
+    SourceProducerConflict,
     AmbiguousColumn,
     UnknownCastType,
     UnrecognizedFunction,
@@ -901,6 +912,15 @@ pub enum DiagnosticCode {
     /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
     /// start.
     MaintenanceScanUnbounded,
+    /// Emitted (Error) when the repair family's affected-key obligation (P7,
+    /// `model_properties.md` §"Affected-key discovery") could not resolve a
+    /// finite key set for a source's delta over an upstream maintained-model
+    /// edge — no key-addressed route admits, and the enrichment-keyed route
+    /// either found no eligible column group, an unbounded scan with no
+    /// declared `allow_full_scan`, or a join key the downstream does not
+    /// itself project (`docs/specs/incremental_models.md` §"Upstream model
+    /// edges"). Anchored at the model SQL body start.
+    MaintenanceRepairKeysNotDiscoverable,
     /// Emitted (Error) when a model's definition-change `Trigger::
     /// ColumnAdded` names a column that occupies a row-membership/identity
     /// (skeleton) position — a grain change, never a column backfill
@@ -1121,6 +1141,24 @@ pub enum DiagnosticCode {
     /// `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY`, or `LIMIT` on the
     /// scope, or a model resembling no admitted grain.
     SuccessionPatternUnrecognized,
+
+    /// Emitted (Error) when a model's derived required reach into a
+    /// declared-`retention:` source is proven to exceed the source's
+    /// retained bound (`docs/specs/model_properties.md` §"Reach versus
+    /// retained history", `docs/specs/sources.md` §Semantics 5 "Retention
+    /// refusal") — a recompute reaching past the retained bound would
+    /// silently rebuild from partial input. Names the source, the required
+    /// reach, and the retained bound. Anchored at the model SQL body start.
+    SourceRetentionExceeded,
+    /// Emitted (Warning) when a model's derived required reach into a
+    /// declared-`retention:` source could not be *proven* to fit inside the
+    /// bound (an unbounded or otherwise underivable reach,
+    /// `docs/specs/model_properties.md` §"Reach versus retained history"'s
+    /// `UnprovableWithin` verdict) — admitted, but the model's pre-bound
+    /// region stops being claimed replayable. Names the source, the
+    /// retained bound, and why the reach was unprovable. Anchored at the
+    /// model SQL body start.
+    SourceRetentionDowngraded,
 }
 
 /// Structured metadata attached to diagnostics for code actions

@@ -96,7 +96,7 @@ S_PHASE_BLOCKED="<<PHASE_BLOCKED>>"
 S_OUTCOME_COMPLETE="<<OUTCOME_COMPLETE>>"
 S_OUTCOME_BLOCKED="<<OUTCOME_BLOCKED>>"
 
-cd "${REPO_ROOT}"
+cd "${REPO_ROOT}" || exit 1
 
 outcome_dir() {
   # .claude/outcome-backlog holds ordered outcome directories, one per
@@ -135,6 +135,7 @@ echo "===== Outcome loop starting ====="
 echo "Repo:            ${REPO_ROOT}"
 ACTIVE="$(outcome_dir)" || {
   echo "===== no workable outcome in .claude/outcome-backlog (all done/blocked, or backlog empty/missing) ====="
+  # shellcheck disable=SC2046  # deliberate: the substitution is a LIST of paths for grep
   if grep -lF '**Status:** blocked' $(grep -v '^\s*#' "${SCRIPT_DIR}/../outcome-backlog" 2>/dev/null | sed 's#$#/outcome.md#') >/dev/null 2>&1; then
     exit 2
   fi

@@ -581,6 +581,7 @@ mod tests {
             key_recurrence: None,
             partition_column: None,
             delete_flag_column: None,
+            retention: None,
         }
     }
 

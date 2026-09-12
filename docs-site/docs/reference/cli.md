@@ -1449,6 +1449,34 @@ Inbound edges: sources.raw.events
 Probes (0):
 ```
 
+### `smelt explain <external step>`
+
+When `MODEL_NAME` resolves to a discovered [external step](../guide/external-steps.md) rather
+than a model, `smelt explain` prints that step's report instead of a maintenance plan: the
+source addresses it `produces:`, the literal `command:` argv exactly as declared (unsubstituted
+— `{run_date}`/`{run_end}` placeholders are shown raw, since `explain` has no run window to
+resolve them against), the `cadence:` when declared, the `description:` when declared, the
+models that directly consume a produced source, and a fixed sentence that smelt does not author
+or parse the step's program. `smelt explain` never spawns the step's `command:`.
+
+`--show-sql`, `--period`, and `--technique` are maintenance-plan flags with no meaning for a step
+— each is rejected as a usage error (exit `2`) naming the step and the flag, rather than treated
+as "model not found" or silently ignored. `--select` is ignored when a positional argument is
+given, matching model-report behavior.
+
+With `--json`, `smelt explain <step>` emits one object: `kind: "external_step"`, `address`,
+`produces` (array of source addresses), `command` (argv array, unsubstituted), `cadence` and
+`description` when declared, and `consumed_by` (models reading a produced source). See
+`docs/specs/cli.md` §"`smelt explain <external step>`" for the full schema.
+
+```bash
+# Explain a declared external step
+smelt explain github_loader
+
+# Same, machine-readable
+smelt explain github_loader --json
+```
+
 ---
 
 ## smelt bakeoff

@@ -6,6 +6,7 @@ pub mod diff;
 pub mod docs;
 pub mod explain;
 pub mod explain_diff;
+pub mod explain_external_step;
 pub mod history;
 pub mod init;
 pub mod list;

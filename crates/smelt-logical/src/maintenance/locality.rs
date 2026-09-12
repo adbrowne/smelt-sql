@@ -2086,4 +2086,39 @@ mod tests {
             SettledEmptyVerdict::Dirty
         );
     }
+
+    /// `docs/outcomes/20260906-trimmed-history-sources/phases/09-plan.md`
+    /// test 2 — the phase's own reachability argument claimed "adding
+    /// candidates can only take `Some → None`, never `None → Some`". That
+    /// claim is FALSE for the empty-pool case: a pool with zero clocked
+    /// candidates resolves `None`, and adding exactly one candidate
+    /// resolves it to `Some` — this is exactly the composed-upstream
+    /// scenario row 9 names (a `grain: key` model with zero *declared*
+    /// clocked source refs whose sole clocked candidate is an upstream
+    /// model's composed output). This test pins the counterexample rather
+    /// than the false universal, so phase 9 takes the closure branch
+    /// (task 6) instead of recording leg 3 as proven.
+    #[test]
+    fn adding_a_candidate_to_an_empty_pool_resolves_an_undecided_granularity() {
+        assert_eq!(single_clocked_granularity(Vec::<Granularity>::new()), None);
+        assert_eq!(
+            single_clocked_granularity(vec![Granularity::Day]),
+            Some(Granularity::Day)
+        );
+    }
+
+    /// The direction leg 3 DOES hold: once a pool already has two or more
+    /// candidates (already `None`), adding more candidates can never
+    /// resolve it — `single_clocked_granularity` never un-ambiguates.
+    #[test]
+    fn adding_a_candidate_to_an_already_ambiguous_pool_stays_undecided() {
+        assert_eq!(
+            single_clocked_granularity(vec![Granularity::Day, Granularity::Week]),
+            None
+        );
+        assert_eq!(
+            single_clocked_granularity(vec![Granularity::Day, Granularity::Week, Granularity::Day]),
+            None
+        );
+    }
 }

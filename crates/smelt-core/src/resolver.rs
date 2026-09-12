@@ -40,6 +40,11 @@ pub enum EntityKind {
     },
     /// A standalone `.yml` file (no sibling `.csv`).
     Source,
+    /// A standalone `.yml` file carrying a top-level `external_step:` block —
+    /// an externally-produced source's declared producer
+    /// (`docs/specs/sources.md` §"Externally-produced sources (black-box
+    /// steps)"). Checked before the source/seed-sidecar tiebreaker.
+    ExternalStep,
 }
 
 /// A discovered project entity with its kind and address.
@@ -143,6 +148,21 @@ pub fn classify(
             if stem == "sources" {
                 return None;
             }
+            let text = if let Some(c) = content {
+                c.to_string()
+            } else {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                }
+            };
+            // The `external_step:` discriminator is checked before the
+            // seed-sidecar tiebreaker: a step file producing a source that
+            // happens to share a stem with a `.csv` seed is still a step,
+            // never a sidecar (sources.md §"Externally-produced sources").
+            if looks_like_external_step_yaml(&text) {
+                return Some(EntityKind::ExternalStep);
+            }
             // If a sibling .csv exists (same stem), this is a sidecar — not addressable.
             let has_csv_sibling = sibling_paths.iter().any(|p| {
                 p.extension().and_then(|e| e.to_str()) == Some("csv")
@@ -154,14 +174,6 @@ pub fn classify(
             // Content-sniff: a per-entity source YAML is a top-level mapping
             // with at least one known source-schema key. Arbitrary data YAML
             // files (lists, mappings with domain-specific keys) are NOT sources.
-            let text = if let Some(c) = content {
-                c.to_string()
-            } else {
-                match std::fs::read_to_string(path) {
-                    Ok(s) => s,
-                    Err(_) => return None,
-                }
-            };
             if looks_like_source_yaml(&text) {
                 Some(EntityKind::Source)
             } else {
@@ -241,6 +253,16 @@ fn looks_like_source_yaml(text: &str) -> bool {
     })
 }
 
+/// Return `true` if a YAML file's content carries a top-level
+/// `external_step:` key — the discriminator for an externally-produced
+/// source's declared producer (`docs/specs/sources.md` §"Externally-produced
+/// sources (black-box steps)"). Checked before both the seed-sidecar
+/// tiebreaker and the source content-sniff.
+fn looks_like_external_step_yaml(text: &str) -> bool {
+    text.lines()
+        .any(|line| line == "external_step:" || line.starts_with("external_step:"))
+}
+
 // ---------------------------------------------------------------------------
 // Address-map authority (BUG-002, BUG-021)
 // ---------------------------------------------------------------------------
@@ -254,6 +276,8 @@ pub enum EntityRefKind {
     Seed,
     /// A source YAML file.
     Source,
+    /// An external-step YAML file.
+    ExternalStep,
 }
 
 /// A reference to a discovered workspace entity with enough information to
@@ -297,6 +321,7 @@ pub fn resolve_address_map(
     sql_files: &[ModelFile],
     seeds: &[SeedInfo],
     sources: &[SourceInfo],
+    external_steps: &[crate::external_step::ExternalStepInfo],
 ) -> (HashMap<String, EntityRef>, Vec<AddressCollision>) {
     let mut map: HashMap<String, EntityRef> = HashMap::new();
     let mut collisions: Vec<AddressCollision> = Vec::new();
@@ -356,6 +381,15 @@ pub fn resolve_address_map(
             EntityRefKind::Source,
             source.path.clone(),
             source.address_segments.clone(),
+        );
+    }
+    for step in external_steps {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::ExternalStep,
+            step.path.clone(),
+            step.address_segments.clone(),
         );
     }
 
@@ -704,6 +738,7 @@ mod tests {
         let (_, addr_collisions) = resolve_address_map(
             std::slice::from_ref(&fn_file),
             std::slice::from_ref(&seed),
+            &[],
             &[],
         );
         assert!(

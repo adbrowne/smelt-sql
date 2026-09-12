@@ -1,0 +1,90 @@
+description: >
+  Raw GitHub Archive sample (`sample.sql`), loaded into a day-partitioned
+  table by an external, at-least-once loader (`docs/outcomes/
+  20260906-bigquery-dogfood-spine/outcome.md`). smelt does not author the
+  load; this declaration is the contract the loader is trusted against.
+# Target-aware `name:` override (`docs/specs/sources.md` §"Target-aware
+# `name:` override`). Without this, the default mapping
+# `<target_schema>.<address_segments.join("_")>` would resolve this source
+# to `smelt_dogfood.sources_raw_github_events` on the `bigquery` target, but
+# phase 10's loader landed the physical table at `smelt_dogfood.github_events`
+# (`docs/outcomes/20260906-bigquery-dogfood-spine/phases/10-summary.md`,
+# finding 1). This is a real, first-class smelt mechanism — not a
+# hand-substitution stopgap — so it is the correct fix, not a placeholder for
+# one. `dev` is intentionally absent from the map: it falls back to the
+# default mapping (`main.sources_raw_github_events`), matching the local
+# DuckDB fixture's own table name.
+# `bigquery_oracle` maps to the SAME physical table, deliberately: the
+# full-refresh oracle must read exactly the rows the incremental leg read, and
+# only its outputs belong in its own dataset. Without this entry the default
+# mapping would resolve the source to
+# `smelt_dogfood_oracle.sources_raw_github_events` — a table nothing creates —
+# and the oracle would refresh over zero rows, making the equivalence
+# comparison pass vacuously. Gated by
+# `github_activity_bq_oracle::the_oracle_target_resolves_sources_to_the_shared_tables`.
+name:
+  bigquery: smelt_dogfood.github_events
+  bigquery_oracle: smelt_dogfood.github_events
+mutation_profile:
+  kind: append_only
+  # GitHub Archive publishes hourly shard files; an event minted near an hour
+  # boundary can land in the following hour's file, but the fixture carries
+  # no independent ingestion-time column to measure the real cross-day tail
+  # against (that arrives with `ingested_date` in a later phase). Declared
+  # conservatively pending a live measurement — orchestration-only
+  # (`docs/specs/sources.md` §Semantics: "never a plan input, never widens a
+  # scan"), so a wrong value here cannot affect correctness.
+  lateness: '6 hours'
+  redelivery: at_least_once
+  # The loader's redelivery rule (`sample.sql`-adjacent contract, see
+  # `models/silver/events_deduped.sql`) re-appends a slice of the previous
+  # day's rows byte-identical to the original — same `id`, same `created_at`.
+  # A duplicate pair's event-time distance is therefore always exactly zero;
+  # declared as the exact fact rather than a padded bound; a fixture that
+  # ever produced a wider gap would fail the run loudly
+  # (`KeyedRecurrenceBoundViolated`) rather than silently mis-dedup.
+  key_recurrence:
+    key: [id]
+    window: '0 days'
+unique_key: [id]
+# Matches the loader's own trim (`scripts/bq-dogfood-loader.sh --emit-ddl` /
+# `README.md` declare `partition_expiration_days = 45`) — a rolling bound,
+# not a fixed calendar date (`docs/specs/sources.md` §Semantics 5). Read by
+# the composition walk's retention-reach comparison
+# (`docs/outcomes/20260906-trimmed-history-sources/outcome.md`), but never
+# refused or downgraded by this fixture's own models: the fixture spans 30
+# days, well inside the bound, so its derived reach never approaches it.
+retention: '45 days'
+timeseries:
+  event_time_column: created_at
+  partition_column: created_at
+  granularity: day
+columns:
+  - name: id
+    type: VARCHAR
+    nullable: false
+  - name: type
+    type: VARCHAR
+  - name: created_at
+    type: TIMESTAMP
+    nullable: false
+  - name: actor_id
+    type: BIGINT
+  - name: actor_login
+    type: VARCHAR
+  - name: repo_id
+    type: BIGINT
+  - name: repo_name
+    type: VARCHAR
+  - name: org_id
+    type: BIGINT
+  - name: public
+    type: BOOLEAN
+  - name: payload
+    # Raw JSON string, unparsed (`sample.sql`'s own note on why it's
+    # projected this way). `silver.events_deduped` passes it through
+    # unmodified; the typed fan-out (`push_events`, `pr_events`,
+    # `issue_events`, `star_events`) extracts from it with
+    # `JSON_EXTRACT_TEXT` (`docs/outcomes/20260906-bigquery-dogfood-spine/
+    # outcome.md`).
+    type: VARCHAR

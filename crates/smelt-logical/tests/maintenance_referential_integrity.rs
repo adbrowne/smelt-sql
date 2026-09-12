@@ -178,6 +178,7 @@ fn silver_fact_edge() -> ModelEdge {
         clock_col_aliases: vec![],
         unique_key: vec![],
         output_shape: None,
+        allow_full_scan: false,
     }
 }
 
@@ -261,6 +262,7 @@ fn model_edge_closure_open_when_external_inner_join_unproven() {
         clock_col_aliases: vec![],
         unique_key: vec!["id".to_string()],
         output_shape: None,
+        allow_full_scan: false,
     };
     let mut plan = MaintenancePlan::default();
     append_model_edge_cells(

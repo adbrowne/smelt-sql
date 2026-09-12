@@ -391,6 +391,23 @@ fn consumer_grouping_result(model: &ModelFile, source_infos: &[SourceInfo]) -> G
 /// `classify_keyed_edges` to classify (so both `propagate` and
 /// `required_inputs` share exactly one admission/refusal implementation,
 /// per that module's own composition law).
+/// Every maintained `grain: key` model in `models` that this workspace
+/// admits key temporal locality for, as a `SourceFacts` + declared
+/// `Granularity` candidate keyed by its own canonical address — the SAME
+/// converged fixed-point [`derive_clamp_and_locality`] computes internally,
+/// exposed for the ONE run-time call site with no query-recursion to lean
+/// on: [`crate::execute::retention_admission::derive_model_retention_plan`]
+/// (`docs/outcomes/20260906-trimmed-history-sources/phases/09-plan.md` task
+/// 6). Never re-derive this map independently — `smelt-db`'s
+/// `maintenance_refs/plan.rs` resolves the same candidates recursively via
+/// Salsa; this is the one place `smelt-runtime` resolves them without it.
+pub(crate) fn composed_source_granularities(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+) -> Result<BTreeMap<String, (SourceFacts, Granularity)>> {
+    Ok(derive_clamp_and_locality(models, source_infos)?.composed_sources)
+}
+
 pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) -> Result<Vec<Edge>> {
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();

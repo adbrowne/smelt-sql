@@ -1,0 +1,62 @@
+description: >
+  Arrival-partitioned twin of `raw.github_events` (`docs/outcomes/
+  20260906-bigquery-dogfood-spine/phases/03-plan.md`). Same rows, same loader,
+  same redelivery rule — but landed under a loader-stamped `ingested_date`
+  rather than the event's own `created_at`, so `silver.actor_naming` exercises
+  the arrival-partitioned succession posture from the same pipeline that
+  drives `silver.repo_naming`'s event-time posture. A separate physical
+  relation rather than a second source declaration over
+  `raw.github_events`'s table: two declarations over one relation would key
+  two differently-partitioned fingerprint sidecars onto the same physical
+  table, which is untested and not what this phase exists to test.
+# See `github_events.yml`'s identical note: the `bigquery` target's physical
+# table is `smelt_dogfood.github_events_arrival` (phase 10's loader), not the
+# default-mapped `smelt_dogfood.sources_raw_github_events_arrival`.
+# `bigquery_oracle` maps to the SAME physical table — see the twin's note in
+# `github_events.yml`: the full-refresh oracle reads the shared source and
+# writes only its outputs to its own dataset.
+name:
+  bigquery: smelt_dogfood.github_events_arrival
+  bigquery_oracle: smelt_dogfood.github_events_arrival
+mutation_profile:
+  kind: append_only
+  lateness: '6 hours'
+  redelivery: at_least_once
+  # Copied from `github_events.yml` verbatim (`docs/outcomes/
+  # 20260906-bigquery-dogfood-spine/phases/03-plan.md`): `silver.actor_naming`
+  # is a succession cell, not a keyed grain, so this sub-fact is not consumed
+  # by anything on this source — it is declared for symmetry with the
+  # event-time twin rather than because a route-3 check reads it here.
+  key_recurrence:
+    key: [id]
+    window: '0 days'
+unique_key: [id]
+retention: '45 days'
+timeseries:
+  event_time_column: created_at
+  partition_column: ingested_date
+  granularity: day
+columns:
+  - name: id
+    type: VARCHAR
+    nullable: false
+  - name: type
+    type: VARCHAR
+  - name: created_at
+    type: TIMESTAMP
+    nullable: false
+  - name: actor_id
+    type: BIGINT
+  - name: actor_login
+    type: VARCHAR
+  - name: repo_id
+    type: BIGINT
+  - name: repo_name
+    type: VARCHAR
+  - name: org_id
+    type: BIGINT
+  - name: public
+    type: BOOLEAN
+  - name: ingested_date
+    type: DATE
+    nullable: false

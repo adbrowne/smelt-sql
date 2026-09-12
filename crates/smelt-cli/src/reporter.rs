@@ -133,6 +133,25 @@ impl RunReporter for CliReporter {
     fn run_cancelled(&self, _run_id: &str) {
         eprintln!("smelt: run cancelled");
     }
+
+    fn external_step_started(&self, _run_id: &str, step: &str, argv: &[String]) {
+        if self.verbose {
+            info!("→ step {} ({})", step, argv.join(" "));
+        } else {
+            info!("→ step {}", step);
+        }
+    }
+
+    fn external_step_completed(&self, _run_id: &str, step: &str, duration: Duration) {
+        info!("step {} done ({:?})", step, duration);
+    }
+
+    fn external_step_failed(&self, _run_id: &str, step: &str, exit_code: i32, error: &str) {
+        eprintln!(
+            "smelt: run failed — step '{}' exited with code {}: {}",
+            step, exit_code, error
+        );
+    }
 }
 
 /// Coarse classification of why a model failed, inferred from its recorded

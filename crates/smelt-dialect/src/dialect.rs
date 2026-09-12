@@ -34,6 +34,41 @@ impl SqlDialect {
             SqlDialect::BigQuery => DialectId::BigQuery,
         }
     }
+
+    /// Whether this dialect has the SQL-standard aggregate `FILTER (WHERE …)`
+    /// clause.
+    ///
+    /// A *language* property of the dialect, not of a backend's table format,
+    /// so it is declared here — the single place a dialect's own facts live —
+    /// rather than as a `BackendCapabilities` flag no printer would consult
+    /// (the refusal happens before printing, in
+    /// [`crate::unsupported_emissions`]).
+    ///
+    /// GoogleSQL has no such clause: a live run compiled
+    /// `MAX(x) FILTER (WHERE p)` and BigQuery answered `400 Syntax error:
+    /// Expected ")" but got "("`. DuckDB has it, and Spark SQL has had it
+    /// since 3.0.
+    pub fn supports_aggregate_filter_clause(self) -> bool {
+        match self {
+            SqlDialect::DuckDB | SqlDialect::SparkSQL => true,
+            SqlDialect::BigQuery => false,
+        }
+    }
+
+    /// Whether this dialect's `RANGE` window frames accept an `INTERVAL`
+    /// offset (`RANGE BETWEEN INTERVAL '2 days' PRECEDING`), as opposed to a
+    /// numeric offset over a numeric `ORDER BY` only.
+    ///
+    /// A language property, declared here for the same reason as
+    /// [`Self::supports_aggregate_filter_clause`]. GoogleSQL has only the
+    /// numeric form — a live run got `400 Syntax error: Unexpected keyword
+    /// PRECEDING`. DuckDB and Spark SQL both accept the interval form.
+    pub fn supports_interval_range_frame(self) -> bool {
+        match self {
+            SqlDialect::DuckDB | SqlDialect::SparkSQL => true,
+            SqlDialect::BigQuery => false,
+        }
+    }
 }
 
 /// How a backend spells a null-safe equality comparison — one where two
@@ -313,7 +348,19 @@ impl BackendCapabilities {
             supports_date_literal: true,
             supports_concat_operator: true,
             supports_array_literal: true,
-            supports_transactional_ddl: true,
+            // BigQuery has multi-statement transactions, but they cannot hold
+            // DDL on *permanent* entities: "DDL statements that create or drop
+            // permanent entities, such as datasets, tables, and functions, are
+            // not supported inside transactions" (BigQuery docs,
+            // "Multi-statement transactions"); only `CREATE TEMP TABLE` and
+            // friends are. Every smelt caller of this flag is asking about a
+            // permanent table — a `CREATE TABLE … AS` target or an `ALTER
+            // TABLE` migration — so the honest answer here is `false`. It
+            // gates the maintenance driver's refusal to fold a first-run
+            // `CREATE TABLE … AS` action together with its ledger record
+            // (`smelt_runtime::maintenance_driver`), which would otherwise be
+            // discovered against a live warehouse.
+            supports_transactional_ddl: false,
             // GoogleSQL has no `::` cast operator: `SELECT 1::INT64` is a syntax error.
             supports_double_colon_cast: false,
             supports_trailing_commas: true,

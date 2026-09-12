@@ -15,7 +15,9 @@ use smelt_planner::{analyze_batch_safety, BatchSafety, BoundResult, ModelInfo};
 use smelt_runtime::{CompilerRegistry, EphemeralResolver, SourceBound, TimeRange};
 use std::collections::BTreeMap;
 
+mod retention;
 mod succession;
+pub use retention::{retention_json_rows, write_retention_text, ExplainRetentionJson};
 pub use succession::{
     build_succession_explain_view, SuccessionExplainView, SuccessionJson,
     SuccessionTombstoneLedgerJson,
@@ -28,6 +30,30 @@ pub struct ExplainOutput {
     pub execution_order: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub physical: Option<ExplainPhysical>,
+    /// External steps (`sources.md` §"Externally-produced sources (black-box
+    /// steps)"), keyed by canonical address. Never entries in `models` or
+    /// `execution_order` (`cli.md` §"`smelt explain --json` output schema") —
+    /// a step is not a model, and the run path orders it ahead of its
+    /// consumers structurally, not through that list. Omitted entirely when
+    /// the project declares none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_steps: BTreeMap<String, ExplainExternalStep>,
+}
+
+/// One external step's rendering in the whole-project `smelt explain --json`
+/// output and (as a single value, wrapped with `kind`/`address`) in `smelt
+/// explain <step>`'s own report. `command` is the literal declared argv,
+/// unsubstituted — `explain` never resolves `{run_date}`/`{run_end}` and
+/// never spawns it (`sources.md` §Semantics 12).
+#[derive(Debug, Serialize, Clone)]
+pub struct ExplainExternalStep {
+    pub produces: Vec<String>,
+    pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cadence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub consumers: Vec<String>,
 }
 
 /// Per-model metadata in the explain output.
@@ -862,6 +888,10 @@ pub fn build_maintenance_plan_report(
                             "keyed at the downstream's own grain, projected over the upstream \
                              relation"
                         }
+                        smelt_logical::maintenance::KeyDiscovery::EnrichmentKeyed => {
+                            "value-enrichment merge keyed by the join key the downstream itself \
+                             projects"
+                        }
                     };
                     let _ = writeln!(
                         out,
@@ -1099,6 +1129,13 @@ pub fn build_maintenance_plan_report(
         }
     }
     let _ = writeln!(out);
+
+    // `docs/specs/cli.md` §"Retention reach."
+    write_retention_text(
+        &mut out,
+        &result.plan.retention_reaches,
+        &result.plan.retention_downgrades,
+    );
 
     // Relation Contract (`docs/specs/models.md` §"The Relation Contract"):
     // this model's own clock/identity/derived-grain rows, then one contract
@@ -1360,10 +1397,15 @@ fn build_delete_insert_period_statement_group(
         end: dw.output_end.clone(),
         axis: dw.axis,
     };
+    // `--period` is a single, unbatched window — the whole invocation's own
+    // outer envelope, never an interior chunk — so its scan range equals its
+    // output range exactly (`derive_batch_filtered_sql`'s doc comment: the
+    // clamp is a no-op at the outer edge).
     let filtered_sql = smelt_runtime::derive_batch_filtered_sql(
         &stripped_sql,
         &partition_col,
         &dw.scan_bounds,
+        &run_range,
         &run_range,
         dw.run_start,
         dw.skew,
@@ -1691,6 +1733,9 @@ pub struct ExplainMaintenanceJson {
     /// grain"), absent for a non-succession model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub succession: Option<SuccessionJson>,
+    /// `docs/specs/cli.md` §"Retention reach."
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retention: Vec<ExplainRetentionJson>,
 }
 
 /// A pending definition delta, as reported by `smelt explain --json`
@@ -1771,6 +1816,8 @@ pub fn build_maintenance_plan_json(
     own_output_delta: Option<&smelt_logical::analysis::output_delta::OutputDelta>,
     key_locality: Option<&smelt_logical::maintenance::KeyLocality>,
     succession: Option<&SuccessionExplainView>,
+    retention_reaches: &[smelt_logical::maintenance::RetentionReach],
+    retention_downgrades: &[smelt_logical::maintenance::RetentionDowngrade],
 ) -> ExplainMaintenanceJson {
     let delta_signature =
         delta_signature_headline(own_output_delta, key_locality, &own_contract, succession);
@@ -1874,6 +1921,7 @@ pub fn build_maintenance_plan_json(
         refusals,
         definition_delta,
         succession: succession_json,
+        retention: retention_json_rows(retention_reaches, retention_downgrades),
     }
 }
 
@@ -1890,6 +1938,7 @@ pub fn build_explain_output(
     fn_bodies: &smelt_runtime::FnBodyMap,
     origins: &std::collections::HashMap<String, (String, String)>,
     period: Option<&(String, String)>,
+    steps: &[smelt_core::external_step::ExternalStepInfo],
 ) -> Result<ExplainOutput> {
     let execution_order = graph.execution_order()?;
 
@@ -1962,10 +2011,29 @@ pub fn build_explain_output(
         );
     }
 
+    let external_steps = steps
+        .iter()
+        .map(|step| {
+            let addr = step.address_segments.join(".");
+            let consumers = graph.consumers_of_step(&addr).to_vec();
+            (
+                addr,
+                ExplainExternalStep {
+                    produces: step.produces.clone(),
+                    command: step.command.clone(),
+                    cadence: step.cadence.as_ref().map(|c| c.display.clone()),
+                    description: step.description.clone(),
+                    consumers,
+                },
+            )
+        })
+        .collect();
+
     Ok(ExplainOutput {
         models,
         execution_order,
         physical: None,
+        external_steps,
     })
 }
 
@@ -2271,7 +2339,7 @@ mod tests {
         );
 
         let bs = |fns: &smelt_runtime::FnBodyMap| {
-            build_explain_output(&graph, &config, fns, &HashMap::new(), None)
+            build_explain_output(&graph, &config, fns, &HashMap::new(), None, &[])
                 .unwrap()
                 .models["sessions"]
                 .incremental
@@ -2308,7 +2376,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         assert_eq!(output.execution_order.len(), 2);
         assert_eq!(output.execution_order[0], "orders");
@@ -2362,7 +2431,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         let daily = &output.models["daily_revenue"];
         assert_eq!(daily.materialization, Materialization::Table);
@@ -2381,7 +2451,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
 
         assert!(json.contains("\"models\""));
@@ -2404,7 +2475,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")
@@ -2439,7 +2511,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         let model_entry = &output.models["device_stats"];
 
@@ -2491,7 +2564,8 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None, &[])
+                .unwrap();
 
         let model_entry = &output.models["orders"];
         assert_eq!(

@@ -105,6 +105,7 @@ fn request_with_rebuild(start: &str, end: &str, rebuild: bool) -> ExecuteRequest
         retry_backoff_ms: Some(0),
         resume: false,
         technique_overrides: vec![],
+        invoke_external_steps: true,
     }
 }
 

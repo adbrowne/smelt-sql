@@ -18,10 +18,13 @@
 
 mod backend;
 mod bootstrap;
+mod enrichment_heal;
+mod external_steps;
 mod key_addressed;
 mod outcome;
 mod plan;
 mod project;
+mod retention_admission;
 mod retry;
 mod sink;
 mod sources;

@@ -359,6 +359,19 @@ pub enum SourceError {
         referential_integrity: Vec<String>,
         unique_key: Vec<String>,
     },
+
+    #[error(
+        "`retention: '{value}'` is not a parseable interval — expected a format like '45 days', '1 hour'"
+    )]
+    RetentionUnparseable { value: String },
+
+    #[error("`retention: '{value}'` is zero-length — a zero-length retention bound is inert")]
+    RetentionZero { value: String },
+
+    #[error(
+        "`retention: '{value}'` is declared without `timeseries:` — a retention bound with no clock has no reach to compare it against; declare `timeseries:` or remove `retention:`"
+    )]
+    RetentionWithoutTimeseries { value: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -411,9 +424,12 @@ struct RawSourceYaml {
     #[serde(default, deserialize_with = "opt_string_or_vec")]
     unique_key: Option<Vec<String>>,
 
-    /// How far back the source can be re-read.
+    /// How far back the source can be re-read. Kept as the raw string here
+    /// so a bad interval is caught by `parse_source_yaml` (naming
+    /// `retention:` and the offending value), not by serde's opaque
+    /// `DataLatency` deserializer.
     #[serde(default)]
-    retention: Option<DataLatency>,
+    retention: Option<String>,
 
     /// Referential-integrity world-fact — single string or list, both
     /// accepted (`sources.md` §"Referential integrity").
@@ -692,6 +708,29 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
 
     let mutation_profile = normalize_mutation_profile(raw.mutation_profile, &raw.source_lateness)?;
 
+    // `retention:` well-formedness (sources.md §"Retention refusal"): a
+    // malformed or inert bound is refused rather than accepted and ignored.
+    let retention = match &raw.retention {
+        None => None,
+        Some(value) => {
+            let latency =
+                DataLatency::parse(value).ok_or_else(|| SourceError::RetentionUnparseable {
+                    value: value.clone(),
+                })?;
+            if latency.seconds == 0 {
+                return Err(SourceError::RetentionZero {
+                    value: value.clone(),
+                });
+            }
+            if raw.timeseries.is_none() {
+                return Err(SourceError::RetentionWithoutTimeseries {
+                    value: value.clone(),
+                });
+            }
+            Some(latency)
+        }
+    };
+
     // Validate the referential_integrity/unique_key subset rule (sources.md
     // §"Diagnostic codes" `MalformedSource`): when both are declared,
     // referential_integrity's columns must be a subset of unique_key's —
@@ -720,7 +759,7 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
             complete_through: w.complete_through,
         }),
         unique_key: raw.unique_key,
-        retention: raw.retention,
+        retention,
         referential_integrity: raw.referential_integrity,
     })
 }

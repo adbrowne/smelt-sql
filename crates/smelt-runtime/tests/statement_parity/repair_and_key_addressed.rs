@@ -550,6 +550,7 @@ async fn key_addressed_model_edge_statements_come_from_the_emitter() {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        invoke_external_steps: true,
     };
 
     // Run 1: creation — nothing to fold yet.
@@ -902,6 +903,7 @@ mutation_profile:
         "customer_max_amount",
         &key,
         &affected_keys_select,
+        MaintenanceDialect::DuckDb,
     );
     let expected = emit_diff_patch(
         "main.customer_max_amount",

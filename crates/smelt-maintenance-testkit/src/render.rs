@@ -229,10 +229,17 @@ pub fn render_oracle_sql(recipe: &ModelRecipe) -> String {
 
 /// The source YAML sidecar (`sources.md` §"Source YAML shape"), declaring the
 /// clocked, `append_only` `events(d, id, val)` source every Phase 1 recipe
-/// stages.
+/// stages. A declared `recipe.source.retention` (phase 8 of
+/// `docs/outcomes/20260906-trimmed-history-sources`) renders as a trailing
+/// top-level `retention: '<n> days'` line; `None` renders nothing, keeping
+/// every prior caller's output byte-identical.
 pub fn render_source_yaml(recipe: &ModelRecipe) -> String {
+    let retention_line = match recipe.source.retention {
+        Some(crate::retention::RetentionDecl { days }) => format!("retention: '{days} days'\n"),
+        None => String::new(),
+    };
     format!(
-        "description: generative-conformance source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+        "description: generative-conformance source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n{retention_line}",
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,

@@ -381,10 +381,17 @@ pub fn derive_model_maintenance_plan(
         &added_columns,
     );
 
-    let mut plan = derive_maintenance_plan_with_referential_integrity(
+    // Reach-versus-retention (`model_properties.md` §"Reach versus retained
+    // history"): built from the same `source_refs` this function already
+    // takes for succession-context resolution, rather than a new parameter —
+    // every one of this function's dozens of existing call sites stays
+    // unaffected by a channel this phase alone introduces.
+    let retentions = build_source_retentions(source_refs);
+    let mut plan = smelt_logical::maintenance::derive::derive_maintenance_plan_with_referential_integrity_and_retentions(
         &inputs,
         &triggers,
         source_referential_integrity,
+        &retentions,
     );
     plan.key_locality = established_key_locality.map(|slice| {
         let bound = smelt_logical::maintenance::locality::settle_bound(&slice);
@@ -476,11 +483,32 @@ pub fn derive_model_maintenance_plan_with_edges(
             .map(|t| t.partition_column.as_str()),
         _ => None,
     };
+    // The enrichment-keyed route (`append_model_edge_cells`'s third,
+    // clockless-`KeyedUpsert` discovery leg) needs each edge's own declared
+    // `allow_full_scan` acceptance — a fact of THIS downstream's own
+    // `maintenance.scan_bounds`, not of the upstream edge itself, so it is
+    // populated here rather than at `ModelEdge` construction time (every
+    // other construction site keeps the fail-closed `false` default).
+    let model_scan_bounds = metadata
+        .maintenance
+        .as_ref()
+        .and_then(|m| m.scan_bounds.as_ref());
+    let model_edges_with_scan_bounds: Vec<smelt_logical::maintenance::derive::ModelEdge> =
+        model_edges
+            .iter()
+            .cloned()
+            .map(|mut edge| {
+                let (allow_full_scan, _require, _on_violation) =
+                    effective_scan_bounds(&edge.name, model_scan_bounds, None);
+                edge.allow_full_scan = allow_full_scan;
+                edge
+            })
+            .collect();
     smelt_logical::maintenance::derive::append_model_edge_cells(
         &mut result.plan,
         sql,
         output_partition_col,
-        model_edges,
+        &model_edges_with_scan_bounds,
         metadata.unique_key.as_deref().unwrap_or(&[]),
         sources,
         source_referential_integrity,

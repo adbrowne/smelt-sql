@@ -1,0 +1,6 @@
+external_step:
+  description: cadence is not a parseable interval.
+  produces:
+    - smelt.sources.step_bad_cadence_target
+  command: ["bash", "scripts/loader.sh"]
+  cadence: "sometimes"

@@ -70,6 +70,18 @@ pub(crate) fn build_model_plans(
 ) -> Result<(Vec<ModelPlan>, usize)> {
     let mut model_plans: Vec<ModelPlan> = Vec::new();
     let mut total_batches: usize = 0;
+    // Derived output window per upstream model built earlier in this same
+    // topologically-ordered loop (`docs/specs/model_transforms.md` §Semantics
+    // "The derived output window propagates within a run."). A model absent
+    // from this map either wasn't selected in this invocation or produced no
+    // incremental batches — contributes nothing to a downstream's widening.
+    let mut upstream_output_windows: HashMap<
+        String,
+        (
+            crate::windowing::PartitionPoint,
+            crate::windowing::PartitionPoint,
+        ),
+    > = HashMap::new();
 
     for model_name in selected {
         let model = graph_lock.get_model(model_name)?;
@@ -129,6 +141,39 @@ pub(crate) fn build_model_plans(
         match (inc_config, axis_and_window) {
             (Some(inc), Some((axis, ts, Some((window_start, window_end))))) => {
                 let ts = ts.clone();
+
+                // Own `smelt.ref()` list, unfiltered — a self-edge (BL7,
+                // `window_independence`) is `refs` containing `model_name`
+                // itself. Computed up front (rather than only just before
+                // `compute_incremental_windows_ordered`) because the output-
+                // window widening below also needs it.
+                let refs: Vec<String> = model
+                    .refs
+                    .iter()
+                    .map(|r| r.smelt_ref.to_path().join("."))
+                    .collect();
+
+                // Widen the requested window to cover every in-run upstream's
+                // derived output window (`docs/specs/model_transforms.md`
+                // §Semantics "The derived output window propagates within a
+                // run."), before the `frozen_horizon` clamp below (which
+                // narrows, never widens).
+                let upstream_windows: Vec<(
+                    crate::windowing::PartitionPoint,
+                    crate::windowing::PartitionPoint,
+                )> = refs
+                    .iter()
+                    .filter_map(|r| upstream_output_windows.get(r).copied())
+                    .collect();
+                let (window_start, window_end) = if upstream_windows.is_empty() {
+                    (window_start, window_end)
+                } else {
+                    crate::windowing::widen_run_window_for_upstream_outputs(
+                        (window_start, window_end),
+                        &upstream_windows,
+                        &ts.granularity,
+                    )
+                };
 
                 // Contract-lattice `frozen_horizon` write-eligibility clamp
                 // (`docs/specs/incremental_models.md` §"Contract relaxations
@@ -221,16 +266,6 @@ pub(crate) fn build_model_plans(
                     })
                     .collect();
 
-                // Own `smelt.ref()` list, unfiltered — a self-edge (BL7,
-                // `window_independence`) is `refs` containing `model_name`
-                // itself, which `model_ref_paths`/`dep_ts` above deliberately
-                // excludes (that map is upstream-*source* timeseries only).
-                let refs: Vec<String> = model
-                    .refs
-                    .iter()
-                    .map(|r| r.smelt_ref.to_path().join("."))
-                    .collect();
-
                 let inc_windows = compute_incremental_windows_ordered(
                     model_name,
                     &refs,
@@ -258,6 +293,14 @@ pub(crate) fn build_model_plans(
 
                 if let Some(ref warning) = inc_windows.wide_batch_warning {
                     warn!("model '{model_name}': {warning}");
+                }
+
+                // Record this model's own derived output window for any
+                // downstream model later in this same topologically-ordered
+                // loop (`docs/specs/model_transforms.md` §Semantics "The
+                // derived output window propagates within a run.").
+                if let Some(output_window) = inc_windows.output_window() {
+                    upstream_output_windows.insert(model_name.clone(), output_window);
                 }
 
                 let batches = inc_windows.batches;

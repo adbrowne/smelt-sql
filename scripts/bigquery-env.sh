@@ -1,3 +1,4 @@
+# shellcheck shell=bash  # sourced, not executed — no shebang by design
 # bigquery-env.sh — source this (`source scripts/bigquery-env.sh`) to point
 # smelt's BigQuery integration tests at your provisioned GCP project.
 #

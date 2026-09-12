@@ -1,6 +1,11 @@
 [tools]
 rust = "1.95"
 node = "24"
+# shellcheck backs the shell-lint gate in verify-phase.sh. Unlike the Cloud SDK
+# (a task, not a tool, because 200MB in seven CI jobs that never use it is
+# waste), this is ~1MB and every job that runs the gate needs it — so a
+# [tools] pin is right and the gate can fail rather than skip green.
+shellcheck = "0.11"
 
 [env]
 # DUCKDB_LIB_DIR mirrors the manual setup snippet in CLAUDE.md's "Build and
@@ -23,6 +28,24 @@ LD_LIBRARY_PATH = "{{ env.DUCKDB_LIB_DIR }}:{{ env.LD_LIBRARY_PATH | default(val
 # .mise.local.toml, or per-command with `CARGO_BUILD_JOBS=32 cargo test`.
 CARGO_BUILD_JOBS = "12"
 
+# The Cloud SDK's bin directory, for the BigQuery paths. Resolved the same way
+# DUCKDB_LIB_DIR is: prefer whatever is already on PATH, else the locations
+# `mise run setup-gcloud` installs to. Empty (not installed) is tolerated — the
+# scripts that need it fail with their own clear message. When nothing is
+# installed the resolver prints the not-yet-existent install location rather
+# than an empty string, because an empty PATH entry means the current
+# directory.
+#
+# It goes on PATH rather than being consumed as a variable because `bq` shells
+# out to `gcloud` BY NAME: an absolute path to `bq` alone fails.
+# `_.path` is mise's mechanism for this; a bare `PATH =` key is silently
+# ignored (measured — gcloud stayed unresolvable under `mise exec`).
+_.path = "{{ exec(command='bash scripts/mise-gcloud-bin-dir.sh') }}"
+
+[tasks.setup-gcloud]
+description = "Install the Google Cloud SDK (gcloud, bq) into ~/.local if not already present"
+run = "bash scripts/mise-setup-gcloud.sh"
+
 [tasks.setup-duckdb]
 description = "Install the DuckDB shared library (v1.5.4) into ~/.local/lib/duckdb if not already present"
 run = "bash scripts/mise-setup-duckdb.sh"
@@ -34,6 +57,10 @@ run = "bash .claude/scripts/verify-phase.sh"
 [tasks.verify-fast]
 description = "verify, skipping the full cargo test run"
 run = "bash .claude/scripts/verify-phase.sh --fast"
+
+[tasks.shellcheck]
+description = "Shell lint gate (scripts/ and .claude/scripts/, warning severity)"
+run = "bash .claude/scripts/shellcheck-gate.sh"
 
 [tasks.clippy]
 description = "Clippy gate (both CI feature sets)"

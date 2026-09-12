@@ -2,9 +2,38 @@
 # One outcome directory per non-comment line, priority order. The loop works
 # the first entry whose outcome.md **Status:** is neither `done` nor `blocked`,
 # then advances to the next. Scaffold + append via /smelt:outcome.
-#
-# Order below follows docs/research/20260904-incremental-state-review.md
-# §"Recommended next sequence" (hygiene first, state-residency as the blocker).
+
+# --- active ---
+# The BigQuery dogfood spine (docs/research/20260906-bigquery-dogfood.md).
+# Split driver, unlike the rest of this file: phases 2-5 build and trust the
+# whole pipeline on DuckDB with no warehouse and no credentials, so a headless
+# loop can grind them. Phases 6-12 provision cloud resources and run live
+# BigQuery, which it cannot — phase 6 must emit <<PHASE_BLOCKED>> rather than
+# attempt it, and the loop then advances to the entries below.
+docs/outcomes/20260906-bigquery-dogfood-spine
+
+# Each of the three below can be ground unattended, but depends on evidence the
+# spine produces:
+#   bigquery-correctness      phase 1 is unconditional and runnable today; phase 2
+#                             onwards is rewritten from the spine's findings handoff.
+#   external-dag-steps        phase 1 is a spec decision; the rest waits on the spine's
+#   trimmed-history-sources   real loader and its retention bound.
+# A phase needing live BigQuery or the spine's handoff must emit <<PHASE_BLOCKED>>
+# rather than skip green.
+docs/outcomes/20260906-bigquery-correctness
+docs/outcomes/20260906-trimmed-history-sources
+
+# --- human-gated, deliberately not listed ---
+# docs/outcomes/20260906-bigquery-unattended — Cloud Run Job, Scheduler, workload
+#   identity and log routing; nothing in it is executable without a provisioned
+#   project, so it never enters this file.
+# docs/outcomes/20260905-property-diff — all 8 phases done, but parked `active`
+#   awaiting a controller ruling on criterion 7's unimplemented lens action
+#   (ruling R6). Not loop work; see its phases/08-summary.md.
+
+# --- done ---
+docs/outcomes/20260906-external-dag-steps
+docs/outcomes/20260906-scd2-keyed-succession
 docs/outcomes/20260904-programme-hygiene
 docs/outcomes/20260904-state-residency
 docs/outcomes/20260904-walk-migration-residue
@@ -12,7 +41,6 @@ docs/outcomes/20260904-delta-signature-front-door
 docs/outcomes/20260904-decided-gap-residue
 docs/outcomes/20260904-ratchet-paydown
 docs/outcomes/20260904-dialect-emission-vocabulary
-# --- done / blocked ---
 docs/outcomes/20260904-decision-residue
 docs/outcomes/20260815-definition-delta-migrate
 docs/outcomes/20260815-keyed-grain-residue
@@ -24,8 +52,3 @@ docs/outcomes/20260809-probe-backed-facts
 docs/outcomes/20260809-output-delta-typing
 docs/outcomes/20260809-contract-lattice-v1
 docs/outcomes/20260809-incremental-spec-redraft
-# --- queued feature work (runs after every entry above is done/blocked) ---
-# Listed after the done section so this line merges cleanly against the
-# hygiene loop branch's own edits to the section above. Depends only on
-# state-residency (done); promote by moving the line up once that branch lands.
-docs/outcomes/20260906-scd2-keyed-succession

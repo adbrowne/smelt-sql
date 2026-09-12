@@ -58,6 +58,7 @@ fn observed_delta_predicate_matches_suppressed_merge_guard_byte_for_byte() {
         "SELECT * FROM main.sources_users",
         &compared_columns,
         None,
+        MaintenanceDialect::DuckDb,
     );
     assert!(
         changed_keys_query.contains(&record_sql),
@@ -107,6 +108,7 @@ fn keyed_fold_changed_key_select_matches_the_merge_guard() {
         &compared_columns,
         &folds,
         None,
+        MaintenanceDialect::DuckDb,
     );
     assert!(
         changed_keys_query.contains(&record_predicate),
