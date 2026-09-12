@@ -25,44 +25,57 @@ owners: [andrew]
 
 ## Surface
 
-- **Backends.** A target's `type:` selects a backend (`duckdb` | `spark` | `bigquery`; see
-  `smelt_yml.md` §"Target shape"). Each backend declares a `SqlDialect` (`DuckDB` | `SparkSQL` |
-  `BigQuery`) and a `BackendCapabilities` value. A `bigquery` target names a
-  `project`, `dataset`, and `location` in place of DuckDB's `database` or Spark's `connect_url`.
+- **Backends.** A target's `type:` selects a backend (`duckdb` | `spark` | `bigquery` |
+  `databricks`; see `smelt_yml.md` §"Target shape"). Each backend declares a `SqlDialect`
+  (`DuckDB` | `SparkSQL` | `BigQuery`) and a `BackendCapabilities` value. A `bigquery` target
+  names a `project`, `dataset`, and `location` in place of DuckDB's `database` or Spark's
+  `connect_url`. A `databricks` target declares `SqlDialect::SparkSQL` and
+  `BackendCapabilities::databricks()`, and names `host`, `catalog`, and `schema` in place of
+  Spark's `connect_url`/`warehouse` — it shares Spark's dialect (both compile to Spark SQL)
+  while carrying its own capability profile and connection shape (§"Why Databricks is a
+  distinct target type").
 - **Capability matrix.** `BackendCapabilities` is the single declared description of what a
   backend's SQL surface supports. Backends differ **only** in (a) their capability flags and
   (b) the dialect-specific physical SQL the printer emits; they do **not** differ in which
   smelt models a user may write. The flags are:
 
-  | Flag | DuckDB | Spark (Delta) | Spark (Parquet) | BigQuery |
-  |------|:------:|:-------------:|:---------------:|:--------:|
-  | `supports_qualify` | ✓ | ✗ | ✗ | ✓ |
-  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ | ✓ |
-  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ | ✓ |
-  | `supports_merge` | ✓ | ✓ | ✗ | ✓ |
-  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ |
-  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ | ✓ |
-  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ | ✓ |
-  | `supports_pivot` | ✓ | ✓ | ✓ | ✓ |
-  | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ |
-  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ |
-  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ | ✓ |
-  | `supports_transactional_ddl` | ✓ | ✗ | ✗ | ✓ |
-  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ |
-  | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ |
-  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) |
-  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✓ |
-  | `supports_retraction` | ✗ | ✗ | ✗ | ✗ |
-  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ |
-  | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ |
-  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ | ✓ |
-  | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ |
-  | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ |
-  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ |
-  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ |
-  | `supports_fingerprint_sidecar` (delta-restriction admission over an external `mutable_snapshot` source's synthesized fingerprint diff) | ✓ | ✗ | ✗ | ✗ |
-  | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ |
-  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` |
+  | Flag | DuckDB | Spark (Delta) | Spark (Parquet) | BigQuery | Databricks |
+  |------|:------:|:-------------:|:---------------:|:--------:|:----------:|
+  | `supports_qualify` | ✓ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_merge` | ✓ | ✓ | ✗ | ✓ | ✓ |
+  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ | ✓ |
+  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ | ✓ | ✓ |
+  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_pivot` | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_transactional_ddl` | ✓ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) | ✓ |
+  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_retraction` | ✗ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ |
+  | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ |
+  | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ | ✓ |
+  | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ | ✓ |
+  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ | ✗ |
+  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_fingerprint_sidecar` (delta-restriction admission over an external `mutable_snapshot` source's synthesized fingerprint diff) | ✓ | ✗ | ✗ | ✗ | ✗ |
+  | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` | `<=>` |
+
+  The Databricks column equals the Spark (Delta) column in every flag except
+  `null_safe_equality`, which follows Spark SQL's own `<=>` spelling rather than DuckDB's
+  `IS NOT DISTINCT FROM` — Databricks and Spark share a SQL dialect. `supports_native_ivm` is
+  `✗` because the flag states what smelt itself emits, and smelt emits no Enzyme statements;
+  Databricks' native incremental-view-maintenance engine is unmodelled (§Known Divergences).
+  These cells are inherited from the Spark (Delta) profile and not yet each independently
+  executed against a live Databricks workspace (§Known Divergences).
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
   constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`,
@@ -91,6 +104,9 @@ owners: [andrew]
   credentials. This is a security property, not a convenience: ambient credentials on a developer
   machine carry that developer's whole cloud identity, so refusing the fallback makes the
   explicitly-supplied token the only route to the warehouse.
+- **`SMELT_DATABRICKS_HOST` / `SMELT_DATABRICKS_TOKEN`.** Databricks integration tests connect
+  to the workspace named by these two variables. When either is unset, Databricks-targeted
+  tests **skip** (not fail), exactly as Spark's and BigQuery's do.
 
 ## Semantics
 
@@ -808,7 +824,10 @@ schema/database and before the first model runs. Selecting a non-existent schema
 the first statement a fresh session issues — on backends whose `setCurrentDatabase`/`USE` hard-
 fails for a missing schema (Spark Connect raises `[SCHEMA_NOT_FOUND]`), that ordering bug blocks
 every model on first run. The flag is `true` for every backend today; the conformance suite
-asserts each constructor sets it and that a first-run model against a fresh schema succeeds.
+asserts each constructor sets it and that a first-run model against a fresh schema succeeds. A
+`databricks` target issues `CREATE SCHEMA IF NOT EXISTS <catalog>.<schema>` against Unity
+Catalog — the catalog-qualified form, since a Unity Catalog schema is always addressed within
+a catalog rather than standing alone.
 
 ### Connection security
 A backend target's connection string may need secrets (an auth token) or TLS parameters that
@@ -830,6 +849,16 @@ separately, and never logs the resolved URL. A `connect_url` holding a literal (
 token is a lint-worthy smell: the secret sits in the committed YAML in plaintext, exactly what
 the interpolation mechanism exists to prevent.
 
+A `databricks` target carries the secret differently: the token is not embedded in a URL at
+all, but read from its own `token` key (`smelt_yml.md` §"Target shape") and handed to the
+Databricks Connect session builder (`DatabricksSession.builder...token(...)`) as a distinct
+argument. Because the key *is* the secret rather than a substring of a larger URL value, a
+literal (non-`${VAR}`) `token` is not a smell but a **hard configuration error** — there is no
+adjacent context in which a literal could be an intentional non-secret value. Whether the
+token came from `${ENV}` interpolation or the ambient-credential fallback (`token` absent), it
+is never written to a log line, a run report, a diagnostic, or an error message: every
+rendering path for a `databricks` target config redacts the field.
+
 ### Loading data into a backend
 Loading external rows into a backend (seeds, test fixtures, an Arrow batch) must not assume the
 backend's process shares the host filesystem. The transfer is performed through the backend's
@@ -839,6 +868,12 @@ read it back (`spark.read.parquet('/tmp/…')`), which fails with `PATH_NOT_FOUN
 containerized or remote Connect server whose JVM cannot see the host path. This is distinct from
 cross-engine *exchange* below, where the shared `warehouse` filesystem is an explicit
 requirement; data **loading** carries no such assumption.
+
+On a `databricks` target this in-memory path is not merely preferred but the only one that can
+work: serverless compute shares no filesystem with the client at all, so there is no host-path
+fallback to reach for even by mistake. Rows load through the session's own `createDataFrame`
+from Arrow, exactly as Spark Connect's does; smelt assumes neither a DBFS root nor a Volume
+mount is available to write through.
 
 ### Cross-engine data exchange
 When a model on backend A references a model pinned to backend B (a cross-backend edge, found
@@ -852,6 +887,12 @@ referenced Spark model to be `materialization: table` and the Spark target to de
 `warehouse` path that is on a filesystem the DuckDB process can also read.
 No explicit copy step exists; Spark writes Parquet, DuckDB reads it natively.
 
+A cross-backend edge into or out of a `databricks` target is **refused with a diagnostic**
+rather than compiled to a `read_parquet()` substitution. The substitution's precondition — a
+`warehouse` path both processes can read — cannot hold for Databricks: a `databricks` target
+has no `warehouse` key at all (it is one of the keys §"Target shape" hard-errors on), and
+serverless compute exposes no host-visible file layout for a DuckDB process to read back.
+
 ### Incremental & schema evolution per backend
 Strategy *resolution* (`incremental_models.md`) and change *classification*
 (`schema_evolution.md`) consult the capability matrix but are specified in those documents.
@@ -862,6 +903,19 @@ resolves nested widening to a table rewrite.
 
 ## Design
 
+- **Why Databricks is a distinct target type.** A Databricks Free Edition workspace is
+  serverless-only, Unity-Catalog-mandatory, and exposes no host-visible warehouse directory —
+  none of which the existing `spark` target models. `type: spark`'s `connect_url` hands a raw
+  `sc://` URL straight to PySpark's `builder.remote()`, which cannot address serverless
+  compute at all; reaching it requires the `databricks-connect` client's `DatabricksSession`
+  builder, a distinct package that conflicts with the plain `pyspark` the local-Spark path
+  pins. Rejected: a `serverless: true` flag on `type: spark`. That would have kept
+  `warehouse:` and `format:` as legal-but-broken keys on a Databricks target — configuration
+  that parses, looks plausible, and silently does nothing (or fails deep in a session builder)
+  because serverless compute has no warehouse path to write and no format choice to make. A
+  distinct `databricks` type turns that gap into a set of hard errors named at config-load time
+  (§"Target shape" refusals) instead of a runtime surprise, and lets the capability profile and
+  connection shape diverge from Spark's without contorting one type to cover two backends.
 - **Capabilities are data, not branches.** Centralizing backend differences in one
   `BackendCapabilities` value (rather than scattering `if dialect == Spark` across the printer)
   keeps the parity contract auditable: the conformance suite can enumerate every flag, and the
@@ -1169,8 +1223,25 @@ resolves nested widening to a table rewrite.
 - **Partition-pruned cross-engine reads.** The `read_parquet()` substitution reads the full
   Parquet glob on every downstream run; partition pruning at the exchange boundary is a
   performance gap, not a correctness one. Deferred.
-- **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
-  Connect but Databricks-specific capability differences are not modelled.
+- **The Databricks capability matrix column is inherited, not independently verified.** The
+  `databricks` target's `BackendCapabilities` column (§Surface capability matrix) is copied
+  from the Spark (Delta) profile with only `null_safe_equality` and `supports_native_ivm`
+  reasoned about directly; each flag has not yet been individually executed against a live
+  Databricks workspace the way the DuckDB/Spark/BigQuery columns have. Tracked by
+  `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`.
+- **No cross-engine exchange for Databricks.** §"Cross-engine data exchange" refuses a
+  cross-backend edge into or out of a `databricks` target outright; a Volumes-based exchange
+  path is a later design, not attempted here.
+- **Databricks has no native-IVM emission.** `supports_native_ivm` is `false` for
+  `databricks()` — smelt emits no Enzyme statements, so `refresh: materialized_view` hard-errors
+  on this backend exactly as it does on DuckDB and both Spark profiles.
+- **The Statement Execution API is not a Databricks connection path.** Databricks Connect
+  (`DatabricksSession`) is the only modelled way to reach a `databricks` target; a SQL-warehouse
+  connection via the Statement Execution API is a separate, unstarted design.
+- **Databricks paid-tier compute shapes are unmodelled.** The `databricks` target is specified
+  against Free Edition's serverless-only, Unity-Catalog-mandatory shape. Classic clusters,
+  instance profiles, and private networking on a paid workspace are out of scope until a
+  concrete need arises.
 - **The `spark_type` divergence ledger.** The ledger in
   `crates/smelt-db/tests/prop_helpers/divergences.rs` (23 entries) has been re-verified entry by
   entry against a live Spark Connect server: every recorded `spark_type` (both `Some` claims and

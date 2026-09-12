@@ -58,17 +58,27 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `type` | string | yes | Backend type — `duckdb`, `spark`, or `bigquery`. |
-| `schema` | string | no | Schema name used for materialised tables/views and target-schema seeds. Defaults to `main` when omitted (matches `architecture.md` §"Default materialization name mapping"). |
+| `type` | string | yes | Backend type — `duckdb`, `spark`, `bigquery`, or `databricks`. |
+| `schema` | string | no | Schema name used for materialised tables/views and target-schema seeds. Defaults to `main` when omitted (matches `architecture.md` §"Default materialization name mapping"). On a `databricks` target this is the Unity Catalog schema, catalog-qualified in emitted SQL by `catalog`. |
 | `database` | string | DuckDB only | Path to the `.duckdb` file (relative to project root). |
 | `connect_url` | string | Spark only | Spark Connect URL (e.g. `sc://localhost:15002`). |
-| `catalog` | string | Spark only | Optional Spark catalog name. |
+| `catalog` | string | Spark and Databricks | Optional Spark catalog name. On a `databricks` target it names the Unity Catalog catalog and defaults to `workspace` when omitted. |
 | `warehouse` | string | Spark only | Base directory for file-based output (Parquet warehouse). |
 | `format` | string | Spark only | `delta` (default) or `parquet`. Affects schema-evolution capabilities. |
 | `project` | string | BigQuery only | GCP project the jobs are billed to and resolved against. |
 | `dataset` | string | BigQuery only | Dataset holding the target's tables — BigQuery's analogue of a schema. Defaults to `schema` when omitted. |
 | `location` | string | BigQuery only | Dataset location (e.g. `US`, `europe-west2`). Must match at query time; a dataset created in one location cannot be queried alongside tables in another. |
 | `settings` | map of string → string | DuckDB only | Connection-time settings applied as `SET key = value` on open. Unknown keys are rejected with an error. Common keys: `memory_limit`, `threads`, `temp_directory`. When `memory_limit` and/or `temp_directory` are absent, smelt supplies conservative defaults (see Semantics §8); any key the user sets is applied verbatim and never overridden. |
+| `host` | string | Databricks only, required | Workspace hostname — no scheme, no trailing slash (e.g. `my-workspace.cloud.databricks.com`). |
+| `token` | string | Databricks only, optional | A `${ENV}` reference to a Databricks personal access token or service-principal secret. A literal (non-`${VAR}`) value is a hard configuration error, not a warning: the value is a whole-workspace credential, and a literal would sit in a checked-in file. When `token` is absent, the session authenticates with the client's **ambient** Databricks credentials — the form a workload running inside the workspace itself takes (no secret in the config at all). |
+
+A `databricks` target hard-errors, naming both the offending key and the backend, on
+`connect_url`, `warehouse`, `format`, `database`, `settings`, `project`, `dataset`, and
+`location` — these keys are never silently ignored. Free Edition serverless compute has no
+host-visible warehouse directory and no format choice, so a silently-dropped `warehouse:`
+would mean a user's file-layout intention was lost rather than rejected. This per-target
+key-placement check is specified for `databricks` only; other target types still tolerate a
+misplaced key from another backend's shape (see §Known Divergences).
 
 ### Model-config shape (per `models.<name>`)
 
@@ -143,6 +153,12 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 
 ## Known Divergences / Open Questions
 
+- **Per-target key-placement checking is Databricks-only.** A `databricks` target hard-errors
+  on a key belonging to another backend's shape (`warehouse`, `format`, `connect_url`,
+  `database`, `settings`, `project`, `dataset`, `location`); no other target type performs
+  this check today, so (say) a `project:` key left over from copy-pasting a BigQuery target
+  into a `spark` block is silently ignored rather than rejected. Extending the check to every
+  target type is open. Tracked by `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`.
 - **Per-declaration probe cadence override is open.** `probes:` sets one project-wide cadence; overriding cadence per declaration (e.g. a cheap functional-dependency probe every run, an expensive bounded-domain probe periodic) is not specified today. Tracked by `docs/outcomes/20260809-probe-backed-facts/outcome.md`.
 - **Fuzzy typo hints.** Unknown top-level keys (including typos of known keys) are warned by name. A future "did you mean …" hint that fuzzy-matches the offending key against the known-key set is open; not implemented today.
 - **Per-key reference drift.** The user-facing reference (`docs-site/docs/reference/smelt-yml.md`) currently documents some fields this spec does not yet cover (`schema_evolution`, `columns`). The reference is ahead of the spec on those keys; when the corresponding feature specs land they will absorb those fields.
