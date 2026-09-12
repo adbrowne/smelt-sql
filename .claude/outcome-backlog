@@ -8,7 +8,7 @@
 # (Databricks Free Edition) over the same rows as DuckDB and BigQuery. Split
 # driver: phases 1-3 and 10 are offline (spec, backend, venv + loader, evidence)
 # and grindable here; phase 4 provisions the workspace and credential (human);
-# phases 5-9 run live Databricks and must emit <<PHASE_BLOCKED>> whenever
+# phases 5-9 and 11 run live Databricks and must emit <<PHASE_BLOCKED>> whenever
 # scripts/dbx-dogfood-env.sh cannot reach the workspace.
 docs/outcomes/20260912-databricks-dogfood-spine
 

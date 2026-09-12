@@ -4,10 +4,10 @@
 **Status:** queued
 **Driver:** split. Phases 1–3 and 10 are loop-grindable (no workspace, no credentials) and this
 outcome sits in `.claude/outcome-backlog` for them. Phase 4 is **human-gated** — it provisions
-the workspace objects and mints the credential. Phases 5–9 run live Databricks and need the
-credential phase 4 produces; a headless loop must emit `<<PHASE_BLOCKED>>` for any of them when
-`scripts/dbx-dogfood-env.sh` cannot reach the workspace, never skip green. Phase 10 harvests
-the *committed* summaries of phases 5–9 and needs no credential of its own.
+the workspace objects and mints the credential. Phases 5–9 and 11 run live Databricks and need
+the credential phase 4 produces; a headless loop must emit `<<PHASE_BLOCKED>>` for any of them
+when `scripts/dbx-dogfood-env.sh` cannot reach the workspace, never skip green. Phase 10
+harvests the *committed* summaries of phases 5–9 and needs no credential of its own.
 **Source:** `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` (the pattern this
 repeats on a third target); `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0,
 D1), §"Sequencing: models first, punch-list second"
@@ -31,7 +31,10 @@ Against that table the pipeline runs a full refresh, then at least three consecu
 incremental windows; every model's output agrees with DuckDB over the same rows, every
 incremental state matches a full-refresh oracle, and every divergence is registered rather
 than tolerated. The defects the live run surfaces are written down as a punch-list rather than
-fixed here.
+fixed here. Finally the pipeline stops depending on this machine at all: a Databricks Job
+with a daily schedule runs the loader task and then `smelt run` **on the platform's own
+compute**, with smelt's run state living in a Unity Catalog Volume, so a day lands and is
+processed with no laptop, no token in flight, and nothing outside the workspace.
 
 Everything that can be built without a workspace is built and tested **first**: the target
 type, the session builder, the pinned client environment and the loader are green offline
@@ -97,6 +100,20 @@ of the models or the tooling.
 10. **Gates green.** `bash .claude/scripts/verify-phase.sh` passes; no ratchet lowered. The
     Spark parity tier is unaffected: `scripts/spark-up.sh` and its `pyspark` venv keep
     working alongside the new `databricks-connect` environment.
+11. **Unattended, fully on the platform.** A Databricks Job, defined as a committed asset
+    (`examples/github_activity/databricks/` — a Databricks Asset Bundle or an equivalent
+    checked-in job spec, deployed by one `scripts/dbx-*.sh` wrapper), runs daily on
+    serverless compute with two tasks in order: the loader lands the next fixture day, then
+    `smelt run` processes it. The smelt binary is a released Linux build fetched onto the
+    task (not compiled there); the `databricks` target inside the job authenticates with the
+    **ambient** session — no token, no `${ENV}` secret — which the spec records as a second,
+    credential-free form of the same target; and the project's `.smelt/` run state (ledger,
+    manifests, run reports) persists across runs on a Unity Catalog Volume, so each daily run
+    is a genuine incremental window over the previous one. Demonstrated, not assumed: at
+    least three consecutive **scheduled** runs (not manually triggered) complete, their run
+    reports are captured from the Volume, and the state they leave matches a full-refresh
+    oracle exactly as criterion 8 checks. The compute budget the schedule consumes is
+    recorded against the Free Edition quotas of criterion 4.
 
 ## Out of scope
 
@@ -112,8 +129,9 @@ of the models or the tooling.
 - **Cross-engine exchange** to or from Databricks. The Spark `read_parquet()` substitution
   assumes a shared warehouse filesystem that Free Edition does not have; Volumes-based
   exchange is a later design.
-- **Unattended scheduling** on Databricks Jobs or Workflows. The BigQuery equivalent is
-  `20260906-bigquery-unattended` and is human-gated for the same reasons.
+- **Orchestration beyond one job.** Criterion 11's job is the whole platform-side surface:
+  no alerting, no log routing to an external sink, no multi-workspace deployment, no
+  Workflows fan-out. Failure notification is the job's own built-in email/UI setting.
 - **Paid-tier features** (classic clusters, instance profiles, private networking). Free
   Edition is the target; a paid workspace is not assumed anywhere.
 - Everything in `docs/research/20260906-bigquery-dogfood.md` §"Out of scope".
@@ -132,6 +150,7 @@ of the models or the tooling.
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised | pending |
+| 11 | **[live]** Package the pipeline as a daily Databricks Job on serverless compute — committed job asset, released smelt binary fetched onto the task, ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
 
@@ -146,6 +165,17 @@ of the models or the tooling.
   "Databricks is not yet a distinct backend" gap. The population is the committed Parquet
   fixture replayed by a loader — GitHub Archive is not reachable from Databricks — which is
   what makes a three-way parity possible.
+- 2026-09-12 (scaffold, addendum): **the pipeline must also run with nothing outside the
+  workspace.** Phase 11 packages `smelt run` as a daily Databricks Job on the platform's own
+  compute. Two consequences shape it. First, the `databricks` target needs a second,
+  credential-free form — inside a Databricks task the session is ambient, and shipping a
+  token into the job would be strictly worse than using it. Second, smelt's run state has to
+  outlive the task's ephemeral filesystem, so the project directory (or at least `.smelt/`)
+  lives on a Unity Catalog Volume; whether a Volume path is fast and consistent enough for
+  the interval ledger is a fact the live phase measures, not assumes. The BigQuery
+  equivalent (`20260906-bigquery-unattended`) stayed human-gated and unlisted; here it is a
+  listed phase because Free Edition has no per-run bill to guard and the job spec is a
+  committed asset the loop can author offline before the human deploys it.
 
 ## Blocked
 
