@@ -2,10 +2,10 @@
 
 **Created:** 2026-09-12
 **Status:** active
-**Driver:** split. Phases 1–3 and 10 are loop-grindable (no workspace, no credentials) and this
-outcome sits in `.claude/outcome-backlog` for them. Phase 4 is **human-gated** — it provisions
-the workspace objects and mints the credential. Phases 5–9 and 11 run live Databricks and need
-the credential phase 4 produces; a headless loop must emit `<<PHASE_BLOCKED>>` for any of them
+**Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
+this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
+the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
+Phases 5–9 and 11 run live Databricks and need the credential phase 4b produces; a headless loop must emit `<<PHASE_BLOCKED>>` for any of them
 when `scripts/dbx-dogfood-env.sh` cannot reach the workspace, never skip green. Phase 10
 harvests the *committed* summaries of phases 5–9 and needs no credential of its own.
 **Source:** `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md` (the pattern this
@@ -156,7 +156,8 @@ of the models or the tooling.
 | 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | done |
 | 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | done |
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | done |
-| 4 | **[human]** Provision: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential encrypted at rest, `scripts/dbx-*.sh` wrappers and settings allow-list, reachability and refusal demonstrated, Free Edition quotas recorded | pending |
+| 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | planned |
+| 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | pending |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
@@ -252,6 +253,18 @@ of the models or the tooling.
   appending, so the loader's `--date D` execute path would overwrite rather than accumulate
   days — phase 5 (first live load) must fix this before trusting a multi-day load. See
   `phases/03-summary.md`.
+
+- 2026-09-12 (plan 4a): **row 4 split into `4a` (offline tooling) and `4b` (the human run).**
+  Phase 3's summary left phase 4 needing four scripts that do not exist yet (`dbx-key.sh`,
+  `dbx-auth.sh`, `dbx-provision.sh`, `dbx-verify.sh`) plus the settings deny/allow split — all
+  of which are authorable and gateable with no workspace, exactly as `bigquery-key.sh` /
+  `bigquery-auth.sh` / `bq-dogfood-provision.sh` were. Only *running* them needs a human with
+  a browser and an account. Splitting keeps the loop productive and shrinks the human gate to
+  "run one wizard and paste two values". No work leaves the outcome: every clause of success
+  criterion 4 now lands in `4a` (the mechanism) or `4b` (the demonstration). The credential
+  choice (service principal + OAuth M2M vs PAT) is deliberately *not* decided in `4a` — the
+  scripts are written credential-agnostic and `4b` records which Free Edition actually permits,
+  because that is an empirical fact about the account, not a design call.
 
 ## Blocked
 
