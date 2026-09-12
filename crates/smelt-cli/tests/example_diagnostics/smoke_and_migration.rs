@@ -41,25 +41,40 @@ fn web_analytics_no_diagnostics() {
     check_workspace_no_diagnostics("examples/web_analytics");
 }
 
-/// `examples/github_activity` deliberately declares both a `dev` (DuckDB) and
-/// a `bigquery` target (`docs/outcomes/20260906-bigquery-dogfood-spine/
-/// phases/11-summary.md`), so a `MaintenanceStateDowngraded` here would be
-/// legitimate rather than a bug — which is exactly what makes the **empty**
-/// diagnostic set the load-bearing claim.
-///
-/// Every state structure this workspace's cells need is now realised on
-/// BigQuery as well as DuckDB (`docs/specs/state.md` §"Which dialects realise
-/// which structure"): the transactional merge ledger, the reconciliation
-/// ledger with its never-fold-twice refusal, the observed-delta record, and —
-/// since this outcome's phase 15 — the tombstone ledger. So the
-/// `ColumnScopedMerge` cell, the `KeyedFold` cell and both `SuccessionPatch`
-/// cells all keep their technique on the `bigquery` target, and the
-/// cross-target comparison weighs one plan on two engines rather than two
-/// plans. A downgrade reappearing here means a dialect row was flipped off,
-/// or an availability claim lost its backing.
+/// `examples/github_activity` declares `dev` (DuckDB), `bigquery` and, since
+/// `docs/outcomes/20260912-databricks-dogfood-spine/phases/06-plan.md`,
+/// `databricks` — and `MaintenanceStateDowngraded` diagnostics are
+/// deliberately computed against the union of every declared target's
+/// backend, not the resolved default
+/// (`crates/smelt-db/src/queries/maintenance/diagnostics.rs`'s own comment:
+/// "Checked against every declared backend... analysis time has no single
+/// declared target"). BigQuery realises every state structure this
+/// workspace's cells need (`docs/specs/state.md` §"Which dialects realise
+/// which structure") — the transactional merge ledger, the reconciliation
+/// ledger, the observed-delta record and the tombstone ledger — so it causes
+/// no downgrade. The `databricks` target maps to the `SparkSQL` dialect
+/// (`crates/smelt-db/src/queries/maintenance/write_pin.rs::
+/// backend_dialect_for`), which realises **none** of those structures
+/// (`crates/smelt-logical/src/maintenance/availability/state_structure.rs`:
+/// Delta's lack of a cross-table transaction), so the four cells that need
+/// one legitimately downgrade to their recompute-family equivalent the
+/// moment `databricks` is declared as a target at all — independent of
+/// whether a Databricks run ever executes. This is the diagnostic doing its
+/// job, not a bug: an *exact* match on these four (not a swallowed "any
+/// diagnostics") still fails loudly on a fifth (a regression) or on one of
+/// the four disappearing (an unnoticed behavior change, e.g. Databricks
+/// gaining ledger support).
 #[test]
 fn github_activity_no_diagnostics() {
-    check_workspace_no_diagnostics("examples/github_activity");
+    check_workspace_diagnostics_are_exactly(
+        "examples/github_activity",
+        &[
+            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } downgraded from SuccessionPatch to its recompute-family equivalent — SuccessionPatch requires the tombstone ledger, which is unavailable for this project; downgraded to DeleteInsert, the cheapest recompute-family technique that preserves the equivalence invariant",
+            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } downgraded from KeyedFold to its recompute-family equivalent — KeyedFold requires the reconciliation ledger (frontier record), which is unavailable for this project; downgraded to PerGroupRecompute, the cheapest recompute-family technique that preserves the equivalence invariant",
+            "MaintenanceStateDowngraded: cell UpstreamMutation { source: \"raw.github_events\" } downgraded from ColumnScopedMerge to its recompute-family equivalent — ColumnScopedMerge requires the transactional merge ledger, which is unavailable for this project; downgraded to PerGroupRecompute, the cheapest recompute-family technique that preserves the equivalence invariant",
+            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events_arrival\" } downgraded from SuccessionPatch to its recompute-family equivalent — SuccessionPatch requires the tombstone ledger, which is unavailable for this project; downgraded to DeleteInsert, the cheapest recompute-family technique that preserves the equivalence invariant",
+        ],
+    );
 }
 
 #[test]

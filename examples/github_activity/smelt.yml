@@ -29,6 +29,19 @@ targets:
     dataset: smelt_dogfood
     location: US
     schema: smelt_dogfood
+  databricks:
+    # The long-lived Databricks Free Edition dogfood schema
+    # (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`), landed
+    # out-of-band by `scripts/dbx-dogfood-loader.sh` (phase 5). This target's
+    # job is to compile+run the model set against it, not to load it. See
+    # `scripts/dbx-dogfood-env.sh` for the credentials this target needs at
+    # runtime. The oracle target (criterion 9) is deliberately NOT declared
+    # here — that is phase 9's, with its own source-name entry.
+    type: databricks
+    host: ${SMELT_DBX_HOST}
+    token: ${SMELT_DBX_TOKEN}
+    catalog: workspace
+    schema: smelt_dogfood
   bigquery_oracle:
     # The full-refresh oracle's own dataset. The equivalence invariant
     # (`docs/specs/incremental_models.md` §"The equivalence invariant") is

@@ -20,6 +20,25 @@ class DatabricksAdapter:
     """Wraps a Databricks Connect `DatabricksSession` for SQL execution with Arrow results."""
 
     def __init__(self, host, catalog=None, token=None):
+        # PyO3's embedded interpreter reaches this venv's site-packages via a
+        # bare PYTHONPATH entry (`scripts/dbx-dogfood-env.sh`), not real venv
+        # activation, so the venv's own `distutils-precedence.pth` (which
+        # shims `import distutils` onto `setuptools._distutils` on Python
+        # 3.12, where stdlib `distutils` no longer exists) is never processed
+        # — `.pth` files only run for directories the `site` module itself
+        # registers, not ones appended via `sys.path`/`PYTHONPATH`.
+        # `databricks-connect` (via `pyspark`) imports `distutils` internally,
+        # so without this the session builder fails outright with
+        # `ModuleNotFoundError: No module named 'distutils'`. A no-op wherever
+        # the shim already ran (real venv activation, an older Python with a
+        # native `distutils`, or no `setuptools` present at all).
+        try:
+            import _distutils_hack
+
+            _distutils_hack.add_shim()
+        except ImportError:
+            pass
+
         from databricks.connect import DatabricksSession
 
         # Stored verbatim so tests can assert the value reaching the builder

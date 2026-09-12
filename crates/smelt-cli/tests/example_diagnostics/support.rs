@@ -194,14 +194,12 @@ pub(crate) fn check_workspace_no_diagnostics(example_dir: &str) {
 /// silently passing or silently accumulating more expected warnings than the
 /// project actually has.
 ///
-/// **Currently unused**, and deliberately kept: every example workspace is
-/// diagnostic-clean again now that BigQuery realises the whole ledger
-/// substrate (`docs/outcomes/20260906-bigquery-correctness` phases 11-15), so
-/// there is no expected-downgrade list left to hold. The moment a workspace
-/// legitimately reacquires one — a new dialect, or a structure with no sound
-/// realisation there — this is the harness that must hold it, rather than
-/// widening `check_workspace_no_diagnostics`.
-#[allow(dead_code)]
+/// Reacquired a caller in `docs/outcomes/20260912-databricks-dogfood-spine/
+/// phases/06-plan.md`: `github_activity` declares a `databricks` target,
+/// which maps to the `SparkSQL` dialect and realises none of the state
+/// structures four of its cells need
+/// (`crates/smelt-logical/src/maintenance/availability/state_structure.rs`),
+/// so those four legitimately downgrade again.
 pub(crate) fn check_workspace_diagnostics_are_exactly(
     example_dir: &str,
     expected_messages: &[&str],

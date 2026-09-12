@@ -160,7 +160,7 @@ of the models or the tooling.
 | 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | blocked |
 | 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | done |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | done |
-| 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | planned |
+| 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -376,6 +376,29 @@ of the models or the tooling.
   `pyarrow`-gated loader tests' CI-hardness question is a note for the same handoff. Phase 6
   keeps its shape; the oracle target and its source-name entry stay with phase 9, which is
   the first phase that reads them.
+
+- 2026-09-12 (phase 6 implement): **row 6 done — first full refresh run, one root-cause
+  finding, two environment fixes made under the "no run completes at all" exception.** Result:
+  1 success (`silver.events_deduped`, 5,915 rows), 3 failed, 12 skipped — every model whose
+  driving source needs an append-only baseline snapshot over `raw.github_events`/
+  `raw.github_events_arrival` fails identically, because `crates/smelt-logical/src/
+  maintenance/emit/fingerprint.rs` hand-spells `sha256(...)` as literal SQL text rather than
+  through the Function-Registry emission path, and Spark/Databricks has no `sha256` routine
+  (only `sha2(expr, bits)`) — recorded, not fixed, as `06-summary.md` finding 1. Two fixes
+  were made because nothing lived without them: `smelt-cli` had no `databricks` Cargo feature
+  at all (added, mirroring `spark`'s shape), and the PyO3-embedded interpreter never runs the
+  Databricks venv's `distutils-precedence.pth` shim since `PYTHONPATH`-appended directories
+  skip `site` module `.pth` processing (fixed with a 6-line `_distutils_hack.add_shim()` in
+  `python/smelt/databricks_adapter.py`, verified against a standalone repro first). A third
+  issue — `scripts/dbx-key.sh` stores the host WITH its `https://` scheme, but the target's
+  `host:` field requires bare — was worked around only in the shell for this phase's live
+  calls, with no committed script or config touched; left as an open reconciliation for
+  phase 10 or later. Declaring the target also reopened `MaintenanceStateDowngraded` (the
+  same four cells BigQuery itself triggered before its own ledger support landed) and broke
+  three offline test files because env-var interpolation is target-blind by spec — both fixed
+  as test-only changes following the BigQuery phase 11 precedent exactly (an expected-messages
+  list restored to use, and dummy `SMELT_DBX_HOST`/`SMELT_DBX_TOKEN` values added at four
+  `smelt`-spawning call sites). Nothing left the outcome; nothing added to `## Out of scope`.
 
 ## Blocked
 

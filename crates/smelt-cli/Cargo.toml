@@ -82,4 +82,9 @@ duckdb = ["smelt-backend-duckdb", "dep:duckdb", "smelt-backends/duckdb"]
 bundled-duckdb = ["smelt-backend-duckdb/bundled", "duckdb/bundled", "smelt-ui/bundled-duckdb", "smelt-backends/bundled-duckdb"]
 spark = ["smelt-backend-spark", "python", "smelt-backends/spark", "smelt-maintenance-testkit/spark"]
 bigquery = ["smelt-backend-bigquery", "python", "smelt-backends/bigquery", "smelt-maintenance-testkit/bigquery"]
+# Same `smelt-backend-spark` crate as `spark` (the `SparkFlavor` discriminator
+# picks the Databricks Connect session builder), gated separately so a build
+# can pull in the Databricks backend without also declaring Spark Connect
+# support (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`).
+databricks = ["smelt-backend-spark", "python", "smelt-backends/databricks"]
 python = ["smelt-planner/python", "smelt-core/python", "pyo3"]
