@@ -161,6 +161,7 @@ of the models or the tooling.
 | 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | done |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | done |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | done |
+| 6b | **[live]** Unblock the Databricks run path so more than one model can complete: make the maintenance fingerprint's hash spelling dialect-dispatched (`sha2(x, 256)` on Spark/Databricks) behind a single owner plus a structural gate, reconcile the bare-host/scheme mismatch between the wizard's `SMELT_DBX_HOST` and the `type: databricks` target contract, then re-run the full refresh to a clean baseline and record what remains | planned |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -168,6 +169,24 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 7 plan): **reshape — inserted row 6b between the full refresh and the
+  incremental windows.** Phase 6's live full refresh completed 1 of 16 models: the maintenance
+  layer's append-only baseline-snapshot fingerprint emits `sha256(...)` as literal,
+  dialect-unaware text (`crates/smelt-logical/src/maintenance/emit/fingerprint.rs`), and
+  Spark/Databricks has no `sha256` function — only `sha2(expr, 256)`. The cause is
+  dialect-invariant, so every subsequent window fails identically and criteria 6, 7 and 8
+  (three windows, dual-target parity per model, the oracle equivalence check per window) would
+  all be vacuous over a single model. This is therefore not a `databricks-correctness` deferral
+  but the outcome's own named exception — "unless the fix is the only way a run completes at
+  all" — and it gets a phase row rather than leaving the outcome. Phase 6b also folds in the
+  `SMELT_DBX_HOST` scheme mismatch phase 6 recorded and worked around in the shell, because
+  three scripted consecutive windows (row 7) and the Asset Bundle (row 11) both need a
+  committed, workaround-free target config. Rows 7-11 are unchanged. Deliberately NOT in 6b:
+  migrating the maintenance layer's hash spelling into `BuiltinRegistry`'s
+  `Signature::emission` table, which is the architectural question phase 6 raised against the
+  Function-registry single-ownership invariant — that is a follow-on outcome's, recorded in
+  row 10's findings handoff.
 
 - 2026-09-12 (phase 5 implement): **row 5 done — two fixture days live in Unity Catalog, and a
   load-blocking Arrow/pandas bug was fixed rather than merely recorded.** Reachability was
