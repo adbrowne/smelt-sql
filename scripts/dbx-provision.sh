@@ -240,17 +240,42 @@ source scripts/dbx-dogfood-env.sh >/dev/null
 
 PROVISION_SQL="$(mktemp)"
 trap 'rm -f "$PROVISION_SQL"' EXIT
-cat > "$PROVISION_SQL" <<SQL
+
+# The GRANT target must be the credential just minted, never a
+# workspace/account-wide group — `account users` grants every user in the
+# account, defeating the point of a scoped credential.
+_dbx_config_dir="${SMELT_DBX_CONFIG_DIR:-$HOME/.config/databricks-smelt-dogfood}"
+if [[ "$CRED_KIND" == "oauth-m2m" ]]; then
+  GRANT_PRINCIPAL="$(grep -E '^SMELT_DBX_CLIENT_ID=' "${_dbx_config_dir}/config.env" | tail -n1 | cut -d= -f2)"
+  [[ -n "$GRANT_PRINCIPAL" ]] || { warn "no SMELT_DBX_CLIENT_ID recorded — cannot scope the grant."; exit 1; }
+  cat > "$PROVISION_SQL" <<SQL
 CREATE SCHEMA IF NOT EXISTS ${CATALOG}.${SCHEMA};
 CREATE SCHEMA IF NOT EXISTS ${CATALOG}.${ORACLE_SCHEMA};
-GRANT USE SCHEMA, CREATE TABLE, SELECT, MODIFY ON SCHEMA ${CATALOG}.${SCHEMA} TO \`account users\`;
-GRANT USE SCHEMA, CREATE TABLE, SELECT, MODIFY ON SCHEMA ${CATALOG}.${ORACLE_SCHEMA} TO \`account users\`;
+GRANT USE SCHEMA, CREATE TABLE, SELECT, MODIFY ON SCHEMA ${CATALOG}.${SCHEMA} TO \`${GRANT_PRINCIPAL}\`;
+GRANT USE SCHEMA, CREATE TABLE, SELECT, MODIFY ON SCHEMA ${CATALOG}.${ORACLE_SCHEMA} TO \`${GRANT_PRINCIPAL}\`;
 SQL
+else
+  say "PAT credential — it already runs as your own user, so no separate GRANT is needed."
+  cat > "$PROVISION_SQL" <<SQL
+CREATE SCHEMA IF NOT EXISTS ${CATALOG}.${SCHEMA};
+CREATE SCHEMA IF NOT EXISTS ${CATALOG}.${ORACLE_SCHEMA};
+SQL
+fi
 note "The wizard's generated SQL (schema-scoped grants only, nothing catalog-wide):"
 cat "$PROVISION_SQL"
+say "Creating the two schemas needs CREATE SCHEMA on catalog ${CATALOG}, which a"
+say "freshly-scoped credential typically does NOT have yet — Free Edition treats"
+say "your own user as workspace admin, so if this fails, run the SQL above"
+say "yourself (as your user, e.g. via the Databricks SQL editor) and re-run this"
+say "stage; the credential only needs the resulting schema-scoped grants, never"
+say "catalog-level rights."
 while IFS= read -r stmt; do
   [[ -n "$stmt" ]] || continue
-  bash scripts/dbx-query.sh "$stmt" >/dev/null
+  if ! bash scripts/dbx-query.sh "$stmt" >/dev/null; then
+    warn "statement failed: $stmt"
+    warn "run the SQL above yourself with an admin-capable credential, then re-run this stage."
+    exit 1
+  fi
 done < <(tr '\n' ' ' < "$PROVISION_SQL" | sed 's/;/\n/g')
 say "schemas created, grants applied"
 pause

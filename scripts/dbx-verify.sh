@@ -8,12 +8,19 @@
 #
 #   1. Reachability — SELECT 1 and SHOW TABLES against BOTH dogfood schemas
 #      (smelt_dogfood, smelt_dogfood_oracle) must succeed.
-#   2. Refusal — a CREATE TABLE outside the two granted schemas
-#      (workspace.default) must FAIL. This leg's exit-status handling is
-#      INVERTED from the reachability leg: the probe command succeeding is
-#      the failure condition here, so a credential scoped too broadly is
-#      caught rather than silently passing
+#   2. Refusal — a CREATE SCHEMA on the catalog itself must FAIL. This leg's
+#      exit-status handling is INVERTED from the reachability leg: the probe
+#      command succeeding is the failure condition here, so a credential
+#      scoped too broadly is caught rather than silently passing
 #      (docs/outcomes/20260912-databricks-dogfood-spine/phases/04a-plan.md).
+#
+#      NOT probed: writing into `workspace.default`. Free Edition grants its
+#      built-in `_workspace_users_...` group CREATE TABLE (and CREATE VOLUME/
+#      MODEL/MATERIALIZED VIEW/FUNCTION) on that schema for every workspace
+#      user and service principal — a platform default, not something this
+#      wizard grants — so a write there always succeeds regardless of how
+#      tightly the credential's own grants are scoped. CREATE SCHEMA on the
+#      catalog is the credential's own scope, unaffected by that default.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
@@ -47,16 +54,16 @@ for schema in "$SCHEMA" "$ORACLE_SCHEMA"; do
 done
 
 echo
-echo "=== Out-of-scope write refusal"
-PROBE_TABLE="smelt_probe_$$"
+echo "=== Out-of-scope refusal"
+PROBE_SCHEMA="smelt_probe_$$"
 # Inverted exit-status handling: success here is the FAILURE condition — the
-# credential must NOT be able to write outside the two granted schemas.
-if query "CREATE TABLE ${CATALOG}.default.${PROBE_TABLE} AS SELECT 1" >/dev/null 2>&1; then
-  bad "UNEXPECTED: wrote to ${CATALOG}.default.${PROBE_TABLE} — the credential is scoped too broadly"
-  query "DROP TABLE IF EXISTS ${CATALOG}.default.${PROBE_TABLE}" >/dev/null 2>&1 || true
+# credential must NOT hold catalog-level CREATE SCHEMA.
+if query "CREATE SCHEMA ${CATALOG}.${PROBE_SCHEMA}" >/dev/null 2>&1; then
+  bad "UNEXPECTED: created ${CATALOG}.${PROBE_SCHEMA} — the credential holds catalog-level rights"
+  query "DROP SCHEMA IF EXISTS ${CATALOG}.${PROBE_SCHEMA} CASCADE" >/dev/null 2>&1 || true
   FAILED=1
 else
-  ok "write to ${CATALOG}.default correctly refused"
+  ok "CREATE SCHEMA on ${CATALOG} correctly refused"
 fi
 
 echo
