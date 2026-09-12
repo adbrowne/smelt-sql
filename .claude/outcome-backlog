@@ -4,24 +4,13 @@
 # then advances to the next. Scaffold + append via /smelt:outcome.
 
 # --- active ---
-# The BigQuery dogfood spine (docs/research/20260906-bigquery-dogfood.md).
-# Split driver, unlike the rest of this file: phases 2-5 build and trust the
-# whole pipeline on DuckDB with no warehouse and no credentials, so a headless
-# loop can grind them. Phases 6-12 provision cloud resources and run live
-# BigQuery, which it cannot — phase 6 must emit <<PHASE_BLOCKED>> rather than
-# attempt it, and the loop then advances to the entries below.
-docs/outcomes/20260906-bigquery-dogfood-spine
-
-# Each of the three below can be ground unattended, but depends on evidence the
-# spine produces:
-#   bigquery-correctness      phase 1 is unconditional and runnable today; phase 2
-#                             onwards is rewritten from the spine's findings handoff.
-#   external-dag-steps        phase 1 is a spec decision; the rest waits on the spine's
-#   trimmed-history-sources   real loader and its retention bound.
-# A phase needing live BigQuery or the spine's handoff must emit <<PHASE_BLOCKED>>
-# rather than skip green.
-docs/outcomes/20260906-bigquery-correctness
-docs/outcomes/20260906-trimmed-history-sources
+# The Databricks dogfood spine: the github_activity pipeline on a third target
+# (Databricks Free Edition) over the same rows as DuckDB and BigQuery. Split
+# driver: phases 1-3 and 10 are offline (spec, backend, venv + loader, evidence)
+# and grindable here; phase 4 provisions the workspace and credential (human);
+# phases 5-9 run live Databricks and must emit <<PHASE_BLOCKED>> whenever
+# scripts/dbx-dogfood-env.sh cannot reach the workspace.
+docs/outcomes/20260912-databricks-dogfood-spine
 
 # --- human-gated, deliberately not listed ---
 # docs/outcomes/20260906-bigquery-unattended — Cloud Run Job, Scheduler, workload
@@ -32,6 +21,9 @@ docs/outcomes/20260906-trimmed-history-sources
 #   (ruling R6). Not loop work; see its phases/08-summary.md.
 
 # --- done ---
+docs/outcomes/20260906-bigquery-correctness
+docs/outcomes/20260906-trimmed-history-sources
+docs/outcomes/20260906-bigquery-dogfood-spine
 docs/outcomes/20260906-external-dag-steps
 docs/outcomes/20260906-scd2-keyed-succession
 docs/outcomes/20260904-programme-hygiene
