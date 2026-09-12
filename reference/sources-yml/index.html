@@ -1299,6 +1299,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/external-steps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    External Steps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/materializations/" class="md-nav__link">
         
   
@@ -2449,6 +2477,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Mutation profile">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-external_step-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The external_step: block
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2853,6 +2898,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Mutation profile">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-external_step-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The external_step: block
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2979,6 +3041,12 @@
 <td>absent</td>
 <td>Column(s) — a subset of <code>unique_key</code> — guaranteed to have a matching row for every value a consuming model's inner-join enrichment reads by. Narrows an enrichment <code>MERGE</code>'s recompute to a point lookup on the changed key(s); re-checked every run, never trusted silently. See <a href="../../guide/sources/#declaring-referential-integrity">Declaring referential integrity</a>.</td>
 </tr>
+<tr>
+<td><code>retention</code></td>
+<td>no</td>
+<td>absent (trusted replayable)</td>
+<td>How far back the source can be re-read: a non-zero interval (e.g. <code>'45 days'</code>), <strong>rolling</strong> — anchored to the current run rather than a fixed calendar date, so replayability is re-evaluated every run as old partitions age out. Requires <code>timeseries:</code> on the same source (a bound with no clock has nothing to compare against). A backfill whose reach exceeds it refuses at plan time (<code>SourceRetentionExceeded</code>); a reach that cannot be proven to fit is admitted with a recorded downgrade (<code>SourceRetentionDowngraded</code>) rather than trusted silently. See <a href="../../guide/sources/#bounded-history-retention">Bounded history (<code>retention:</code>)</a>.</td>
+</tr>
 </tbody>
 </table>
 <h2 id="column-keys">Column keys<a class="headerlink" href="#column-keys" title="Permanent link">&para;</a></h2>
@@ -3090,6 +3158,60 @@
 </tbody>
 </table>
 <p>Declaring <code>mutation_profile: mutable_snapshot</code> derives a mutation-maintenance cell for a model that reads this source whether or not the source is also clocked (<code>timeseries:</code> declared) — a late correction to an already-processed row is maintained either way, not only for an unclocked lookup. An <code>append_only</code> source read by an aggregate gets one too: a late-arriving append into an already-written region still changes the stored aggregate, so that region is maintained rather than left stale. Either case may have no statically derivable scan bound, refusing loudly (<code>MaintenanceScanUnbounded</code>) until <code>maintenance.scan_bounds.per_source.&lt;name&gt;.allow_full_scan</code> accepts the full-table cost.</p>
+<h3 id="the-external_step-block">The <code>external_step:</code> block<a class="headerlink" href="#the-external_step-block" title="Permanent link">&para;</a></h3>
+<p>A relation landed by a program smelt itself invokes — rather than an out-of-band pipeline
+smelt has no visibility into — is declared as an <strong>external step</strong>: a <code>.yml</code> file carrying
+a top-level <code>external_step:</code> block instead of <code>columns:</code>. The presence of <code>external_step:</code>
+makes the file a step, never a source; <code>columns:</code> is <strong>forbidden</strong> alongside it on the
+same file (<code>MalformedExternalStep</code>). See <a href="../../guide/external-steps/">External Steps</a> for
+the full guide.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># models/sources/raw/github_loader.yml</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nt">external_step</span><span class="p">:</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Loads the previous UTC day of GitHub events.</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nt">produces</span><span class="p">:</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt.sources.raw.github_events</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;bash&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;scripts/loader.sh&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--date&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;{run_date}&quot;</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span><span class="nt">cadence</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;1</span><span class="nv"> </span><span class="s">day&#39;</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Required</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>produces</code></td>
+<td><strong>yes</strong></td>
+<td>—</td>
+<td>Non-empty list of source addresses (<code>smelt.&lt;path&gt;</code> form) this step populates. Every entry must resolve to a declared source; a source may be named by at most one step in the workspace.</td>
+</tr>
+<tr>
+<td><code>command</code></td>
+<td><strong>yes</strong></td>
+<td>—</td>
+<td>Argv list smelt invokes as the step's program. Never parsed or type-checked — an opaque external command, run and observed only by its exit code.</td>
+</tr>
+<tr>
+<td><code>cadence</code></td>
+<td>no</td>
+<td>absent</td>
+<td>How often the producer intends to run (an interval, e.g. <code>'1 day'</code>). Describes the producer's schedule, distinct from <code>mutation_profile.lateness</code>.</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>no</td>
+<td>absent</td>
+<td>Free-text description, surfaced in LSP hover and <code>smelt explain</code>.</td>
+</tr>
+</tbody>
+</table>
+<p><code>command:</code>'s argv accepts the closed placeholder grammar <code>{run_date}</code>/<code>{run_end}</code> (the run
+window's start and exclusive end, ISO <code>YYYY-MM-DD</code>); <code>{{</code>/<code>}}</code> escape to literal
+<code>{</code>/<code>}</code>. Any other <code>{name}</code> is <code>MalformedExternalStep</code> at declaration time.</p>
 <h2 id="supported-types">Supported types<a class="headerlink" href="#supported-types" title="Permanent link">&para;</a></h2>
 <table>
 <thead>

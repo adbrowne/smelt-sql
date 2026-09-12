@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/scd2-succession/">
+        <link rel="canonical" href="https://smeltsql.com/guide/external-steps/">
       
       
-        <link rel="prev" href="../incremental-models/">
+        <link rel="prev" href="../sources/">
       
       
-        <link rel="next" href="../schema-evolution/">
+        <link rel="next" href="../materializations/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>SCD2 Succession - smelt</title>
+        <title>External Steps - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#the-succession-grain-scd2-style-history" class="md-skip">
+        <a href="#external-steps" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              SCD2 Succession
+              External Steps
             
           </span>
         </div>
@@ -1299,10 +1299,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../external-steps/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    External Steps
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1318,6 +1345,103 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#declaring-a-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Declaring a step
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-run_date-run_end-placeholders" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The {run_date} / {run_end} placeholders
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-smelt-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What smelt guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-smelt-does-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What smelt does not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure modes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-a-step-vs-an-out-of-band-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use a step vs. an out-of-band pipeline
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#further-reading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Further reading
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1383,37 +1507,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    SCD2 Succession
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../scd2-succession/" class="md-nav__link">
         
   
   
@@ -1429,125 +1526,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#why-it-needs-no-declaration" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Why it needs no declaration
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-admitted-sql-outline" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The admitted SQL outline
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-derived-k-t-identity" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The derived (k, t) identity
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-delete-filter" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The delete filter
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-optional-pre-window-clamp" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The optional pre-window clamp
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#arrival-vs-event-time-partitioning" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Arrival- vs event-time partitioning
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-tombstone-ledger" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The tombstone ledger
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#what-smelt-explain-shows" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What smelt explain shows
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#refusal-codes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Refusal codes
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -2840,10 +2818,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#why-it-needs-no-declaration" class="md-nav__link">
+  <a href="#declaring-a-step" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Why it needs no declaration
+        Declaring a step
       
     </span>
   </a>
@@ -2851,10 +2829,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-admitted-sql-outline" class="md-nav__link">
+  <a href="#the-run_date-run_end-placeholders" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The admitted SQL outline
+        The {run_date} / {run_end} placeholders
       
     </span>
   </a>
@@ -2862,10 +2840,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-derived-k-t-identity" class="md-nav__link">
+  <a href="#what-smelt-guarantees" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The derived (k, t) identity
+        What smelt guarantees
       
     </span>
   </a>
@@ -2873,10 +2851,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-delete-filter" class="md-nav__link">
+  <a href="#what-smelt-does-not-do" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The delete filter
+        What smelt does not do
       
     </span>
   </a>
@@ -2884,10 +2862,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-optional-pre-window-clamp" class="md-nav__link">
+  <a href="#failure-modes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The optional pre-window clamp
+        Failure modes
       
     </span>
   </a>
@@ -2895,10 +2873,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#arrival-vs-event-time-partitioning" class="md-nav__link">
+  <a href="#when-to-use-a-step-vs-an-out-of-band-pipeline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Arrival- vs event-time partitioning
+        When to use a step vs. an out-of-band pipeline
       
     </span>
   </a>
@@ -2906,32 +2884,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-tombstone-ledger" class="md-nav__link">
+  <a href="#further-reading" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The tombstone ledger
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#what-smelt-explain-shows" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What smelt explain shows
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#refusal-codes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Refusal codes
+        Further reading
       
     </span>
   </a>
@@ -2955,7 +2911,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/scd2-succession.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/external-steps.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2963,179 +2919,147 @@
   
 
 
-<h1 id="the-succession-grain-scd2-style-history">The succession grain (SCD2-style history)<a class="headerlink" href="#the-succession-grain-scd2-style-history" title="Permanent link">&para;</a></h1>
-<p>A <strong>succession</strong> model turns an append-only change stream into a keyed history table — one row
-per key per event, each row's validity window closed out by the row that follows it for the same
-key. This is the classic slowly-changing-dimension type-2 (SCD2) pattern, but smelt never asks
-you to declare it: the shape is <strong>recognised from the model's own SQL</strong>, the same way the key
-grain and the partition grain are recognised from a declared <code>unique_key:</code> or <code>timeseries:</code>.</p>
-<h2 id="why-it-needs-no-declaration">Why it needs no declaration<a class="headerlink" href="#why-it-needs-no-declaration" title="Permanent link">&para;</a></h2>
-<p>A succession model's identity is the pair <code>(k, t)</code> — a key and the clock value at which that
-key's row was recorded. There is no <code>GROUP BY</code>, so there is no aggregation to declare a
-<code>unique_key:</code> for; there is no model-level <code>timeseries:</code> to declare either, since the clock
-comes from the <em>driving source's</em> declared clock. The one fact left to communicate is the SQL
-shape itself — a window-function projection over an append-only source — and smelt's
-keyed-succession classifier reads it directly.</p>
-<h2 id="the-admitted-sql-outline">The admitted SQL outline<a class="headerlink" href="#the-admitted-sql-outline" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>SELECT &lt;row-local columns, including k and t&gt;,
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>       &lt;LEAD(t)/LAG(t) OVER (PARTITION BY k ORDER BY t) and scalar expressions over them&gt;
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>FROM smelt.&lt;one append-only, clocked source&gt;
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>[WHERE &lt;one deterministic row-local predicate&gt;]   -- optional lateness clamp
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>[QUALIFY NOT &lt;a NOT NULL boolean column&gt;]          -- optional delete-flag filter
+<h1 id="external-steps">External Steps<a class="headerlink" href="#external-steps" title="Permanent link">&para;</a></h1>
+<p>Some relations aren't computed by a smelt model — they're landed by a program you run
+outside SQL entirely: a loader script pulling from an API, a batch export from another
+system, a one-off ETL job. That program's output is still a table your models depend on,
+and smelt needs to know when it has to run <em>before</em> those models can.</p>
+<p>An <strong>external step</strong> declares that dependency explicitly. It's a node in smelt's DAG —
+discovered, ordered, and invoked like any other project entity — but smelt never authors
+or inspects what it runs. The declaration is the entire contract: what sources the step
+produces, how to invoke it, and how often it's expected to run.</p>
+<h2 id="declaring-a-step">Declaring a step<a class="headerlink" href="#declaring-a-step" title="Permanent link">&para;</a></h2>
+<p>A step is a <code>.yml</code> file, placed anywhere under <code>paths:</code> like any other project file,
+carrying a top-level <code>external_step:</code> block:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># models/sources/raw/github_loader.yml</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nt">external_step</span><span class="p">:</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="no">Loads the previous two UTC days of githubarchive.day events into</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="no">raw.github_events and its one-day redelivery arm.</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="nt">produces</span><span class="p">:</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt.sources.raw.github_events</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt.sources.raw.github_events_arrival</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">  </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;bash&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;scripts/bq-dogfood-loader.sh&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--date&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;{run_date}&quot;</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">  </span><span class="nt">cadence</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;1</span><span class="nv"> </span><span class="s">day&#39;</span>
 </code></pre></div>
-<p>and nothing else: no join, CTE, subquery, or set operation in <code>FROM</code>; no <code>DISTINCT</code>,
-<code>GROUP BY</code>, <code>HAVING</code>, <code>ORDER BY</code>, or <code>LIMIT</code>; no aggregate, ranking, or frame-based window.
-<code>customer_history</code> in <a href="https://github.com/adbrowne/smelt-sql/tree/main/examples/scd2_succession"><code>examples/scd2_succession/</code></a>
-is the worked example:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">---</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1">---</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">SELECT</span>
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="n">customer_id</span><span class="p">,</span>
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="n">tier</span><span class="p">,</span>
-<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="n">region</span><span class="p">,</span>
-<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">    </span><span class="n">effective_ts</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_from</span><span class="p">,</span>
-<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="n">LEAD</span><span class="p">(</span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">customer_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">valid_to</span><span class="p">,</span>
-<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="n">LEAD</span><span class="p">(</span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">customer_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">effective_ts</span><span class="p">)</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">is_current</span>
-<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">customer_changes</span>
-<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="n">QUALIFY</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="n">is_deleted</span>
-</code></pre></div>
-<p><code>customer_id</code> is the key <code>k</code>, <code>effective_ts</code> is the clock <code>t</code>. The <code>LEAD</code> derives <code>valid_to</code> (and,
-via a scalar expression over it, <code>is_current</code>) by looking one event ahead in each customer's own
-sequence. No <code>unique_key:</code> or <code>timeseries:</code> appears anywhere in this frontmatter — the grain is
-derived, not declared.</p>
-<h2 id="the-derived-k-t-identity">The derived <code>(k, t)</code> identity<a class="headerlink" href="#the-derived-k-t-identity" title="Permanent link">&para;</a></h2>
-<p>The output has one row per <code>(customer_id, effective_ts)</code> pair — every event a customer generates
-produces its own history row. This differs from the key grain (one row per key, latest value
-wins) and the partition grain (one row per time-partitioned slice): a succession table's rows
-accumulate, they don't collapse.</p>
-<h2 id="the-delete-filter">The delete filter<a class="headerlink" href="#the-delete-filter" title="Permanent link">&para;</a></h2>
-<p>A CDC delete flag must still close out its predecessor's validity interval before the deleted
-row itself disappears from the output — that's why the filter is a <code>QUALIFY</code>, evaluated <em>after</em>
-the window functions run, rather than a <code>WHERE</code> evaluated before them. <code>QUALIFY NOT is_deleted</code>
-lets <code>LEAD(effective_ts)</code> see the delete event (so the previous row's <code>valid_to</code> closes
-correctly) and only then drops it from the materialized table. Writing <code>WHERE NOT is_deleted</code>
-instead is accepted as a legitimate pre-window clamp, but it means something different: the
-delete's timestamp never reaches its predecessor, so the previous version is left open forever.
-Because that's the classic mistake, smelt warns (<code>SuccessionPreFilterNegatesFlag</code>) whenever a
-pre-window filter is a bare negated boolean column, without refusing the model — you may have
-meant it as an ordinary lateness clamp.</p>
-<h2 id="the-optional-pre-window-clamp">The optional pre-window clamp<a class="headerlink" href="#the-optional-pre-window-clamp" title="Permanent link">&para;</a></h2>
-<p>A single deterministic, row-local <code>WHERE</code> before the window functions bounds which events count
-at all — for example, dropping versions that land implausibly late:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">customer_changes</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">ingested_at</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">effective_ts</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;7 days&#39;</span>
-</code></pre></div>
-<p>A row the clamp drops never enters the sequence, in the oracle or in the maintained state, so
-equivalence holds by construction. Nothing requires a clamp — the write footprint is the same
-either way — it's a semantic choice, not a performance one.</p>
-<h2 id="arrival-vs-event-time-partitioning">Arrival- vs event-time partitioning<a class="headerlink" href="#arrival-vs-event-time-partitioning" title="Permanent link">&para;</a></h2>
-<p>The driving source's <code>timeseries.partition_column</code> is the model's <strong>run axis</strong> — what a run
-window covers. The clock in the window functions' <code>ORDER BY</code> is the <strong>succession clock</strong>, and it
-must trace back to the source's declared <code>event_time_column</code>. These two columns may differ, and
-which case you're in decides how late events reach the grain:</p>
-<ul>
-<li><strong>Arrival-partitioned</strong> — the source's <code>partition_column</code> is a landing/ingest date, distinct
-  from its <code>event_time_column</code>. <code>customer_changes</code> in the worked example partitions by
-  <code>ingested_date</code> but clocks by <code>effective_ts</code>. A late event is simply an event in a later
-  arrival window — no special handling.</li>
-<li><strong>Event-time-partitioned</strong> — <code>partition_column</code> and <code>event_time_column</code> are the same column. A
-  late event surfaces as an observed delta on an already-closed partition, and that partition's
-  window is safely re-presented (the grain is re-run tolerant — see below).</li>
-</ul>
-<p><code>smelt explain &lt;model&gt;</code> prints which posture a model has, so you can see whether a late event
-costs a closed-partition re-presentation.</p>
-<p>Both postures are re-run tolerant and order-independent (but never concurrent): a window may be
-folded again, or windows may apply out of temporal order, and the result is always the same as
-folding them in order exactly once.</p>
-<h2 id="the-tombstone-ledger">The tombstone ledger<a class="headerlink" href="#the-tombstone-ledger" title="Permanent link">&para;</a></h2>
-<p>Beside the presented table, a succession model keeps one piece of hidden state: the
-<strong>tombstone ledger</strong>, a table holding <code>(k, t)</code> for every delete event ever folded. Non-delete
-events are represented by their presented rows alone; the ledger exists only because a delete
-event has no presented row, yet its timestamp is still load-bearing for its predecessor's
-<code>valid_to</code>. <code>smelt explain</code> reports the ledger as internal state, not part of the model's public
-schema — you never query it directly, and it degrades together with the presented table on
-<code>--full-refresh</code> or <code>smelt repair</code>.</p>
-<h2 id="what-smelt-explain-shows">What <code>smelt explain</code> shows<a class="headerlink" href="#what-smelt-explain-shows" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>$ smelt explain customer_history
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>model customer_history  (emits: event history keyed by [customer_id], event-addressed by (customer_id, effective_ts))
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>  grain: succession
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>  identity: (customer_id, effective_ts)
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>  technique: succession-patch
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>  run axis: ingested_date (arrival-partitioned)
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>  clock: effective_ts
-<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>  posture: re-run tolerant; order-independent but serial
-<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>  internal state: tombstone ledger customer_history__tombstones (customer_id, effective_ts) — not part of the model&#39;s public schema
-</code></pre></div>
-<p><code>smelt explain &lt;model&gt; --json</code> carries the same facts under a <code>succession</code> object
-(<code>key_columns</code>, <code>clock_column</code>, <code>run_axis</code>, <code>partitioning</code>, <code>lead_columns</code>, <code>lag_columns</code>,
-<code>delete_flag</code>, <code>pre_window_filter</code>, <code>tombstone_ledger</code>, and the <code>rerun_tolerant</code>/
-<code>order_independent</code>/<code>concurrent</code> execution postures), plus a <code>delta_signature</code> object with
-<code>shape: "keyed_succession"</code> and <code>addressing: "event"</code>.</p>
-<h2 id="refusal-codes">Refusal codes<a class="headerlink" href="#refusal-codes" title="Permanent link">&para;</a></h2>
-<p>Every clause outside the admitted outline is refused by a named diagnostic, never silently
-demoted to another grain. Each names the offending clause and a fix.</p>
+<p>The presence of <code>external_step:</code> at the top level makes this file a <strong>step</strong>, never a
+source — it declares no <code>columns:</code>. The sources it produces are declared exactly as any
+other source, in their own <code>.yml</code> files with their own <code>columns:</code>, <code>timeseries:</code>, and
+mutation profile; having a step behind them changes nothing about their shape.</p>
 <table>
 <thead>
 <tr>
-<th>Code</th>
-<th>Fix</th>
+<th>Key</th>
+<th>Required</th>
+<th>Meaning</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>SuccessionWindowFunctionNotLead</code></td>
-<td>Only <code>LEAD(t)</code>/<code>LAG(t)</code> over the clock column, default offset, are admitted — remove the extra offset/default argument, or window over the clock column instead.</td>
+<td><code>produces</code></td>
+<td>yes</td>
+<td>Non-empty list of source addresses (<code>smelt.&lt;path&gt;</code> form) this step populates. Every entry must resolve to a declared source, and a source may be named by at most one step in the workspace.</td>
 </tr>
 <tr>
-<td><code>SuccessionPartitionKeyMismatch</code></td>
-<td>Make every window function partition by the same, <code>NOT NULL</code>-proven key set.</td>
+<td><code>command</code></td>
+<td>yes</td>
+<td>Argv list smelt invokes as the step's program. Opaque to smelt — never parsed or type-checked, just run and observed by its exit code.</td>
 </tr>
 <tr>
-<td><code>SuccessionOrderNotMonotoneClock</code></td>
-<td><code>ORDER BY</code> must be the single, ascending, <code>NOT NULL</code> column that traces to the source's <code>event_time_column</code> — remove extra sort keys or <code>DESC</code>.</td>
+<td><code>cadence</code></td>
+<td>no</td>
+<td>How often the producer intends to run, e.g. <code>'1 day'</code>. Describes the <em>producer's</em> schedule, distinct from a source's own <code>mutation_profile.lateness</code>, which describes how far behind the clock a landed row can be.</td>
 </tr>
 <tr>
-<td><code>SuccessionRowLocalColumnViolation</code></td>
-<td>Every non-window column must be row-local — remove the aggregate or nested window function, or move it into a window expression.</td>
-</tr>
-<tr>
-<td><code>SuccessionIdentityNotProjected</code></td>
-<td>Project the key column and the clock column row-locally so <code>(k, t)</code> is recoverable from the output.</td>
-</tr>
-<tr>
-<td><code>SuccessionSingleSourceOnly</code></td>
-<td>Remove the join/CTE/subquery/set operation — the <code>FROM</code> clause must be exactly one source.</td>
-</tr>
-<tr>
-<td><code>SuccessionDrivingSourceNotAppendOnly</code></td>
-<td>Declare <code>mutation_profile: append_only</code> and a <code>timeseries:</code> block on the driving source.</td>
-</tr>
-<tr>
-<td><code>SuccessionPreFilterNotRowLocal</code></td>
-<td>The pre-window <code>WHERE</code> must be one deterministic, row-local predicate over the source's own columns.</td>
-</tr>
-<tr>
-<td><code>SuccessionDeleteFilterMisplaced</code></td>
-<td>Use exactly <code>QUALIFY NOT &lt;flag&gt;</code> for a <code>NOT NULL</code> boolean delete flag, not a <code>WHERE</code>.</td>
-</tr>
-<tr>
-<td><code>SuccessionPreFilterNegatesFlag</code> (warning)</td>
-<td>Advisory only — if the negated column is a delete flag, prefer <code>QUALIFY NOT &lt;col&gt;</code> so its timestamp still closes its predecessor's interval.</td>
-</tr>
-<tr>
-<td><code>SuccessionPatternUnrecognized</code></td>
-<td>The model matches no admitted grain — declare <code>unique_key:</code>/<code>timeseries:</code> to reach another grain, or use <code>refresh: full</code>/<code>refresh: materialized_view</code>.</td>
-</tr>
-<tr>
-<td><code>SuccessionClockTie</code> (runtime)</td>
-<td>Two non-identical events (or a delete and a non-delete) landed at the same <code>(k, t)</code> — the run rolls back; resolve the upstream duplicate/collision.</td>
+<td><code>description</code></td>
+<td>no</td>
+<td>Free-text description, surfaced in LSP hover and <code>smelt explain</code>.</td>
 </tr>
 </tbody>
 </table>
-<p>See the <a href="../../reference/diagnostics/#succession-grain">diagnostics reference</a> for full
-descriptions, and <a href="https://github.com/adbrowne/smelt-sql/blob/main/docs/specs/incremental_shapes.md"><code>docs/specs/incremental_shapes.md</code> §"The succession grain"</a>
-for the normative spec.</p>
+<h2 id="the-run_date-run_end-placeholders">The <code>{run_date}</code> / <code>{run_end}</code> placeholders<a class="headerlink" href="#the-run_date-run_end-placeholders" title="Permanent link">&para;</a></h2>
+<p><code>command:</code>'s argv is opaque to smelt except for one closed substitution grammar, applied
+per-argv-element before spawning:</p>
+<ul>
+<li><code>{run_date}</code> — the run window's start, ISO <code>YYYY-MM-DD</code>.</li>
+<li><code>{run_end}</code> — the run window's exclusive end, same form.</li>
+<li><code>{{</code> and <code>}}</code> escape to literal <code>{</code> and <code>}</code>.</li>
+</ul>
+<p>Any other <code>{name}</code> in an argv element is rejected at declaration time
+(<code>MalformedExternalStep</code>) — caught by the LSP and by <code>smelt list</code>/<code>smelt run</code>'s pre-flight
+parse, never deferred to the run that first reaches the step.</p>
+<h2 id="what-smelt-guarantees">What smelt guarantees<a class="headerlink" href="#what-smelt-guarantees" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>DAG ordering.</strong> A run that selects a model downstream of a step's produced sources
+  runs the step first, ahead of every consumer.</li>
+<li><strong>Invocation.</strong> When the run reaches the step, smelt spawns <code>command:</code> with the
+  placeholders substituted for the run's actual window.</li>
+<li><strong>Failure propagation.</strong> A non-zero exit is a run failure, naming the step and its exit
+  code; every model downstream of the sources it produces is left unbuilt.</li>
+<li><strong>Reporting.</strong> The run report and manifest record every step a run invoked
+  (<code>command</code>, <code>produces</code>, and duration); <code>smelt explain</code> renders a step's declaration.</li>
+<li><strong>Selection.</strong> <code>smelt list</code>, the DAG/graph surfaces, and model selection
+  (<code>+model</code>-style upstream expansion, direct addressing) reach a step through the same
+  selectors as any other node.</li>
+</ul>
+<h2 id="what-smelt-does-not-do">What smelt does not do<a class="headerlink" href="#what-smelt-does-not-do" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Authorship.</strong> smelt never writes, generates, or reviews the external program. The
+  loader script is yours to write and maintain — see
+  <code>examples/github_activity/load_day.sh</code> for a worked example that carries its own
+  bookkeeping.</li>
+<li><strong>Parsing or type-checking the command.</strong> <code>command:</code>'s argv is an opaque string list;
+  smelt does not parse it, does not type-check it, and does not know what the program
+  inside it does beyond its exit code.</li>
+<li><strong>Retries.</strong> A failed step is a run failure like any other — smelt applies no retry
+  policy beyond whatever the run's own invocation policy already provides. The step
+  itself owns any internal retry logic it needs.</li>
+<li><strong>Idempotence.</strong> smelt does not guarantee, and does not verify, that running the step
+  twice for the same window produces the same result. If the step needs to be safe to
+  re-run (for example, after a partial failure), that safety is the step's own
+  responsibility to build in.</li>
+</ul>
+<h2 id="failure-modes">Failure modes<a class="headerlink" href="#failure-modes" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>external_step:</code> is malformed — <code>produces:</code> missing/empty, an entry that doesn't resolve to a declared source, <code>columns:</code> present alongside <code>external_step:</code>, a malformed <code>command:</code>, an unrecognised <code>{name}</code> placeholder, or a malformed <code>cadence:</code></td>
+<td><code>MalformedExternalStep</code> — caught at declaration time by the LSP and by <code>smelt list</code>/<code>smelt run</code>'s pre-flight parse, before any run starts.</td>
+</tr>
+<tr>
+<td>A run reaches a step but cannot invoke it — no <code>command:</code> resolvable in the environment, a dry run, or an environment that categorically cannot execute external commands</td>
+<td><code>ExternalStepNotInvocable</code> — the run refuses rather than proceeding against a possibly-stale table.</td>
+</tr>
+<tr>
+<td>The step's <code>command:</code> exits non-zero</td>
+<td><code>ExternalStepFailed</code> — the run fails, naming the step and its exit code; every model downstream of its produced sources is left unbuilt.</td>
+</tr>
+</tbody>
+</table>
+<p><code>smelt explain &lt;step&gt;</code> is the one non-refusing preview surface: it prints the step's
+declared <code>produces:</code>, its literal (unsubstituted) <code>command:</code> argv, its cadence and
+description, and the models that directly consume its produced sources — without ever
+spawning the command.</p>
+<h2 id="when-to-use-a-step-vs-an-out-of-band-pipeline">When to use a step vs. an out-of-band pipeline<a class="headerlink" href="#when-to-use-a-step-vs-an-out-of-band-pipeline" title="Permanent link">&para;</a></h2>
+<p>Reach for an external step when the loader is something a run needs to have happened
+before it can trust the sources it reads — smelt should order it, fail the run loudly if
+it fails, and show it in <code>smelt list</code>/<code>smelt explain</code>. If the loading pipeline runs on its
+own schedule, independent of any smelt run, and the source's freshness is just something
+models tolerate (via <code>mutation_profile</code>/<code>source_lateness</code>), a plain source declaration
+with no step behind it is the better fit — you gain nothing from smelt invoking a program
+whose completion your run doesn't actually need to wait on.</p>
+<h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../../reference/sources-yml/#the-external_step-block">Source YAML Reference</a> for the
+  full <code>external_step:</code> key table</li>
+<li><a href="../sources/">Sources</a> for how the sources a step produces are declared</li>
+</ul>
 
 
 
