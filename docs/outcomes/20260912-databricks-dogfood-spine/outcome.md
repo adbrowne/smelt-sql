@@ -157,16 +157,32 @@ of the models or the tooling.
 | 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | done |
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | done |
 | 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | done |
-| 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | pending |
+| 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | blocked |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
-| 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised | pending |
+| 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (plan 4b): **row 4b blocked — a human is running it live in this worktree right
+  now, and a structural token-refresh question has no answer yet.** Probing the environment
+  found the credential leg already done by hand: `SMELT_DBX_HOST` is set, a valid OAuth M2M
+  bearer token (a JWT, so the credential kind is **service-principal OAuth M2M**, not a PAT) is
+  present with ~58 minutes of life, and `scripts/dbx-query.sh` reaches the workspace
+  successfully. `SHOW SCHEMAS IN workspace` returns only `default` and `information_schema`, so
+  the two dogfood schemas are **not yet created** and the facts sheet is still all `TBD`. The
+  worktree also carries uncommitted edits to `scripts/dbx-dogfood-env.sh` and an untracked
+  `.env`; the edits fix two real bugs this planner independently found (the token file is
+  `token\nexpiry`, so `$(cat)` produced a malformed two-line `SMELT_DBX_TOKEN` — now `head -n1`;
+  and `${VAR:+SET}${VAR:-UNSET…}` printed the whole token when set, violating criterion 1's
+  connection-security rule — now a plain `SET`/`UNSET` branch). A headless implement step must
+  not race a live human session against the same workspace, so no plan was written. Reshape:
+  phase 10 additionally picks up `.gitignore`-ing `.env`, which phase 4a's summary flagged and
+  which is a live leak risk while the wizard's default `ENV_FILE` is `.env`.
 
 - 2026-09-12 (plan 2, addendum): **smelt reaches the job as a locally-built wheel via the
   bundle's `artifacts:` block, not a PyPI dependency.** smelt already ships a `bindings =
@@ -278,3 +294,28 @@ of the models or the tooling.
 
 ## Blocked
 
+- **2026-09-12 — phase 4b (provisioning run).** Two things a human must settle.
+
+  **(a) Finish the wizard.** The credential leg is done (OAuth M2M service principal,
+  reachable). What remains of criterion 4: create `workspace.smelt_dogfood` and
+  `workspace.smelt_dogfood_oracle`, apply the schema-scoped grants (`dbx-provision.sh`'s
+  grantee is currently the untested literal `` `account users` `` — adjust to the service
+  principal's actual application ID), run `bash scripts/dbx-verify.sh` so both the
+  reachability and the inverted out-of-scope-write-refusal legs pass, and fill in
+  `free-edition-facts.md` (four quota rows plus the credential-kind line). Then commit the
+  in-flight `scripts/dbx-dogfood-env.sh` fix, write `phases/04b-summary.md`, and flip this row
+  to `done`.
+
+  **(b) Decide how a headless step gets a live token — this gates phases 5–9 and 11, not just
+  4b.** OAuth M2M tokens last one hour, and `scripts/dbx-auth.sh` (the only refresher) is in
+  `permissions.deny` *and* needs a gpg passphrase, so a loop iteration cannot mint one and any
+  live phase longer than the human's last manual refresh dies mid-run. Candidate options:
+  (i) allow-list `dbx-auth.sh` — it prints only an expiry, never the token — and rely on a
+  `gpg-agent` cache primed by the human at the start of a live session, recording the cache TTL
+  as a Free Edition fact; (ii) have `dbx-query.sh`/`dbx-dogfood-loader.sh` refresh the token
+  themselves when `$CONFIG_DIR/token`'s expiry stamp is stale, keeping the deny entry and
+  moving the gpg dependency inside the allow-listed wrappers; (iii) keep every live phase
+  human-attended and accept that phases 5–9 and 11 never run under the loop, which makes the
+  `[live]` rows human rows and shrinks this outcome's loop-grindable set to phase 10 alone.
+  Option (ii) is the only one that makes the `[live]` rows genuinely unattended, which
+  criterion 11 ("no laptop, no token in flight") ultimately requires anyway.
