@@ -60,9 +60,16 @@ if [ -f "${_dbx_env_file}" ]; then
 fi
 
 if [ -f "${_dbx_token_file}" ]; then
-  SMELT_DBX_TOKEN="$(cat "${_dbx_token_file}")"
+  # The token file is two lines (token, then an epoch expiry stamp — see
+  # dbx-auth.sh); `head -n1` takes only the token so it can't pick up an
+  # embedded newline that would corrupt the `Authorization: Bearer` header.
+  SMELT_DBX_TOKEN="$(head -n1 "${_dbx_token_file}")"
   export SMELT_DBX_TOKEN
 fi
 
 echo "dogfood target: ${SMELT_DBX_HOST:-UNSET}.${SMELT_DBX_CATALOG}.${SMELT_DBX_SCHEMA}"
-echo "SMELT_DBX_TOKEN=${SMELT_DBX_TOKEN:+SET}${SMELT_DBX_TOKEN:-UNSET (ambient credentials, if SMELT_DBX_HOST is set)}"
+if [ -n "${SMELT_DBX_TOKEN:-}" ]; then
+  echo "SMELT_DBX_TOKEN=SET"
+else
+  echo "SMELT_DBX_TOKEN=UNSET (ambient credentials, if SMELT_DBX_HOST is set)"
+fi
