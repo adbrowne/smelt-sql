@@ -1,0 +1,425 @@
+{
+  "checkpoints": [
+    {
+      "day": "2026-08-13",
+      "label": "w09",
+      "relations": [
+        {
+          "incr_only": 0,
+          "incr_rows": 29911,
+          "oracle_only": 0,
+          "oracle_rows": 29911,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 9,
+          "incr_rows": 29405,
+          "oracle_only": 9,
+          "oracle_rows": 29405,
+          "relation": "gold_events_enriched",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 4907,
+          "oracle_only": 0,
+          "oracle_rows": 4907,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 2916,
+          "oracle_only": 0,
+          "oracle_rows": 2916,
+          "relation": "gold_repo_dim",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 9,
+          "oracle_only": 0,
+          "oracle_rows": 9,
+          "relation": "marts_daily_active_contributors",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 22,
+          "oracle_only": 0,
+          "oracle_rows": 22,
+          "relation": "marts_naming_history",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 2916,
+          "oracle_only": 0,
+          "oracle_rows": 2916,
+          "relation": "marts_repo_leaderboard",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 7,
+          "oracle_only": 0,
+          "oracle_rows": 7,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 29911,
+          "oracle_only": 0,
+          "oracle_rows": 29911,
+          "relation": "silver_actor_naming",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 5996,
+          "oracle_only": 0,
+          "oracle_rows": 5996,
+          "relation": "silver_actor_sessions",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 29405,
+          "oracle_only": 0,
+          "oracle_rows": 29405,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 39,
+          "oracle_only": 0,
+          "oracle_rows": 39,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 130,
+          "oracle_only": 0,
+          "oracle_rows": 130,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 27565,
+          "oracle_only": 0,
+          "oracle_rows": 27565,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 29911,
+          "oracle_only": 0,
+          "oracle_rows": 29911,
+          "relation": "silver_repo_naming",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 18,
+          "oracle_only": 0,
+          "oracle_rows": 18,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "source_days_loaded": 9,
+      "window": 9
+    },
+    {
+      "day": "2026-08-14",
+      "label": "w10",
+      "relations": [
+        {
+          "incr_only": 0,
+          "incr_rows": 33332,
+          "oracle_only": 0,
+          "oracle_rows": 33332,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 10,
+          "incr_rows": 32758,
+          "oracle_only": 10,
+          "oracle_rows": 32758,
+          "relation": "gold_events_enriched",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 5530,
+          "oracle_only": 0,
+          "oracle_rows": 5530,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 3186,
+          "oracle_only": 0,
+          "oracle_rows": 3186,
+          "relation": "gold_repo_dim",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 10,
+          "oracle_only": 0,
+          "oracle_rows": 10,
+          "relation": "marts_daily_active_contributors",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 26,
+          "oracle_only": 0,
+          "oracle_rows": 26,
+          "relation": "marts_naming_history",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 3186,
+          "oracle_only": 0,
+          "oracle_rows": 3186,
+          "relation": "marts_repo_leaderboard",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 7,
+          "oracle_only": 0,
+          "oracle_rows": 7,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 33332,
+          "oracle_only": 0,
+          "oracle_rows": 33332,
+          "relation": "silver_actor_naming",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 6768,
+          "oracle_only": 0,
+          "oracle_rows": 6768,
+          "relation": "silver_actor_sessions",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 32758,
+          "oracle_only": 0,
+          "oracle_rows": 32758,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 47,
+          "oracle_only": 0,
+          "oracle_rows": 47,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 143,
+          "oracle_only": 0,
+          "oracle_rows": 143,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 30680,
+          "oracle_only": 0,
+          "oracle_rows": 30680,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 33332,
+          "oracle_only": 0,
+          "oracle_rows": 33332,
+          "relation": "silver_repo_naming",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 18,
+          "oracle_only": 0,
+          "oracle_rows": 18,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "source_days_loaded": 10,
+      "window": 10
+    },
+    {
+      "day": "2026-08-15",
+      "label": "w11",
+      "relations": [
+        {
+          "incr_only": 0,
+          "incr_rows": 37395,
+          "oracle_only": 0,
+          "oracle_rows": 37395,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 16,
+          "incr_rows": 36762,
+          "oracle_only": 16,
+          "oracle_rows": 36762,
+          "relation": "gold_events_enriched",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 5964,
+          "oracle_only": 0,
+          "oracle_rows": 5964,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 3349,
+          "oracle_only": 0,
+          "oracle_rows": 3349,
+          "relation": "gold_repo_dim",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 11,
+          "oracle_only": 0,
+          "oracle_rows": 11,
+          "relation": "marts_daily_active_contributors",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 27,
+          "oracle_only": 0,
+          "oracle_rows": 27,
+          "relation": "marts_naming_history",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 3349,
+          "oracle_only": 0,
+          "oracle_rows": 3349,
+          "relation": "marts_repo_leaderboard",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 7,
+          "oracle_only": 0,
+          "oracle_rows": 7,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 37395,
+          "oracle_only": 0,
+          "oracle_rows": 37395,
+          "relation": "silver_actor_naming",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 7276,
+          "oracle_only": 0,
+          "oracle_rows": 7276,
+          "relation": "silver_actor_sessions",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 36762,
+          "oracle_only": 0,
+          "oracle_rows": 36762,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 48,
+          "oracle_only": 0,
+          "oracle_rows": 48,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 144,
+          "oracle_only": 0,
+          "oracle_rows": 144,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 34553,
+          "oracle_only": 0,
+          "oracle_rows": 34553,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 37395,
+          "oracle_only": 0,
+          "oracle_rows": 37395,
+          "relation": "silver_repo_naming",
+          "scope": "compared"
+        },
+        {
+          "incr_only": 0,
+          "incr_rows": 18,
+          "oracle_only": 0,
+          "oracle_rows": 18,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "source_days_loaded": 11,
+      "window": 11
+    }
+  ],
+  "claim": "on Databricks, each model's incrementally-maintained state equals a full refresh over the inputs seen so far",
+  "excluded_models": [],
+  "oracle_schema": "smelt_dogfood_oracle",
+  "schedule": {
+    "checkpoints": [
+      9,
+      10,
+      11
+    ],
+    "start_date": "2026-08-05"
+  },
+  "shared_source_schema": "smelt_dogfood",
+  "target": "databricks_oracle"
+}

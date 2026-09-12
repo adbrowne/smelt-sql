@@ -74,7 +74,7 @@ stage_window() {
   # shellcheck source=scripts/dbx-dogfood-env.sh
   . "$REPO/scripts/dbx-dogfood-env.sh" >&2
   python_bin="$(venv_python)"
-  "$python_bin" "$REPO/scripts/dbx-dogfood-loader.py" --day "$day"
+  "$python_bin" "$REPO/scripts/dbx-dogfood-loader.py" --date "$day"
   ( cd "$EXAMPLE_DIR" && "$SMELT_BIN" run --target databricks \
       --event-time-start "$day" --event-time-end "$end" )
 }
@@ -89,7 +89,16 @@ stage_oracle() {
   end="$(window_end "$n")"
   # shellcheck source=scripts/dbx-dogfood-env.sh
   . "$REPO/scripts/dbx-dogfood-env.sh" >&2
+  # --allow-full-refresh: each checkpoint re-runs a --full-refresh over the
+  # SAME smelt_dogfood_oracle tables the previous checkpoint already built
+  # (unlike the BigQuery oracle, which drops and recreates a scratch
+  # dataset), so from the second checkpoint on stored output already exists
+  # and the retention gate (docs/specs/sources.md §Semantics 5) requires an
+  # explicit operator license for a whole-table recompute. Harmless here: at
+  # 11 days deep the run window is far inside the sources' 45-day retention,
+  # so the license's reported loss is a formality, not an actual gap.
   ( cd "$EXAMPLE_DIR" && "$SMELT_BIN" run --target databricks_oracle --full-refresh \
+      --allow-full-refresh \
       --event-time-start "$START_DATE" --event-time-end "$end" )
 }
 

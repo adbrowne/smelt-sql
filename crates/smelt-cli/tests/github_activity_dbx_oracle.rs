@@ -415,17 +415,12 @@ fn the_oracle_driver_declares_the_checkpoint_schedule_the_sweep_expects() {
 const EQUIVALENCE_REPORT_PATH: &str =
     "docs/outcomes/20260912-databricks-dogfood-spine/phases/09b-equivalence.json";
 
-fn equivalence_report() -> Option<serde_json::Value> {
+fn equivalence_report() -> serde_json::Value {
     let path = repo_root().join(EQUIVALENCE_REPORT_PATH);
-    if !path.exists() {
-        return None;
-    }
-    Some(
-        serde_json::from_str(
-            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")),
-        )
-        .unwrap_or_else(|e| panic!("parse {path:?}: {e}")),
+    serde_json::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")),
     )
+    .unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
 }
 
 fn report_checkpoints(report: &serde_json::Value) -> Vec<&serde_json::Value> {
@@ -437,19 +432,10 @@ fn report_checkpoints(report: &serde_json::Value) -> Vec<&serde_json::Value> {
 }
 
 /// The report is total: the same sixteen-relation set at every compared
-/// checkpoint, no blank cell. Reads the committed report when present; until
-/// phase 9b commits one this prints a loud skip rather than failing, because
-/// the report is 9b's own deliverable. Phase 9b flips this to a hard gate by
-/// deleting the skip branch.
+/// checkpoint, no blank cell.
 #[test]
 fn the_equivalence_report_covers_every_model_at_every_checkpoint() {
-    let Some(report) = equivalence_report() else {
-        eprintln!(
-            "no committed report at {EQUIVALENCE_REPORT_PATH} yet — this is phase 9b's \
-             deliverable. Skipping until it lands."
-        );
-        return;
-    };
+    let report = equivalence_report();
     let checkpoints = report_checkpoints(&report);
     assert!(
         !checkpoints.is_empty(),
@@ -621,4 +607,75 @@ fn databricks_incremental_matches_its_oracle_at_every_window() {
         "Databricks' incremental state does not equal its own full refresh:\n{}",
         failures.join("\n\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Anti-vacuity and coverage gates over the committed report
+// ---------------------------------------------------------------------------
+
+/// Anti-vacuity over the committed evidence: every checkpoint records
+/// `source_days_loaded == window` (the premise that makes this target's oracle
+/// valid — see the module doc's "Where the oracle is a valid oracle" section)
+/// and a non-zero row count on both sides for every relation, so an
+/// empty-vs-empty comparison cannot read as success. Mirrors
+/// `github_activity_bq_oracle.rs`'s gate of the same name.
+#[test]
+fn the_committed_report_proves_the_oracle_read_the_shared_source() {
+    let report = equivalence_report();
+    for cp in report_checkpoints(&report) {
+        let label = cp["label"].as_str().expect("label");
+        let window = cp["window"].as_i64().expect("window");
+        let source_days_loaded = cp["source_days_loaded"]
+            .as_i64()
+            .expect("source_days_loaded");
+        assert_eq!(
+            source_days_loaded, window,
+            "checkpoint {label}: source_days_loaded ({source_days_loaded}) must equal the \
+             window number ({window}) — otherwise the oracle is not a valid full refresh over \
+             exactly the inputs seen so far"
+        );
+        for rel in cp["relations"].as_array().expect("relations") {
+            let incr_rows = rel["incr_rows"].as_i64().expect("incr_rows");
+            let oracle_rows = rel["oracle_rows"].as_i64().expect("oracle_rows");
+            assert!(
+                incr_rows > 0 && oracle_rows > 0,
+                "checkpoint {label}, relation {}: incr_rows={incr_rows}, oracle_rows={oracle_rows} \
+                 — a zero on either side would make this comparison vacuous",
+                rel["relation"]
+            );
+        }
+    }
+}
+
+/// **The final window is compared in full.** Nothing is exempt there: all
+/// sixteen models are checked with `DBX_UNBOUNDED_REFRESH_RELATIONS` empty —
+/// the complete statement of `incremental_state(S) == full_refresh(inputs ∈
+/// S)` over this target's three-window live run.
+#[test]
+fn the_final_window_compares_every_relation_with_nothing_exempt() {
+    assert!(
+        DBX_UNBOUNDED_REFRESH_RELATIONS.is_empty(),
+        "this target exempts no relation from comparison at any window"
+    );
+    let report = equivalence_report();
+    let checkpoints = report_checkpoints(&report);
+    let final_cp = checkpoints
+        .iter()
+        .find(|c| c["window"].as_i64() == Some(11))
+        .expect("the final window (11) is in the report");
+    let relations = final_cp["relations"].as_array().expect("relations");
+    assert_eq!(
+        relations.len(),
+        16,
+        "the final window must compare all sixteen models"
+    );
+    for rel in relations {
+        assert_eq!(
+            rel["scope"].as_str(),
+            Some("compared"),
+            "`{}` is exempt at the final window — nothing may be, since the inputs seen so \
+             far are the whole source there",
+            rel["relation"]
+        );
+    }
 }

@@ -170,12 +170,32 @@ of the models or the tooling.
 | 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | done |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | blocked |
 | 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | done |
-| 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | planned |
+| 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
 | 9c | **[live]** Close criterion 7's blocker with 9b's evidence: root-cause `silver_actor_naming`'s Databricks-only duplication (the oracle leg says whether it is an incremental write-path defect or shared with the full refresh), take one of `## Blocked`'s three routes, then re-run the parity sweep, commit `08-parity.json` and restore `dbx_registry_entries_are_all_live` | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9b implement): **row 9b blocked per its own plan contingency — the
+  measurement is complete and committed, and it resolves phase 8's open question.** Two
+  script bugs were fixed to make the live sequence runnable at all (`dbx-dogfood-loader.py`
+  takes `--date`, not the `--day` the oracle script passed; the oracle's repeated
+  `--full-refresh` over the same already-populated `smelt_dogfood_oracle` tables needs
+  `--allow-full-refresh` per `docs/specs/sources.md` §Semantics 5's retention gate — unlike
+  the BigQuery oracle, this target never drops its scratch schema between checkpoints). Also
+  cleaned a stale local `examples/github_activity/.smelt/`/`target/` (gitignored, observability
+  only per `docs/specs/run_state.md`) that blocked a fresh `--first-full-refresh`. The measured
+  sweep: `silver_actor_naming` matches exactly at all three checkpoints — the full-refresh
+  oracle does not reproduce row 8's 520-row incremental-only duplication, confining that
+  defect to the succession-patch write path (`## Blocked`'s options 1/3, not 2).
+  `gold_events_enriched` violates identically to row 8's already-registered
+  `UnorderedColumnDivergence` (not new). Per the plan's contingency, tests 5-6
+  (`the_committed_equivalence_report_shows_no_violation`,
+  `equivalence_registry_entries_are_all_live`) were NOT landed — whether to register
+  `gold_events_enriched` in this suite's own registry is left to 9c or later, deliberately not
+  decided here. Tests 2-4 landed (15/15 offline); `bash .claude/scripts/verify-phase.sh` green.
+  See `phases/09b-summary.md`. Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 9b plan): **no reshape; the contingency on a non-clean sweep is fixed in
   advance.** Phase 9a's summary reports nothing left undone and nothing new surfaced, so the
@@ -765,6 +785,30 @@ of the models or the tooling.
   `smelt`-spawning call sites). Nothing left the outcome; nothing added to `## Out of scope`.
 
 ## Blocked
+
+- **2026-09-13 — phase 9b (equivalence oracle, live).** Three checkpoints (w09/w10/w11,
+  `2026-08-13/14/15`) measured; the sweep is not clean, per the plan's own contingency
+  (commit evidence, land tests 2-4 only, block, hand to 9c). Two relations violate:
+  1. **`gold_events_enriched`** — `9/9`, `10/10`, `16/16` (`incr_only`/`oracle_only`) at
+     w09/w10/w11. This is the SAME divergence phase 8 root-caused and registered
+     (`DivergenceBound::UnorderedColumnDivergence` on `current_repo_name`) in the
+     dual-target suite — not new, not investigated further. Left for 9c or a later phase to
+     decide whether to also register it in `github_activity_dbx_oracle.rs`'s own
+     `EQUIVALENCE_DIVERGENCE_REGISTRY` (it is understood and bounded, so the high bar that
+     registry's doc comment sets is arguably met — but the plan's contingency scoped this
+     phase to evidence-gathering only, so the call was left open rather than made here).
+  2. **`silver_actor_naming` matches exactly at all three checkpoints** (`incr_only=0,
+     oracle_only=0`) — this is NOT a violation, and it is the decisive evidence phase 8's own
+     entry (below) asked for: Databricks' full-refresh oracle does not reproduce the 520-row
+     duplication the incremental leg shows against DuckDB, so the defect is confined to the
+     incremental write path (succession-patch tombstone mechanism in
+     `crates/smelt-runtime/src/maintenance_driver/succession/execute.rs`), not shared with a
+     full refresh on the same engine. This resolves phase 8's open question in favour of
+     `## Blocked`'s options 1 or 3 below (a write-path bug), ruling out option 2 (an
+     accepted, both-legs-see-it duplication).
+  See `phases/09b-summary.md` for the full measured table and two script bugs fixed along
+  the way (`scripts/dbx-dogfood-oracle.sh`'s loader flag name and a missing
+  `--allow-full-refresh` license, both needed for the sequence to run at all).
 
 - **2026-09-13 — phase 8 (dual-target parity).** `silver_actor_naming` has 520 more rows
   on Databricks than DuckDB after the live sweep (`duckdb_only=0, databricks_only=520`;
