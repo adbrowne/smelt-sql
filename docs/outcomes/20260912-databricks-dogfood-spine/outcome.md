@@ -169,11 +169,37 @@ of the models or the tooling.
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | done |
 | 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | done |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | blocked |
-| 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
+| 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | planned |
+| 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | pending |
+| 9c | **[live]** Close criterion 7's blocker with 9b's evidence: root-cause `silver_actor_naming`'s Databricks-only duplication (the oracle leg says whether it is an incremental write-path defect or shared with the full refresh), take one of `## Blocked`'s three routes, then re-run the parity sweep, commit `08-parity.json` and restore `dbx_registry_entries_are_all_live` | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9 plan): **row 9 split into 9a/9b, and a new row 9c added to finish
+  criterion 7.** (a) *Split.* Row 9 as written bundled a body of offline construction (a new
+  `databricks_oracle` target, its source-name entries, a whole equivalence sweep over the
+  shared `parity_support` seam, a driver script) with three live windows on a workspace whose
+  OAuth token lasts one hour. Phases 6-8 each showed the live budget being the scarce thing;
+  building the harness in a phase that needs no workspace at all means the live phase is
+  purely "run the sequence and commit the report", and a token expiry costs a re-run rather
+  than losing the harness work. Nothing left the outcome — 9a+9b together are exactly the old
+  row 9. (b) *Oracle validity is free on this target.* The BigQuery oracle needed
+  `UNBOUNDED_REFRESH_RELATIONS` because BigQuery's source tables statically held all thirty
+  days, so a whole-source refresh at an intermediate checkpoint saw inputs the incremental leg
+  had not. On Databricks the loader lands one day at a time and the source holds **only** the
+  inputs seen so far, so a full refresh over the source *is* a full refresh over the inputs
+  seen so far at every checkpoint. That exemption machinery is therefore not ported; the
+  premise it replaces is asserted per checkpoint instead (the source's day count equals the
+  window number), so it is measured rather than assumed. (c) *New row 9c.* Criterion 7 is
+  currently blocked on `silver_actor_naming`'s 520-row Databricks-only duplication, and
+  criterion 7 is a success criterion, so the work cannot leave the outcome. It gets its own
+  row rather than reopening row 8, placed after 9b because 9b's oracle leg is the decisive
+  measurement: if the full refresh on Databricks duplicates too, the defect is in the model's
+  own SQL under SparkSQL; if it does not, it is in the succession-patch write path, which is
+  `## Blocked` option 1 or 3. Planning that resolution before that evidence exists would be
+  guesswork. Nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 8 implement): **row 8 blocked — the generalised comparator, the
   Databricks sweep infrastructure, and one root-caused divergence all landed and are
