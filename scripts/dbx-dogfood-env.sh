@@ -14,6 +14,9 @@
 #                        (docs/specs/smelt_yml.md §"Target shape").
 #   SMELT_DBX_CATALOG / SMELT_DBX_SCHEMA — the dogfood Unity Catalog schema;
 #                        default to `workspace`/`smelt_dogfood`.
+#   SMELT_DBX_ORACLE_SCHEMA — the full-refresh oracle's Unity Catalog schema
+#                        (criterion 8 of the outcome); defaults to
+#                        `smelt_dogfood_oracle`.
 #
 # Mirrors scripts/spark-env.sh: the PyO3-embedded interpreter resolves
 # `import smelt.databricks_adapter` and `import databricks.connect` via
@@ -41,6 +44,7 @@ fi
 
 export SMELT_DBX_CATALOG="${SMELT_DBX_CATALOG:-workspace}"
 export SMELT_DBX_SCHEMA="${SMELT_DBX_SCHEMA:-smelt_dogfood}"
+export SMELT_DBX_ORACLE_SCHEMA="${SMELT_DBX_ORACLE_SCHEMA:-smelt_dogfood_oracle}"
 
 _dbx_config_dir="${SMELT_DBX_CONFIG_DIR:-$HOME/.config/databricks-smelt-dogfood}"
 _dbx_env_file="${_dbx_config_dir}/config.env"

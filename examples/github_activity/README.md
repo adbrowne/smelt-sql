@@ -113,6 +113,30 @@ workspace and the credential these last two need is phase 4 of
 `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` (human-gated) — with no
 credential configured, the `execute` mode simply refuses.
 
+### Provisioning and credentials
+
+The provisioning and credential tooling itself is built and gated offline
+(`docs/outcomes/20260912-databricks-dogfood-spine/phases/04a-plan.md`
+`crates/smelt-cli/tests/dbx_dogfood_provision.rs`) — only *running* it needs a
+human with a browser and a Free Edition workspace:
+
+```bash
+bash scripts/dbx-provision.sh   # once: schemas, scoped credential, verification
+bash scripts/dbx-auth.sh        # per session: mint/refresh the bearer token
+source scripts/dbx-dogfood-env.sh
+```
+
+`dbx-provision.sh` is credential-agnostic over whether Free Edition permits a
+service principal with an OAuth machine-to-machine secret or only a personal
+access token — that is an empirical fact about the account it discovers via
+`dbx-key.sh`, not a design choice. `dbx-key.sh`, `dbx-auth.sh` and
+`dbx-provision.sh` touch the encrypted secret and are denied to a Claude
+session in `.claude/settings.json`; `dbx-verify.sh` and `dbx-query.sh` are
+read-only wrappers and allow-listed. Free Edition's measured quotas (serverless
+concurrency, cold-start latency, storage, session idle timeout) and which
+credential kind it actually permits are recorded in
+`docs/outcomes/20260912-databricks-dogfood-spine/free-edition-facts.md`.
+
 ## The DuckDB leg
 
 `examples/github_activity/` runs four models against DuckDB with no warehouse and no

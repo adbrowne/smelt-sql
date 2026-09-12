@@ -156,7 +156,7 @@ of the models or the tooling.
 | 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | done |
 | 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | done |
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | done |
-| 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | planned |
+| 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | done |
 | 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | pending |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
@@ -265,6 +265,16 @@ of the models or the tooling.
   choice (service principal + OAuth M2M vs PAT) is deliberately *not* decided in `4a` — the
   scripts are written credential-agnostic and `4b` records which Free Edition actually permits,
   because that is an empirical fact about the account, not a design call.
+
+- 2026-09-12 (phase 4a implement): **`dbx-verify.sh` shells out through `dbx-query.sh`
+  rather than reimplementing the Databricks Connect call**, so the verification path and the
+  one allow-listed query path are the same code. Two real bugs surfaced and were fixed by the
+  offline test suite before any live workspace existed: `dbx-key.sh --self-test`'s original
+  `trap ... EXIT` referenced a function-local variable that was already out of scope by the
+  time the trap fired (an "unbound variable" under `set -u`), and the wizard's own comment
+  text tripped its own "never grant ALL PRIVILEGES" test. See `phases/04a-summary.md` for the
+  full list, including a `.env` file that appeared mid-session with a real-looking Databricks
+  host — left untouched, likely a concurrent human run of phase 4b in this shared worktree.
 
 ## Blocked
 

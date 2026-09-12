@@ -8,7 +8,22 @@
       "Bash(./scripts/bigquery-auth.sh*)",
       "Bash(bash scripts/bigquery-setup.sh*)",
       "Bash(./scripts/bigquery-setup.sh*)",
-      "Read(//home/andrew/.config/gcloud-smelt-bq/**)"
+      "Read(//home/andrew/.config/gcloud-smelt-bq/**)",
+      "Bash(bash scripts/dbx-key.sh*)",
+      "Bash(./scripts/dbx-key.sh*)",
+      "Bash(bash scripts/dbx-auth.sh*)",
+      "Bash(./scripts/dbx-auth.sh*)",
+      "Bash(bash scripts/dbx-provision.sh*)",
+      "Bash(./scripts/dbx-provision.sh*)",
+      "Read(//home/andrew/.config/databricks-smelt-dogfood/**)"
+    ],
+    "allow": [
+      "Bash(bash scripts/dbx-verify.sh*)",
+      "Bash(./scripts/dbx-verify.sh*)",
+      "Bash(bash scripts/dbx-query.sh*)",
+      "Bash(./scripts/dbx-query.sh*)",
+      "Bash(bash scripts/dbx-dogfood-loader.sh*)",
+      "Bash(./scripts/dbx-dogfood-loader.sh*)"
     ]
   },
   "hooks": {
