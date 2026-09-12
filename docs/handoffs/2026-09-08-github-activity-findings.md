@@ -464,7 +464,7 @@ and gated today, not that it was dismissed.
 | Cost is jobs, not rows: ≈5.1 jobs/model/run and a ~5 s per-job floor, so a model writing 2 rows can cost six times another model writing 2 rows | `silver.issue_events` (`deleteinsert`, 2 rows, 33 s) vs `marts.star_growth` (`full_refresh`, 2 rows, 5.5 s) | the per-model execution recorded across phase 13's thirty per-window `smelt run --target bigquery` reports (derivation in `phases/16-plan.md`) | open — **derived** from those reports, not measured against `INFORMATION_SCHEMA.JOBS` (the dogfood SA lacks `bigquery.jobs.list`) | `20260906-bigquery-unattended` |
 | The shared `_smelt_ledger` serialises every model's bookkeeping — BigQuery aborts a transaction mutating a table another in-flight transaction is mutating, so a parallel run loses models at random; every ledger access is already model-scoped | every maintained model; surfaced through `silver.repo_naming` in a parallel run | the per-model bookkeeping transaction's write into `smelt_dogfood._smelt_ledger` | open — filed as [#203](https://github.com/adbrowne/smelt-sql/issues/203) with its evidence; not restated here | issue #203 |
 | An empty incremental window costs as much as a full one — every model still re-scans its inputs | `gold.repo_activity_daily` | W3, `smelt run --target bigquery --start 2026-08-07 --end 2026-08-08` (230,686,720 bytes billed, identical to W2, which landed 2,714 events) | open — operational economics for a scheduled idle run | `20260906-bigquery-unattended` |
-| The run window need not match partition granularity (`docs/specs/incremental_shapes.md` §"Run window vs partition granularity"), so the thirty daily windows were a schedule *choice*, not a requirement — with the caveat that the saving is batch-safety-class-dependent | `gold.repo_activity_daily` | the thirty per-window `smelt run --target bigquery --start D --end D+1` schedule | operational note | `20260906-bigquery-unattended` |
+| The run window need not match partition granularity (`docs/specs/incremental_shapes.md` §"Run window vs partition granularity"), and the saving from widening it is **measured**: six 5-day windows against thirty daily ones is 2.48× the model-execution time, 2.57× fewer jobs and 6.30× less cost, with the two schedules reaching byte-identical state — but it is batch-safety-class-dependent, and the three `PerPartitionOnly`/succession models a wider window does not help are 64% of all per-model execution | `silver.repo_naming`, `silver.actor_naming`, `silver.events_deduped` (flat at 120–157 s per 5-day window) vs `gold.repo_activity_daily` and the other ten (4.7–65 s, width-independent) | the six `smelt run --target bigquery --event-time-start W --event-time-end W+5` windows of phase 18, against phase 13's thirty daily ones | operational note, now measured (phase 18) | `20260906-bigquery-unattended` |
 | `stage_workspace` copied the gitignored `.smelt/` into staged workspaces, so a staged run inherited a developer's local posture baseline and failed where a fresh clone and CI could not reproduce it | `silver.repo_naming` (the append-only posture probe) | the staged-workspace copy in `crates/smelt-cli/tests/github_activity_support/mod.rs::copy_dir_all` | **closed** (phase 13): `target/` and `.smelt/` are now skipped by name, with the reason inline. Recorded because the class recurs | closed — this outcome |
 | A concurrent `cargo test -p smelt-cli` rebuilt `target/debug/smelt` **without** `--features bigquery` mid-run and killed a live leg at window 3; the refusal happens at backend construction, so no partial window was written | the whole thirty-window leg (the refusal precedes model execution) | `Error: BigQuery backend not available. Rebuild with --features bigquery` | **closed** operationally: `scripts/bq-dogfood-parity.sh` honours `SMELT_BIN` and `PARITY_RESUME_FROM` | closed — `scripts/bq-dogfood-parity.sh` |
 | Dataset creation is outside the dogfood SA's grant — deliberate, from phase 7's provisioning design; the grant was not widened | the `bigquery_oracle` target's dataset (no model) | `CREATE SCHEMA smelt_dogfood_oracle` → `Access Denied: … does not have bigquery.datasets.create permission` | boundary, working as intended | closed — dataset lifecycle lives in `scripts/bq-dogfood-oracle-dataset.sh`, under the human credential |
@@ -551,10 +551,48 @@ puts a thirty-checkpoint sweep at ≈7.2M rows ≈81 min, against ~51 min of mod
 `PARITY_RESUME_FROM` resumes an interrupted leg with **absolute** window numbers, so a
 checkpoint keeps its label. Neither changes what is compared, only how much.
 
-**Scheduling shape.** The thirty daily windows were a choice; the run window need not match
-partition granularity, and a wider window is one engine query with one partition-aligned
-DELETE and one INSERT. But an empty window costs what a full one does, so an idle daily
-schedule pays a working day's scan for nothing.
+**Scheduling shape, now measured rather than reasoned about.** The thirty daily windows were
+a choice, and the same thirty days were re-run as **six 5-day windows** on both targets to
+price it (2026-09-12; `docs/outcomes/20260906-bigquery-dogfood-spine/phases/18-summary.md`):
+
+| | 30 x 1 day | 6 x 5 days | ratio |
+|---|---|---|---|
+| model execution, total | 3,086 s | **1,243 s** | **2.48x faster** |
+| model execution, per run | mean 102.9 s | mean 207.2 s | a 5-day window costs **2.01x** a 1-day one |
+| leg wall time | ~61 min | **31 m 47 s** | 1.92x |
+| jobs | 2,160 | **842** | 2.57x fewer |
+| billed bytes / cost | 58.46 GB / US$0.29 | **9.27 GB / US$0.046** | **6.30x less** |
+
+**Five times fewer runs buys 2.5x the time and 6.3x the money, not 5x of either.** Money falls
+faster than time because most per-job billing is the 10 MB per-table floor and the coarse
+schedule issues 2.6x fewer jobs; time falls slower than the run count because the saving is
+**batch-safety-class-dependent** and the classes that do not collapse dominate this pipeline.
+Eleven of the fourteen models sit at 4.7-65 s per window with no dependence on width -- the
+`FullyBatchSafe`/`BoundedSafe` shapes that run as a single query for any run window. The two
+succession cells and the cumulative aggregate sit at 120-157 s, roughly 5x the rest and roughly
+flat, because `PerPartitionOnly` still executes one partition at a time inside a wider window;
+those three are **64% of all per-model execution**. Read the batch-safety class before widening
+a schedule -- though `smelt explain` reports no class for 8 of 16 models today
+([#205](https://github.com/adbrowne/smelt-sql/issues/205)).
+
+**And the schedules converge.** Coarse w06 against the fine schedule's w30 on BigQuery,
+compared in full by the same committed comparator with nothing exempt: **zero rows in either
+direction on all fourteen relations**. Two different valid run sequences over identical inputs
+reach byte-identical state. Cross-target parity holds at all six coarse checkpoints. Two
+caveats worth carrying: a coarse schedule must use the **preloaded** DuckDB leg, because
+`load_day.sh` is declared `cadence: 1 day` and receives only the window's first day as
+`{run_date}`; and the interval frontier for the two succession models came back as
+`2026-08-10 -> 2026-09-04` rather than `2026-08-05 -> ...` (understating coverage, not losing
+data), attributed by elimination to `succession_full_rebuild` under the first window's
+`--full-refresh`.
+
+Unchanged by the measurement: an empty window costs what a full one does, so an idle daily
+schedule still pays a working day's scan for nothing.
+
+**A hazard the coarse run added.** Do not edit a shell script while a leg is executing it --
+bash reads a script incrementally by byte offset, and an edit mid-run produced a
+`syntax error near unexpected token` in the trailing dispatch after all six windows had
+completed. Nothing was lost that time; it could as easily have landed mid-loop.
 
 ## Final punch-list
 

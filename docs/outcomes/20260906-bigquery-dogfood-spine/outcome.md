@@ -140,8 +140,57 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | done |
 | 17 | Expand the BigQuery source population to the committed fixture's full thirty days with the real loader, and delete the stray 2026-08-04 slice, so both targets run over the same rows — **runs before 13 and 14** | done |
+| 18 | Addendum, recorded after closure: re-run the parity legs on a coarse schedule (six 5-day windows instead of thirty daily ones) and measure what a wider run window buys, whether the two targets still agree, and whether the two schedules converge | done (2.5× faster, 6.3× cheaper; 14 of 14 relations equal across targets at all six checkpoints; the two schedules reach byte-identical state — see the 2026-09-12 addendum entry) |
 
 ## Decision log
+
+- 2026-09-12 (phase 18, an addendum after closure): **a coarser run window is a real but
+  sub-linear saving, and the two schedules reach identical state.**
+  `docs/specs/incremental_shapes.md:555` says the CLI range is a run window rather than a
+  per-partition invocation, so phase 13's thirty daily windows were a schedule choice inherited
+  from the DuckDB replay driver. Re-running the same thirty days as **six 5-day windows** on
+  both targets measures the choice instead of assuming it. **5× fewer runs bought 2.48× the
+  model-execution time** (3,086 s → 1,243 s), **2.57× fewer jobs** (2,160 → 842) and **6.30×
+  the cost** (US$0.29 → **US$0.046**); leg wall time fell from ≈61 min to 31 m 47 s. Money falls
+  faster than time because BigQuery bills a 10 MB per-table minimum many times over; time falls
+  slower than the run count because a `PerPartitionOnly` model still executes one partition at
+  a time inside a wider window.
+
+  **Which models collapsed, and the uncomfortable part.** Eleven of the fourteen sit at
+  4.7–65 s per window with no dependence on window width — the `FullyBatchSafe`/`BoundedSafe`
+  shapes the spec says run as a single query for any run window. The two succession cells and
+  the cumulative aggregate sit at 120–157 s, roughly 5× the rest and roughly flat, and together
+  they are **64% of all per-model execution**. So the three models a wider window does not help
+  are the three most expensive ones in this pipeline. The direct per-model fine-vs-coarse ratio
+  is measured on DuckDB (4.40× overall; 2.84× for the cumulative model, 4.17–4.18× for the
+  succession pair, 4.5–6.5× for everything else) because BigQuery's fine-schedule run manifests
+  live under the gitignored `.smelt/` that `clear` removes.
+
+  **The result worth having.** Coarse w06 and phase 13's fine w30, compared in full by the same
+  committed comparator with nothing exempt: **zero rows in either direction on all fourteen
+  relations**. Two different valid run sequences over identical inputs reach byte-identical
+  state — a strictly stronger claim than either sequence alone, and the first direct test of
+  the schedule-independence the run-window rule implies. Cross-target parity holds at **all
+  six** checkpoints, better than phase 13's natural pair only because a coarse schedule forces
+  the preloaded DuckDB leg (the loader is `cadence: 1 day` and gets the window's first day), so
+  the `bronze_events` arrival lag cannot arise.
+
+  **What did not converge, and it is not the data.** The interval frontier for
+  `silver.repo_naming` and `silver.actor_naming` reads `2026-08-10 → 2026-09-04` on the coarse
+  leg where phase 13 recorded `2026-08-05` for every interval-addressed model. It understates
+  coverage rather than losing anything. Window width is ruled out by the six models that ran
+  the same windows and did record 08-05; what is left is the succession cells'
+  `succession_full_rebuild` under this schedule's first-window `--full-refresh`. That is an
+  inference from this run's own evidence, not a second measurement, and it goes to
+  `20260906-bigquery-correctness` next to punch-list item 1.
+
+  **The outcome stays `done`.** No criterion's verdict moves, no gate was lowered, no registry
+  entry was added or removed, and `13-parity.json` / `14-equivalence.json` were not overwritten.
+  `scripts/bq-dogfood-parity.sh` was extended rather than forked (`PARITY_WINDOW_DAYS`,
+  `PARITY_FIRST_FULL_REFRESH`), both defaulting to the fine schedule. Sources read only,
+  65,583 rows each after the run; nothing written outside `smelt_dogfood`; `target: dev` never
+  unpinned. Evidence: `phases/18-summary.md`, `18-parity.json`, `18-parity.md`,
+  `18-convergence.json`.
 
 - 2026-09-12 (phase 16, and the outcome's close-out): **the evidence is banked, criterion 8
   is met, and the outcome is `done`.** `docs/handoffs/2026-09-08-github-activity-findings.md`

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bq-dogfood-parity.sh — drive `examples/github_activity` over the fixture's
-# thirty windows on BOTH targets and snapshot the compared relations, so the
+# thirty days on BOTH targets and snapshot the compared relations, so the
 # offline comparator in `crates/smelt-cli/tests/github_activity_dual_target.rs`
 # can prove criterion 6 ("the two targets agree") over one shared population.
 #
@@ -18,6 +18,20 @@
 #
 #     export PARITY_TOKEN_CMD='gcloud auth application-default print-access-token \
 #       --impersonate-service-account=smelt-dogfood@smelt-bq-test-20260816.iam.gserviceaccount.com'
+#
+# The thirty days are replayed as thirty daily windows by default. They need
+# not be: the CLI range is a RUN WINDOW, not a per-partition invocation, so
+# PARITY_WINDOW_DAYS replays the same fixture on a coarser schedule (and
+# PARITY_FIRST_FULL_REFRESH makes the first window a `--full-refresh`):
+#
+#     PARITY_WINDOW_DAYS=5 PARITY_CHECKPOINTS=1,2,3,4,5,6 \
+#     PARITY_FIRST_FULL_REFRESH=1 bash scripts/bq-dogfood-parity.sh bq
+#
+# Note that the DuckDB leg's loader is declared `cadence: 1 day` and receives
+# the window's FIRST day as `{run_date}`, so a window wider than a day loads
+# one day of five. Use `duck-preloaded` (not `duck`) on a coarse schedule: it
+# stages the whole source before window 1, which is also the arrival order the
+# warehouse-resident BigQuery source already has.
 #
 # Blast radius, enforced by construction:
 #   * `clear` drops ONLY the names it prints, and refuses outright if that list
@@ -58,6 +72,29 @@ ORACLE_DATASET="${PARITY_ORACLE_DATASET:-smelt_dogfood_oracle}"
 
 START_DATE="${PARITY_START_DATE:-2026-08-05}"
 DAYS="${PARITY_DAYS:-30}"
+# Window width in days. The spec is explicit that the CLI's
+# `[--event-time-start, --event-time-end)` range is a RUN WINDOW, not a
+# per-partition invocation (`docs/specs/incremental_shapes.md` §"Run window vs
+# partition granularity"), so the same DAYS of fixture can be replayed as
+# thirty daily windows or six five-day ones. Both are valid run sequences over
+# identical inputs and must reach identical state; making the width a knob is
+# what lets that be measured rather than asserted.
+WINDOW_DAYS="${PARITY_WINDOW_DAYS:-1}"
+# Number of windows, rounding up so a width that does not divide DAYS leaves a
+# short final window rather than dropping days.
+WINDOWS=$(((DAYS + WINDOW_DAYS - 1) / WINDOW_DAYS))
+# Run the FIRST window as `--full-refresh`. Off by default (phase 13's thirty
+# daily windows were all incremental, over ground `clear` had emptied).
+FIRST_FULL_REFRESH="${PARITY_FIRST_FULL_REFRESH:-0}"
+
+# Window n (1-based) covers [window_start n, window_end n). The end is clamped
+# to START_DATE + DAYS so the last window never reaches past the fixture.
+window_start() { date -u -d "$START_DATE + $((($1 - 1) * WINDOW_DAYS)) day" +%F; }
+window_end() {
+  local off=$(($1 * WINDOW_DAYS))
+  ((off > DAYS)) && off=$DAYS
+  date -u -d "$START_DATE + $off day" +%F
+}
 # Declared comparison points (D2). Measured, not assumed — see
 # docs/outcomes/20260906-bigquery-dogfood-spine/phases/13-summary.md.
 CHECKPOINTS="${PARITY_CHECKPOINTS:-1,2,3,5,10,20,30}"
@@ -156,8 +193,11 @@ stage_clear() {
 stage_duck() {
   local exclude_args=()
   for m in "${EXCLUDE_MODELS[@]}"; do exclude_args+=(--exclude "$m"); done
+  local first_refresh_args=()
+  [[ "$FIRST_FULL_REFRESH" == "1" ]] && first_refresh_args=(--first-full-refresh)
   PATH="$(dirname "$SMELT_BIN"):$PATH" python3 "$EXAMPLE_DIR/run_incremental.py" \
-    --start-date "$START_DATE" --days "$DAYS" \
+    --start-date "$START_DATE" --days "$DAYS" --window-days "$WINDOW_DAYS" \
+    "${first_refresh_args[@]}" \
     --snapshot-dir "$OUT_DIR/duck" --snapshot-after "$CHECKPOINTS" \
     --skip-tests "${exclude_args[@]}" \
     --report "$OUT_DIR/duck_replay.json"
@@ -173,8 +213,11 @@ stage_duck() {
 stage_duck_preloaded() {
   local exclude_args=()
   for m in "${EXCLUDE_MODELS[@]}"; do exclude_args+=(--exclude "$m"); done
+  local first_refresh_args=()
+  [[ "$FIRST_FULL_REFRESH" == "1" ]] && first_refresh_args=(--first-full-refresh)
   PATH="$(dirname "$SMELT_BIN"):$PATH" python3 "$EXAMPLE_DIR/run_incremental.py" \
-    --start-date "$START_DATE" --days "$DAYS" --preload-source \
+    --start-date "$START_DATE" --days "$DAYS" --window-days "$WINDOW_DAYS" \
+    --preload-source "${first_refresh_args[@]}" \
     --snapshot-dir "$OUT_DIR/duck-preloaded" --snapshot-after "$CHECKPOINTS" \
     --skip-tests "${exclude_args[@]}" \
     --report "$OUT_DIR/duck_preloaded_replay.json"
@@ -188,13 +231,17 @@ stage_bq() {
   # label and the report's schedule column means the same thing either way.
   local first="${PARITY_RESUME_FROM:-1}"
   local n day nextday snap_dir rel
-  for ((n = first; n <= DAYS; n++)); do
-    day="$(date -u -d "$START_DATE + $((n - 1)) day" +%F)"
-    nextday="$(date -u -d "$START_DATE + $n day" +%F)"
-    echo "=== window $n/$DAYS  [$day .. $nextday) $(date -u +%T) ==="
+  local refresh_args=()
+  for ((n = first; n <= WINDOWS; n++)); do
+    day="$(window_start "$n")"
+    nextday="$(window_end "$n")"
+    refresh_args=()
+    if ((n == 1)) && [[ "$FIRST_FULL_REFRESH" == "1" ]]; then refresh_args=(--full-refresh); fi
+    echo "=== window $n/$WINDOWS  [$day .. $nextday) $(date -u +%T) ==="
     refresh_token
     ( cd "$EXAMPLE_DIR" && "$SMELT_BIN" run --target bigquery \
-        --event-time-start "$day" --event-time-end "$nextday" "${exclude_args[@]}" )
+        --event-time-start "$day" --event-time-end "$nextday" \
+        "${refresh_args[@]}" "${exclude_args[@]}" )
     if [[ ",$CHECKPOINTS," == *",$n,"* ]]; then
       snap_dir="$OUT_DIR/bq/$(printf 'w%02d' "$n")"
       mkdir -p "$snap_dir"
@@ -282,7 +329,7 @@ stage_oracle() {
   for m in "${EXCLUDE_MODELS[@]}"; do exclude_args+=(-e "$m"); done
   local n nextday snap_dir rel
   for n in ${CHECKPOINTS//,/ }; do
-    nextday="$(date -u -d "$START_DATE + $n day" +%F)"
+    nextday="$(window_end "$n")"
     echo "=== oracle checkpoint $n  [$START_DATE .. $nextday) full refresh $(date -u +%T) ==="
     refresh_token
     oracle_clear
@@ -307,20 +354,24 @@ stage_oracle() {
 # DuckDB database that supplies the declared types BOTH are landed under.
 stage_oracle_manifest() {
   CPS="$CHECKPOINTS" OUT="$OUT_DIR" ORACLE_OUT="${PARITY_ORACLE_OUT_DIR:-$OUT_DIR}" \
-  START="$START_DATE" MANIFEST="${PARITY_ORACLE_MANIFEST:-$REPO/target/phase14/equivalence-manifest.json}" \
+  START="$START_DATE" WINDOW_DAYS="$WINDOW_DAYS" DAYS="$DAYS" MANIFEST="${PARITY_ORACLE_MANIFEST:-$REPO/target/phase14/equivalence-manifest.json}" \
   python3 - <<'PY'
 import json, os, pathlib
 from datetime import date, timedelta
 out = pathlib.Path(os.environ["OUT"])
 oracle_out = pathlib.Path(os.environ["ORACLE_OUT"])
 start = date.fromisoformat(os.environ["START"])
+width = int(os.environ["WINDOW_DAYS"])
+days = int(os.environ["DAYS"])
 entries = []
 for n in (int(x) for x in os.environ["CPS"].split(",") if x.strip()):
-    day = start + timedelta(days=n - 1)
+    day = start + timedelta(days=(n - 1) * width)
+    end = start + timedelta(days=min(n * width, days))
     entries.append({
         "label": f"w{n:02d}",
         "window": n,
         "day": day.isoformat(),
+        "window_end": end.isoformat(),
         # The type reference, not a comparison side: both BigQuery snapshots
         # are landed under these declared types so they are byte-comparable.
         "types_db_path": str(out / "duck" / f"w{n:02d}.duckdb"),
@@ -336,20 +387,25 @@ PY
 
 stage_manifest() {
   CPS="$CHECKPOINTS" OUT="$OUT_DIR" START="$START_DATE" \
+  WINDOW_DAYS="$WINDOW_DAYS" DAYS="$DAYS" \
   DUCK_DIR="${PARITY_DUCK_DIR:-duck}" MANIFEST="${PARITY_MANIFEST_NAME:-parity-manifest.json}" \
   python3 - <<'PY'
 import json, os, pathlib
 out = pathlib.Path(os.environ["OUT"])
 from datetime import date, timedelta
 start = date.fromisoformat(os.environ["START"])
+width = int(os.environ["WINDOW_DAYS"])
+days = int(os.environ["DAYS"])
 duck_dir = os.environ["DUCK_DIR"]
 entries = []
 for n in (int(x) for x in os.environ["CPS"].split(",") if x.strip()):
-    day = start + timedelta(days=n - 1)
+    day = start + timedelta(days=(n - 1) * width)
+    end = start + timedelta(days=min(n * width, days))
     entries.append({
         "label": f"w{n:02d}",
         "window": n,
         "day": day.isoformat(),
+        "window_end": end.isoformat(),
         "duck_db_path": str(out / duck_dir / f"w{n:02d}.duckdb"),
         "ndjson_dir": str(out / "bq" / f"w{n:02d}"),
     })
@@ -365,11 +421,12 @@ PY
 # `=` when the multiset difference is zero in both directions and
 # `-<duck_only>/+<bq_only>` when it is not.
 stage_report() {
-  REPO="$REPO" python3 - <<'PY'
+  REPO="$REPO" REPORT_JSON="${PARITY_REPORT_JSON:-13-parity.json}" \
+  REPORT_MD="${PARITY_REPORT_MD:-13-parity.md}" python3 - <<'PY'
 import json, os, pathlib
 repo = pathlib.Path(os.environ["REPO"])
 base = repo / "docs/outcomes/20260906-bigquery-dogfood-spine/phases"
-report = json.loads((base / "13-parity.json").read_text())
+report = json.loads((base / os.environ["REPORT_JSON"]).read_text())
 cps = report["checkpoints"]
 rels = [r["relation"] for r in cps[0]["relations"]]
 lines = ["| relation | " + " | ".join(f'{c["label"]} ({c["day"]})' for c in cps) + " |",
@@ -391,7 +448,7 @@ for rel in rels:
         row.append(str(d["duck_rows"]) if d["duck_rows"] == d["bq_rows"]
                    else f'{d["duck_rows"]}/{d["bq_rows"]}')
     lines.append(f"| `{rel}` | " + " | ".join(row) + " |")
-out = base / "13-parity.md"
+out = base / os.environ["REPORT_MD"]
 out.write_text("\n".join(lines) + "\n")
 print(f"wrote {out}")
 PY

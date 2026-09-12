@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Day-by-day incremental replay driver for examples/github_activity.
+"""Incremental replay driver for examples/github_activity.
 
 Unlike `examples/web_analytics/run_incremental.py`, there is no datagen step:
 `seeds/github_events_sample.parquet` is a committed, reproducible export of
@@ -8,8 +8,15 @@ script does, in order:
 
   1. Wipe target/dev.duckdb and create the empty `raw.github_events` table
      via setup_sources.sql.
-  2. Loop day-by-day across the fixture's 30-day range, invoking `smelt run
-     --event-time-start D --event-time-end D+1`. The day's load itself is no
+  2. Loop window-by-window across the fixture's 30-day range, invoking `smelt
+     run --event-time-start W --event-time-end W+width`. The window is one day
+     wide by default — the fixture's natural cadence — and `--window-days`
+     widens it, because the CLI's range is a run window rather than a
+     per-partition invocation (`docs/specs/incremental_shapes.md` §"Run window
+     vs partition granularity"). Note that a window wider than the loader's
+     `cadence: 1 day` invokes `load_day.sh` once, for the window's FIRST day
+     only (`{run_date}` is the run-window start), so a coarse schedule wants
+     `--preload-source` to stage the source up front. The day's load is no
      longer this script's job: `models/sources/raw/github_loader.yml`
      declares `load_day.sh` as an external step producing both raw sources,
      and `smelt run` orders and invokes it ahead of every model that reads
@@ -113,7 +120,10 @@ def redelivered_count(db: Path, day: date) -> int:
 
 
 def smelt_run_window(
-    window_start: date, window_end: date, exclude: list[str] | None = None
+    window_start: date,
+    window_end: date,
+    exclude: list[str] | None = None,
+    full_refresh: bool = False,
 ) -> None:
     cmd = [
         "smelt",
@@ -123,6 +133,8 @@ def smelt_run_window(
         "--event-time-end",
         window_end.isoformat(),
     ]
+    if full_refresh:
+        cmd.append("--full-refresh")
     for model in exclude or []:
         cmd += ["-e", model]
     run_or_die(cmd, cwd=EXAMPLE_DIR)
@@ -140,6 +152,22 @@ def main() -> int:
         default=DEFAULT_START,
     )
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
+    parser.add_argument(
+        "--window-days",
+        type=int,
+        default=1,
+        help="width of each `smelt run` window in days (default 1, the fixture's natural "
+        "daily cadence). The CLI's [--event-time-start, --event-time-end) range is a run "
+        "window, not a per-partition invocation (`docs/specs/incremental_shapes.md` "
+        "\u00a7\"Run window vs partition granularity\"), so the same --days of fixture can be "
+        "replayed as thirty daily windows or six five-day ones. A width that does not "
+        "divide --days leaves a short final window rather than dropping days.",
+    )
+    parser.add_argument(
+        "--first-full-refresh",
+        action="store_true",
+        help="run the first window with --full-refresh (the rest stay incremental)",
+    )
     parser.add_argument("--report", type=Path, default=EXAMPLE_DIR / ".last_run.json")
     parser.add_argument(
         "--exclude",
@@ -190,7 +218,16 @@ def main() -> int:
         db.unlink()
     setup_sources(db)
 
+    if args.window_days < 1:
+        parser.error("--window-days must be at least 1")
     days = daterange(args.start_date, args.days)
+    windows = [
+        (
+            args.start_date + timedelta(days=i * args.window_days),
+            args.start_date + timedelta(days=min((i + 1) * args.window_days, args.days)),
+        )
+        for i in range((args.days + args.window_days - 1) // args.window_days)
+    ]
     if args.preload_source:
         for day in days:
             run_or_die(
@@ -201,20 +238,30 @@ def main() -> int:
     iter_reports: list[IterReport] = []
     total_redelivered = 0
     loop_t0 = time.monotonic()
-    for idx, day in enumerate(days, start=1):
+    for idx, (w_start, w_end) in enumerate(windows, start=1):
         t0 = time.monotonic()
-        smelt_run_window(day, day + timedelta(days=1), args.exclude)
+        smelt_run_window(
+            w_start,
+            w_end,
+            args.exclude,
+            full_refresh=(idx == 1 and args.first_full_refresh),
+        )
         elapsed = time.monotonic() - t0
         if idx in snapshot_after:
             args.snapshot_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(db, args.snapshot_dir / f"w{idx:02d}.duckdb")
-        redelivered = redelivered_count(db, day)
+        # The redelivery count is a per-day property of the fixture, so a wide
+        # window sums the days it covers rather than reporting one of them.
+        redelivered = sum(
+            redelivered_count(db, w_start + timedelta(days=k))
+            for k in range((w_end - w_start).days)
+        )
         total_redelivered += redelivered
         print(
-            f"[day {idx:>2}/{len(days)}] {day.isoformat()}  "
+            f"[window {idx:>2}/{len(windows)}] [{w_start.isoformat()} .. {w_end.isoformat()})  "
             f"redelivered={redelivered}  smelt run {elapsed:.2f}s"
         )
-        iter_reports.append(IterReport(idx, len(days), day, redelivered, elapsed))
+        iter_reports.append(IterReport(idx, len(windows), w_start, redelivered, elapsed))
 
     loop_seconds = time.monotonic() - loop_t0
     test_t0 = time.monotonic()
@@ -225,6 +272,9 @@ def main() -> int:
     report = {
         "start_date": args.start_date.isoformat(),
         "days": args.days,
+        "window_days": args.window_days,
+        "windows": len(windows),
+        "first_full_refresh": args.first_full_refresh,
         "total_redelivered_rows": total_redelivered,
         "loop_seconds": loop_seconds,
         "tests_seconds": test_seconds,
@@ -237,7 +287,10 @@ def main() -> int:
 
     print()
     print("=== summary ===")
-    print(f"  {args.days} days replayed in {loop_seconds:.1f}s")
+    print(
+        f"  {args.days} days replayed as {len(windows)} window(s) of "
+        f"{args.window_days} day(s) in {loop_seconds:.1f}s"
+    )
     print(f"  total redelivered rows observed: {total_redelivered}")
     print(f"  report: {args.report}")
     return 0
