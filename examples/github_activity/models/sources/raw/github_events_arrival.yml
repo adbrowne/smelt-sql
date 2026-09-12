@@ -23,6 +23,9 @@ name:
   # loader), not the default-mapped
   # `smelt_dogfood.sources_raw_github_events_arrival`.
   databricks: smelt_dogfood.github_events_arrival
+  # See `github_events.yml`'s identical note: the full-refresh oracle reads
+  # the shared source and writes only its outputs to its own schema.
+  databricks_oracle: smelt_dogfood.github_events_arrival
 mutation_profile:
   kind: append_only
   lateness: '6 hours'

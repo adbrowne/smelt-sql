@@ -23,7 +23,11 @@
       "Bash(bash scripts/dbx-dogfood-loader.sh*)",
       "Bash(./scripts/dbx-dogfood-loader.sh*)",
       "Bash(bash scripts/dbx-auth.sh*)",
-      "Bash(./scripts/dbx-auth.sh*)"
+      "Bash(./scripts/dbx-auth.sh*)",
+      "Bash(bash scripts/dbx-dogfood-parity.sh*)",
+      "Bash(./scripts/dbx-dogfood-parity.sh*)",
+      "Bash(bash scripts/dbx-dogfood-oracle.sh*)",
+      "Bash(./scripts/dbx-dogfood-oracle.sh*)"
     ]
   },
   "hooks": {

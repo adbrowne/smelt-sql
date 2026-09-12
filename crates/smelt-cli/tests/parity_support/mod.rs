@@ -673,6 +673,99 @@ pub struct ParityManifest {
     pub checkpoints: Vec<Checkpoint>,
 }
 
+// ---------------------------------------------------------------------------
+// The equivalence manifest shape, shared by every full-refresh-oracle sweep
+// ---------------------------------------------------------------------------
+
+/// One compared checkpoint of an equivalence-invariant sweep (does one
+/// engine's incrementally-maintained state equal its own full refresh over
+/// the inputs seen so far?): the DuckDB **type reference** database at that
+/// window, and the two exported NDJSON directories — the incrementally
+/// maintained side and the full-refresh oracle side. Shared by
+/// `github_activity_bq_oracle.rs` and `github_activity_dbx_oracle.rs` so the
+/// shape is declared once.
+///
+/// `source_days_loaded` is optional (`#[serde(default)]`) because it means
+/// something only on a target whose source lands one day at a time: there the
+/// full-refresh oracle is a valid oracle for "the inputs seen so far" only
+/// when the source holds exactly as many days as the window number
+/// ([`assert_source_covers_window`]). BigQuery's source is fully populated
+/// before the first window, so its manifest never sets this field and the
+/// unused default costs it nothing.
+#[derive(serde::Deserialize)]
+pub struct EquivalenceCheckpoint {
+    pub label: String,
+    pub window: i64,
+    pub day: String,
+    pub types_db_path: PathBuf,
+    pub incr_ndjson_dir: PathBuf,
+    pub oracle_ndjson_dir: PathBuf,
+    #[serde(default)]
+    pub source_days_loaded: i64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct EquivalenceManifest {
+    pub checkpoints: Vec<EquivalenceCheckpoint>,
+}
+
+/// The measurement that replaces BigQuery's unbounded-refresh exemption list
+/// on a target whose source lands one day at a time (Databricks): the
+/// invariant `incremental_state(S) == full_refresh(inputs ∈ S)` needs the
+/// oracle's `inputs` to be exactly the inputs seen so far, which holds here
+/// only when the source has loaded exactly as many days as the window number
+/// — not fewer (an incomplete oracle) and not more (an oracle reading beyond
+/// the window, exactly the arrival-order mistake the BigQuery exemption list
+/// works around by exempting rather than measuring).
+pub fn assert_source_covers_window(
+    label: &str,
+    source_days_loaded: i64,
+    window: i64,
+) -> Result<(), String> {
+    if source_days_loaded != window {
+        return Err(format!(
+            "checkpoint {label}: the source holds {source_days_loaded} day(s) but the window \
+             number is {window} — a full refresh is only a valid oracle for \"the inputs seen \
+             so far\" when the two agree; a source that ran ahead of its window would make the \
+             oracle read rows the incremental leg had not yet seen, and one that ran behind \
+             would make it read fewer"
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared negative-control fixtures
+// ---------------------------------------------------------------------------
+
+pub fn synth_db(path: &Path, sql: &str) {
+    let conn = duckdb::Connection::open(path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+    conn.execute_batch(sql)
+        .unwrap_or_else(|e| panic!("exec failed: {e}\nSQL:\n{sql}"));
+}
+
+/// A synthetic pair whose incremental side carries one row the oracle does
+/// not, and one differing value — the two shapes an equivalence violation
+/// takes. Shared by every oracle sweep's negative controls, so the fixture
+/// itself cannot drift between suites.
+pub fn violating_pair(tmp: &Path) -> (PathBuf, PathBuf) {
+    let incr = tmp.join("incr.duckdb");
+    let oracle = tmp.join("oracle.duckdb");
+    synth_db(
+        &incr,
+        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
+           (1, 'a/one', 10), (2, 'a/two_stale', 20)) \
+           AS t(repo_id, current_repo_name, event_count);",
+    );
+    synth_db(
+        &oracle,
+        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
+           (1, 'a/one', 10), (2, 'a/two', 20)) \
+           AS t(repo_id, current_repo_name, event_count);",
+    );
+    (incr, oracle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

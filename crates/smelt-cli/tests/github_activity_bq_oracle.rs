@@ -69,8 +69,9 @@ use std::path::PathBuf;
 #[path = "parity_support/mod.rs"]
 mod parity_support;
 use parity_support::{
-    check_agreement_against, compare_databases, load_exported_snapshot, repo_root,
-    RegisteredDivergence, RelationDiff, SideLabels, BIGQUERY_EXCLUDED_MODELS,
+    check_agreement_against, compare_databases, load_exported_snapshot, repo_root, synth_db,
+    violating_pair, EquivalenceManifest, RegisteredDivergence, RelationDiff, SideLabels,
+    BIGQUERY_EXCLUDED_MODELS,
 };
 
 /// The two sides of *this* sweep: BigQuery's incrementally-maintained state,
@@ -419,32 +420,6 @@ fn check_equivalence(
 // ---------------------------------------------------------------------------
 // Offline negative controls — synthetic pairs, no cloud, no credential
 // ---------------------------------------------------------------------------
-
-fn synth_db(path: &std::path::Path, sql: &str) {
-    let conn = duckdb::Connection::open(path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
-    conn.execute_batch(sql)
-        .unwrap_or_else(|e| panic!("exec failed: {e}\nSQL:\n{sql}"));
-}
-
-/// A synthetic pair whose incremental side carries one row the oracle does not,
-/// and one differing value — the two shapes an equivalence violation takes.
-fn violating_pair(tmp: &std::path::Path) -> (PathBuf, PathBuf) {
-    let incr = tmp.join("incr.duckdb");
-    let oracle = tmp.join("oracle.duckdb");
-    synth_db(
-        &incr,
-        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
-           (1, 'a/one', 10), (2, 'a/two_stale', 20)) \
-           AS t(repo_id, current_repo_name, event_count);",
-    );
-    synth_db(
-        &oracle,
-        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
-           (1, 'a/one', 10), (2, 'a/two', 20)) \
-           AS t(repo_id, current_repo_name, event_count);",
-    );
-    (incr, oracle)
-}
 
 /// A real difference between incremental state and its oracle fails the sweep,
 /// naming the relation and both counts under *this* suite's side labels.
@@ -807,26 +782,14 @@ fn the_unbounded_refresh_set_is_exactly_what_the_report_shows() {
 // The live sweep
 // ---------------------------------------------------------------------------
 
-/// One compared checkpoint. `types_db_path` is the DuckDB leg's database at
-/// that window — the **type reference** for landing both BigQuery sides, not a
-/// comparison side: typing both sides identically is what makes the two landed
-/// snapshots byte-comparable. Produced by
-/// `scripts/bq-dogfood-parity.sh oracle-manifest`.
-#[derive(serde::Deserialize)]
-struct Checkpoint {
-    label: String,
-    window: i64,
-    day: String,
-    types_db_path: PathBuf,
-    incr_ndjson_dir: PathBuf,
-    oracle_ndjson_dir: PathBuf,
-}
-
-#[derive(serde::Deserialize)]
-struct EquivalenceManifest {
-    checkpoints: Vec<Checkpoint>,
-}
-
+/// The manifest's checkpoint shape is [`parity_support::EquivalenceCheckpoint`]
+/// — shared with `github_activity_dbx_oracle.rs` rather than restated here.
+/// `types_db_path` is the DuckDB leg's database at that window — the **type
+/// reference** for landing both BigQuery sides, not a comparison side: typing
+/// both sides identically is what makes the two landed snapshots
+/// byte-comparable. Produced by `scripts/bq-dogfood-parity.sh
+/// oracle-manifest`.
+///
 /// The whole sweep over the live snapshots, and the writer of the committed
 /// equivalence report.
 ///

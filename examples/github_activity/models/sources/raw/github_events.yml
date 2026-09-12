@@ -31,6 +31,13 @@ name:
   # resolve to `smelt_dogfood.sources_raw_github_events` on the `databricks`
   # target, a table nothing creates.
   databricks: smelt_dogfood.github_events
+  # The full-refresh oracle (criterion 8) reads the SAME physical table as
+  # the `databricks` target — see the `bigquery_oracle:` note above for why:
+  # without this entry the default mapping would resolve to
+  # `smelt_dogfood_oracle.sources_raw_github_events`, a table nothing
+  # creates, and the oracle would refresh over zero rows. Gated by
+  # `github_activity_dbx_oracle::the_oracle_target_resolves_sources_to_the_shared_tables`.
+  databricks_oracle: smelt_dogfood.github_events
 mutation_profile:
   kind: append_only
   # GitHub Archive publishes hourly shard files; an event minted near an hour
