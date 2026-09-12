@@ -371,6 +371,12 @@ fn dbx_dogfood_env_exports_the_dbx_venv_and_no_secret() {
     let env_script = repo_root().join("scripts/dbx-dogfood-env.sh");
     assert!(env_script.exists());
 
+    // A real credential config now lives at the default
+    // $HOME/.config/databricks-smelt-dogfood (phase 4b's live provisioning), so
+    // merely removing the three env vars falls back to reading it and the "no
+    // credential config on disk" assertion below would see a real host. Point
+    // SMELT_DBX_CONFIG_DIR at an empty tempdir to genuinely isolate this case.
+    let tmp = TempDir::new().expect("tempdir");
     let out = Command::new("bash")
         .arg("-c")
         .arg(format!(
@@ -380,7 +386,7 @@ fn dbx_dogfood_env_exports_the_dbx_venv_and_no_secret() {
         .current_dir(repo_root())
         .env_remove("SMELT_DBX_HOST")
         .env_remove("SMELT_DBX_TOKEN")
-        .env_remove("SMELT_DBX_CONFIG_DIR")
+        .env("SMELT_DBX_CONFIG_DIR", tmp.path())
         .output()
         .unwrap_or_else(|e| panic!("failed to source dbx-dogfood-env.sh: {e}"));
     assert!(

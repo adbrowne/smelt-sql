@@ -158,7 +158,7 @@ of the models or the tooling.
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | done |
 | 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | done |
 | 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | blocked |
-| 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | planned |
+| 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | done |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
@@ -168,6 +168,27 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 4c implement): **criterion 4's demonstrable half is closed.**
+  `dbx-verify.sh` passed both legs on the first run against the live workspace;
+  `SHOW GRANTS ON SCHEMA` for both `smelt_dogfood` and `smelt_dogfood_oracle`
+  returned exactly the 4 expected privileges (`CREATE TABLE`, `MODIFY`, `SELECT`,
+  `USE SCHEMA`) scoped to a single principal, confirmed via `current_user()` to be
+  the credential's own identity — so the grantee bug flagged in the 4c planning
+  decision was already fixed and needed no re-grant. `free-edition-facts.md` now
+  has zero `TBD`s: concurrency and storage are cited from Databricks' own Free
+  Edition limitations doc, cold-start latency is measured (a session-per-`dbx-query.sh`-invocation
+  design means there is no cold/warm distinction to report), and session idle
+  timeout is a measured partial (an `INVALID_HANDLE.SESSION_CLOSED` reproduced twice
+  during `dbx-verify.sh`, suggesting single-digit-second serverless teardown) plus a
+  cited fact that Databricks itself publishes no number. Two pre-existing offline
+  test regressions were found and fixed along the way — a stale `CREATE TABLE`
+  refusal-probe assertion that predated 4a's own switch to `CREATE SCHEMA`, and a
+  loader-env test that fell through to phase 4b's real on-disk config instead of
+  isolating "no credential" state — both confirmed pre-existing by reproducing
+  against committed HEAD before touching either. Row 4b stays `blocked`; its
+  residue (the human's own `04b-summary.md`, and Blocked item (b)'s token-refresh
+  question) is untouched.
 
 - 2026-09-12 (plan 4c): **row 4c added — the demonstrable half of criterion 4 is no longer
   human-gated.** Probing from this worktree found the workspace reachable via the allow-listed

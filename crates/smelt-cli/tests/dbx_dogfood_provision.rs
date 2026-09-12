@@ -169,14 +169,21 @@ fn verify_script_checks_reachability_and_refusal() {
         contents.to_uppercase().contains("SHOW TABLES"),
         "must run a reachability SHOW TABLES"
     );
+    // The refusal probe is CREATE SCHEMA on the catalog, not CREATE TABLE:
+    // Free Edition grants every workspace user/principal CREATE TABLE (and
+    // CREATE VOLUME/MODEL/MATERIALIZED VIEW/FUNCTION) on `workspace.default`
+    // as a platform default unrelated to this credential's own grants, so a
+    // CREATE TABLE probe would pass regardless of scope
+    // (docs/outcomes/20260912-databricks-dogfood-spine/phases/04c-summary.md).
+    // CREATE SCHEMA on the catalog is the credential's own scope instead.
     assert!(
-        contents.contains("CREATE TABLE"),
+        contents.contains("CREATE SCHEMA"),
         "must attempt a write outside the granted schemas"
     );
     // Inverted exit-status handling: the write succeeding must be the
     // failure branch, not the success branch.
     assert!(
-        contents.contains("if query \"CREATE TABLE")
+        contents.contains("if query \"CREATE SCHEMA")
             && contents.contains("UNEXPECTED")
             && contents.contains("correctly refused"),
         "must invert exit-status handling for the refusal leg, not just run the SQL"
@@ -216,12 +223,15 @@ fn env_script_exports_the_oracle_schema() {
 }
 
 #[test]
-fn facts_sheet_has_every_quota_slot_unfilled() {
+fn facts_sheet_has_no_unfilled_quota_slots() {
+    // Phase 4a shipped the sheet with every row TBD; phase 4c (a reachable
+    // session, no human needed for the demonstrable half of criterion 4)
+    // filled every row with a measured or cited value
+    // (docs/outcomes/20260912-databricks-dogfood-spine/phases/04c-summary.md).
+    // This test now guards the opposite direction: no TBD may survive.
     let contents = read("docs/outcomes/20260912-databricks-dogfood-spine/free-edition-facts.md");
-    let placeholder = "TBD (phase 4b)";
-    let occurrences = contents.matches(placeholder).count();
     assert!(
-        occurrences >= 4,
-        "expected every quota row (and the credential kind) to be '{placeholder}', found {occurrences} in:\n{contents}"
+        !contents.contains("TBD"),
+        "expected every quota row and the credential kind to be filled, found a TBD in:\n{contents}"
     );
 }
