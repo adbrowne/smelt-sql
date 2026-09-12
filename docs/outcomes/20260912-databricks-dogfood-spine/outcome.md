@@ -175,6 +175,33 @@ of the models or the tooling.
 
 ## Decision log
 
+- 2026-09-13 (research note, not a phase decision — **planner triage needed**): **the "Spark
+  has no cross-table transaction" premise behind `MergeLedger`/`ReconciliationLedger`/
+  `TombstoneLedger`'s permanent Spark absence (`docs/specs/state.md` §"Which dialects realise
+  which structure", `crates/smelt-logical/src/maintenance/availability/state_structure.rs`'s
+  `realisable_state_structures`) may no longer hold on Databricks specifically.** Databricks
+  shipped **Catalog Commits** (GA, 2026) — Unity Catalog becomes the commit coordinator for
+  Delta (built on the Coordinated Commits protocol) and explicitly supports running multiple
+  SQL statements across multiple UC-managed Delta tables as one atomic commit
+  ([docs](https://docs.databricks.com/aws/en/tables/features/catalog-commits),
+  [GA announcement](https://www.databricks.com/blog/convergence-open-table-formats-and-open-catalogs-catalog-commits-generally-available)).
+  That is precisely the primitive the doc comment says Delta lacks ("per-table atomicity and
+  no cross-table transaction, so a ledger write and its data write cannot be made atomic").
+  This is **Databricks/Unity-Catalog-specific** (requires Catalog Commits enabled on UC-managed
+  tables), not a property of generic Spark-on-Delta-Lake-OSS — the `SqlDialect::SparkSQL` arm
+  covers both today, so unlocking this needs either a Databricks-specific capability flag or a
+  confirmed UC-only distinction, not a blanket flip of the `SparkSQL` row. Also unconfirmed:
+  whether Databricks Free Edition (this outcome's target) has Catalog Commits available/enabled
+  at all, and whether smelt's own transaction model (single Spark Connect session, no explicit
+  multi-statement SQL transaction API surfaced yet) can actually drive a coordinated commit
+  from the client side. Raised by the user mid-loop questioning the "permanent absence" framing
+  after phase 7b's bug (a `MergeLedger`-requiring `ColumnScopedMerge` cell downgrading on
+  Spark). **Not investigated or acted on here** — this is a design question bigger than one
+  phase (would touch `realisable_state_structures`, `docs/specs/state.md`'s dialect table, and
+  potentially years of "no" rows). Flagging for the next spec/plan pass to triage: confirm
+  Free-Edition support empirically, decide whether it's in scope for this outcome or a
+  follow-up outcome, and if in scope, spec the capability split before touching the `Technique`
+  downgrade logic again.
 - 2026-09-13 (phase 8 plan): **no reshape; phase 8 absorbs the `gold.events_enriched`
   backfill.** `07-summary.md` flagged that this one model's coverage has a hole
   (`[2026-08-07, 2026-08-10)`) from the windows that failed before 7b landed, and warned that
