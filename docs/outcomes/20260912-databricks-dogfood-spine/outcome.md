@@ -160,7 +160,7 @@ of the models or the tooling.
 | 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | blocked |
 | 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | done |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | done |
-| 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
+| 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | planned |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -368,6 +368,14 @@ of the models or the tooling.
   text tripped its own "never grant ALL PRIVILEGES" test. See `phases/04a-summary.md` for the
   full list, including a `.env` file that appeared mid-session with a real-looking Databricks
   host — left untouched, likely a concurrent human run of phase 4b in this shared worktree.
+
+- 2026-09-12 (phase 6 plan): **No reshape.** Phase 5's summary surfaced nothing that serves
+  the success criteria and lacks a home: the gpg-agent cache-TTL follow-up is already tracked
+  under `## Blocked` item (b) as human-only, the `INVALID_HANDLE.SESSION_CLOSED` warning is a
+  Free-Edition fact for `free-edition-facts.md` (phase 10's harvest), and the two
+  `pyarrow`-gated loader tests' CI-hardness question is a note for the same handoff. Phase 6
+  keeps its shape; the oracle target and its source-name entry stay with phase 9, which is
+  the first phase that reads them.
 
 ## Blocked
 
