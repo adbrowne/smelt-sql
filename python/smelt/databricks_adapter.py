@@ -71,7 +71,7 @@ class DatabricksAdapter:
         row = self.spark.sql(f"SELECT COUNT(*) AS cnt FROM {full_name}").collect()
         return row[0]["cnt"]
 
-    def load_arrow_table(self, ipc_bytes, full_table_name):
+    def load_arrow_table(self, ipc_bytes, full_table_name, mode="overwrite"):
         """Load Arrow IPC stream bytes into a Unity Catalog table via createDataFrame.
 
         Rows are sent through the session client — serverless compute shares
@@ -83,15 +83,29 @@ class DatabricksAdapter:
             ipc_bytes: Arrow IPC stream bytes (bytes object) containing the
                        table data.
             full_table_name: Fully-qualified table name, e.g. "catalog.schema.table".
+            mode: "overwrite" (default) drops and recreates the table, matching
+                  the existing two-positional-argument call site from
+                  `SparkBackend`. "append" writes without dropping, for a
+                  caller (the dogfood loader) that must accumulate rows across
+                  multiple calls rather than losing history on the second one.
         """
         reader = pa.ipc.open_stream(io.BytesIO(ipc_bytes))
         table = reader.read_all()
+        # Databricks Connect's createDataFrame (pyspark.sql.connect) has no
+        # pyarrow.Table overload — passing one directly makes it iterate the
+        # table as row data and fail inferring a schema from field "_1". A
+        # pandas DataFrame is accepted directly, so convert here rather than
+        # asking every caller to know this quirk.
+        df = self.spark.createDataFrame(table.to_pandas())
 
-        if self.spark.catalog.tableExists(full_table_name):
-            self.spark.sql(f"DROP TABLE IF EXISTS {full_table_name}")
-
-        df = self.spark.createDataFrame(table)
-        df.write.saveAsTable(full_table_name)
+        if mode == "append":
+            df.write.mode("append").saveAsTable(full_table_name)
+        elif mode == "overwrite":
+            if self.spark.catalog.tableExists(full_table_name):
+                self.spark.sql(f"DROP TABLE IF EXISTS {full_table_name}")
+            df.write.saveAsTable(full_table_name)
+        else:
+            raise ValueError(f"unsupported load_arrow_table mode: {mode!r}")
 
     def close(self):
         """Stop the Databricks session."""

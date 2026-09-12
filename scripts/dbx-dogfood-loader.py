@@ -12,6 +12,9 @@ silently drift out of step with what lands in Unity Catalog.
 Modes:
     --emit-ddl                          Delta DDL for the two raw tables and
                                          the per-day ledger table. No network.
+    --apply-ddl                         Executes the same statements
+                                         --emit-ddl prints, against the live
+                                         workspace (needs a credential).
     --emit-sql --date D                 Describes day D's append in
                                          catalog-qualified terms. No network.
     --emit-slice-sql --date D           The DuckDB-executable SELECT queries
@@ -104,12 +107,11 @@ def cmd_emit_slice_sql(date):
     print(arrival_select_sql(date, modulus) + ";")
 
 
-def cmd_emit_ddl():
-    print(
-        f"-- Delta DDL for the Databricks dogfood leg "
-        f"(docs/outcomes/20260912-databricks-dogfood-spine/phases/03-plan.md).\n"
-        f"-- Catalog-qualified only — the fixture never appears here; rows\n"
-        f"-- cross via the Arrow load path (see --date D to execute).\n"
+def ddl_statements():
+    """The Delta DDL for the two raw tables and the per-day ledger table, as a
+    list of statements — the single source both --emit-ddl and --apply-ddl
+    consume, so the two modes cannot drift apart."""
+    return [
         f"CREATE TABLE IF NOT EXISTS {EVENTS_TABLE} (\n"
         f"  id STRING,\n"
         f"  type STRING,\n"
@@ -122,9 +124,7 @@ def cmd_emit_ddl():
         f"  public BOOLEAN,\n"
         f"  payload STRING\n"
         ")\n"
-        "USING DELTA;\n"
-    )
-    print(
+        "USING DELTA",
         f"CREATE TABLE IF NOT EXISTS {ARRIVAL_TABLE} (\n"
         f"  id STRING,\n"
         f"  type STRING,\n"
@@ -138,16 +138,41 @@ def cmd_emit_ddl():
         f"  payload STRING,\n"
         f"  ingested_date DATE\n"
         ")\n"
-        "USING DELTA;\n"
-    )
-    print(
-        f"-- Per-day idempotence ledger, checked before any frame is built\n"
-        f"-- (mirrors load_day.sh's main._loader_days).\n"
+        "USING DELTA",
         f"CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (\n"
         "  day DATE\n"
         ")\n"
-        "USING DELTA;"
+        "USING DELTA",
+    ]
+
+
+def cmd_emit_ddl():
+    print(
+        f"-- Delta DDL for the Databricks dogfood leg "
+        f"(docs/outcomes/20260912-databricks-dogfood-spine/phases/03-plan.md).\n"
+        f"-- Catalog-qualified only — the fixture never appears here; rows\n"
+        f"-- cross via the Arrow load path (see --date D to execute)."
     )
+    for stmt in ddl_statements():
+        print(stmt + ";\n")
+
+
+def cmd_apply_ddl():
+    from smelt.databricks_adapter import DatabricksAdapter
+
+    host = os.environ.get("SMELT_DBX_HOST")
+    if not host:
+        print("SMELT_DBX_HOST is not set — source scripts/dbx-dogfood-env.sh first", file=sys.stderr)
+        sys.exit(1)
+    token = os.environ.get("SMELT_DBX_TOKEN")
+
+    adapter = DatabricksAdapter(host, catalog=CATALOG, token=token)
+    try:
+        for stmt in ddl_statements():
+            adapter.execute_sql_no_result(stmt)
+        print("applied DDL")
+    finally:
+        adapter.close()
 
 
 def cmd_emit_sql(date):
@@ -174,9 +199,20 @@ def cmd_emit_sql(date):
 def duckdb_query_arrow(sql):
     """Runs `sql` against the fixture via the `duckdb` CLI and returns Arrow IPC
     stream bytes (stdlib subprocess only — no Python duckdb/pyarrow dependency
-    is needed for this step, matching load_day.sh's own use of the CLI)."""
+    is needed for this step, matching load_day.sh's own use of the CLI).
+
+    `arrow` moved out of DuckDB's core/autoload-known extension set into the
+    community repository, so unlike `parquet` it is never autoloaded — an
+    explicit `LOAD` is required even once `INSTALL ... FROM community` has
+    cached it on disk (`duckdb :memory: -c "INSTALL arrow FROM community"`,
+    a one-time step this function does not perform itself)."""
     proc = subprocess.run(
-        ["duckdb", ":memory:", "-c", f"COPY ({sql}) TO '/dev/stdout' (FORMAT arrow)"],
+        [
+            "duckdb",
+            ":memory:",
+            "-c",
+            f"LOAD arrow; COPY ({sql}) TO '/dev/stdout' (FORMAT arrow)",
+        ],
         capture_output=True,
         check=False,
     )
@@ -234,13 +270,6 @@ def cmd_dry_run_store(date, store_dir):
 
 
 def cmd_execute(date):
-    # NOTE for phase 5: DatabricksAdapter.load_arrow_table currently drops
-    # and recreates the target table rather than appending
-    # (python/smelt/databricks_adapter.py), so calling it once per day would
-    # overwrite the previous day's rows instead of accumulating history.
-    # This has never been exercised against a live workspace (no credential
-    # exists yet) — fix the adapter (or route through execute_sql_no_result
-    # with an explicit INSERT) before the first live load.
     from smelt.databricks_adapter import DatabricksAdapter
 
     host = os.environ.get("SMELT_DBX_HOST")
@@ -263,8 +292,8 @@ def cmd_execute(date):
         events_bytes = duckdb_query_arrow(events_select_sql(date, modulus))
         arrival_bytes = duckdb_query_arrow(arrival_select_sql(date, modulus))
 
-        adapter.load_arrow_table(events_bytes, EVENTS_TABLE)
-        adapter.load_arrow_table(arrival_bytes, ARRIVAL_TABLE)
+        adapter.load_arrow_table(events_bytes, EVENTS_TABLE, mode="append")
+        adapter.load_arrow_table(arrival_bytes, ARRIVAL_TABLE, mode="append")
         adapter.execute_sql_no_result(f"INSERT INTO {LEDGER_TABLE} VALUES (DATE '{date}')")
         print(f"loaded day {date}")
     finally:
@@ -274,6 +303,7 @@ def cmd_execute(date):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--emit-ddl", action="store_true")
+    parser.add_argument("--apply-ddl", action="store_true")
     parser.add_argument("--emit-sql", action="store_true")
     parser.add_argument("--emit-slice-sql", action="store_true")
     parser.add_argument("--date")
@@ -282,6 +312,9 @@ def main():
 
     if args.emit_ddl:
         cmd_emit_ddl()
+        return
+    if args.apply_ddl:
+        cmd_apply_ddl()
         return
     if args.emit_sql:
         if not args.date:

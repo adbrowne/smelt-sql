@@ -36,6 +36,25 @@ fn load_day_sh() -> PathBuf {
     repo_root().join("examples/github_activity/load_day.sh")
 }
 
+/// Python interpreter with `pyarrow` and `databricks-connect` importable —
+/// the pinned `.smelt-dbx-venv` built by `scripts/dbx-dogfood-venv.sh`, if
+/// present. Tests that drive `python/smelt/databricks_adapter.py` for real
+/// (rather than faking the module out of `sys.modules`) need it and skip
+/// when it hasn't been built yet, matching this repo's `SPARK_CONNECT_URL`
+/// gating convention for tests that need an optional local environment.
+fn dbx_venv_python() -> Option<PathBuf> {
+    let candidate = repo_root().join(".smelt-dbx-venv/bin/python");
+    if !candidate.exists() {
+        return None;
+    }
+    let ok = Command::new(&candidate)
+        .args(["-c", "import pyarrow"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    ok.then_some(candidate)
+}
+
 fn run_loader(args: &[&str]) -> Output {
     Command::new("python3")
         .arg(loader_py())
@@ -416,5 +435,313 @@ fn dbx_dogfood_env_exports_the_dbx_venv_and_no_secret() {
     assert!(
         !combined.to_lowercase().contains("dapi"),
         "must never print a token-shaped value:\n{combined}"
+    );
+}
+
+/// Shared fake-`spark` driver for `DatabricksAdapter.load_arrow_table`: a
+/// `spark` object built with `object.__new__` (never runs `__init__`, so no
+/// `databricks.connect` import and no network), recording every call it
+/// receives as a JSON list of tuples on stdout.
+fn fake_spark_load_arrow_table_script(explicit_mode: Option<&str>) -> String {
+    let mode_call = match explicit_mode {
+        Some(m) => format!(r#"adapter.load_arrow_table(ipc_bytes, "cat.sch.tbl", mode="{m}")"#),
+        None => r#"adapter.load_arrow_table(ipc_bytes, "cat.sch.tbl")"#.to_string(),
+    };
+    let python_dir = format!("{:?}", repo_root().join("python").display().to_string());
+    format!(
+        r#"
+import io, json, sys
+sys.path.insert(0, {python_dir})
+import pyarrow as pa
+from smelt.databricks_adapter import DatabricksAdapter
+
+log = []
+
+class FakeWriter:
+    def __init__(self, log):
+        self.log = log
+    def mode(self, m):
+        self.log.append(["mode", m])
+        return self
+    def saveAsTable(self, name):
+        self.log.append(["saveAsTable", name])
+
+class FakeDF:
+    def __init__(self, log):
+        self.write = FakeWriter(log)
+
+class FakeCatalog:
+    def __init__(self, log):
+        self.log = log
+    def tableExists(self, name):
+        self.log.append(["tableExists", name])
+        return True
+
+class FakeSpark:
+    def __init__(self, log):
+        self.log = log
+        self.catalog = FakeCatalog(log)
+    def sql(self, s):
+        self.log.append(["sql", s])
+    def createDataFrame(self, table):
+        self.log.append(["createDataFrame", type(table).__module__ + "." + type(table).__name__])
+        return FakeDF(self.log)
+
+adapter = object.__new__(DatabricksAdapter)
+adapter.spark = FakeSpark(log)
+adapter.host = "fake"
+
+table = pa.table({{"a": [1, 2, 3]}})
+sink = pa.BufferOutputStream()
+writer = pa.ipc.new_stream(sink, table.schema)
+writer.write_table(table)
+writer.close()
+ipc_bytes = sink.getvalue().to_pybytes()
+
+{mode_call}
+
+print(json.dumps(log))
+"#,
+        python_dir = python_dir,
+    )
+}
+
+fn run_python(python: &Path, script: &str) -> Output {
+    Command::new(python)
+        .args(["-c", script])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", python.display()))
+}
+
+#[test]
+fn load_arrow_table_appends_without_dropping() {
+    let Some(python) = dbx_venv_python() else {
+        eprintln!("Skipping — build .smelt-dbx-venv via scripts/dbx-dogfood-venv.sh to enable");
+        return;
+    };
+    let script = fake_spark_load_arrow_table_script(Some("append"));
+    let out = run_python(&python, &script);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log: Vec<Vec<String>> =
+        serde_json::from_slice(&out.stdout).expect("expected a JSON call log");
+
+    assert!(
+        !log.iter().any(|c| c[0] == "sql"),
+        "append mode must issue no SQL (no DROP TABLE): {log:?}"
+    );
+    assert!(
+        !log.iter().any(|c| c[0] == "tableExists"),
+        "append mode must not probe tableExists: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|c| c[0] == "mode" && c.get(1).map(String::as_str) == Some("append")),
+        "expected a .mode(\"append\") call: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|c| c[0] == "saveAsTable" && c.get(1).map(String::as_str) == Some("cat.sch.tbl")),
+        "expected a saveAsTable call: {log:?}"
+    );
+    assert!(
+        log.iter().any(|c| c[0] == "createDataFrame"
+            && c.get(1).map(String::as_str) == Some("pandas.DataFrame")),
+        "createDataFrame must receive a pandas DataFrame — Databricks Connect's \
+         createDataFrame has no pyarrow.Table overload: {log:?}"
+    );
+}
+
+#[test]
+fn load_arrow_table_default_mode_still_replaces() {
+    let Some(python) = dbx_venv_python() else {
+        eprintln!("Skipping — build .smelt-dbx-venv via scripts/dbx-dogfood-venv.sh to enable");
+        return;
+    };
+    let script = fake_spark_load_arrow_table_script(None);
+    let out = run_python(&python, &script);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log: Vec<Vec<String>> =
+        serde_json::from_slice(&out.stdout).expect("expected a JSON call log");
+
+    assert!(
+        log.iter().any(|c| c[0] == "tableExists"),
+        "default mode must still probe tableExists: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|c| c[0] == "sql" && c.get(1).is_some_and(|s| s.contains("DROP TABLE"))),
+        "default mode must still drop the table first: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|c| c[0] == "mode"),
+        "default mode must not call .mode(...) — unchanged two-positional-argument behaviour: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|c| c[0] == "saveAsTable" && c.get(1).map(String::as_str) == Some("cat.sch.tbl")),
+        "expected a saveAsTable call: {log:?}"
+    );
+    assert!(
+        log.iter().any(|c| c[0] == "createDataFrame"
+            && c.get(1).map(String::as_str) == Some("pandas.DataFrame")),
+        "createDataFrame must receive a pandas DataFrame — Databricks Connect's \
+         createDataFrame has no pyarrow.Table overload: {log:?}"
+    );
+}
+
+/// Loads `dbx-dogfood-loader.py` as a module with `smelt.databricks_adapter`
+/// faked out of `sys.modules` before import, so the loader's own control
+/// flow (mode selection, DDL statement list) can be exercised with no
+/// `pyarrow`/`databricks-connect` dependency and no network.
+fn run_loader_with_fake_adapter(driver_tail: &str) -> Output {
+    let loader_path = format!("{:?}", loader_py().display().to_string());
+    let script = format!(
+        r#"
+import sys, types, importlib.util, json, os
+
+log = []
+
+class FakeAdapter:
+    def __init__(self, host, catalog=None, token=None):
+        log.append(["init", host, catalog, token])
+    def table_exists(self, name):
+        log.append(["table_exists", name])
+        return False
+    def execute_sql(self, sql):
+        log.append(["execute_sql", sql])
+        class _Col:
+            def __init__(self, v):
+                self._v = v
+            def as_py(self):
+                return self._v
+        class _Result:
+            def column(self, name):
+                return [_Col(0)]
+        return _Result()
+    def execute_sql_no_result(self, sql):
+        log.append(["execute_sql_no_result", sql])
+    def load_arrow_table(self, ipc_bytes, full_table_name, mode="overwrite"):
+        log.append(["load_arrow_table", full_table_name, mode])
+    def close(self):
+        log.append(["close"])
+
+fake_mod = types.ModuleType("smelt.databricks_adapter")
+fake_mod.DatabricksAdapter = FakeAdapter
+fake_pkg = types.ModuleType("smelt")
+fake_pkg.databricks_adapter = fake_mod
+sys.modules["smelt"] = fake_pkg
+sys.modules["smelt.databricks_adapter"] = fake_mod
+
+os.environ["SMELT_DBX_HOST"] = "fake-host"
+os.environ.pop("SMELT_DBX_TOKEN", None)
+
+spec = importlib.util.spec_from_file_location("dbx_loader", {loader_path})
+loader_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(loader_mod)
+
+{driver_tail}
+
+print(json.dumps(log))
+"#,
+        loader_path = loader_path,
+    );
+    Command::new("python3")
+        .args(["-c", &script])
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn python3: {e}"))
+}
+
+/// The commands driven here (`cmd_execute`, `cmd_apply_ddl`) print their own
+/// user-facing progress lines to stdout ahead of the driver's final
+/// `json.dumps(log)` line, so the call log is the LAST line, not the whole
+/// stream.
+fn last_line_json(out: &Output) -> Vec<Vec<serde_json::Value>> {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout
+        .lines()
+        .next_back()
+        .unwrap_or_else(|| panic!("expected at least one stdout line:\n{stdout}"));
+    serde_json::from_str(last)
+        .unwrap_or_else(|e| panic!("expected a JSON call log on the last line: {e}\n{stdout}"))
+}
+
+#[test]
+fn loader_execute_path_appends_rather_than_replacing() {
+    let out = run_loader_with_fake_adapter("loader_mod.cmd_execute(\"2026-08-06\")");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = last_line_json(&out);
+
+    let load_calls: Vec<_> = log.iter().filter(|c| c[0] == "load_arrow_table").collect();
+    assert_eq!(
+        load_calls.len(),
+        2,
+        "expected exactly two load_arrow_table calls (events, arrival): {log:?}"
+    );
+    for call in &load_calls {
+        assert_eq!(
+            call[2], "append",
+            "every load_arrow_table call in the execute path must use append mode: {log:?}"
+        );
+    }
+}
+
+#[test]
+fn apply_ddl_executes_exactly_the_emitted_ddl() {
+    let out = run_loader_with_fake_adapter("loader_mod.cmd_apply_ddl()");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = last_line_json(&out);
+    let executed: Vec<String> = log
+        .iter()
+        .filter(|c| c[0] == "execute_sql_no_result")
+        .map(|c| c[1].as_str().unwrap().to_string())
+        .collect();
+
+    let emit_out = run_loader(&["--emit-ddl"]);
+    assert!(emit_out.status.success());
+    let emitted = String::from_utf8_lossy(&emit_out.stdout).to_string();
+
+    assert!(
+        !executed.is_empty(),
+        "expected --apply-ddl to execute statements"
+    );
+    for stmt in &executed {
+        assert!(
+            emitted.contains(stmt.as_str()),
+            "executed statement not found verbatim in --emit-ddl output:\n{stmt}\n---\n{emitted}"
+        );
+    }
+}
+
+#[test]
+fn apply_ddl_needs_no_network_to_emit() {
+    let out = Command::new("python3")
+        .arg(loader_py())
+        .arg("--emit-ddl")
+        .current_dir(repo_root())
+        .env_remove("SMELT_DBX_HOST")
+        .env_remove("SMELT_DBX_TOKEN")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn dbx-dogfood-loader.py: {e}"));
+    assert!(
+        out.status.success(),
+        "--emit-ddl must need no credential or network: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

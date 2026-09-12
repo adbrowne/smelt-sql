@@ -24,8 +24,13 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-const SECRET_SCRIPTS: &[&str] = &["dbx-key.sh", "dbx-auth.sh", "dbx-provision.sh"];
-const READ_ONLY_SCRIPTS: &[&str] = &["dbx-verify.sh", "dbx-query.sh"];
+const SECRET_SCRIPTS: &[&str] = &["dbx-key.sh", "dbx-provision.sh"];
+// dbx-auth.sh mints a fresh token but never prints it — only an expiry
+// stamp (docs/outcomes/20260912-databricks-dogfood-spine/outcome.md
+// "## Blocked" item (b), RESOLVED 2026-09-12) — so it is allow-listed like
+// the other read-only wrappers rather than denied like the scripts above
+// that touch the encrypted secret or grant/rotate its scope.
+const READ_ONLY_SCRIPTS: &[&str] = &["dbx-verify.sh", "dbx-query.sh", "dbx-auth.sh"];
 
 #[test]
 fn every_dbx_script_exists_and_is_shellcheck_clean_shape() {

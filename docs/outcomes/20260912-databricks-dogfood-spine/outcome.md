@@ -159,7 +159,7 @@ of the models or the tooling.
 | 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | done |
 | 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | blocked |
 | 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | done |
-| 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | planned |
+| 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | done |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
@@ -168,6 +168,30 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 5 implement): **row 5 done — two fixture days live in Unity Catalog, and a
+  load-blocking Arrow/pandas bug was fixed rather than merely recorded.** Reachability was
+  still open (`current_user()` succeeded), so the append-mode fix, `--apply-ddl`, and the 5 new
+  offline tests landed first and went green before any live write. The first live
+  `--date 2026-08-05` call then failed outright with `CANNOT_INFER_TYPE_FOR_FIELD` —
+  `DatabricksAdapter.load_arrow_table` passed a raw `pyarrow.Table` to Databricks Connect's
+  `createDataFrame`, which (pyspark 3.5.0, `pyspark.sql.connect.session`) has no
+  `pyarrow.Table` overload and tried to infer a row schema instead. Since the load could not
+  complete at all, the plan's own exception to "record, don't fix" applied: converted to
+  `table.to_pandas()` before `createDataFrame`, added a regression test asserting the argument
+  type. A second local-environment gap surfaced offline first: `duckdb_query_arrow`'s
+  `COPY ... FORMAT arrow` failed because `arrow` is a community extension, not autoloaded —
+  fixed with an explicit `LOAD arrow;` prefix. Both fixture days landed with exact counts
+  (events/arrival 5,978 each; 3,201 / 2,777 per day; redelivered slice 63, all matching a
+  DuckDB-computed oracle exactly), and the day-2 re-run was a genuine idempotent no-op read
+  back from the live ledger. Also found (and fixed, not deferred): `.claude/settings.json` and
+  this file's own `## Blocked` item (b) were already edited on disk, uncommitted, resolving the
+  token-refresh question (`dbx-auth.sh` deny→allow, since it prints only an expiry) — a
+  `dbx_dogfood_provision.rs` test still asserted the old deny state, so it was updated to match
+  rather than left red or the settings reverted. Item (b)'s own remaining open question (raising
+  `gpg-agent`'s cache TTL) is untouched — a headless `dbx-auth.sh` run here still failed for
+  want of a TTY passphrase prompt, but this phase never needed a fresh mint. Nothing left the
+  outcome; nothing added to `## Out of scope`.
 
 - 2026-09-12 (plan 5): **no reshape; the workspace is reachable, so row 5 plans rather than
   blocks.** `scripts/dbx-query.sh "SELECT current_user()"` returned the credential's own
@@ -359,16 +383,20 @@ of the models or the tooling.
   in-flight `scripts/dbx-dogfood-env.sh` fix, write `phases/04b-summary.md`, and flip this row
   to `done`.
 
-  **(b) Decide how a headless step gets a live token — this gates phases 5–9 and 11, not just
-  4b.** OAuth M2M tokens last one hour, and `scripts/dbx-auth.sh` (the only refresher) is in
-  `permissions.deny` *and* needs a gpg passphrase, so a loop iteration cannot mint one and any
-  live phase longer than the human's last manual refresh dies mid-run. Candidate options:
-  (i) allow-list `dbx-auth.sh` — it prints only an expiry, never the token — and rely on a
-  `gpg-agent` cache primed by the human at the start of a live session, recording the cache TTL
-  as a Free Edition fact; (ii) have `dbx-query.sh`/`dbx-dogfood-loader.sh` refresh the token
-  themselves when `$CONFIG_DIR/token`'s expiry stamp is stale, keeping the deny entry and
-  moving the gpg dependency inside the allow-listed wrappers; (iii) keep every live phase
-  human-attended and accept that phases 5–9 and 11 never run under the loop, which makes the
-  `[live]` rows human rows and shrinks this outcome's loop-grindable set to phase 10 alone.
-  Option (ii) is the only one that makes the `[live]` rows genuinely unattended, which
-  criterion 11 ("no laptop, no token in flight") ultimately requires anyway.
+  **(b) RESOLVED 2026-09-12 — how a headless step gets a live token.** OAuth M2M tokens
+  last one hour, and `scripts/dbx-auth.sh` (the only refresher) was in `permissions.deny` and
+  needs a gpg passphrase, so a loop iteration couldn't mint one and any live phase longer than
+  the human's last manual refresh died mid-run. Of the three candidates weighed (allow-list
+  `dbx-auth.sh` directly and rely on the `gpg-agent` cache; move the refresh into the
+  already-allowed `dbx-query.sh`/`dbx-dogfood-loader.sh` wrappers; keep every live phase
+  human-attended), the human chose **option (i)**: `dbx-auth.sh` moved from `permissions.deny`
+  to `permissions.allow` in `.claude/settings.json` (it only ever prints an expiry, never the
+  token). This depends on `gpg-agent`'s passphrase cache outliving the ~1-hour gap between
+  refreshes, which the stock default (`default-cache-ttl` 600s / `max-cache-ttl` 7200s) does
+  not — raising both (e.g. to 43200s in `~/.gnupg/gpg-agent.conf`) is a machine-level,
+  security-relevant change the auto-mode classifier correctly refused to make unattended, so
+  it is still open and tracked as a follow-up on the human, not on this outcome's loop. Once
+  set, the human primes the cache once per gap (or once per `max-cache-ttl` window) and
+  headless phases mint their own refresh via the now-allowed `dbx-auth.sh`. This unblocks
+  phases 5–9 and 11 for the loop, provided the cache TTL is actually raised before a live run
+  longer than ~1 hour is attempted unattended.
