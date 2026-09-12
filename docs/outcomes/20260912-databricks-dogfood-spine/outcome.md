@@ -166,8 +166,8 @@ of the models or the tooling.
 | 6d | **[live]** Give a *source-written* cast target the same per-dialect spelling the cast-wrap already gets — bare `VARCHAR`/`TEXT` prints as `STRING` on the SparkSQL dialect — through one shared owner outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
-| 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | planned |
-| 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites) — plus whatever else row 7's windows record, then re-run the windows to a clean 16/16 | pending |
+| 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | done |
+| 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
@@ -175,6 +175,17 @@ of the models or the tooling.
 
 ## Decision log
 
+- 2026-09-12 (phase 7): **three incremental windows landed and inspected, all matching the plan's
+  predictions exactly.** W1/W2/W3 (`2026-08-07`/`08`/`09`) each ran 14 success / 1 failed
+  (`gold.events_enriched`) / 1 skipped (`marts.star_growth`); `intervals.json` advanced
+  `2026-08-07→08→09→10` for every successful model while `gold.events_enriched` stayed pinned at
+  `2026-08-07`. Row-count deltas on the raw tables matched the fixture's own DuckDB oracle
+  exactly (2,388 new rows per table per day). Engine-resident state is unchanged at 19 tables
+  across all three windows — no ledger/sidecar/tombstone table exists for Spark/Delta, per
+  `docs/specs/state.md`, so all bookkeeping lives in `.smelt/targets/databricks/*.json`. No new
+  incremental-path refusal surfaced beyond the known `gold.events_enriched` gap row 7b already
+  owns. See `phases/07-summary.md` for full detail, including a discovered (but unfixed) gap:
+  run reports' `completed_at`/`duration_ms` fields are never populated.
 - 2026-09-12 (phase 7 plan): **reshape — row 7b inserted between rows 7 and 8; row 7's window
   schedule carries real rows rather than the BigQuery spine's empty ones.** Two findings drove
   this. (a) The `gold.events_enriched` refusal 6f recorded is gated on
