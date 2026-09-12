@@ -141,7 +141,7 @@ of the models or the tooling.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | done |
-| 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | pending |
+| 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | planned |
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | pending |
 | 4 | **[human]** Provision: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential encrypted at rest, `scripts/dbx-*.sh` wrappers and settings allow-list, reachability and refusal demonstrated, Free Edition quotas recorded | pending |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
@@ -184,6 +184,15 @@ of the models or the tooling.
   `token` optional with ambient authentication as the alternative form; phase 11 keeps its own
   spec delta for the job asset and the Volume-resident run state. No other reshape: every
   success criterion still maps to a phase row.
+
+- 2026-09-12 (plan 2): **no reshape.** Phase 1 shipped spec text only and surfaced nothing out of
+  scope; its six named tests map one-to-one onto phase 2's test list (plus a `host` requiredness
+  test and a pure session-plan test, both inside the row's stated boundary). Two implementation
+  calls recorded here because they constrain later phases: the literal-`token` refusal runs as a
+  **pre-interpolation** pass over the raw YAML (after `interpolate_env_vars` the origin of a
+  value is unrecoverable), and the Databricks backend reuses `smelt-backend-spark` behind a
+  flavor discriminator rather than getting its own crate — the SQL surface is identical and only
+  the session builder and capability profile differ.
 
 ## Blocked
 
