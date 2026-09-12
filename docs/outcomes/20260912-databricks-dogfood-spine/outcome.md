@@ -163,7 +163,7 @@ of the models or the tooling.
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | done |
 | 6b | **[live]** Unblock the Databricks run path so more than one model can complete: make the maintenance fingerprint's hash spelling dialect-dispatched (`sha2(x, 256)` on Spark/Databricks) behind a single owner plus a structural gate, reconcile the bare-host/scheme mismatch between the wizard's `SMELT_DBX_HOST` and the `type: databricks` target contract, then re-run the full refresh to a clean baseline and record what remains | done |
 | 6c | **[live]** Recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` as the drop-type-mismatch condition in `SparkBackend::drop_view_if_exists`/`drop_table_if_exists` (one pure, tested predicate per direction), then land the first clean full refresh of the whole model set and record what remains | done |
-| 6d | **[live]** Give a *source-written* cast target the same per-dialect spelling the cast-wrap already gets — bare `VARCHAR`/`TEXT` prints as `STRING` on the SparkSQL dialect — through one shared owner outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | planned |
+| 6d | **[live]** Give a *source-written* cast target the same per-dialect spelling the cast-wrap already gets — bare `VARCHAR`/`TEXT` prints as `STRING` on the SparkSQL dialect — through one shared owner outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -171,6 +171,22 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 6d implement): **row 6d done — the source-cast spelling fix confirmed live;
+  a new, unrelated blocker now occupies the same failure point.** `type_conformance.rs::
+  source_cast_type_sql` is the single owner shared with the cast-wrap's `type_cast_sql`; `TYPE_SPEC`
+  now dispatches to it unconditionally in the printer, with trivia preserved exactly and no
+  `SqlDialect`/function-name branch added to `printer/` (`emission_ownership` stays green). The
+  live re-run (`20260912-110921-5ecbf6`) confirms the fix — `bronze.events` compiles
+  `CAST(actor_id AS STRING)`, not `VARCHAR` — but lands on the same **11 success / 1 failed / 4
+  skipped** shape as 6c, because `silver.actor_sessions` now fails on a *different* statement in
+  the same model: `functions/sessionize.sql`'s `epoch_us(...)` call has no `BuiltinRegistry` entry
+  at all (not merely unemitted for Spark), so it reaches Unity Catalog verbatim and fails
+  `[UNRESOLVED_ROUTINE]`. A run still completes (11/16), so the "only fix what's needed to
+  complete at all" exception does not apply — recorded in `06d-summary.md` rather than fixed, left
+  for row 7's planner with the same two-option shape 6c's summary posed (register `epoch_us` for
+  Spark, or exclude `actor_sessions` and its 3 dependents from criteria 6/7/8). Nothing left the
+  outcome; nothing added to `## Out of scope`.
 
 - 2026-09-12 (phase 6d plan): **reshape — inserted row 6d between 6c and the incremental
   windows, taking the first of the two options 6c's summary left to this planner.** 6c's live

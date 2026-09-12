@@ -690,6 +690,15 @@ regardless of engine. This is the multi-backend instance of the canonical-return
 (`spark.ceil(...)`, `bigquery.sum(...)`) is the explicit per-call opt-out that inherits the
 engine-native type and marks the model non-portable.
 
+The per-dialect cast-target spelling applies to **every** cast smelt prints, not only the cast
+wrap's own synthesized casts: a cast target written in a model's own SQL (`CAST(x AS VARCHAR)`,
+`x::VARCHAR`) is spelled the same way. On the SparkSQL dialect an unqualified string cast target
+(`VARCHAR` with no length, `TEXT`) prints as `STRING`, because Spark treats bare `VARCHAR` as the
+read-compatible char/varchar family and refuses it as a cast target
+(`[DATATYPE_MISSING_SIZE]`); a length-qualified `VARCHAR(n)` is unchanged. One function
+(`type_conformance.rs`) owns this spelling for both the cast wrap and a source-written cast
+target, so the two can never diverge.
+
 The column names and inferred types the cast wrap uses are derived from the model's **source**
 select list — the CST as written, before dialect lowering. The dialect printer's rendered output
 is never re-read to recover a projection: a backend-lowered expression (a BigQuery `MEDIAN`

@@ -325,10 +325,34 @@ fn test_cast_function_passthrough_spark() {
 
 #[test]
 fn test_double_colon_varchar_rewrite_spark() {
+    // A bare VARCHAR cast target is spelled STRING on Spark — see
+    // `double_colon_cast_target_spelling_is_dialect_aware` below.
     let sql = "SELECT name::VARCHAR FROM t";
     let (d, c) = spark_ctx();
     let result = print_with(sql, &d, &c, "main");
-    assert_eq!(result, "SELECT CAST(name AS VARCHAR) FROM t");
+    assert_eq!(result, "SELECT CAST(name AS STRING) FROM t");
+}
+
+#[test]
+fn cast_target_spelling_is_dialect_aware() {
+    let sql = "SELECT CAST(a AS VARCHAR) FROM t";
+    let (spark, spark_c) = spark_ctx();
+    assert_eq!(
+        print_with(sql, &spark, &spark_c, "main"),
+        "SELECT CAST(a AS STRING) FROM t"
+    );
+    let (duckdb, duckdb_c) = duckdb_ctx();
+    assert_eq!(print_with(sql, &duckdb, &duckdb_c, "main"), sql);
+}
+
+#[test]
+fn double_colon_cast_target_spelling_is_dialect_aware() {
+    let sql = "SELECT a::VARCHAR FROM t";
+    let (spark, spark_c) = spark_ctx();
+    assert_eq!(
+        print_with(sql, &spark, &spark_c, "main"),
+        "SELECT CAST(a AS STRING) FROM t"
+    );
 }
 
 // ===== Trailing comma removal tests =====

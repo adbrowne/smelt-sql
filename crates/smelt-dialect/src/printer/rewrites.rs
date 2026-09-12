@@ -123,6 +123,30 @@ pub(crate) fn print_cast_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mu
     }
 }
 
+/// Print a `TYPE_SPEC` node (a cast target written in the model's own SQL),
+/// applying the same per-dialect spelling the cast-wrap already gets via
+/// `type_conformance::source_cast_type_sql` — the single shared owner. Falls
+/// through to the verbatim child walk when the type doesn't parse or already
+/// has the right spelling, preserving leading/trailing trivia exactly.
+pub(crate) fn print_type_spec(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
+    let text = node.text().to_string();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        print_children(node, ctx, out);
+        return;
+    }
+    let Some(spelling) = crate::type_conformance::source_cast_type_sql(trimmed, *ctx.dialect)
+    else {
+        print_children(node, ctx, out);
+        return;
+    };
+    let leading_len = text.len() - text.trim_start().len();
+    let trailing_len = text.len() - text.trim_end().len();
+    out.push_str(&text[..leading_len]);
+    out.push_str(&spelling);
+    out.push_str(&text[text.len() - trailing_len..]);
+}
+
 /// Rewrite ARRAY[1,2,3] → ARRAY(1,2,3).
 pub(crate) fn print_array_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
     for child in node.children_with_tokens() {

@@ -212,3 +212,36 @@ fn databricks_target_host_is_bare() {
         "expected the bare-hostname refusal message in stderr:\n{stderr}"
     );
 }
+
+/// `silver.actor_sessions` writes its own `CAST(... AS VARCHAR)` casts
+/// (session id concatenation, plus `sessionize`'s `platform_col => CAST(NULL
+/// AS VARCHAR)` argument). A bare `VARCHAR` cast target is rejected by
+/// Unity Catalog with `[DATATYPE_MISSING_SIZE]`
+/// (`docs/outcomes/20260912-databricks-dogfood-spine/phases/06d-plan.md`).
+/// Compiling for the `databricks` target with `--dry-run` needs no live
+/// workspace — it only exercises the printer's per-dialect cast-target
+/// spelling (`docs/specs/multi_backend.md` §"Output-schema type
+/// conformance").
+#[test]
+fn actor_sessions_compiles_without_bare_varchar() {
+    let out = Command::new(smelt_bin())
+        .args(["run", "--target", DATABRICKS_TARGET, "--dry-run"])
+        .args(["--select", "silver.actor_sessions"])
+        .args(["--project-dir", example_dir().to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run --dry-run`: {e}"));
+    assert!(
+        out.status.success(),
+        "smelt run --target databricks --dry-run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains(" AS VARCHAR)"),
+        "a bare VARCHAR cast target must be spelled STRING on the databricks target: {stdout}"
+    );
+}
