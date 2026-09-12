@@ -248,7 +248,7 @@ fn print_within_group_to_analytic(
 /// Re-emit the trivia tokens trailing a node whose text a rewrite replaced,
 /// so a following sibling (an `OVER` clause, the next select item) does not
 /// end up glued to the rewritten text.
-fn push_trailing_trivia(node: &SyntaxNode, out: &mut String) {
+pub(crate) fn push_trailing_trivia(node: &SyntaxNode, out: &mut String) {
     // `take_while` must run over the raw `children_with_tokens()` sequence,
     // stopping at the first non-trivia element (token *or* node) — not over
     // a tokens-only view. Filtering nodes out before reversing would erase
@@ -395,6 +395,13 @@ fn apply_rewrite(
         RewriteId::WithinGroupToAnalytic => {
             fc.is_some_and(|fc| print_within_group_to_analytic(node, fc, ctx, out))
         }
+        // The call's own text is untouched — it prints natively via the
+        // normal fallthrough. The frame this verdict addresses is not a
+        // descendant of the call node at all, so there is nothing for this
+        // call-scoped dispatch to do; `crate::frame_elision::should_elide`
+        // decides live, separately, where the printer visits the
+        // `WINDOW_FRAME` node itself.
+        RewriteId::ElideWindowFrame => false,
     }
 }
 

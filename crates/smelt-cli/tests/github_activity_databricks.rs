@@ -275,3 +275,49 @@ fn actor_sessions_compiles_without_epoch_us() {
          `unix_micros(`: {stdout}"
     );
 }
+
+/// `silver.actor_sessions`'s `LAG(...)` calls (`functions/sessionize.sql`)
+/// carry an explicit `RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT
+/// ROW` frame; Spark refuses any frame on `lag`/`lead`. Compiling with
+/// `--dry-run` needs no live workspace; it only exercises the registry-driven
+/// frame elision (`docs/specs/multi_backend.md` §"Frame elision on offset
+/// functions").
+#[test]
+fn actor_sessions_compiles_without_window_frame() {
+    let out = Command::new(smelt_bin())
+        .args(["run", "--target", DATABRICKS_TARGET, "--dry-run"])
+        .args(["--select", "silver.actor_sessions"])
+        .args(["--project-dir", example_dir().to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run --dry-run`: {e}"));
+    assert!(
+        out.status.success(),
+        "smelt run --target databricks --dry-run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // `sessionize`'s two `LAG(...) OVER (PARTITION BY ... ORDER BY ...
+    // RANGE BETWEEN ...)` calls must lose their frame; its `MAX(...) OVER
+    // (...)` call (not an offset function) must keep its own frame —
+    // registry-scoped elision, not a blanket "drop every frame" rewrite. A
+    // bare count would also pass a model whose frame text just moved, so this
+    // pins the exact shape a `LAG` call's own `OVER` clause prints as.
+    assert!(
+        !stdout.contains(
+            "LAG(created_at) OVER (\n                PARTITION BY actor_id ORDER BY created_at\n                RANGE BETWEEN"
+        ),
+        "the first LAG's window frame must not survive on the databricks target: {stdout}"
+    );
+    assert!(
+        stdout.contains("MAX(_boundary_ts) OVER (\n                PARTITION BY actor_id ORDER BY created_at\n                RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW"),
+        "MAX is not an offset function — its window frame must be kept: {stdout}"
+    );
+    assert!(
+        stdout.contains("LAG(created_at) OVER ("),
+        "the lag call itself must still be present, printed natively: {stdout}"
+    );
+}

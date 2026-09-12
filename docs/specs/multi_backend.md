@@ -607,6 +607,25 @@ select item and the query's `FROM` — never a select item's name. A model's out
 types are therefore unchanged by it, as §"Output-schema type conformance" requires; admissibility
 rule 4 is what makes that claim hold in the presence of `SELECT *`.
 
+### Frame elision on offset functions
+
+An offset built-in the SQL standard defines to ignore its window frame — `LAG`/`LEAD` are the
+declared instance — may be registered, per dialect and per position, to emit with its `OVER`
+clause's frame removed rather than printed. Spark refuses any frame on `lag`/`lead` outright
+("Cannot specify window frame for lag function"); DuckDB and the standard both compute the same
+result with or without one, so dropping the frame on Spark's SparkSQL dialect changes nothing a
+caller can observe. `LAG` and `LEAD` carry this verdict at `(DialectId::SparkSql,
+Position::Window)`; every other dialect and position stays `Native`.
+
+The elision is planned from the source CST before printing, exactly like a `Restructure` verdict,
+and is never recovered from printed SQL. It touches only the call's `WINDOW_FRAME` sub-node — the
+call's own text, and everything else in its `OVER` clause (`PARTITION BY`, `ORDER BY`), is
+untouched. The source frame stays in the model's own text; a downstream reader (a derived lookback
+bound, a human reading the model) still sees it. A call reached through a *named* window reference
+(`OVER w`, with `w`'s frame declared on a shared `WINDOW w AS (...)` clause) is not eligible for
+elision — the frame is not the call's own sibling node — so the frame reaches the target dialect
+unchanged and the backend's own refusal, if any, fires there rather than being silently dropped.
+
 ### Cross-engine emission audit
 
 Two complementary legs verify what the registry declares:

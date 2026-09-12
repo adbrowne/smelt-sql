@@ -165,7 +165,7 @@ of the models or the tooling.
 | 6c | **[live]** Recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` as the drop-type-mismatch condition in `SparkBackend::drop_view_if_exists`/`drop_table_if_exists` (one pure, tested predicate per direction), then land the first clean full refresh of the whole model set and record what remains | done |
 | 6d | **[live]** Give a *source-written* cast target the same per-dialect spelling the cast-wrap already gets — bare `VARCHAR`/`TEXT` prints as `STRING` on the SparkSQL dialect — through one shared owner outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | done |
-| 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | planned |
+| 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -173,6 +173,29 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 6f implement): **row 6f done — `LAG`/`LEAD` frame elision confirmed live;
+  a new, unrelated blocker now occupies the same failure point, and the model set is closer to
+  whole than at any prior phase.** The elision is decided **live**, at the point the printer
+  visits a `WINDOW_FRAME` node (`crates/smelt-dialect/src/frame_elision.rs`), not planned ahead
+  against the model's own `syntax` tree as the plan's literal design proposed — that design would
+  not have reached `silver.actor_sessions`'s actual `LAG` calls at all, since they live inside a
+  `smelt.define` function body inlined by **textual re-parse at print time**
+  (`printer::reexpand_call_body`), invisible to any pre-pass walking the top-level model tree
+  (confirmed via `emission_settle.rs::settled_verdict_for`'s existing range-lookup-miss fallback,
+  which exists for exactly this reason). No new `PrintContext` field was added. The live re-run
+  (`20260912-124833-91da82`) moved from **11 success / 1 failed / 4 skipped** to **14 success / 1
+  failed / 1 skipped**: `silver.actor_sessions` and its 3 former dependents all now succeed. The
+  one remaining failure is new and unrelated to window frames — `gold.events_enriched` fails with
+  `Feature not supported by Spark SQL: key-addressed model-edge affected-key discovery over a
+  KeyedUpsert upstream (group-grain fingerprint-sidecar diff)`, skipping `marts.star_growth` as
+  its dependent. 14/16 models still complete, so the outcome's own "only fix what's needed to
+  complete at all" exception does not apply — recorded in `06f-summary.md`, left for row 7's
+  planner with the same "one construct clears, the next is exposed" shape as 6c → 6d → 6e → 6f.
+  Also recorded, not resolved: the dialect-audit's derived `Position::Window` probes carry no
+  window frame at all, so `ElideWindowFrame` is unverified by the standing cross-engine audit
+  end-to-end (only by the phase's own targeted tests and this live run). Nothing left the outcome;
+  nothing added to `## Out of scope`.
 
 - 2026-09-12 (phase 6f plan): **reshape — row 6f inserted before row 7.** Phase 6e's summary
   leaves the live full refresh at 11 success / 1 failed / 4 skipped: `silver.actor_sessions`'s

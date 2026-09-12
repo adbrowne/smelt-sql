@@ -349,6 +349,14 @@ pub(crate) fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String
         SyntaxKind::TYPE_SPEC => {
             print_type_spec(node, ctx, out);
         }
+        // A window frame the registry declares elided for this dialect
+        // (`docs/specs/multi_backend.md` §"Frame elision on offset
+        // functions") prints nothing of its own — only its own trailing
+        // trivia, so a comment or the closing `)` right after it does not
+        // end up glued to the preceding clause.
+        SyntaxKind::WINDOW_FRAME if crate::frame_elision::should_elide(node, ctx.dialect) => {
+            registry_emit::push_trailing_trivia(node, out);
+        }
         // Top-level smelt DSL declarations that are not SQL: suppress them so
         // they never reach the backend engine.  `SMELT_DEFINE` and
         // `SMELT_EXTERN` carry function bodies / extern signatures that the

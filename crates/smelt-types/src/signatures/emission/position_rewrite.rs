@@ -63,6 +63,28 @@ pub enum RewriteId {
     /// placeholder cannot address — the rewrite reads that clause with
     /// `within_group_sort_key` rather than substituting a positional argument.
     WithinGroupToAnalytic,
+    /// Drop a call's window frame clause when emitting a dialect that refuses
+    /// a frame on an offset function — Spark on `lag`/`lead`: "Cannot specify
+    /// window frame for lag function". Registered only at `Position::Window`;
+    /// a whole-partition window carries no frame syntax there is anything to
+    /// drop.
+    ///
+    /// Semantics-preserving, not a narrowing: the SQL standard defines
+    /// `LAG`/`LEAD` as offset functions that ignore any frame clause, and
+    /// DuckDB measurably agrees (`docs/specs/multi_backend.md` §"Frame
+    /// elision on offset functions") — a framed `LAG` and an unframed one
+    /// return the same value on every row. Only the call's own window
+    /// frame clause is dropped; the call's own text is untouched and prints
+    /// natively, so this `RewriteId`'s dispatch arm in
+    /// `printer/registry_emit.rs::apply_rewrite` returns `false` — the
+    /// frame's removal happens separately, live, in
+    /// `crates/smelt-dialect/src/frame_elision.rs`.
+    ///
+    /// Not a template: a `{n}` placeholder names one of the call's own
+    /// *arguments* — there is no argument position that names "the window
+    /// frame clause attached to this call's `OVER` clause" for a template to
+    /// substitute away.
+    ElideWindowFrame,
 }
 
 /// A statement-level restructure shape. Enumerable by construction, mirroring
