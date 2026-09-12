@@ -145,6 +145,25 @@ rediscovered.
 
 ## Decision log
 
+- 2026-09-12 (inbound, from `20260906-bigquery-dogfood-spine` phase 16): **the criterion-8
+  findings handoff is complete and is this outcome's input.**
+  `docs/handoffs/2026-09-08-github-activity-findings.md` now carries both halves — its live
+  section ("## The live BigQuery half" onwards) banks phases 10–14 and 17, and its
+  "## Final punch-list" names nine items with an owner each. Five are this outcome's.
+
+  **The primary input is punch-list item 1: `--event-time-end` does not bound a full
+  refresh's source scans on BigQuery.** Six of fourteen relations' oracle at window 1 is
+  byte-identical to their oracle at window 30, so "full refresh" and "the oracle at window
+  *k*" are not the same operation against a static source. It is invisible on DuckDB, where
+  the oracle stages a truncated source. Whether the bound *should* reach those scans is the
+  product question this outcome takes a view on; the spine deliberately recorded the
+  measurement and did not answer it. The other four inbound items are the window-frame
+  lowering seam (which is what keeps the live half at 14 of 16 models), the run-time
+  invisibility of the degradation contract's precision half, the alphabetical
+  `default_target` fallback, and — filed separately as
+  [#203](https://github.com/adbrowne/smelt-sql/issues/203) — the shared `_smelt_ledger`
+  serialising every model's bookkeeping.
+
 - 2026-09-11 (phase 16, the live run that closes the reopening): **BigQuery runs the
   pipeline's real plan — 14 models, twice, at full parallelism — and the run found four more
   defects every offline gate had passed.** Eight live runs against `smelt_dogfood`; the

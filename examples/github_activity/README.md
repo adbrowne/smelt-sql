@@ -254,7 +254,15 @@ The centrepiece test, `every_window_matches_the_full_refresh_oracle`, checks aft
 one of the 30 incremental windows (measured at ~110s for the full sweep, well under the
 5-minute budget) and is green.
 
-The interim, DuckDB-half writeup of these findings — the four root causes and the
-requirements handed to the two downstream feature outcomes — is banked at
-`docs/handoffs/2026-09-08-github-activity-findings.md`. It is interim: the live-BigQuery
-half lands in phase 16 of `docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`.
+The full writeup of these findings is banked at
+`docs/handoffs/2026-09-08-github-activity-findings.md`, and it is complete: the offline half
+(the four root causes and the requirements handed to the two downstream feature outcomes)
+plus the live-BigQuery half — every compile refusal, runtime failure and cross-target
+comparison the runs against `smelt-bq-test-20260816.smelt_dogfood` surfaced, with the model
+and statement behind each, and the punch-list they hand on.
+
+Both targets ran the fixture's thirty windows over one shared population: fourteen relations
+byte-equal between targets at the final window, and byte-equal to their own full refresh
+there. Two models — `silver.actor_sessions` and its downstream
+`marts.daily_active_contributors` — are refused at compile time on GoogleSQL over an
+INTERVAL `RANGE` lookback frame and run on DuckDB only.

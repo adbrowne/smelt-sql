@@ -1,15 +1,17 @@
-# GitHub-activity pipeline findings — DuckDB half
+# GitHub-activity pipeline findings — both halves
 
-**Status:** interim — **DuckDB half only**. The live-BigQuery half (compile refusals,
-runtime failures, cross-target divergence) lands in phase 16 of
-`docs/outcomes/20260906-bigquery-dogfood-spine/outcome.md`, gated on a provisioned GCP
-project and credential that do not exist in this worktree (`gcloud auth list` → "No
-credentialed accounts", re-checked through phase 9). Everything below is derived from
-`examples/github_activity/`'s DuckDB replay over the committed 30-day Parquet fixture —
-no live warehouse was queried to produce this document.
+**Status:** complete. **Both halves have landed.** The offline half — the four root causes,
+the divergence registry and the requirements handed to the two downstream feature outcomes —
+was banked 2026-09-08 from `examples/github_activity/`'s DuckDB replay over the committed
+30-day Parquet fixture. The **live-BigQuery addendum is dated 2026-09-12** and begins at
+"## The live BigQuery half": it carries the compile refusals, runtime failures,
+cross-target comparison and full-refresh-oracle result of phases 10–14 and 17 run against
+`smelt-bq-test-20260816.smelt_dogfood`. Everything above that heading was produced with no
+live warehouse; everything below it was produced by runs that were.
 
 **Source of every claim below:** `docs/outcomes/20260906-bigquery-dogfood-spine/phases/`
-`0{2,3,4,6,8,9}-summary.md`, that outcome's own "## Decision log", and
+`0{2,3,4,6,8,9}-summary.md` for the offline half, and `10-`, `11-`, `12-`, `17-`, `13-`
+and `14-summary.md` for the live half, plus that outcome's own "## Decision log" and
 `examples/github_activity/README.md`. Nothing here is re-derived or re-measured; each
 number is traceable to one of those.
 
@@ -400,3 +402,186 @@ plan-preview endpoint is built later (for the spine's dogfood-project UI work or
 it must set `invoke_external_steps: false` (or `dry_run: true`, which also refuses) to avoid
 silently invoking a step — for example, a `bq query` against the dogfood project — from what
 looks like a read-only preview action.
+
+## The live BigQuery half
+
+*Added 2026-09-12. Everything in this section and below it was produced by runs against
+`smelt-bq-test-20260816.smelt_dogfood`, under ADC impersonating
+`smelt-dogfood@smelt-bq-test-20260816.iam.gserviceaccount.com`.*
+
+What was provisioned, loaded, widened and run, in phase order — each row's numbers are the
+phase summary's own, read from BigQuery job metadata rather than estimated:
+
+| phase | what happened | cost |
+|---|---|---|
+| 7 | `smelt_dogfood` created in the existing project, `defaultTableExpirationMs` **absent** (read back from the API, not inferred from a successful create); `smelt-dogfood@` holds `roles/bigquery.jobUser` project-wide plus `WRITER` on that one dataset; a project-scoped AUD 25/month budget; a query job created in the dogfood project and **refused** in both of the human's other projects | — |
+| 10 | the loader deployed: `github_events` and `github_events_arrival` created day-partitioned on `created_at` / `ingested_date`, both `timePartitioning.expirationMs = 3888000000` (45 days) read back from `tables.get`; two days loaded, 6,053 rows, `payload` non-null on every one | US$0.0173 + US$0.0183 (≈ US$0.018/run, ≈ US$0.53/month at one run/day) |
+| 11 | first live run: `bronze.events` and the first write of the three silver keyed models succeeded, then a hard stop at `silver.events_deduped` on the T5 observed-delta gap | 94 MB billed, ≈ US$0.0005 |
+| 12 | a full refresh plus **three consecutive incremental windows**, each with a run report, each exit 0, **10 of 16 models**; `silver.events_deduped` reached 5,990 rows — the source's exact distinct-`id` count — so the deliberate redelivery folded once, live; the empty W3 correctly changed nothing | 1.111 GB over 258 jobs, ≈ US$0.0056 |
+| 17 | the population widened to the committed fixture's thirty days: 28 days loaded with `scripts/bq-dogfood-loader.sh --emit-sql`'s own output, every one of the 56 `INSERT`s returning the fixture's expected count on the first attempt; the 75-row 2026-08-04 residue deleted by explicit predicate. `smelt_dogfood.github_events` holds **65,583 rows over 30 partitions with 64,313 distinct ids**, byte-identical to the committed fixture on `(id, created_at, type, actor_id, repo_id, repo_name, payload length, payload MD5)` — compared in full, zero rows differing, all 28 redelivery slices matching. `githubarchive` has **not** drifted from the fixture | 90.60 GB, US$0.45 |
+| 13 | the fixture's **thirty** windows on both targets over that one shared population; at the final window all **fourteen** compared relations byte-equal in both directions of a whole-row `EXCEPT ALL`; thirteen of fourteen equal at *every* compared checkpoint; `silver.events_deduped` reached 64,313 rows across twenty-nine window boundaries | 58.46 GB over 2,160 jobs, US$0.29 |
+| 14 | the full-refresh oracle leg on a third target (`bigquery_oracle`, dataset `smelt_dogfood_oracle`, created and dropped inside the phase): at the final window all **fourteen** relations byte-equal to their own full refresh, empty divergence registry; eight of fourteen equal at every one of the seven checkpoints | 12.0 GB over 1,438 jobs, US$0.06 |
+
+The whole live programme — provisioning through the oracle leg — cost **≈ US$0.84**, of
+which US$0.45 is phase 17's one-off widening scan of `githubarchive`.
+
+**Criteria 5, 6 and 7 are met, and this is what they rest on.**
+
+- **Criterion 5** (live BigQuery: a full refresh then at least three consecutive incremental
+  windows, run reports captured) — phase 12, four runs, all exit 0, reports quoted verbatim
+  in `phases/12-summary.md`. It was met at 10 of 16 models; phases 13 and 14 later ran the
+  same pipeline at 14.
+- **Criterion 6** (the two targets agree) — phase 13. Fourteen relations byte-equal at the
+  final window, gated per-PR over the committed `13-parity.json` by
+  `the_two_targets_agree_at_the_final_window`.
+- **Criterion 7** (each incremental state equals a full refresh over the inputs seen so far,
+  on both targets) — phase 14 on BigQuery, plus `every_window_matches_the_full_refresh_oracle`
+  on DuckDB (30 windows, 16 models, 317.6 s).
+
+**Coverage is stated, not implied.** The BigQuery half is **14 of 16** models — two,
+`silver.actor_sessions` and its only downstream `marts.daily_active_contributors`, are
+refused at compile time on GoogleSQL over an INTERVAL `RANGE` lookback frame, and are
+excluded from both legs so the relation sets are equal by construction. It is checked at
+**7 of 30** windows (1, 2, 3, 5, 10, 20, 30; the set phase 13 measured and phase 14 reused,
+so both phases' claims are about the same state). The DuckDB half is 16 models at all 30
+windows.
+Six of the fourteen are additionally exempt from the *intermediate* oracle comparisons, each
+with a checkable proof recorded per row in `14-equivalence.json` — see live finding 1, which
+is why. Nothing is exempt at the final window, and a gate fails if anything ever is.
+
+There is **no BigQuery CI tier**, by standing decision: the live sweeps write committed
+reports (`13-parity.json`, `13-parity-attribution.json`, `14-equivalence.json`) and it is
+those that are read per-PR.
+
+## Live-BigQuery findings
+
+Every row is harvested from a committed phase summary. "closed" means the defect is fixed
+and gated today, not that it was dismissed.
+
+| finding | provoking model | provoking statement | classification | owner |
+|---|---|---|---|---|
+| `--event-time-end` does not bound a full refresh's source scans, so a full refresh is **not** a window-bounded oracle for six of fourteen relations: their oracle at window 1 is byte-identical to their oracle at window 30 (phase 14) | `gold.repo_dim`, `silver.repo_naming`, `silver.actor_naming`, `marts.naming_history`, `gold.events_enriched`, `marts.repo_leaderboard` | `smelt run --target bigquery_oracle --full-refresh --event-time-start 2026-08-05 --event-time-end <day k+1>` | open — a product question, measured rather than argued; invisible on DuckDB, whose oracle stages a truncated source | `20260906-bigquery-correctness` |
+| Cost is jobs, not rows: ≈5.1 jobs/model/run and a ~5 s per-job floor, so a model writing 2 rows can cost six times another model writing 2 rows | `silver.issue_events` (`deleteinsert`, 2 rows, 33 s) vs `marts.star_growth` (`full_refresh`, 2 rows, 5.5 s) | the per-model execution recorded across phase 13's thirty per-window `smelt run --target bigquery` reports (derivation in `phases/16-plan.md`) | open — **derived** from those reports, not measured against `INFORMATION_SCHEMA.JOBS` (the dogfood SA lacks `bigquery.jobs.list`) | `20260906-bigquery-unattended` |
+| The shared `_smelt_ledger` serialises every model's bookkeeping — BigQuery aborts a transaction mutating a table another in-flight transaction is mutating, so a parallel run loses models at random; every ledger access is already model-scoped | every maintained model; surfaced through `silver.repo_naming` in a parallel run | the per-model bookkeeping transaction's write into `smelt_dogfood._smelt_ledger` | open — filed as [#203](https://github.com/adbrowne/smelt-sql/issues/203) with its evidence; not restated here | issue #203 |
+| An empty incremental window costs as much as a full one — every model still re-scans its inputs | `gold.repo_activity_daily` | W3, `smelt run --target bigquery --start 2026-08-07 --end 2026-08-08` (230,686,720 bytes billed, identical to W2, which landed 2,714 events) | open — operational economics for a scheduled idle run | `20260906-bigquery-unattended` |
+| The run window need not match partition granularity (`docs/specs/incremental_shapes.md` §"Run window vs partition granularity"), so the thirty daily windows were a schedule *choice*, not a requirement — with the caveat that the saving is batch-safety-class-dependent | `gold.repo_activity_daily` | the thirty per-window `smelt run --target bigquery --start D --end D+1` schedule | operational note | `20260906-bigquery-unattended` |
+| `stage_workspace` copied the gitignored `.smelt/` into staged workspaces, so a staged run inherited a developer's local posture baseline and failed where a fresh clone and CI could not reproduce it | `silver.repo_naming` (the append-only posture probe) | the staged-workspace copy in `crates/smelt-cli/tests/github_activity_support/mod.rs::copy_dir_all` | **closed** (phase 13): `target/` and `.smelt/` are now skipped by name, with the reason inline. Recorded because the class recurs | closed — this outcome |
+| A concurrent `cargo test -p smelt-cli` rebuilt `target/debug/smelt` **without** `--features bigquery` mid-run and killed a live leg at window 3; the refusal happens at backend construction, so no partial window was written | the whole thirty-window leg (the refusal precedes model execution) | `Error: BigQuery backend not available. Rebuild with --features bigquery` | **closed** operationally: `scripts/bq-dogfood-parity.sh` honours `SMELT_BIN` and `PARITY_RESUME_FROM` | closed — `scripts/bq-dogfood-parity.sh` |
+| Dataset creation is outside the dogfood SA's grant — deliberate, from phase 7's provisioning design; the grant was not widened | the `bigquery_oracle` target's dataset (no model) | `CREATE SCHEMA smelt_dogfood_oracle` → `Access Denied: … does not have bigquery.datasets.create permission` | boundary, working as intended | closed — dataset lifecycle lives in `scripts/bq-dogfood-oracle-dataset.sh`, under the human credential |
+| T5 observed-delta recording was DuckDB-only and refused unconditionally, stopping the whole model set (`silver.events_deduped` is upstream of everything) | `silver.events_deduped` | `maintenance_driver/driver.rs:634-641`, `Feature not supported by BigQuery: observed-delta recording for a change-suppressed keyed fold (T5)` | **closed** — reconciled into a recorded downgrade rather than a `bail!` | `20260906-bigquery-correctness` (closed) |
+| The append-only posture probe could not be planned by BigQuery at all: the baseline is grouped by the **raw** partition column rather than the declared `granularity: day` (5,797 "partitions" for a 3-day source), and BigQuery's inline row set is one subquery per row, producing a 692,597-character statement | `silver.repo_naming` | the `SourceMutationProfileViolated` probe → `Resources exceeded … too many subqueries or query is too complex` | **closed**; the granularity half was wrong on every backend, DuckDB's `VALUES` just never complained | `20260906-bigquery-correctness` (closed) |
+| `FILTER (WHERE …)` reached the warehouse instead of being refused at compile time — GoogleSQL has no such clause and no `BackendCapabilities` flag covered it | `gold.repo_dim` | `MAX(repo_name) FILTER (WHERE is_current) AS current_repo_name` → `400 Syntax error: Expected ")" but got "("` | **closed** | `20260906-bigquery-correctness` (closed) |
+| An INTERVAL `RANGE` window frame reached the warehouse; GoogleSQL allows only numeric offsets | `silver.actor_sessions`, and its only downstream `marts.daily_active_contributors` | `LAG(created_at) OVER (PARTITION BY actor_id ORDER BY created_at RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW)` | **partly closed**: it is now an actionable compile-time `UnsupportedOnBackend` refusal rather than a warehouse error — but the two models still cannot run on BigQuery, which is why the live half is 14 of 16. A window-frame lowering seam is its own piece of work | `20260906-bigquery-correctness` (the lowering seam) |
+| A dialect-blind `VARCHAR` spelling hid behind the frame above — a *missed site* of a known bug class, not a new one | `silver.actor_sessions` | `LAG(CAST(NULL AS VARCHAR))` | **closed** | `20260906-bigquery-correctness` (closed) |
+| The precision half of the degradation contract is invisible at run time: nothing in the console output or the run report says an observed delta was skipped, and `smelt explain` still takes no `--target` | `silver.events_deduped` | the downgraded T5 write path, on all four phase-12 runs | open — the spec says the degradation is "recorded, explain-visible"; for this class on this backend it is neither | `20260906-bigquery-correctness` |
+| An `external_step:` has no target-awareness: it cannot be told, or scoped to, the target a run is invoking it for, so the loader step reported `success` on the BigQuery target while writing to a local DuckDB file | `sources.raw.github_loader` | `command: ["bash", "load_day.sh", "--date", "{run_date}"]` | open | `20260906-external-dag-steps` |
+| `default_target` falls back to the **alphabetically-first** target, so merely declaring a `bigquery` target silently re-pointed every no-`--target` invocation and downgraded `ColumnScopedMerge` to `PerGroupRecompute` project-wide; nothing announced it | every model in `examples/github_activity` under a no-`--target` invocation | `crates/smelt-runtime/src/profile.rs::default_target` with targets `bigquery` and `dev` declared | open — a fail-loud violation; `target: dev` is pinned here as the local fix and does nothing for the next project | `20260906-bigquery-correctness` |
+| `--emit-ddl` declared 9 columns while `--emit-sql` selected 10 — two artifacts deriving a schema from one source of truth with only one of them gated | `raw.github_events` / `raw.github_events_arrival` | `bash scripts/bq-dogfood-loader.sh --emit-ddl` vs `sample.sql`'s projection | **closed** (phase 10) by `ddl_columns_match_the_sample_projection`, written RED against the pre-fix DDL. The general shape is worth a sweep | closed — this outcome |
+| Loader invocation order is not gated: phase 10 deliberately loaded 08-06 before 08-05 and the redelivery arithmetic closed correctly (63 duplicate ids, 3,201 + 63 = 3,264), but nothing asserts what two invocations do in either order | `raw.github_events` | two `scripts/bq-dogfood-loader.sh --emit-sql --date D` loads in reverse calendar order | open — test gap, evidenced but not gated | `20260906-external-dag-steps` |
+| `bronze_events` differs between targets at every intermediate checkpoint (62,382 → 59,605 → 57,217 → 50,406 → 32,251 → 11,536 → 0), always with the DuckDB side a strict subset — arrival order, not either engine | `bronze.events` | its whole-source rebuild (`materialization: table`, no incremental strategy) under a warehouse-resident source vs a day-by-day loaded one | **closed**: registered as one `TARGET_DIVERGENCE_REGISTRY` entry under an `ArrivalLag` bound that still refuses a row lost from inside the lagging leg's own loaded range, and removed entirely by `run_incremental.py --preload-source` | closed — nothing escalated |
+
+## Recorded, not BigQuery findings
+
+Backend-agnostic items the live runs surfaced, kept here so a future reader does not
+re-file them against a backend:
+
+- **`SourceRetentionExceeded` on a repeated `--full-refresh`.** A second `--full-refresh`
+  over a retention-bounded source, while stored output already exists, refuses without an
+  explicit license — `docs/specs/sources.md` §Semantics 5, implemented in
+  `smelt-logical`/`smelt-runtime` with no backend crate involved. It would reproduce
+  identically on DuckDB given the same sequence. An operational fact for anyone running this
+  pipeline live, not a defect.
+- **The posture-baseline granularity half of the probe defect.** Grouping the baseline by the
+  raw partition column rather than the declared granularity is wrong on **every** backend;
+  BigQuery merely made it fatal, because DuckDB's `VALUES` row set absorbs 5,797 branches
+  without complaint.
+- **The `retention: '90 days'` field on both source YAMLs is still inert and still disagrees
+  with the loader's 45.** Unchanged by the live half — see "Requirements handed to
+  `20260906-trimmed-history-sources`" above. What the live half *did* add is that the 45 is
+  no longer only a DDL claim: it was read back from live table metadata as
+  `timePartitioning.expirationMs = 3888000000` on both tables (phases 10 and 17).
+- **`smelt list --format json` hard-fails on all three example workspaces.** Pre-existing and
+  unrelated to any backend — see finding (b) above. `smelt explain --json` is unaffected and
+  is what the live phases used.
+- **The `bronze_events` cross-target difference is about arrival order**, which is a fact
+  about the example (it is the pipeline's only whole-source rebuild), not about DuckDB or
+  BigQuery.
+
+## Operational notes for the next live run
+
+**Build and credential recipe.** None of this is written down anywhere but the phase
+summaries:
+
+```bash
+cargo build -p smelt-cli --features bigquery     # the default build has no BigQuery backend
+bash scripts/bigquery-venv.sh                    # the pinned Python client venv
+source scripts/bq-dogfood-env.sh                 # dataset=smelt_dogfood, expiry UNSET, token UNSET
+export SMELT_BQ_ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
+smelt run --target bigquery --start D --end D+1  # always pass --target; never unpin `target: dev`
+```
+
+`python/smelt/bigquery_adapter.py` never falls back to ADC itself, which is why the token has
+to be minted explicitly and handed over. ADC here is **already** an
+`impersonated_service_account` credential targeting `smelt-dogfood@`, so the printed token is
+the service account's — an explicit `--impersonate-service-account` flag on top of it is
+redundant.
+
+**Costs, measured.** The loader is ≈ US$0.018/run (≈ US$0.53/month at one run/day); a
+thirty-window incremental leg is US$0.29; a seven-checkpoint oracle sweep over the same
+state is US$0.06; a one-off thirty-day re-widening of the source from `githubarchive` is
+US$0.45. Most per-job billing is BigQuery's 10 MB per-table minimum-billing floor applied
+many times over, not data volume — the inputs are 65,583 rows.
+
+**The 2026-09-19 partition-expiration deadline is live.** Both source tables declare
+`partition_expiration_days = 45` and the oldest partition in each is 2026-08-05, so it ages
+out on 2026-09-19. Phases 13 and 14 completed on 2026-09-11/12, a week inside it. **Any
+later live comparison must first re-load the missing days** — after that date, a comparison
+against the committed fixture is invalid rather than merely late.
+
+**Two hazards worth not rediscovering.** Run a live leg against a *pinned copy* of the
+binary (`SMELT_BIN`): a concurrent `cargo test` in the same checkout will rebuild
+`target/debug/smelt` without `--features bigquery` under a running leg's feet. And an
+impersonated token outlives less than a thirty-window leg does (~61 minutes against a
+one-hour token), so `scripts/bq-dogfood-parity.sh` re-mints before every window and every
+snapshot via `PARITY_TOKEN_CMD` rather than exporting one token up front.
+
+**Levers.** `PARITY_CHECKPOINTS=1,2,3,…,30` widens the comparison set from the declared
+seven (the reduction was measured, not assumed: 1,481 rows/s through the real landing path
+puts a thirty-checkpoint sweep at ≈7.2M rows ≈81 min, against ~51 min of model execution).
+`PARITY_RESUME_FROM` resumes an interrupted leg with **absolute** window numbers, so a
+checkpoint keeps its label. Neither changes what is compared, only how much.
+
+**Scheduling shape.** The thirty daily windows were a choice; the run window need not match
+partition granularity, and a wider window is one engine query with one partition-aligned
+DELETE and one INSERT. But an empty window costs what a full one does, so an idle daily
+schedule pays a working day's scan for nothing.
+
+## Final punch-list
+
+Ordered, for `20260906-bigquery-correctness` to consume. Everything the DuckDB half handed
+over is already closed — see "Punch-list for `20260906-bigquery-correctness`" above, whose
+items 1-3 are done and whose item 4 was closed by the run-window widening described in root
+cause 4's **Fixed** paragraph. These are what the *live* half adds:
+
+1. **Decide whether `--event-time-end` should bound a full refresh's source scans.** The
+   consequential one: today "full refresh" and "the oracle at window *k*" are not the same
+   operation against a static source, so six of fourteen relations cannot be compared at an
+   intermediate checkpoint. Owner: `20260906-bigquery-correctness`.
+2. **Give BigQuery a per-model ledger, or otherwise stop serialising every model's
+   bookkeeping through one `_smelt_ledger` table.** Owner:
+   [#203](https://github.com/adbrowne/smelt-sql/issues/203).
+3. **A window-frame lowering seam**, so `silver.actor_sessions` and
+   `marts.daily_active_contributors` run on GoogleSQL and the live half becomes 16 of 16.
+   Owner: `20260906-bigquery-correctness`.
+4. **Surface the precision half of the degradation contract at run time** — a console line, a
+   run-report field, or `smelt explain --target`. Owner: `20260906-bigquery-correctness`.
+5. **Stop inferring the default target from sort order.** Owner:
+   `20260906-bigquery-correctness`.
+6. **Target-awareness for `external_step:`** — per-target scoping, a `{target}` placeholder,
+   or a trust-this-source-is-fresh escape hatch. Owner: `20260906-external-dag-steps`.
+7. **Gate the loader's two-invocation orderings**, which the live run evidenced but nothing
+   checks. Owner: `20260906-external-dag-steps`.
+8. **Reconcile `retention: '90 days'` with the loader's enforced 45.** Owner:
+   `20260906-trimmed-history-sources`.
+9. **Cost shape for a scheduled run**: ≈5.1 jobs/model/run with a ~5 s per-job floor, and an
+   empty window costing a full one. Owner: `20260906-bigquery-unattended`.

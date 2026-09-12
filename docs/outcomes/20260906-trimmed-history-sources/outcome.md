@@ -86,6 +86,16 @@ for such sources, so `full_refresh(inputs ∈ S)` has one meaning rather than tw
 
 ## Decision log
 
+- 2026-09-12 (inbound, from `20260906-bigquery-dogfood-spine` phase 16): **the 45-day
+  retention bound this outcome must reconcile with the inert `retention: '90 days'` field is
+  no longer only a DDL claim — it was read back live.** Both dogfood source tables report
+  `timePartitioning.expirationMs = 3888000000` (45 days) from `tables.get`, in phase 10 and
+  again in phase 17, and the bound is operationally live: the oldest partition (2026-08-05)
+  expires 2026-09-19. Nothing else the live half produced changes what this outcome consumes;
+  the requirement itself is unchanged and stands in
+  `docs/handoffs/2026-09-08-github-activity-findings.md` §"Requirements handed to
+  `20260906-trimmed-history-sources`".
+
 - 2026-09-09 (phase 11 implement): **outcome closed `done` — all eight success criteria
   verified against code and tests at HEAD, no gaps found.** Evidence table in
   `phases/11-summary.md`. Every named test file existed and passed

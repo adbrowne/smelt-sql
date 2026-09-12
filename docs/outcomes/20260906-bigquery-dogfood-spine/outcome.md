@@ -1,14 +1,15 @@
 # Outcome: The GitHub-activity pipeline runs on BigQuery and DuckDB, and the numbers agree
 
 **Created:** 2026-09-06
-**Status:** in progress
+**Status:** done
 **Driver:** split. Phases 2–4, 6, 8 and 9 are loop-grindable (no warehouse, no credentials)
 and this outcome sits in `.claude/outcome-backlog` for them. Phase 5 needs a human-minted
 BigQuery token for one fixture regeneration (see "## Blocked"); phases 7, 10–14 and 16 are
 **human-gated** — they provision cloud resources and run live BigQuery, which a headless
 loop cannot do, so those phases must emit `<<PHASE_BLOCKED>>` rather than attempt it.
 Phases 15 and 16 bank the evidence and are loop-grindable: phase 16 harvests the *committed
-summaries* of the live phases 10 and 11, so it needs no credential of its own.
+summaries* of the live phases 10–14 and 17, so it needs no credential of its own. Every
+phase has now run; nothing is outstanding.
 **Source:** `docs/research/20260906-bigquery-dogfood.md` §"The programme" (D0, D1), §"The example project"
 **Spec anchors:** `docs/specs/sources.md`; `docs/specs/multi_backend.md`; `docs/specs/incremental_models.md` §"The equivalence invariant"; `docs/specs/smelt_yml.md`; `docs/specs/run_state.md`; `docs/specs/state.md`
 
@@ -137,10 +138,44 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | done (14 of 14 relations equal at the final window; one arrival-order divergence registered — see the 2026-09-12 entry) |
 | 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | done (14 of 14 relations byte-equal to their own full refresh at the final window; 8 of 14 at every checkpoint, the other 6 exempt at intermediate ones with a checkable proof — see the 2026-09-12 entry) |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
-| 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | planned |
+| 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | done |
 | 17 | Expand the BigQuery source population to the committed fixture's full thirty days with the real loader, and delete the stray 2026-08-04 slice, so both targets run over the same rows — **runs before 13 and 14** | done |
 
 ## Decision log
+
+- 2026-09-12 (phase 16, and the outcome's close-out): **the evidence is banked, criterion 8
+  is met, and the outcome is `done`.** `docs/handoffs/2026-09-08-github-activity-findings.md`
+  is no longer interim: its live section banks phases 10–14 and 17 in phase order with each
+  phase's own measured cost, a nineteen-row findings table in which every row names the model
+  and the statement that provoked it, the backend-agnostic items kept out of the backends'
+  punch-lists, an operational recipe for the next live run, and a nine-item final punch-list
+  with an owner per item. Nothing in it was re-derived or re-measured here and no cloud call
+  was made: every number traces to a committed summary. Four string-level gates hold the
+  document — that both halves have landed, that every live-findings row names a provoking
+  model and statement (with a scoped, non-vacuous scan behind it), and that the coverage the
+  met criteria rest on is stated in the document itself.
+
+  **Criteria met, and on what evidence.** 1 and 2 — phase 7, dataset properties and the
+  cross-project job refusal read back from the API. 3 — phase 10, the loader deployed and its
+  projection gated byte-identical to `sample.sql`, cost measured per job. 4 — phases 2–5, the
+  whole pipeline green on DuckDB per-PR. 5 — phase 12, a full refresh plus three consecutive
+  windows, run reports captured. 6 — phase 13, fourteen relations byte-equal between targets
+  at the final window, gated over `13-parity.json`. 7 — phase 14 on BigQuery plus
+  `every_window_matches_the_full_refresh_oracle` on DuckDB. 8 — this phase. 9 — phase 3, and
+  re-exercised live: both succession models compare byte-equal across targets and against
+  their own full refresh at the final window. 10 — this phase's own `verify-phase.sh` run.
+
+  **What is not covered, stated rather than rounded up.** The live half is **14 of 16
+  models**: `silver.actor_sessions` and `marts.daily_active_contributors` are refused at
+  compile time on GoogleSQL over an INTERVAL `RANGE` lookback frame and run on DuckDB only —
+  the window-frame lowering seam is punch-list item 3, not done here. The BigQuery
+  equivalence check is **7 of 30 windows**, the set phase 13 measured and phase 14 reused; at
+  six of those seven, six relations are additionally exempt on the oracle side, each with a
+  checkable proof, because a full refresh over a static source is not window-bounded
+  (punch-list item 1, the consequential finding). There is **no BigQuery CI tier**, by
+  standing decision: the committed reports are what run per-PR, and the live legs are
+  re-runnable by hand. And the live evidence has a date — the source tables' oldest partition
+  expires 2026-09-19, so a later comparison must re-load the missing days first.
 
 - 2026-09-12 (phase 14, executed live): **the numbers are trustworthy on both targets;
   criterion 7 is met, and criterion 6 stands from phase 13.** On BigQuery, after the fixture's
@@ -1069,6 +1104,10 @@ exists — so the live run is a test of the *backend*, not of the models.
   centrepiece per-window sweep is blocked on this finding.
 
 ## Blocked
+
+- 2026-09-12 — **nothing is blocked; every entry below is history.** The credential was
+  minted, the dataset provisioned, and phases 10–14, 17 and 16 all ran. The outcome is
+  `done`. The entries below are kept for the record of each gate and how it lifted.
 
 - 2026-09-11 — **LIFTED (phases 12-14).** `20260906-bigquery-correctness` phase 11 landed the
   downgrade path described below as "more likely the right design", so the refusal is gone and
