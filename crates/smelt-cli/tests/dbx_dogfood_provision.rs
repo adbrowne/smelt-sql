@@ -227,6 +227,50 @@ fn env_script_exports_the_oracle_schema() {
     );
 }
 
+/// `SMELT_DBX_HOSTNAME` (the bare hostname the `type: databricks` target's
+/// `host:` key requires) is derived from `SMELT_DBX_HOST` by stripping its
+/// scheme and any trailing slash, while `SMELT_DBX_HOST` itself is left
+/// untouched — `dbx-auth.sh` and the Python query wrapper still need the
+/// scheme-bearing URL (`docs/outcomes/20260912-databricks-dogfood-spine/
+/// outcome.md` phase 6b: the wizard writes a scheme-bearing host, but the
+/// target's `host:` contract is bare-hostname-only).
+#[test]
+fn env_script_exports_bare_hostname() {
+    let env_script = repo_root().join("scripts/dbx-dogfood-env.sh");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("config.env"),
+        "SMELT_DBX_HOST=https://dbc-test.cloud.databricks.com/\n",
+    )
+    .expect("write config.env");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -e; source {}; echo \"HOST=$SMELT_DBX_HOST\"; echo \"HOSTNAME=$SMELT_DBX_HOSTNAME\"",
+            env_script.display()
+        ))
+        .current_dir(repo_root())
+        .env("SMELT_DBX_CONFIG_DIR", tmp.path())
+        .env_remove("SMELT_DBX_HOST")
+        .env_remove("SMELT_DBX_TOKEN")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to source dbx-dogfood-env.sh: {e}"));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("HOST=https://dbc-test.cloud.databricks.com/"),
+        "SMELT_DBX_HOST must stay scheme-bearing for URL-building consumers:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("HOSTNAME=dbc-test.cloud.databricks.com"),
+        "SMELT_DBX_HOSTNAME must be the bare hostname, no scheme, no trailing slash:\n{stdout}"
+    );
+}
+
 #[test]
 fn facts_sheet_has_no_unfilled_quota_slots() {
     // Phase 4a shipped the sheet with every row TBD; phase 4c (a reachable

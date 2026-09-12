@@ -9,6 +9,7 @@
 //! `adding_the_oracle_target_does_not_move_the_default`.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 /// The committed project's Databricks dogfood target.
 const DATABRICKS_TARGET: &str = "databricks";
@@ -26,6 +27,10 @@ fn repo_root() -> PathBuf {
 
 fn example_dir() -> PathBuf {
     repo_root().join("examples/github_activity")
+}
+
+fn smelt_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_smelt"))
 }
 
 fn example_config() -> smelt_core::config::Config {
@@ -150,5 +155,60 @@ fn the_databricks_target_parses_and_needs_no_credential_to_load() {
         target.warehouse.is_none(),
         "a `databricks` target must carry no `warehouse` key (config.rs refuses it; Free \
          Edition has no host-visible warehouse path)"
+    );
+}
+
+/// `host: ${SMELT_DBX_HOSTNAME}` reads the bare-hostname variable, never
+/// `SMELT_DBX_HOST` — a scheme-bearing `SMELT_DBX_HOST` sitting in the
+/// environment (as `scripts/dbx-dogfood-env.sh` always leaves it, for
+/// `dbx-auth.sh`'s own URL-building) must not stop the config from loading.
+/// And the target's own bare-hostname contract still holds: if a scheme
+/// reaches `SMELT_DBX_HOSTNAME` itself, `Config::load` still refuses it
+/// (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` phase 6b —
+/// the scheme/bare-host mismatch phase 6 worked around in the shell).
+#[test]
+fn databricks_target_host_is_bare() {
+    // `explain --json` on a real model triggers the same whole-project
+    // config load (and its `${VAR}` interpolation across every declared
+    // target) as `list`/`run`, without `list`'s own unrelated discovery
+    // issue over this project's root-level `sample.sql`/`setup_sources.sql`
+    // scratch files.
+    let out = Command::new(smelt_bin())
+        .args(["explain", "--json", "silver.events_deduped"])
+        .args(["--project-dir", example_dir().to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .env("SMELT_DBX_HOST", "https://dbc-test.cloud.databricks.com")
+        .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt explain`: {e}"));
+    assert!(
+        out.status.success(),
+        "config load must succeed reading the bare SMELT_DBX_HOSTNAME even though the \
+         scheme-bearing SMELT_DBX_HOST is also set:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = Command::new(smelt_bin())
+        .args(["explain", "--json", "silver.events_deduped"])
+        .args(["--project-dir", example_dir().to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .env("SMELT_DBX_HOST", "https://dbc-test.cloud.databricks.com")
+        .env(
+            "SMELT_DBX_HOSTNAME",
+            "https://dbc-test.cloud.databricks.com",
+        )
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt explain`: {e}"));
+    assert!(
+        !out.status.success(),
+        "a scheme-bearing SMELT_DBX_HOSTNAME reaching `host:` must still be refused"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bare hostname"),
+        "expected the bare-hostname refusal message in stderr:\n{stderr}"
     );
 }

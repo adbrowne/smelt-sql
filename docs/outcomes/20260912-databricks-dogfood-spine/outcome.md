@@ -161,7 +161,7 @@ of the models or the tooling.
 | 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | done |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | done |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | done |
-| 6b | **[live]** Unblock the Databricks run path so more than one model can complete: make the maintenance fingerprint's hash spelling dialect-dispatched (`sha2(x, 256)` on Spark/Databricks) behind a single owner plus a structural gate, reconcile the bare-host/scheme mismatch between the wizard's `SMELT_DBX_HOST` and the `type: databricks` target contract, then re-run the full refresh to a clean baseline and record what remains | planned |
+| 6b | **[live]** Unblock the Databricks run path so more than one model can complete: make the maintenance fingerprint's hash spelling dialect-dispatched (`sha2(x, 256)` on Spark/Databricks) behind a single owner plus a structural gate, reconcile the bare-host/scheme mismatch between the wizard's `SMELT_DBX_HOST` and the `type: databricks` target contract, then re-run the full refresh to a clean baseline and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -169,6 +169,30 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 6b implement): **row 6b done — the hash-dialect fix and host
+  reconciliation both confirmed live; one new, unrelated finding recorded rather than fixed.**
+  `emit/hash.rs` now single-owns every `sha256`/`SHA256`/`sha2` spelling under
+  `src/maintenance/`, gated by a new structural test
+  (`hash_spelling_has_one_owner`); Spark/Databricks now emits `sha2(x, 256)`, DuckDB and
+  BigQuery are byte-identical to before (pinned by
+  `duckdb_and_bigquery_hash_spellings_are_unchanged`). `SMELT_DBX_HOSTNAME` (bare) is now
+  exported alongside the scheme-bearing `SMELT_DBX_HOST`, and `smelt.yml`'s `host:` key reads
+  the bare variable — no more shell workaround needed. The re-run full refresh confirmed the
+  phase-6 root cause is gone (no failure mentions `sha256` or a hash function at all) but
+  landed on the identical **1 success / 3 failed / 12 skipped** shape for a *different* reason:
+  Databricks' `[DROP_COMMAND_TYPE_MISMATCH]` error text for "DROP VIEW on a table" isn't one of
+  the two strings `SparkBackend::drop_view_if_exists` recognizes as "safe to swallow" (both are
+  vanilla-Spark-shaped), so every self-referential bootstrap model
+  (`bronze.events`/`silver.actor_naming`/`silver.repo_naming`) fails the moment its target table
+  already exists from a prior run — confirmed live via `DESCRIBE EXTENDED`, which shows a real,
+  valid Delta table, not a stray view. This is squarely a new finding outside 6b's own
+  boundary (hash spelling + host contract), and a run still completes (1 model succeeds), so
+  the "only fix what's needed to complete at all" exception does not apply — it is recorded in
+  `06b-summary.md` with its exact fix candidate for the next live phase, which now needs it
+  before three consecutive incremental windows are possible (every window past the first will
+  re-hit this on the same three models). Nothing left the outcome; nothing added to `## Out of
+  scope`.
 
 - 2026-09-12 (phase 7 plan): **reshape — inserted row 6b between the full refresh and the
   incremental windows.** Phase 6's live full refresh completed 1 of 16 models: the maintenance

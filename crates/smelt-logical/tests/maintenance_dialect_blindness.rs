@@ -218,6 +218,92 @@ fn find_offenders(source: &str) -> Vec<(usize, String)> {
     offenders
 }
 
+/// Every raw occurrence of a hash-function spelling (`sha256(`, `SHA256(`,
+/// `sha2(`) in code context, as `(1-based line, trimmed line text)` — used by
+/// [`hash_spelling_has_one_owner`] to enforce that `emit/hash.rs` is the
+/// single author of every such spelling
+/// (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` phase 6b:
+/// the maintenance layer hand-spelled `sha256(...)` outside the
+/// Function-Registry emission path, so Spark's missing `sha256` reached a
+/// live engine as a runtime error rather than a compile-time refusal).
+fn find_hash_spelling_occurrences(source: &str) -> Vec<(usize, String)> {
+    let chars: Vec<char> = source.chars().collect();
+    let kinds = classify_chars(&chars);
+    let lines: Vec<&str> = source.lines().collect();
+
+    let mut line_of = vec![0usize; chars.len()];
+    let mut line_no = 0;
+    for (idx, c) in chars.iter().enumerate() {
+        line_of[idx] = line_no;
+        if *c == '\n' {
+            line_no += 1;
+        }
+    }
+
+    let needles: [Vec<char>; 3] = [
+        "sha256(".chars().collect(),
+        "SHA256(".chars().collect(),
+        "sha2(".chars().collect(),
+    ];
+    let mut hits = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let mut matched_len = None;
+        for needle in &needles {
+            if matches_code_marker(&chars, &kinds, i, needle) {
+                matched_len = Some(needle.len());
+                break;
+            }
+        }
+        if let Some(len) = matched_len {
+            let ln = line_of[i];
+            let line_text = lines.get(ln).copied().unwrap_or("").trim().to_string();
+            hits.push((ln + 1, line_text));
+            i += len;
+        } else {
+            i += 1;
+        }
+    }
+    hits
+}
+
+#[test]
+fn hash_spelling_has_one_owner() {
+    let mut all_offenders = Vec::new();
+    for (path, src) in maintenance_files() {
+        let stripped = strip_test_modules(&src);
+        let is_hash_owner = path.file_name().is_some_and(|n| n == "hash.rs");
+        for (line, text) in find_hash_spelling_occurrences(&stripped) {
+            if is_hash_owner && text.contains("=>") {
+                continue;
+            }
+            all_offenders.push(format!("{}:{line}: {text}", path.display()));
+        }
+    }
+    assert!(
+        all_offenders.is_empty(),
+        "found a hash-function spelling outside emit/hash.rs (or outside a dispatch line \
+         within it) — every hash spelling must be single-owned by emit/hash.rs:\n{}",
+        all_offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_hash_scan_flags_a_planted_spelling() {
+    let planted = r#"
+fn some_other_emitter(column: &str) -> String {
+    let bad = sha256(column);
+    bad
+}
+"#;
+    let offenders = find_hash_spelling_occurrences(planted);
+    assert_eq!(
+        offenders.len(),
+        1,
+        "expected exactly one offender, got {offenders:?}"
+    );
+}
+
 #[test]
 fn no_production_emitter_hardcodes_the_duckdb_dialect() {
     let mut all_offenders = Vec::new();

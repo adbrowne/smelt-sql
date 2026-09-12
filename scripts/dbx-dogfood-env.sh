@@ -3,9 +3,18 @@
 # point the github_activity dogfood pipeline at the Databricks Free Edition
 # workspace (docs/outcomes/20260912-databricks-dogfood-spine/phases/03-plan.md).
 #
-#   SMELT_DBX_HOST     — gate + target workspace hostname for the Databricks
-#                        backend tests. When UNSET, all Databricks-targeted
-#                        tests skip (green).
+#   SMELT_DBX_HOST     — gate + scheme-bearing workspace URL (e.g.
+#                        `https://dbc-xxxx.cloud.databricks.com`), consumed
+#                        directly by URL-building callers (`dbx-auth.sh`,
+#                        the Python query wrapper). When UNSET, all
+#                        Databricks-targeted tests skip (green).
+#   SMELT_DBX_HOSTNAME — SMELT_DBX_HOST with its scheme and any trailing
+#                        slash stripped — the bare-hostname shape the
+#                        `type: databricks` target's `host:` key requires
+#                        (`docs/specs/smelt_yml.md` §"Target shape"). This is
+#                        the variable `examples/github_activity/smelt.yml`
+#                        interpolates into `host:`, never SMELT_DBX_HOST
+#                        itself.
 #   SMELT_DBX_TOKEN    — a short-lived PAT/OAuth token, read from the
 #                        gpg-backed config dir's decrypted `token` file if
 #                        present. Never printed by this script. Unset (rather
@@ -51,12 +60,25 @@ _dbx_env_file="${_dbx_config_dir}/config.env"
 _dbx_token_file="${_dbx_config_dir}/token"
 
 unset SMELT_DBX_HOST
+unset SMELT_DBX_HOSTNAME
 unset SMELT_DBX_TOKEN
 
 if [ -f "${_dbx_env_file}" ]; then
   # shellcheck disable=SC1090
   . "${_dbx_env_file}"
   export SMELT_DBX_HOST
+fi
+
+if [ -n "${SMELT_DBX_HOST:-}" ]; then
+  # Strip a leading scheme (`https://`/`http://`) and any trailing slash —
+  # the target's `host:` key is a bare hostname
+  # (`crates/smelt-core/src/config.rs`'s "no scheme, no trailing slash"
+  # validation), while SMELT_DBX_HOST itself stays scheme-bearing for
+  # dbx-auth.sh's and the Python query wrapper's own URL-building.
+  SMELT_DBX_HOSTNAME="${SMELT_DBX_HOST#http://}"
+  SMELT_DBX_HOSTNAME="${SMELT_DBX_HOSTNAME#https://}"
+  SMELT_DBX_HOSTNAME="${SMELT_DBX_HOSTNAME%/}"
+  export SMELT_DBX_HOSTNAME
 fi
 
 if [ -f "${_dbx_token_file}" ]; then

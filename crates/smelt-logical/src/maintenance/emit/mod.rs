@@ -24,6 +24,7 @@
 
 mod bootstrap;
 mod fingerprint;
+mod hash;
 mod merge;
 mod partition_bucket;
 mod probes;

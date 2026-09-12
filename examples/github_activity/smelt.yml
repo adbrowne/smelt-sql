@@ -38,7 +38,7 @@ targets:
     # runtime. The oracle target (criterion 9) is deliberately NOT declared
     # here — that is phase 9's, with its own source-name entry.
     type: databricks
-    host: ${SMELT_DBX_HOST}
+    host: ${SMELT_DBX_HOSTNAME}
     token: ${SMELT_DBX_TOKEN}
     catalog: workspace
     schema: smelt_dogfood
