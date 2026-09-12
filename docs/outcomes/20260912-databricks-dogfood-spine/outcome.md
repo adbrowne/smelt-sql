@@ -158,6 +158,7 @@ of the models or the tooling.
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | done |
 | 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | done |
 | 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | blocked |
+| 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | planned |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
@@ -167,6 +168,22 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (plan 4c): **row 4c added — the demonstrable half of criterion 4 is no longer
+  human-gated.** Probing from this worktree found the workspace reachable via the allow-listed
+  `scripts/dbx-query.sh` and `SHOW SCHEMAS IN workspace` returning **both** `smelt_dogfood` and
+  `smelt_dogfood_oracle` — so the human's 4b run created the schemas after the 4b planning probe
+  saw only `default`/`information_schema`. The grantee bug that entry flagged is also already
+  fixed: `dbx-provision.sh` now grants to `$SMELT_DBX_CLIENT_ID`, not the literal
+  `` `account users` ``. What criterion 4 still lacks is *demonstration* — `dbx-verify.sh` has
+  never been run green, the grants have never been read back, and `free-edition-facts.md` is
+  five `TBD`s — and none of that needs a browser or the account console, only a reachable
+  session and the allow-listed wrappers. Leaving it inside blocked row 4b would strand work a
+  success criterion names, which this process forbids, so it becomes row 4c ahead of phase 5;
+  reading the credential's real scope is also a prerequisite to trusting the first live write.
+  Row 4b stays `blocked` for what genuinely remains human: its own `04b-summary.md` and the
+  token-refresh decision in `## Blocked` item (b), which still gates phases 5-9 and 11. No work
+  left the outcome; nothing was added to `## Out of scope`.
 
 - 2026-09-12 (plan 4b): **row 4b blocked — a human is running it live in this worktree right
   now, and a structural token-refresh question has no answer yet.** Probing the environment
