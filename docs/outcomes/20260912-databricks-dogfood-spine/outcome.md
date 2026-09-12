@@ -148,7 +148,7 @@ of the models or the tooling.
 |---|-------|--------|
 | 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | done |
 | 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | done |
-| 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | pending |
+| 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | planned |
 | 4 | **[human]** Provision: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential encrypted at rest, `scripts/dbx-*.sh` wrappers and settings allow-list, reachability and refusal demonstrated, Free Edition quotas recorded | pending |
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
@@ -215,6 +215,15 @@ of the models or the tooling.
   feature on `smelt-backends::create_backend`, and a cross-backend-edge refusal in
   `smelt-runtime` naming both targets. All eight named tests pass with no live workspace; see
   `phases/02-summary.md`.
+
+- 2026-09-12 (plan 3): **no reshape.** Phase 2 surfaced nothing out of scope; its one carried
+  note — that `databricks-connect`'s real Python API has never been checked against
+  `python/smelt/databricks_adapter.py` — lands inside phase 3's venv script as an import
+  verification step (the shape `scripts/bigquery-venv.sh` already uses), not as a new row. Two
+  planning calls: the loader's per-day slice is emitted as DuckDB-executable SQL so the per-PR
+  identity gate can compare it to `load_day.sh`'s own rows with no workspace and no Python
+  client, and per-day idempotence is proved offline via a `--dry-run-store` ledger that runs the
+  real guard with the Unity Catalog sink swapped out.
 
 ## Blocked
 
