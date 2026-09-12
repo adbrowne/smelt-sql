@@ -12,8 +12,12 @@ description: >
 # See `github_events.yml`'s identical note: the `bigquery` target's physical
 # table is `smelt_dogfood.github_events_arrival` (phase 10's loader), not the
 # default-mapped `smelt_dogfood.sources_raw_github_events_arrival`.
+# `bigquery_oracle` maps to the SAME physical table — see the twin's note in
+# `github_events.yml`: the full-refresh oracle reads the shared source and
+# writes only its outputs to its own dataset.
 name:
   bigquery: smelt_dogfood.github_events_arrival
+  bigquery_oracle: smelt_dogfood.github_events_arrival
 mutation_profile:
   kind: append_only
   lateness: '6 hours'

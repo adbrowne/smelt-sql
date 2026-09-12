@@ -30,6 +30,18 @@
 # The DuckDB leg is the committed replay (`examples/github_activity/run_incremental.py`),
 # not a re-implementation of it. The BigQuery leg is the same thirty windows of
 # the same `smelt run`, with `--target bigquery`.
+#
+# The same driver also carries the equivalence-invariant leg, which reuses the
+# incremental snapshots `bq` already exported rather than re-running them:
+#
+#     bash scripts/bq-dogfood-oracle-dataset.sh create   # human credential
+#     bash scripts/bq-dogfood-parity.sh oracle-precheck
+#     bash scripts/bq-dogfood-parity.sh oracle
+#     bash scripts/bq-dogfood-parity.sh oracle-manifest
+#     bash scripts/bq-dogfood-oracle-dataset.sh drop     # scaffolding, not history
+#
+# See the section comment above `stage_oracle_precheck` for what that leg claims
+# and why the oracle needs its own dataset but the SAME source tables.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
@@ -39,6 +51,10 @@ EXAMPLE_DIR="$REPO/examples/github_activity"
 OUT_DIR="${PARITY_OUT_DIR:-$REPO/target/phase13}"
 SMELT_BIN="${SMELT_BIN:-$REPO/target/debug/smelt}"
 DATASET="${SMELT_BQ_DATASET:-smelt_dogfood}"
+# The full-refresh oracle's own dataset (`oracle` stage). Declared in the
+# committed project as the `bigquery_oracle` target, which reads the SAME
+# physical source tables out of $DATASET and writes only its outputs here.
+ORACLE_DATASET="${PARITY_ORACLE_DATASET:-smelt_dogfood_oracle}"
 
 START_DATE="${PARITY_START_DATE:-2026-08-05}"
 DAYS="${PARITY_DAYS:-30}"
@@ -86,11 +102,12 @@ bq_query() {
 # catalogue with the same exclusion rules the comparator applies — never a
 # hardcoded model list.
 compared_relations() {
+  local ds="${1:-$DATASET}"
   bq_query - <<SQL | python3 -c 'import json,sys
 for line in sys.stdin:
     print(json.loads(line)["table_name"])'
 SELECT table_name
-FROM \`${DATASET}.INFORMATION_SCHEMA.TABLES\`
+FROM \`${ds}.INFORMATION_SCHEMA.TABLES\`
 WHERE table_type = 'BASE TABLE'
   AND NOT STARTS_WITH(table_name, 'sources_')
   AND NOT STARTS_WITH(table_name, '_smelt_')
@@ -103,11 +120,12 @@ SQL
 # Everything `clear` is allowed to drop: the model tables, their tombstone
 # siblings, and the engine-resident bookkeeping. Discovered, then screened.
 droppable_relations() {
+  local ds="${1:-$DATASET}"
   bq_query - <<SQL | python3 -c 'import json,sys
 for line in sys.stdin:
     print(json.loads(line)["table_name"])'
 SELECT table_name
-FROM \`${DATASET}.INFORMATION_SCHEMA.TABLES\`
+FROM \`${ds}.INFORMATION_SCHEMA.TABLES\`
 WHERE table_name NOT IN ('github_events', 'github_events_arrival')
 ORDER BY table_name
 SQL
@@ -192,6 +210,130 @@ stage_bq() {
   done
 }
 
+# ---------------------------------------------------------------------------
+# The equivalence-invariant legs (phase 14)
+# ---------------------------------------------------------------------------
+# The dual-target sweep above asks "do two engines agree with each other". The
+# stages below ask the other question: does ONE engine's incrementally-
+# maintained state equal its own full refresh over the inputs seen so far
+# (`docs/specs/incremental_models.md` §"The equivalence invariant")?
+#
+# The incremental side is already on disk — `stage_bq` exported it at every
+# declared checkpoint. Only the oracle side is new: at checkpoint k, refresh
+# every model from scratch over [START_DATE, day k+1) on the `bigquery_oracle`
+# target and export the result. Both sides then land into DuckDB, typed from
+# the same reference database, and are differenced by the same comparator.
+#
+# The oracle target reads the SAME physical source tables (the
+# `bigquery_oracle:` entries in the two source YAMLs). Without them the source
+# would resolve to a table nothing creates and every oracle would be empty —
+# a vacuous pass, which is the failure mode this leg exists to rule out.
+
+# Precondition for the oracle leg: the dataset exists and this credential can
+# read its catalogue.
+#
+# Creating it is NOT this script's job and cannot be — the dogfood service
+# account was provisioned with `roles/bigquery.jobUser` plus WRITER on one
+# dataset and no `bigquery.datasets.create` at all ("never creates datasets of
+# its own", scripts/bq-dogfood-provision.sh). Dataset lifecycle runs under the
+# human credential in `scripts/bq-dogfood-oracle-dataset.sh {create,drop}`;
+# this stage only refuses to start a sweep that would otherwise fail
+# mid-flight.
+stage_oracle_precheck() {
+  need_token
+  local n
+  n="$(droppable_relations "$ORACLE_DATASET" | wc -l)" || {
+    echo "the oracle dataset ${ORACLE_DATASET} is not readable — create it with:" >&2
+    echo "  bash scripts/bq-dogfood-oracle-dataset.sh create" >&2
+    exit 1
+  }
+  echo "oracle dataset ${SMELT_BQ_PROJECT}.${ORACLE_DATASET} is present (${n} table(s))"
+}
+
+# Empty the oracle dataset. Each checkpoint's oracle must be a refresh from
+# nothing, exactly as the DuckDB oracle stages a fresh workspace per window
+# (`github_activity_oracle.rs`), so nothing carries between checkpoints —
+# neither a table nor the interval ledger.
+#
+# Screened like `clear`: this refuses if the discovered list ever names a
+# source table or anything qualified. It can only ever see the oracle dataset,
+# which holds no sources at all, but the screen is cheap and the blast radius
+# it guards is the whole point.
+oracle_clear() {
+  local names=() n
+  mapfile -t names < <(droppable_relations "$ORACLE_DATASET")
+  for n in "${names[@]}"; do
+    case "$n" in
+      github_events|github_events_arrival|*.*|"")
+        echo "REFUSING: '$n' is not droppable by this script" >&2
+        exit 1
+        ;;
+    esac
+    echo "DROP TABLE \`${ORACLE_DATASET}.${n}\`" | bq_query - >/dev/null
+  done
+  rm -rf "$EXAMPLE_DIR/.smelt/targets/bigquery_oracle"
+  echo "oracle dataset emptied (${#names[@]} table(s))"
+}
+
+stage_oracle() {
+  need_token
+  local oracle_out="${PARITY_ORACLE_OUT_DIR:-$OUT_DIR}"
+  local exclude_args=()
+  for m in "${EXCLUDE_MODELS[@]}"; do exclude_args+=(-e "$m"); done
+  local n nextday snap_dir rel
+  for n in ${CHECKPOINTS//,/ }; do
+    nextday="$(date -u -d "$START_DATE + $n day" +%F)"
+    echo "=== oracle checkpoint $n  [$START_DATE .. $nextday) full refresh $(date -u +%T) ==="
+    refresh_token
+    oracle_clear
+    refresh_token
+    ( cd "$EXAMPLE_DIR" && "$SMELT_BIN" run --target bigquery_oracle --full-refresh \
+        --event-time-start "$START_DATE" --event-time-end "$nextday" "${exclude_args[@]}" )
+    snap_dir="$oracle_out/oracle/$(printf 'w%02d' "$n")"
+    mkdir -p "$snap_dir"
+    refresh_token
+    while read -r rel; do
+      [[ -z "$rel" ]] && continue
+      printf 'SELECT * FROM `%s.%s`\n' "$ORACLE_DATASET" "$rel" > "$snap_dir/$rel.sql"
+      python3 "$REPO/scripts/bq_dogfood_export.py" \
+        "$snap_dir/$rel.sql" "$snap_dir/$rel.ndjson"
+    done < <(compared_relations "$ORACLE_DATASET")
+    echo "oracle snapshot -> $snap_dir"
+  done
+}
+
+# The equivalence sweep's manifest: per checkpoint, the incremental snapshot
+# `stage_bq` exported, the oracle snapshot `stage_oracle` exported, and the
+# DuckDB database that supplies the declared types BOTH are landed under.
+stage_oracle_manifest() {
+  CPS="$CHECKPOINTS" OUT="$OUT_DIR" ORACLE_OUT="${PARITY_ORACLE_OUT_DIR:-$OUT_DIR}" \
+  START="$START_DATE" MANIFEST="${PARITY_ORACLE_MANIFEST:-$REPO/target/phase14/equivalence-manifest.json}" \
+  python3 - <<'PY'
+import json, os, pathlib
+from datetime import date, timedelta
+out = pathlib.Path(os.environ["OUT"])
+oracle_out = pathlib.Path(os.environ["ORACLE_OUT"])
+start = date.fromisoformat(os.environ["START"])
+entries = []
+for n in (int(x) for x in os.environ["CPS"].split(",") if x.strip()):
+    day = start + timedelta(days=n - 1)
+    entries.append({
+        "label": f"w{n:02d}",
+        "window": n,
+        "day": day.isoformat(),
+        # The type reference, not a comparison side: both BigQuery snapshots
+        # are landed under these declared types so they are byte-comparable.
+        "types_db_path": str(out / "duck" / f"w{n:02d}.duckdb"),
+        "incr_ndjson_dir": str(out / "bq" / f"w{n:02d}"),
+        "oracle_ndjson_dir": str(oracle_out / "oracle" / f"w{n:02d}"),
+    })
+path = pathlib.Path(os.environ["MANIFEST"])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({"checkpoints": entries}, indent=2) + "\n")
+print(f"wrote {path} with {len(entries)} checkpoint(s)")
+PY
+}
+
 stage_manifest() {
   CPS="$CHECKPOINTS" OUT="$OUT_DIR" START="$START_DATE" \
   DUCK_DIR="${PARITY_DUCK_DIR:-duck}" MANIFEST="${PARITY_MANIFEST_NAME:-parity-manifest.json}" \
@@ -262,9 +404,13 @@ case "${1:-}" in
   duck-preloaded) stage_duck_preloaded ;;
   bq) stage_bq ;;
   manifest) stage_manifest ;;
-  relations) need_token; compared_relations ;;
+  oracle-precheck) stage_oracle_precheck ;;
+  oracle) stage_oracle ;;
+  oracle-manifest) stage_oracle_manifest ;;
+  relations) need_token; compared_relations "${2:-$DATASET}" ;;
   *)
-    echo "usage: $0 {clear|duck|duck-preloaded|bq|manifest|report|relations}" >&2
+    echo "usage: $0 {clear|duck|duck-preloaded|bq|manifest|report|relations|\
+oracle-precheck|oracle|oracle-manifest}" >&2
     exit 2
     ;;
 esac

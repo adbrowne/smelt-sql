@@ -14,8 +14,17 @@ description: >
 # one. `dev` is intentionally absent from the map: it falls back to the
 # default mapping (`main.sources_raw_github_events`), matching the local
 # DuckDB fixture's own table name.
+# `bigquery_oracle` maps to the SAME physical table, deliberately: the
+# full-refresh oracle must read exactly the rows the incremental leg read, and
+# only its outputs belong in its own dataset. Without this entry the default
+# mapping would resolve the source to
+# `smelt_dogfood_oracle.sources_raw_github_events` — a table nothing creates —
+# and the oracle would refresh over zero rows, making the equivalence
+# comparison pass vacuously. Gated by
+# `github_activity_bq_oracle::the_oracle_target_resolves_sources_to_the_shared_tables`.
 name:
   bigquery: smelt_dogfood.github_events
+  bigquery_oracle: smelt_dogfood.github_events
 mutation_profile:
   kind: append_only
   # GitHub Archive publishes hourly shard files; an event minted near an hour

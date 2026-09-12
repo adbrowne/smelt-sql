@@ -1,0 +1,1054 @@
+{
+  "checkpoints": [
+    {
+      "day": "2026-08-05",
+      "label": "w01",
+      "relations": [
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 65583,
+          "oracle_only": 0,
+          "oracle_rows": 65583,
+          "proof_holds": null,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 3,
+          "incr_rows": 3201,
+          "oracle_only": 3,
+          "oracle_rows": 3201,
+          "proof_holds": true,
+          "relation": "gold_events_enriched",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 399,
+          "oracle_only": 0,
+          "oracle_rows": 399,
+          "proof_holds": null,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 3,
+          "incr_rows": 399,
+          "oracle_only": 4620,
+          "oracle_rows": 5016,
+          "proof_holds": true,
+          "relation": "gold_repo_dim",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 0,
+          "incr_rows": 1,
+          "oracle_only": 41,
+          "oracle_rows": 42,
+          "proof_holds": true,
+          "relation": "marts_naming_history",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 3,
+          "incr_rows": 399,
+          "oracle_only": 3,
+          "oracle_rows": 399,
+          "proof_holds": true,
+          "relation": "marts_repo_leaderboard",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 1,
+          "oracle_only": 0,
+          "oracle_rows": 1,
+          "proof_holds": null,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 152,
+          "incr_rows": 3143,
+          "oracle_only": 61177,
+          "oracle_rows": 64168,
+          "proof_holds": true,
+          "relation": "silver_actor_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 3201,
+          "oracle_only": 0,
+          "oracle_rows": 3201,
+          "proof_holds": null,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 1,
+          "oracle_only": 0,
+          "oracle_rows": 1,
+          "proof_holds": null,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 2,
+          "oracle_only": 0,
+          "oracle_rows": 2,
+          "proof_holds": null,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 3015,
+          "oracle_only": 0,
+          "oracle_rows": 3015,
+          "proof_holds": null,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 231,
+          "incr_rows": 3143,
+          "oracle_only": 61262,
+          "oracle_rows": 64174,
+          "proof_holds": true,
+          "relation": "silver_repo_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 1,
+          "oracle_only": 0,
+          "oracle_rows": 1,
+          "proof_holds": null,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "window": 1
+    },
+    {
+      "day": "2026-08-06",
+      "label": "w02",
+      "relations": [
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 65583,
+          "oracle_only": 0,
+          "oracle_rows": 65583,
+          "proof_holds": null,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 5,
+          "incr_rows": 5915,
+          "oracle_only": 5,
+          "oracle_rows": 5915,
+          "proof_holds": true,
+          "relation": "gold_events_enriched",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 762,
+          "oracle_only": 0,
+          "oracle_rows": 762,
+          "proof_holds": null,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 4,
+          "incr_rows": 686,
+          "oracle_only": 4334,
+          "oracle_rows": 5016,
+          "proof_holds": true,
+          "relation": "gold_repo_dim",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 0,
+          "incr_rows": 2,
+          "oracle_only": 40,
+          "oracle_rows": 42,
+          "proof_holds": true,
+          "relation": "marts_naming_history",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 4,
+          "incr_rows": 686,
+          "oracle_only": 4,
+          "oracle_rows": 686,
+          "proof_holds": true,
+          "relation": "marts_repo_leaderboard",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 2,
+          "oracle_only": 0,
+          "oracle_rows": 2,
+          "proof_holds": null,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 263,
+          "incr_rows": 5856,
+          "oracle_only": 58575,
+          "oracle_rows": 64168,
+          "proof_holds": true,
+          "relation": "silver_actor_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 5915,
+          "oracle_only": 0,
+          "oracle_rows": 5915,
+          "proof_holds": null,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 1,
+          "oracle_only": 0,
+          "oracle_rows": 1,
+          "proof_holds": null,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 5,
+          "oracle_only": 0,
+          "oracle_rows": 5,
+          "proof_holds": null,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 5639,
+          "oracle_only": 0,
+          "oracle_rows": 5639,
+          "proof_holds": null,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 370,
+          "incr_rows": 5856,
+          "oracle_only": 58688,
+          "oracle_rows": 64174,
+          "proof_holds": true,
+          "relation": "silver_repo_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 2,
+          "oracle_only": 0,
+          "oracle_rows": 2,
+          "proof_holds": null,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "window": 2
+    },
+    {
+      "day": "2026-08-07",
+      "label": "w03",
+      "relations": [
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 65583,
+          "oracle_only": 0,
+          "oracle_rows": 65583,
+          "proof_holds": null,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 8,
+          "incr_rows": 8249,
+          "oracle_only": 8,
+          "oracle_rows": 8249,
+          "proof_holds": true,
+          "relation": "gold_events_enriched",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 1165,
+          "oracle_only": 0,
+          "oracle_rows": 1165,
+          "proof_holds": null,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 7,
+          "incr_rows": 956,
+          "oracle_only": 4067,
+          "oracle_rows": 5016,
+          "proof_holds": true,
+          "relation": "gold_repo_dim",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 0,
+          "incr_rows": 3,
+          "oracle_only": 39,
+          "oracle_rows": 42,
+          "proof_holds": true,
+          "relation": "marts_naming_history",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 7,
+          "incr_rows": 956,
+          "oracle_only": 7,
+          "oracle_rows": 956,
+          "proof_holds": true,
+          "relation": "marts_repo_leaderboard",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 3,
+          "oracle_only": 0,
+          "oracle_rows": 3,
+          "proof_holds": null,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 324,
+          "incr_rows": 8178,
+          "oracle_only": 56314,
+          "oracle_rows": 64168,
+          "proof_holds": true,
+          "relation": "silver_actor_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 8249,
+          "oracle_only": 0,
+          "oracle_rows": 8249,
+          "proof_holds": null,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 13,
+          "oracle_only": 0,
+          "oracle_rows": 13,
+          "proof_holds": null,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 86,
+          "oracle_only": 0,
+          "oracle_rows": 86,
+          "proof_holds": null,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 7710,
+          "oracle_only": 0,
+          "oracle_rows": 7710,
+          "proof_holds": null,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 488,
+          "incr_rows": 8177,
+          "oracle_only": 56485,
+          "oracle_rows": 64174,
+          "proof_holds": true,
+          "relation": "silver_repo_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 10,
+          "oracle_only": 0,
+          "oracle_rows": 10,
+          "proof_holds": null,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "window": 3
+    },
+    {
+      "day": "2026-08-09",
+      "label": "w05",
+      "relations": [
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 65583,
+          "oracle_only": 0,
+          "oracle_rows": 65583,
+          "proof_holds": null,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 9,
+          "incr_rows": 14932,
+          "oracle_only": 9,
+          "oracle_rows": 14932,
+          "proof_holds": true,
+          "relation": "gold_events_enriched",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 2286,
+          "oracle_only": 0,
+          "oracle_rows": 2286,
+          "proof_holds": null,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 8,
+          "incr_rows": 1644,
+          "oracle_only": 3380,
+          "oracle_rows": 5016,
+          "proof_holds": true,
+          "relation": "gold_repo_dim",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 0,
+          "incr_rows": 10,
+          "oracle_only": 32,
+          "oracle_rows": 42,
+          "proof_holds": true,
+          "relation": "marts_naming_history",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 8,
+          "incr_rows": 1644,
+          "oracle_only": 8,
+          "oracle_rows": 1644,
+          "proof_holds": true,
+          "relation": "marts_repo_leaderboard",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 5,
+          "oracle_only": 0,
+          "oracle_rows": 5,
+          "proof_holds": null,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 449,
+          "incr_rows": 14853,
+          "oracle_only": 49764,
+          "oracle_rows": 64168,
+          "proof_holds": true,
+          "relation": "silver_actor_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 14932,
+          "oracle_only": 0,
+          "oracle_rows": 14932,
+          "proof_holds": null,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 20,
+          "oracle_only": 0,
+          "oracle_rows": 20,
+          "proof_holds": null,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 99,
+          "oracle_only": 0,
+          "oracle_rows": 99,
+          "proof_holds": null,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 13988,
+          "oracle_only": 0,
+          "oracle_rows": 13988,
+          "proof_holds": null,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 700,
+          "incr_rows": 14852,
+          "oracle_only": 50022,
+          "oracle_rows": 64174,
+          "proof_holds": true,
+          "relation": "silver_repo_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 15,
+          "oracle_only": 0,
+          "oracle_rows": 15,
+          "proof_holds": null,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "window": 5
+    },
+    {
+      "day": "2026-08-14",
+      "label": "w10",
+      "relations": [
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 65583,
+          "oracle_only": 0,
+          "oracle_rows": 65583,
+          "proof_holds": null,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 17,
+          "incr_rows": 32758,
+          "oracle_only": 17,
+          "oracle_rows": 32758,
+          "proof_holds": true,
+          "relation": "gold_events_enriched",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 5530,
+          "oracle_only": 0,
+          "oracle_rows": 5530,
+          "proof_holds": null,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 5,
+          "incr_rows": 3186,
+          "oracle_only": 1835,
+          "oracle_rows": 5016,
+          "proof_holds": true,
+          "relation": "gold_repo_dim",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 0,
+          "incr_rows": 26,
+          "oracle_only": 16,
+          "oracle_rows": 42,
+          "proof_holds": true,
+          "relation": "marts_naming_history",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 5,
+          "incr_rows": 3186,
+          "oracle_only": 5,
+          "oracle_rows": 3186,
+          "proof_holds": true,
+          "relation": "marts_repo_leaderboard",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 7,
+          "oracle_only": 0,
+          "oracle_rows": 7,
+          "proof_holds": null,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 567,
+          "incr_rows": 32647,
+          "oracle_only": 32088,
+          "oracle_rows": 64168,
+          "proof_holds": true,
+          "relation": "silver_actor_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 32758,
+          "oracle_only": 0,
+          "oracle_rows": 32758,
+          "proof_holds": null,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 47,
+          "oracle_only": 0,
+          "oracle_rows": 47,
+          "proof_holds": null,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 143,
+          "oracle_only": 0,
+          "oracle_rows": 143,
+          "proof_holds": null,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 30680,
+          "oracle_only": 0,
+          "oracle_rows": 30680,
+          "proof_holds": null,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 838,
+          "incr_rows": 32651,
+          "oracle_only": 32361,
+          "oracle_rows": 64174,
+          "proof_holds": true,
+          "relation": "silver_repo_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 18,
+          "oracle_only": 0,
+          "oracle_rows": 18,
+          "proof_holds": null,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "window": 10
+    },
+    {
+      "day": "2026-08-24",
+      "label": "w20",
+      "relations": [
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 65583,
+          "oracle_only": 0,
+          "oracle_rows": 65583,
+          "proof_holds": null,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 7,
+          "incr_rows": 53018,
+          "oracle_only": 7,
+          "oracle_rows": 53018,
+          "proof_holds": true,
+          "relation": "gold_events_enriched",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 8529,
+          "oracle_only": 0,
+          "oracle_rows": 8529,
+          "proof_holds": null,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 4,
+          "incr_rows": 4438,
+          "oracle_only": 582,
+          "oracle_rows": 5016,
+          "proof_holds": true,
+          "relation": "gold_repo_dim",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 0,
+          "incr_rows": 35,
+          "oracle_only": 7,
+          "oracle_rows": 42,
+          "proof_holds": true,
+          "relation": "marts_naming_history",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": "inherited_columns_only",
+          "incr_only": 4,
+          "incr_rows": 4438,
+          "oracle_only": 4,
+          "oracle_rows": 4438,
+          "proof_holds": true,
+          "relation": "marts_repo_leaderboard",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 12,
+          "oracle_only": 0,
+          "oracle_rows": 12,
+          "proof_holds": null,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 327,
+          "incr_rows": 52893,
+          "oracle_only": 11602,
+          "oracle_rows": 64168,
+          "proof_holds": true,
+          "relation": "silver_actor_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 53018,
+          "oracle_only": 0,
+          "oracle_rows": 53018,
+          "proof_holds": null,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 73,
+          "oracle_only": 0,
+          "oracle_rows": 73,
+          "proof_holds": null,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 202,
+          "oracle_only": 0,
+          "oracle_rows": 202,
+          "proof_holds": null,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 50062,
+          "oracle_only": 0,
+          "oracle_rows": 50062,
+          "proof_holds": null,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": "oracle_is_the_final_state",
+          "incr_only": 453,
+          "incr_rows": 52899,
+          "oracle_only": 11728,
+          "oracle_rows": 64174,
+          "proof_holds": true,
+          "relation": "silver_repo_naming",
+          "scope": "oracle_unbounded"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 32,
+          "oracle_only": 0,
+          "oracle_rows": 32,
+          "proof_holds": null,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "window": 20
+    },
+    {
+      "day": "2026-09-03",
+      "label": "w30",
+      "relations": [
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 65583,
+          "oracle_only": 0,
+          "oracle_rows": 65583,
+          "proof_holds": null,
+          "relation": "bronze_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 64313,
+          "oracle_only": 0,
+          "oracle_rows": 64313,
+          "proof_holds": null,
+          "relation": "gold_events_enriched",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 9997,
+          "oracle_only": 0,
+          "oracle_rows": 9997,
+          "proof_holds": null,
+          "relation": "gold_repo_activity_daily",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 5016,
+          "oracle_only": 0,
+          "oracle_rows": 5016,
+          "proof_holds": null,
+          "relation": "gold_repo_dim",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 42,
+          "oracle_only": 0,
+          "oracle_rows": 42,
+          "proof_holds": null,
+          "relation": "marts_naming_history",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 5016,
+          "oracle_only": 0,
+          "oracle_rows": 5016,
+          "proof_holds": null,
+          "relation": "marts_repo_leaderboard",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 22,
+          "oracle_only": 0,
+          "oracle_rows": 22,
+          "proof_holds": null,
+          "relation": "marts_star_growth",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 64168,
+          "oracle_only": 0,
+          "oracle_rows": 64168,
+          "proof_holds": null,
+          "relation": "silver_actor_naming",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 64313,
+          "oracle_only": 0,
+          "oracle_rows": 64313,
+          "proof_holds": null,
+          "relation": "silver_events_deduped",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 128,
+          "oracle_only": 0,
+          "oracle_rows": 128,
+          "proof_holds": null,
+          "relation": "silver_issue_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 366,
+          "oracle_only": 0,
+          "oracle_rows": 366,
+          "proof_holds": null,
+          "relation": "silver_pr_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 60643,
+          "oracle_only": 0,
+          "oracle_rows": 60643,
+          "proof_holds": null,
+          "relation": "silver_push_events",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 64174,
+          "oracle_only": 0,
+          "oracle_rows": 64174,
+          "proof_holds": null,
+          "relation": "silver_repo_naming",
+          "scope": "compared"
+        },
+        {
+          "exemption_proof": null,
+          "incr_only": 0,
+          "incr_rows": 47,
+          "oracle_only": 0,
+          "oracle_rows": 47,
+          "proof_holds": null,
+          "relation": "silver_star_events",
+          "scope": "compared"
+        }
+      ],
+      "window": 30
+    }
+  ],
+  "claim": "on BigQuery, each model's incrementally-maintained state equals a full refresh over the inputs seen so far",
+  "excluded_models": [
+    "silver.actor_sessions",
+    "marts.daily_active_contributors"
+  ],
+  "oracle_dataset": "smelt_dogfood_oracle",
+  "schedule": {
+    "checkpoints": [
+      1,
+      2,
+      3,
+      5,
+      10,
+      20,
+      30
+    ],
+    "days": 30,
+    "start_date": "2026-08-05"
+  },
+  "shared_source_dataset": "smelt_dogfood",
+  "target": "bigquery_oracle"
+}

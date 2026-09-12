@@ -135,12 +135,66 @@ exists — so the live run is a test of the *backend*, not of the models.
 | 11 | First live BigQuery run: full refresh of the whole model set against the dogfood dataset; record every compile refusal and runtime failure rather than fixing them in place | done |
 | 12 | Three or more consecutive incremental windows on BigQuery, run reports captured, frontier and engine-resident state inspected between runs | done (10 of 16 models — see the 2026-09-11 entry) |
 | 13 | Dual-target parity: compare every model's output between DuckDB and BigQuery over the same rows; register each difference with a reason or fail | done (14 of 14 relations equal at the final window; one arrival-order divergence registered — see the 2026-09-12 entry) |
-| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | pending (needs 17) |
+| 14 | Trust the numbers on both targets: full-refresh oracle vs incremental state after each window | done (14 of 14 relations byte-equal to their own full refresh at the final window; 8 of 14 at every checkpoint, the other 6 exempt at intermediate ones with a checkable proof — see the 2026-09-12 entry) |
 | 15 | Bank the DuckDB-half evidence now: `docs/handoffs/2026-09-08-github-activity-findings.md` carrying the four measured root causes, the five registered divergences and the loader/retention requirements, so the three downstream outcomes' harvest phases can proceed without live BigQuery | done |
 | 16 | Extend the handoff with the live-BigQuery findings: every compile refusal, runtime failure and cross-target divergence the live runs surfaced, plus the final punch-list | planned |
 | 17 | Expand the BigQuery source population to the committed fixture's full thirty days with the real loader, and delete the stray 2026-08-04 slice, so both targets run over the same rows — **runs before 13 and 14** | done |
 
 ## Decision log
+
+- 2026-09-12 (phase 14, executed live): **the numbers are trustworthy on both targets;
+  criterion 7 is met, and criterion 6 stands from phase 13.** On BigQuery, after the fixture's
+  full thirty-window incremental run, every one of the **fourteen** compared models' maintained
+  state is byte-equal to a full refresh over the whole population — zero rows in both
+  directions of a whole-row `EXCEPT ALL`, with an **empty** divergence registry. Eight of the
+  fourteen are equal at *every* one of the seven declared checkpoints (1, 2, 3, 5, 10, 20, 30 —
+  phase 13's set, reused so the two phases' claims are about the same state). The oracle ran on
+  a third committed target, `bigquery_oracle`, writing to `smelt_dogfood_oracle` and reading
+  the **same** physical source tables via a `bigquery_oracle:` entry in both sources' `name:`
+  maps; without that entry the oracle reads an empty table and the sweep passes vacuously, so
+  the gate on it was written RED first and observed failing on exactly that value. The DuckDB
+  half was re-run and cited, not rebuilt (`every_window_matches_the_full_refresh_oracle`, 30
+  windows, 16 models, 317.6 s). Coverage is stated rather than implied: the BigQuery half is
+  **14 of 16 models** (the INTERVAL-`RANGE` compile refusal) at **7 of 30 windows**.
+
+  **The substantive finding, for `20260906-bigquery-correctness` to take a view on: a full
+  refresh on BigQuery is not a window-bounded oracle for six of the fourteen models.**
+  `--full-refresh --event-time-start X --event-time-end Y` bounds the source scan for eight
+  relations and does not for the two succession cells, the dimension declaring
+  `allow_full_scan`, `marts.naming_history`, and the two relations enriched from that
+  dimension. Because BigQuery's source statically holds all thirty days from before window 1,
+  those relations' oracle at an intermediate window refreshes over inputs the incremental leg
+  had not yet seen — so the invariant's antecedent ("a full refresh over the inputs seen so
+  far") does not hold there and comparing against it would measure arrival order, phase 13's
+  controlled variable. Measured, not inferred: four of the six produce output at window 1 that
+  is **byte-identical to their output at window 30**, and the other two agree exactly once the
+  single column inherited from the dimension (`current_repo_name`) is projected away — row sets
+  and every other column match. Each exemption is a checkable proof recorded per row in
+  `14-equivalence.json`, applies **only** at intermediate checkpoints, and is ratcheted
+  two-sided against the report; a failing proof fails the sweep. Whether the `--event-time-end`
+  bound *should* reach those source scans is a product question this phase deliberately does
+  not answer. It is invisible on DuckDB, where the oracle stages a truncated source, so it
+  could only have surfaced against a warehouse-resident one.
+
+  Consequently **criterion 7 rests on**: the final window, where the inputs seen so far *are*
+  the whole source and nothing is exempt, across all fourteen relations on BigQuery; plus all
+  thirty windows across all sixteen models on DuckDB. Five per-PR gates read the committed
+  `14-equivalence.json`, including one that fails if anything is ever exempt at the final
+  window. **Criterion 6 is met** (phase 13) and **criterion 7 is met** with the coverage caveat
+  above.
+
+  Two structural consequences worth carrying forward. The comparator, exclusions, divergence
+  vocabulary and landing seam moved into `crates/smelt-cli/tests/bq_parity_support/` and are
+  shared by the dual-target and equivalence suites — two claims, one primitive, with phase 13's
+  sixteen tests passing unchanged through the move. And the scoped dogfood service account
+  could **not** create the oracle dataset (`bigquery.datasets.create` denied), which is the
+  phase-7 provisioning design working as intended; dataset lifecycle moved to a
+  human-credential sibling script (`scripts/bq-dogfood-oracle-dataset.sh`) rather than the SA's
+  grant being widened. `smelt_dogfood_oracle` was created without a default table expiration
+  and **dropped at the end of the phase, confirmed gone**; `smelt_dogfood` still holds its 20
+  tables and both source tables still hold 65,583 rows each, read-only throughout. Cost
+  **US$0.06** — a fifth of phase 13's, because the thirty windows of incremental execution were
+  reused rather than re-run. Detail in `phases/14-summary.md`.
 
 - 2026-09-12 (phase 13, executed live): **the two targets agree.** The fixture's thirty
   windows ran on both targets over phase 17's one shared population, both legs excluding the

@@ -29,6 +29,26 @@ targets:
     dataset: smelt_dogfood
     location: US
     schema: smelt_dogfood
+  bigquery_oracle:
+    # The full-refresh oracle's own dataset. The equivalence invariant
+    # (`docs/specs/incremental_models.md` §"The equivalence invariant") is
+    # checked on BigQuery by refreshing every model from scratch over the
+    # inputs seen so far and comparing against the incrementally-maintained
+    # state in `smelt_dogfood` — so the oracle needs somewhere to write that
+    # is NOT the state it is judging. It reads the same physical source
+    # tables (see the `bigquery_oracle:` entries in
+    # `models/sources/raw/github_events.yml` and `github_events_arrival.yml`);
+    # only the outputs are separate.
+    #
+    # Scaffolding, not history: the dataset is created without a default table
+    # expiration and dropped once a sweep has been recorded. Selected only via
+    # `--target bigquery_oracle`; `target: dev` above keeps it off the
+    # no-`--target` default, which it would otherwise take by sorting first.
+    type: bigquery
+    project: smelt-bq-test-20260816
+    dataset: smelt_dogfood_oracle
+    location: US
+    schema: smelt_dogfood_oracle
 default_materialization: view
 unstable_schema: true
 # Run manifests, run reports and the interval ledger are the evidence this
