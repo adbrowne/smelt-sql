@@ -168,13 +168,26 @@ of the models or the tooling.
 | 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | done |
 | 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | done |
-| 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
+| 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | planned |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
 
+- 2026-09-13 (phase 8 plan): **no reshape; phase 8 absorbs the `gold.events_enriched`
+  backfill.** `07-summary.md` flagged that this one model's coverage has a hole
+  (`[2026-08-07, 2026-08-10)`) from the windows that failed before 7b landed, and warned that
+  rows 8 and 9 must not assume contiguity. Parity over a hole would measure the hole, so the
+  backfill run is task 8 of phase 8 rather than a row of its own — it is one `smelt run`
+  invocation, not a body of work, and row 9 inherits contiguous coverage from it. The other
+  discovery (`completed_at`/`duration_ms` now populated, so the row-7 gap is not reproducible
+  on a clean run) is punch-list material row 10 already owns. Generalisation route chosen for
+  criterion 7's "generalised over the target rather than duplicated": rename
+  `bq_parity_support` → `parity_support`, make the landing seam's export encoding an explicit
+  documented contract instead of a BigQuery-shaped branch, share the manifest struct, and split
+  the model-exclusion constant per sweep (Databricks excludes nothing — 6b–6f closed every
+  construct). Nothing left the outcome; nothing added to `## Out of scope`.
 - 2026-09-12 (phase 7b implement): **row 7b done — 16/16 clean on all three new windows; the
   real live bug was one level deeper than the plan's own root-cause analysis.** The plan assumed
   `gold.events_enriched`'s failing cell was ideally-derived as `PerGroupRecompute` directly; in
