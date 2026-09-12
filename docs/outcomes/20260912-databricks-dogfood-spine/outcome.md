@@ -100,9 +100,15 @@ of the models or the tooling.
 10. **Gates green.** `bash .claude/scripts/verify-phase.sh` passes; no ratchet lowered. The
     Spark parity tier is unaffected: `scripts/spark-up.sh` and its `pyspark` venv keep
     working alongside the new `databricks-connect` environment.
-11. **Unattended, fully on the platform.** A Databricks Job, defined as a committed asset
-    (`examples/github_activity/databricks/` — a Databricks Asset Bundle or an equivalent
-    checked-in job spec, deployed by one `scripts/dbx-*.sh` wrapper), runs daily on
+11. **Unattended, fully on the platform, deployed as a Databricks Asset Bundle.** The job is
+    declared in a committed bundle (`examples/github_activity/databricks.yml` plus its
+    `resources/`): one job resource with a daily schedule, a serverless environment, the
+    Volume path and the two tasks, with the dogfood workspace as a bundle *target* so a
+    second workspace is a target entry rather than a fork. `databricks bundle validate`
+    runs per-PR with no workspace (it is a pure config check); `databricks bundle deploy`
+    and `databricks bundle run` are the only calls the `scripts/dbx-*.sh` wrapper makes.
+    The Databricks CLI is pinned and installed through `mise` the way the Google Cloud SDK
+    is (`mise run setup-gcloud`), never assumed on `PATH`. The job runs daily on
     serverless compute with two tasks in order: the loader lands the next fixture day, then
     `smelt run` processes it. The smelt binary is a released Linux build fetched onto the
     task (not compiled there); the `databricks` target inside the job authenticates with the
@@ -150,7 +156,7 @@ of the models or the tooling.
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised | pending |
-| 11 | **[live]** Package the pipeline as a daily Databricks Job on serverless compute — committed job asset, released smelt binary fetched onto the task, ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
+| 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — released smelt binary fetched onto the task, ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
 
@@ -176,6 +182,11 @@ of the models or the tooling.
   equivalent (`20260906-bigquery-unattended`) stayed human-gated and unlisted; here it is a
   listed phase because Free Edition has no per-run bill to guard and the job spec is a
   committed asset the loop can author offline before the human deploys it.
+- 2026-09-12 (scaffold, addendum 2): **the job ships as a Databricks Asset Bundle, not a
+  hand-posted job spec.** A bundle's `databricks.yml` holds the job, schedule, environment
+  and Volume path in one reviewable file; `bundle validate` gives a per-PR gate that needs
+  no workspace; and targets make a second workspace a config entry. The cost is a pinned
+  Databricks CLI, installed through mise alongside gcloud.
 
 - 2026-09-12 (plan 1): **the credential-free form of the target is specified in phase 1, not
   deferred to phase 11.** Phase 11 needs `token` to be optional so a task running inside the
