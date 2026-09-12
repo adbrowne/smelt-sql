@@ -66,8 +66,8 @@ use std::path::PathBuf;
 mod parity_support;
 use parity_support::{
     check_agreement_against, compare_databases, load_exported_snapshot, repo_root, synth_db,
-    violating_pair, EquivalenceManifest, RegisteredDivergence, RelationDiff, SideLabels,
-    DATABRICKS_EXCLUDED_MODELS,
+    violating_pair, DivergenceBound, EquivalenceManifest, RegisteredDivergence, RelationDiff,
+    SideLabels, DATABRICKS_EXCLUDED_MODELS,
 };
 
 /// The two sides of *this* sweep: Databricks' incrementally-maintained state,
@@ -241,7 +241,53 @@ fn adding_the_oracle_target_does_not_move_the_default() {
 /// [`the_equivalence_sweep_fails_closed_on_an_empty_registry`], and the
 /// committed report is checked for unregistered divergence once phase 9b
 /// commits one.
-const EQUIVALENCE_DIVERGENCE_REGISTRY: &[RegisteredDivergence] = &[];
+const EQUIVALENCE_DIVERGENCE_REGISTRY: &[RegisteredDivergence] = &[RegisteredDivergence {
+    relation: "gold_events_enriched",
+    // Root cause, not a shrug — the identical bound and root cause
+    // `github_activity_dual_target.rs::DBX_DIVERGENCE_REGISTRY` already
+    // registers for the same relation. `gold.events_enriched`'s
+    // `current_repo_name` is a value-enrichment join against
+    // `gold.repo_dim` whose designed healing semantics
+    // (`crates/smelt-runtime/src/execute/enrichment_heal.rs`) run a
+    // `ColumnScopedMerge` cell once per run over the model's UNWINDOWED
+    // output. Phase 7b downgraded this cell's Databricks route from
+    // `PerGroupRecompute` (which the key-addressed driver can never
+    // dispatch for an `EnrichmentKeyed` cell) straight to `DeleteInsert`,
+    // because Spark/Delta has no `MergeLedger`
+    // (`docs/outcomes/20260912-databricks-dogfood-spine/phases/07b-plan.md`).
+    // `DeleteInsert` is window-scoped, so on Databricks `current_repo_name`
+    // freezes at whatever `gold.repo_dim` held on the day a row was FIRST
+    // written and is never retroactively healed by a later rename — this
+    // affects the **full-refresh oracle exactly as much as the incremental
+    // leg**, because the oracle target runs the same plan, so the committed
+    // report shows the identical incr_only == oracle_only count at every
+    // checkpoint (9/10/16 at w09/w10/w11) rather than a one-sided
+    // divergence. No column other than `current_repo_name` diverges and no
+    // row is missing or extra, so the bound is unordered rather than
+    // monotone.
+    reason: "gold.repo_dim enrichment freezes at write time on Databricks: phase 7b downgraded \
+             the EnrichmentKeyed cell to window-scoped DeleteInsert (Spark/Delta has no \
+             MergeLedger), which sacrifices the unwindowed run-level heal DuckDB's \
+             ColumnScopedMerge cell performs. The same downgrade applies to both the \
+             incremental leg and this suite's own full-refresh oracle, so a pre-rename \
+             current_repo_name persists identically on both sides until databricks-correctness \
+             realises the fingerprint sidecar on Delta.",
+    bound: DivergenceBound::UnorderedColumnDivergence {
+        key_col: "id",
+        exact_columns: &[
+            "type",
+            "actor_id",
+            "actor_login",
+            "repo_id",
+            "repo_name",
+            "org_id",
+            "public",
+            "created_at",
+            "event_date",
+        ],
+        tolerant_columns: &["current_repo_name"],
+    },
+}];
 
 /// The relations whose full refresh reads beyond the requested window on this
 /// target. Empty — see the module doc's "Where the oracle is a valid oracle"
@@ -476,6 +522,92 @@ fn the_equivalence_report_covers_every_model_at_every_checkpoint() {
             }
         }
     }
+}
+
+/// Relations the committed report shows diverging at *any* compared
+/// checkpoint. Mirrors `github_activity_dual_target.rs::divergent_relations`
+/// under this suite's own `incr_only`/`oracle_only` field names.
+fn divergent_relations(report: &serde_json::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for cp in report_checkpoints(report) {
+        for rel in cp["relations"].as_array().expect("relations array") {
+            let incr_only = rel["incr_only"].as_i64().expect("incr_only");
+            let oracle_only = rel["oracle_only"].as_i64().expect("oracle_only");
+            if incr_only != 0 || oracle_only != 0 {
+                out.insert(rel["relation"].as_str().expect("relation name").to_string());
+            }
+        }
+    }
+    out
+}
+
+/// **Criterion 8, closed.** At every compared checkpoint, every compared
+/// relation's incrementally-maintained state equals the full refresh over the
+/// inputs seen so far — zero rows in both directions of a whole-row multiset
+/// difference — unless the relation carries a registered
+/// [`EQUIVALENCE_DIVERGENCE_REGISTRY`] entry, in which case the divergence is
+/// licensed rather than a violation.
+#[test]
+fn the_committed_equivalence_report_shows_no_violation() {
+    let report = equivalence_report();
+    let registered: BTreeSet<String> = EQUIVALENCE_DIVERGENCE_REGISTRY
+        .iter()
+        .map(|e| e.relation.to_string())
+        .collect();
+    let mut offenders = Vec::new();
+    for cp in report_checkpoints(&report) {
+        let label = cp["label"].as_str().expect("label");
+        for rel in cp["relations"].as_array().expect("relations") {
+            let relation = rel["relation"].as_str().expect("relation name");
+            if registered.contains(relation) {
+                continue;
+            }
+            let incr_only = rel["incr_only"].as_i64().expect("incr_only");
+            let oracle_only = rel["oracle_only"].as_i64().expect("oracle_only");
+            if incr_only != 0 || oracle_only != 0 {
+                offenders.push(format!(
+                    "{label}/{relation}: incremental_only={incr_only}, oracle_only={oracle_only}"
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the committed report shows the equivalence invariant violated on Databricks with no \
+         registered licence — each of these is a finding for a follow-on \
+         databricks-correctness outcome, not something to register away silently: {offenders:?}"
+    );
+}
+
+/// The two-sided liveness ratchet. An entry naming a relation the committed
+/// report shows agreeing at every checkpoint is stale and must be deleted; a
+/// relation the report shows diverging with no registry entry is an
+/// unregistered divergence — caught here rather than only by
+/// [`the_committed_equivalence_report_shows_no_violation`] so a healed
+/// divergence forces the entry out instead of just going quiet. Mirrors
+/// `github_activity_dual_target.rs::registry_entries_are_all_live`.
+#[test]
+fn equivalence_registry_entries_are_all_live() {
+    let report = equivalence_report();
+    let measured = divergent_relations(&report);
+    let registered: BTreeSet<String> = EQUIVALENCE_DIVERGENCE_REGISTRY
+        .iter()
+        .map(|e| e.relation.to_string())
+        .collect();
+
+    let stale: Vec<&String> = registered.difference(&measured).collect();
+    assert!(
+        stale.is_empty(),
+        "EQUIVALENCE_DIVERGENCE_REGISTRY entries name relations the committed equivalence \
+         report shows agreeing at every checkpoint — delete them: {stale:?}"
+    );
+    let unregistered: Vec<&String> = measured.difference(&registered).collect();
+    assert!(
+        unregistered.is_empty(),
+        "the committed equivalence report shows these relations diverging with no registry \
+         entry — register each with a root-caused reason and a checkable bound: \
+         {unregistered:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

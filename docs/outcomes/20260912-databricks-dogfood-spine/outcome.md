@@ -171,12 +171,41 @@ of the models or the tooling.
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | blocked |
 | 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | done |
 | 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
-| 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | planned |
+| 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | done |
 | 9d | **[live]** Re-run the Databricks sweeps with 9c's resolution in place: `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence, a refreshed oracle sweep if 9c changed a maintenance statement, commit `08-parity.json`, restore `dbx_registry_entries_are_all_live`, criterion 7 closed | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9c implement): **row 9c done — criterion 8 closed, and the Databricks
+  succession-fold defect root-caused and fixed, entirely offline.** Criterion 8: registered
+  `gold_events_enriched`'s `UnorderedColumnDivergence` in `github_activity_dbx_oracle.rs`'s own
+  `EQUIVALENCE_DIVERGENCE_REGISTRY` (mirroring the dual-target suite's identical entry) and landed
+  the two deferred report-driven gates — 20/20 on that suite. Root cause of `silver_actor_naming`'s
+  Databricks-only duplication (row 8/9b): `resolve_live_succession_cell`
+  (`crates/smelt-runtime/src/maintenance_driver/succession/mod.rs`) treated any state-downgraded
+  cell as "not live", so on Spark/Databricks — where `realisable_state_structures` realises
+  nothing, including the `TombstoneLedger` a succession cell's ideal `SuccessionPatch` technique
+  needs — the model fell through to the generic `DeleteInsert` driver, which has no `(key, clock)`
+  fold. This was found via the plan's own named differential (`maintenance_plan_report` +
+  `resolve_availability` at two dialects, no workspace), though `smelt explain` turned out to have
+  no `--target` flag to run the differential through the CLI literally as the plan described —
+  the library functions were called directly instead, which is a more precise experiment anyway.
+  The measured branch was the *opposite* of the plan's own cheapest-first guess (same technique on
+  both targets, pointing at the write path): the technique **differs** (downgraded on Databricks),
+  which is `## Blocked`'s route 3, not route 1. Fix: `SuccessionCell` gained a `state_downgraded`
+  flag; the resolver now stays live for a downgraded cell and the dispatch site
+  (`crates/smelt-runtime/src/execute/project/mod.rs`) forces the fold-preserving full-rebuild
+  route (`rebuild_succession_state`) whenever a cell is downgraded, never the window-forward patch
+  loop. Confirmed via a new resolver-level unit test and a new offline differential test against
+  the real `examples/github_activity` project (`explain_maintenance/
+  databricks_succession_differential.rs`); `statement_parity`, `walk_coverage`,
+  `maintenance_conformance` (104/104) and the full `verify-phase.sh` all green. See
+  `phases/09c-summary.md`. **9d must now re-run BOTH the parity and equivalence-oracle sweeps**
+  (not parity alone) — the fix changes every incremental run's execution shape for this model, so
+  the currently-committed `08-parity.json`/`09b-equivalence.json` are stale for
+  `silver_actor_naming`. Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 9c plan): **row 9c split into 9c (offline) / 9d (live), and 9b's inference
   corrected.** (a) *The inference.* Row 9's own decision rule was "if the full refresh on
@@ -839,7 +868,11 @@ of the models or the tooling.
   the way (`scripts/dbx-dogfood-oracle.sh`'s loader flag name and a missing
   `--allow-full-refresh` license, both needed for the sequence to run at all).
 
-- **2026-09-13 — phase 8 (dual-target parity).** `silver_actor_naming` has 520 more rows
+- **2026-09-13 — phase 8 (dual-target parity). RESOLVED by phase 9c — see the 9c decision-log
+  entry below for the root cause and fix; route 1 (a re-read of `succession/execute.rs`'s
+  MERGE/patch statement) turned out to name the wrong mechanism, route 3 (fix the write path)
+  is what landed, at a smaller scope than either candidate anticipated.** Original text kept
+  for context: `silver_actor_naming` has 520 more rows
   on Databricks than DuckDB after the live sweep (`duckdb_only=0, databricks_only=520`;
   Databricks holds 26,177 `DISTINCT` rows against DuckDB's 25,700 over the identical
   source, with individual `(actor_id, created_at)` pairs duplicated up to 7x on

@@ -164,6 +164,61 @@ pub(crate) fn build_report_for(project_dir: &Path, model_name: &str) -> Option<S
     )
 }
 
+/// The path to a committed example project under `examples/`, resolved from
+/// this crate's own manifest dir — used by tests that need the real
+/// `github_activity` fixture rather than a synthetic staged one.
+pub(crate) fn example_dir(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir")
+        .parent()
+        .expect("repo root")
+        .join("examples")
+        .join(name)
+}
+
+/// The bare [`smelt_db::queries::maintenance::MaintenancePlanResult`] for
+/// `model_name` in `examples/github_activity` — the same resolution
+/// sequence [`build_report_for`] runs, stopping right after
+/// `smelt_db::maintenance_plan_report` instead of building the rendered
+/// report string, so callers can apply
+/// `smelt_logical::maintenance::availability::resolve_availability`
+/// themselves against a dialect of their own choosing (never available
+/// through the CLI's `smelt explain`, which has no `--target` flag and
+/// always resolves the project's own default target).
+pub(crate) fn plan_result_for(
+    model_name: &str,
+) -> Option<smelt_db::queries::maintenance::MaintenancePlanResult> {
+    let project_dir = example_dir("github_activity");
+    let project_dir = find_project_root(&project_dir).expect("find project root");
+    let config = Config::load(&project_dir).expect("load smelt.yml");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let models = discovery.discover_models().expect("discover models");
+
+    let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, None);
+    let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), model_name)
+        .unwrap_or_else(|e| panic!("resolve_argument({model_name}): {e}"));
+
+    let model = models
+        .iter()
+        .find(|m| m.canonical_path() == canonical)
+        .unwrap_or_else(|| panic!("model '{canonical}' not found among discovered models"));
+
+    let file = db
+        .source_file(&model.path)
+        .expect("model file not registered");
+
+    smelt_db::maintenance_plan_report(&db, ws, file)
+}
+
 /// Stage a project with a clocked keyed upstream (`dag_kchain_a`, `KeyedAgg`
 /// over the append-only `events` source, grouped by `id` — no clock of its
 /// own) feeding a keyed-fold downstream (`dag_kchain_b`) — the generated

@@ -1,5 +1,5 @@
 # Large-file ratchet baseline
-# Updated: 2026-09-12
+# Updated: 2026-09-13
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -15,7 +15,8 @@ crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1441
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
-crates/smelt-cli/tests/github_activity_bq_oracle.rs 1039
+crates/smelt-cli/tests/github_activity_bq_oracle.rs 1002
+crates/smelt-cli/tests/github_activity_dual_target.rs 1232
 crates/smelt-cli/tests/github_activity_oracle.rs 1069
 crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
 crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
@@ -98,7 +99,7 @@ crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-runtime/src/compile.rs 4060
 crates/smelt-runtime/src/cumulative.rs 2178
-crates/smelt-runtime/src/execute/project/mod.rs 4998
+crates/smelt-runtime/src/execute/project/mod.rs 5002
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
 crates/smelt-runtime/src/windowing.rs 1277

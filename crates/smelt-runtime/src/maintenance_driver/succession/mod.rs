@@ -16,15 +16,22 @@
 //! succession grain") — dispatched before the ordinary `plan.incremental`
 //! match, since it carries no `Grain::Key`/`Grain::Partition` plan at all.
 //! [`resolve_live_succession_cell`] itself refuses (`Ok(None)`) for a
-//! non-incremental model, a `NotSuccession` classifier verdict, or a
-//! state-downgraded cell (technique no longer `SuccessionPatch`), so the
-//! dispatch site's guard only needs the grain check.
+//! non-incremental model or a `NotSuccession` classifier verdict, but stays
+//! live for a state-downgraded cell (a target with no realisable
+//! `TombstoneLedger`, e.g. Spark/Databricks — `SuccessionCell::
+//! state_downgraded`), so the dispatch site's guard only needs the grain
+//! check.
 //!
-//! `request.full_refresh || force_full_refresh || request.rebuild` takes the
-//! full-ledger [`rebuild_succession_state`] path (`docs/outcomes/
-//! 20260906-scd2-keyed-succession/phases/05c-plan.md`, widened in phase 6a);
-//! every other run takes the ordinary window-forward patch loop
-//! ([`execute_succession_maintenance`]). `request.rebuild` is set only by
+//! `request.full_refresh || force_full_refresh || request.rebuild ||
+//! cell.state_downgraded` takes the full-ledger [`rebuild_succession_state`]
+//! path (`docs/outcomes/20260906-scd2-keyed-succession/phases/05c-plan.md`,
+//! widened in phase 6a; `state_downgraded` added by
+//! `docs/outcomes/20260912-databricks-dogfood-spine/phases/09c-plan.md` —
+//! without a live tombstone ledger there is no correct window-forward patch
+//! loop, so every run re-derives the whole presented table via the same
+//! fold-preserving statement a full refresh uses); every other run takes the
+//! ordinary window-forward patch loop ([`execute_succession_maintenance`]).
+//! `request.rebuild` is set only by
 //! `smelt rebuild` (`crates/smelt-cli/src/commands/rebuild.rs`); per
 //! `docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
 //! state)" — "Lifecycle", a succession model has no run-axis column to
@@ -152,6 +159,12 @@ pub struct SuccessionCell {
     /// (`docs/specs/incremental_shapes.md` §"Run shape and late events").
     pub partition_column: String,
     pub granularity: smelt_core::config::Granularity,
+    /// `true` when this cell's ideal `SuccessionPatch` technique was
+    /// state-downgraded (no realisable `TombstoneLedger` on this target) —
+    /// the dispatch site forces the full-rebuild route every run in that
+    /// case, never the window-forward patch loop, which needs the ledger
+    /// for correctness across runs.
+    pub state_downgraded: bool,
 }
 
 /// Resolve a live `Technique::SuccessionPatch` cell for `table`, or `Ok(None)`
@@ -201,11 +214,28 @@ pub fn resolve_live_succession_cell(
         return Ok(None);
     };
 
-    let is_live = result
-        .plan
-        .cells
-        .iter()
-        .any(|c| c.technique == Technique::SuccessionPatch);
+    // A cell is succession-shaped either while still carrying its ideal
+    // `SuccessionPatch` technique, or after `resolve_availability` has
+    // downgraded it because the target has no realisable `TombstoneLedger`
+    // (Spark/Databricks: `state_structure::realisable_state_structures`
+    // returns nothing) — `recompute_equivalent`'s own succession-grain
+    // branch names the intended fallback as "always the full-refresh
+    // region rewrite", so a downgraded cell must still reach the
+    // succession-aware full-rebuild path below rather than falling through
+    // to the generic `DeleteInsert` driver, which has no `(key, clock)`
+    // fold at all and duplicates a redelivered event once per run it lands
+    // in.
+    let state_downgraded = result.plan.cells.iter().any(|c| {
+        c.state_downgrade
+            .as_ref()
+            .is_some_and(|d| d.original == Technique::SuccessionPatch)
+    });
+    let is_live = state_downgraded
+        || result
+            .plan
+            .cells
+            .iter()
+            .any(|c| c.technique == Technique::SuccessionPatch);
     if !is_live {
         return Ok(None);
     }
@@ -240,6 +270,7 @@ pub fn resolve_live_succession_cell(
         source_table,
         partition_column: axis.column,
         granularity: axis.granularity,
+        state_downgraded,
     }))
 }
 

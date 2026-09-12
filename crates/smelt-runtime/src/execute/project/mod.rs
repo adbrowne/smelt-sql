@@ -2555,7 +2555,11 @@ pub async fn execute_project(
                 // transaction — never the window-forward patch loop, which
                 // would leave a full refresh touching neither relation.
                 let (succession_result, strategy, time_range) =
-                    if request.full_refresh || force_full_refresh || request.rebuild {
+                    if request.full_refresh
+                        || force_full_refresh
+                        || request.rebuild
+                        || cell.state_downgraded
+                    {
                         let compiler = compilers.get(model_target);
                         let resolver = &ephemeral_resolvers[model_target];
                         let compiled = compiler.compile_with_sql_and_ephemerals(
