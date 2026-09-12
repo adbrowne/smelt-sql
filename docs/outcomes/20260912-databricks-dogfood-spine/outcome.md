@@ -1,7 +1,7 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** queued
+**Status:** active
 **Driver:** split. Phases 1–3 and 10 are loop-grindable (no workspace, no credentials) and this
 outcome sits in `.claude/outcome-backlog` for them. Phase 4 is **human-gated** — it provisions
 the workspace objects and mints the credential. Phases 5–9 and 11 run live Databricks and need
@@ -140,7 +140,7 @@ of the models or the tooling.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | pending |
+| 1 | Spec delta: `type: databricks` target shape, `BackendCapabilities::databricks()` profile, connection-security and loading rules, Free Edition constraints; replace the "not yet a distinct backend" divergence | planned |
 | 2 | Backend, offline: `BackendType::Databricks` dispatch, the `DatabricksSession` builder path in the Python adapter, capability profile, `warehouse`/`format` refusal and token redaction, all asserted with no workspace | pending |
 | 3 | Tooling, offline: pinned `databricks-connect` venv script, `scripts/dbx-dogfood-env.sh`, and the day loader replaying the Parquet fixture with the redelivery rule, gated by a per-PR slice-identity test against `load_day.sh` | pending |
 | 4 | **[human]** Provision: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential encrypted at rest, `scripts/dbx-*.sh` wrappers and settings allow-list, reachability and refusal demonstrated, Free Edition quotas recorded | pending |
@@ -176,6 +176,14 @@ of the models or the tooling.
   equivalent (`20260906-bigquery-unattended`) stayed human-gated and unlisted; here it is a
   listed phase because Free Edition has no per-run bill to guard and the job spec is a
   committed asset the loop can author offline before the human deploys it.
+
+- 2026-09-12 (plan 1): **the credential-free form of the target is specified in phase 1, not
+  deferred to phase 11.** Phase 11 needs `token` to be optional so a task running inside the
+  workspace can use the ambient session; specifying `token` as required now and relaxing it
+  later would publish a rule the outcome already knows is wrong. Phase 1 therefore states
+  `token` optional with ambient authentication as the alternative form; phase 11 keeps its own
+  spec delta for the job asset and the Volume-resident run state. No other reshape: every
+  success criterion still maps to a phase row.
 
 ## Blocked
 
