@@ -159,7 +159,7 @@ of the models or the tooling.
 | 4a | Provisioning tooling, offline: the `dbx-provision`/`dbx-key`/`dbx-auth`/`dbx-verify` wrapper set (credential-agnostic over service-principal-OAuth vs PAT), the `.claude/settings.json` deny/allow split, and the Free-Edition facts sheet skeleton, gated with no workspace | done |
 | 4b | **[human]** Run the provisioning wizard: `smelt_dogfood` + `smelt_dogfood_oracle` in the `workspace` catalog, the scoped credential minted and encrypted at rest, reachability and out-of-scope-write refusal demonstrated, Free Edition quotas recorded | blocked |
 | 4c | **[live]** Close criterion 4 from a reachable session: `dbx-verify.sh` green on both legs, grants confirmed scoped to the two dogfood schemas and the service principal, `free-edition-facts.md` filled with measured/cited quotas | done |
-| 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | pending |
+| 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | planned |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | pending |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
@@ -168,6 +168,21 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (plan 5): **no reshape; the workspace is reachable, so row 5 plans rather than
+  blocks.** `scripts/dbx-query.sh "SELECT current_user()"` returned the credential's own
+  principal from this worktree, so the live gate is open for now — but the one-hour OAuth
+  lifetime of `## Blocked` item (b) is unresolved, so the plan makes reachability task 5's
+  explicit first step with `<<PHASE_BLOCKED>>` as the only alternative to a green load. Phase
+  4c's summary surfaced nothing needing a new row (its session-per-invocation latency note
+  bites phases 6-9, not the loader, which already holds one session across a day's load).
+  Two planning calls, both inside row 5's stated boundary: the append fix is a `mode=`
+  keyword on `DatabricksAdapter.load_arrow_table` only — `spark_adapter.py` is untouched so
+  the Spark parity tier stays out of the blast radius, and the Rust call site's two positional
+  arguments keep their present replace semantics; and the loader gains an `--apply-ddl` mode
+  because `--emit-ddl` prints DDL nobody executes, while `cmd_execute`'s ledger `INSERT`
+  requires the ledger table to exist. Nothing left the outcome; nothing was added to
+  `## Out of scope`.
 
 - 2026-09-12 (phase 4c implement): **criterion 4's demonstrable half is closed.**
   `dbx-verify.sh` passed both legs on the first run against the live workspace;
