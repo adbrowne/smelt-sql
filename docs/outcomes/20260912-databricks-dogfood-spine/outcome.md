@@ -172,11 +172,25 @@ of the models or the tooling.
 | 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | done |
 | 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
 | 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | done |
-| 9d | **[live]** Re-run the Databricks sweeps with 9c's resolution in place: `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence, a refreshed oracle sweep if 9c changed a maintenance statement, commit `08-parity.json`, restore `dbx_registry_entries_are_all_live`, criterion 7 closed | pending |
+| 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | planned |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9d plan): **9d widened from "re-run the parity sweep" to "reset, replay and
+  re-measure BOTH sweeps".** 9c's summary established that the fix changes the execution shape of
+  every incremental window for `silver.actor_naming` on Databricks (full rebuild, not window-forward
+  patch), so the committed `08-parity.json` and `09b-equivalence.json` both describe a run sequence
+  the fixed code would never produce. Patching only the one model's state, or re-running a single
+  window on top of the existing state, would leave the committed reports describing a sequence
+  nobody ran; a clean replay under the fixed binary is the only evidence that supports restoring the
+  liveness ratchet. The replay reloads the source day-by-day after a `TRUNCATE` rather than relying
+  on `--event-time-*` bounds to hide the later days, so oracle validity ("the source holds exactly
+  the inputs seen so far") is reproduced by construction rather than assumed. This also means 9d
+  closes criteria 7 and 8 together in one live sequence instead of paying for two replays; rows 8
+  and 9b are flipped by 9d's own evidence. Nothing left the outcome; nothing added to
+  `## Out of scope`.
 
 - 2026-09-13 (phase 9c implement): **row 9c done — criterion 8 closed, and the Databricks
   succession-fold defect root-caused and fixed, entirely offline.** Criterion 8: registered
