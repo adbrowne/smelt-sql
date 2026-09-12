@@ -166,13 +166,33 @@ of the models or the tooling.
 | 6d | **[live]** Give a *source-written* cast target the same per-dialect spelling the cast-wrap already gets — bare `VARCHAR`/`TEXT` prints as `STRING` on the SparkSQL dialect — through one shared owner outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
-| 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
+| 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | planned |
+| 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites) — plus whatever else row 7's windows record, then re-run the windows to a clean 16/16 | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 7 plan): **reshape — row 7b inserted between rows 7 and 8; row 7's window
+  schedule carries real rows rather than the BigQuery spine's empty ones.** Two findings drove
+  this. (a) The `gold.events_enriched` refusal 6f recorded is gated on
+  `BackendCapabilities::supports_fingerprint_sidecar`, `false` for Spark/Delta
+  (`crates/smelt-dialect/src/dialect.rs:295`), and fires at *execution* time
+  (`maintenance_driver/key_addressed/mod.rs:124`) rather than being downgraded at plan
+  derivation. It is on the incremental path as much as the full-refresh one, so it will recur in
+  every window; criteria 7 and 8 are stated over the whole model set, so clearing it is work
+  serving the success criteria and gets its own row rather than a decision-log mention. Row 7
+  still runs first, so one fix row can take the whole inventory of incremental-path refusals
+  instead of guessing at them. (b) Read back live, `smelt_dogfood` holds event-time days 08-05
+  (3,264) and 08-06 (2,714) only — but this loader replays a **local** Parquet fixture holding
+  08-05 through 08-20, not a `githubarchive` scan, so landing a further day is nearly free.
+  Row 7's three windows therefore each land a new fixture day (08-07, 08-08, 08-09: 2,334 /
+  4,086 / 2,597 new event rows) instead of repeating the BigQuery spine's two no-new-row
+  windows, and each also exercises the loader's ~2% late-arrival reach-back. No new full refresh
+  is run — `20260912-124833-91da82` is the baseline and nothing under `crates/` has changed
+  since. Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-12 (phase 6f implement): **row 6f done — `LAG`/`LEAD` frame elision confirmed live;
   a new, unrelated blocker now occupies the same failure point, and the model set is closer to
