@@ -11,8 +11,9 @@ use super::base_cell;
 
 #[test]
 fn succession_patch_requires_the_tombstone_ledger() {
+    let cell = base_cell(Corner::FoldDelta, Technique::SuccessionPatch);
     assert_eq!(
-        required_state_structure(Technique::SuccessionPatch),
+        required_state_structure(&cell),
         Some(StateStructure::TombstoneLedger)
     );
 }

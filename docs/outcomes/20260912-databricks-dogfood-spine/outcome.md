@@ -167,7 +167,7 @@ of the models or the tooling.
 | 6e | **[live]** Register `epoch_us` in the `BuiltinRegistry` (the last construct stopping `silver.actor_sessions` and its 3 dependents) with a SparkSQL/Databricks emission spelling, through the Function-registry single-ownership path — not a printer branch — then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | done |
-| 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | planned |
+| 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | done |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
@@ -175,6 +175,26 @@ of the models or the tooling.
 
 ## Decision log
 
+- 2026-09-12 (phase 7b implement): **row 7b done — 16/16 clean on all three new windows; the
+  real live bug was one level deeper than the plan's own root-cause analysis.** The plan assumed
+  `gold.events_enriched`'s failing cell was ideally-derived as `PerGroupRecompute` directly; in
+  fact its only key-addressed candidate is the `gold.repo_dim` edge's `ColumnScopedMerge` cell
+  (`KeyDiscovery::EnrichmentKeyed`, a value-enrichment join), which ideal derivation never gives
+  a `PerGroupRecompute` technique. The actual failure path: Spark has no `MergeLedger`, so
+  availability resolution downgrades this `ColumnScopedMerge` cell via `recompute_equivalent`'s
+  **generic** `key_scope.is_some() → PerGroupRecompute` rule — which, before this phase, did not
+  distinguish discovery routes and handed the key-addressed driver a `PerGroupRecompute` cell it
+  can never execute for `EnrichmentKeyed` (the variant's own doc comment says the driver never
+  dispatches it). Fixed by making `recompute_equivalent` route on `KeyDiscovery` explicitly:
+  `UpstreamKeyed`/`DownstreamGrainOverUpstream` downgrade to `PerGroupRecompute` (the driver
+  dispatches these) and `EnrichmentKeyed` downgrades straight to `DeleteInsert`. This is the
+  same `recompute_equivalent`/`required_state_structure` pair the plan already scoped, so no
+  file beyond what the plan's tasks touched was needed. W4 (`2026-08-10`), W5 (`2026-08-11`),
+  W6 (`2026-08-12`) each landed 16/16 success/0 failed/0 skipped; `intervals.json` confirms
+  every model ends at `2026-08-13` (`gold.events_enriched` carries a coverage gap
+  `[2026-08-07, 2026-08-10)` from windows that failed before this fix — noted for row 8/9's
+  planner, not fixed here). See `phases/07b-summary.md`. Nothing left the outcome; nothing added
+  to `## Out of scope`.
 - 2026-09-12 (phase 7b plan): **route chosen — downgrade at plan derivation, not sidecar
   realisation on Delta.** Root cause verified: `availability::required_state_structure` is keyed
   on `Technique` alone and returns `None` for `PerGroupRecompute`

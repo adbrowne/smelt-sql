@@ -34,7 +34,7 @@ use serde::Serialize;
 
 use smelt_core::config::WarehouseTables;
 
-use super::{Corner, PlanCell, Technique};
+use super::{Corner, KeyDiscovery, PlanCell, Technique};
 
 /// The set of [`StateStructure`]s available to a project's availability
 /// resolution — the intersection of what the target backend can realise and
@@ -101,9 +101,9 @@ pub struct StateDowngrade {
 /// The cheapest recompute-family technique that preserves the equivalence
 /// invariant for `cell` (`state.md` §"The degradation contract"): a
 /// targeted-write cell (`Corner::FoldDelta`, `Corner::ColumnMerge`, or one
-/// carrying a `key_scope`) downgrades to `PerGroupRecompute`; a region-write
-/// cell (`Corner::RmwRegion`, `Corner::RecomputeRegion`) downgrades to
-/// `DeleteInsert`.
+/// carrying a `key_scope` whose discovery has a group-scoped recompute route)
+/// downgrades to `PerGroupRecompute`; a region-write cell (`Corner::
+/// RmwRegion`, `Corner::RecomputeRegion`) downgrades to `DeleteInsert`.
 pub fn recompute_equivalent(cell: &PlanCell) -> Technique {
     // The succession grain's own recompute-equivalent is always the
     // full-refresh region rewrite, never `PerGroupRecompute` — the grain has
@@ -112,8 +112,32 @@ pub fn recompute_equivalent(cell: &PlanCell) -> Technique {
     if cell.technique == Technique::SuccessionPatch {
         return Technique::DeleteInsert;
     }
-    if cell.key_scope.is_some() {
-        return Technique::PerGroupRecompute;
+    // A cell whose technique is *already* `PerGroupRecompute` is already at
+    // the group-scoped recompute route; if it is here, it is because the
+    // whole per-group route is what is undoable — a key-addressed cell whose
+    // required fingerprint sidecar has no realisation
+    // (`docs/specs/state.md` §"The degradation contract" step 2). Full-region
+    // recompute is the only honest fallback, never a no-op "downgrade" back
+    // to the same technique.
+    if cell.technique == Technique::PerGroupRecompute {
+        return Technique::DeleteInsert;
+    }
+    if let Some(key_scope) = &cell.key_scope {
+        return match key_scope.discovery {
+            // Both routes address a `PerGroupRecompute` cell for real — the
+            // key-addressed driver (`smelt-runtime::maintenance_driver::
+            // key_addressed`) dispatches them.
+            KeyDiscovery::UpstreamKeyed | KeyDiscovery::DownstreamGrainOverUpstream => {
+                Technique::PerGroupRecompute
+            }
+            // The enrichment-keyed route only ever addresses a
+            // `ColumnScopedMerge` cell — the key-addressed driver never
+            // dispatches this variant (`KeyDiscovery::EnrichmentKeyed`'s own
+            // doc comment), so `PerGroupRecompute` is not a realisable
+            // fallback here, whatever this cell's `corner` says. Full-region
+            // recompute is the only honest one.
+            KeyDiscovery::EnrichmentKeyed => Technique::DeleteInsert,
+        };
     }
     match cell.corner {
         Corner::FoldDelta | Corner::ColumnMerge => Technique::PerGroupRecompute,
@@ -132,7 +156,7 @@ pub fn resolve_availability(cells: &mut [PlanCell], available: &StateAvailabilit
         if cell.state_downgrade.is_some() {
             continue;
         }
-        let Some(required) = required_state_structure(cell.technique) else {
+        let Some(required) = required_state_structure(cell) else {
             continue;
         };
         if available.contains(required) {

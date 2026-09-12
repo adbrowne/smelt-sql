@@ -104,7 +104,7 @@ crates/smelt-runtime/src/transformer.rs 1174
 crates/smelt-runtime/src/windowing.rs 1277
 crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1060
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
-crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1147
+crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1200
 crates/smelt-runtime/tests/observed_delta/main.rs 1066
 crates/smelt-runtime/tests/repair_lowering.rs 1569
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
