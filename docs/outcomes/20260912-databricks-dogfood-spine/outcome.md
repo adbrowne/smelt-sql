@@ -168,13 +168,63 @@ of the models or the tooling.
 | 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | done |
 | 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | done |
-| 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | planned |
+| 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | blocked |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
 
+- 2026-09-13 (phase 8 implement): **row 8 blocked — the generalised comparator, the
+  Databricks sweep infrastructure, and one root-caused divergence all landed and are
+  committed; a second, larger divergence was found but not resolved.** Backfilled
+  `gold.events_enriched`'s coverage gap first (`smelt run --target databricks
+  --event-time-start 2026-08-07 --event-time-end 2026-08-10 -s gold.events_enriched+`),
+  confirming `intervals.json` contiguous `[2026-08-05, 2026-08-13)` for every
+  window-addressed model. Ran `duck`/`dbx-snapshot`/`manifest`/the live test.
+  **Divergence 1 (root-caused, registered):** `gold_events_enriched.current_repo_name`
+  differed on 7 of 25,786 rows — a repo renamed at `2026-08-12 04:38:01`; `gold.repo_dim`
+  and `silver.repo_naming` agree exactly between the two legs (verified live), but
+  Databricks' pre-rename rows (written 2026-08-05/06) never healed. Root cause: phase 7b's
+  `EnrichmentKeyed` downgrade to window-scoped `DeleteInsert` (Spark/Delta has no
+  `MergeLedger`) sacrifices `crates/smelt-runtime/src/execute/enrichment_heal.rs`'s
+  unwindowed run-level heal that DuckDB's `ColumnScopedMerge` cell performs every run —
+  exactly the trade-off 7b's own decision log named as deferred to `databricks-correctness`.
+  Registered with a new `DivergenceBound::UnorderedColumnDivergence` variant (added to
+  `parity_support`, reusable by any suite): licenses one named column to differ with no
+  enforced direction — unlike `MonotoneDivergence`, `current_repo_name` is a string with no
+  natural "ahead"/"behind" — while the row-key set and every other column must still match
+  exactly. **Divergence 2 (found, NOT resolved):** `silver_actor_naming` has 520 more rows
+  on Databricks than DuckDB (`duckdb_only=0, databricks_only=520`); a `DISTINCT` count shows
+  Databricks holds 26,177 distinct rows against DuckDB's 25,700 (both engines see the
+  identical 26,220-row/25,786-distinct-id source, confirmed live) — some Databricks rows
+  reach up to 7x literal duplication (`SELECT actor_id, created_at, COUNT(*) ... HAVING
+  COUNT(*) > 1` returns rows with `c` up to 7). `silver.actor_naming` is a succession-grain
+  model (`docs/specs/incremental_shapes.md` §"The succession grain") maintained by the
+  succession-patch technique's tombstone mechanism
+  (`crates/smelt-runtime/src/maintenance_driver/succession/execute.rs`) — DuckDB's write
+  path evidently collapses a redelivered duplicate event onto the same `(actor_id,
+  created_at)` succession row (no duplication at all: `total == distinct`), while
+  Databricks' does not. This looks like a second, independent gap in the maintenance
+  layer's write primitives on Delta — plausibly related to the same "Spark has no
+  cross-table transaction for a ledger write" premise this file's own 2026-09-13 research
+  note already flags for planner triage, though this is the succession/tombstone
+  mechanism rather than `MergeLedger`. **Not root-caused past this point** — designing a
+  bound for genuine row-count/duplication divergence (as opposed to a value divergence on
+  a matched key) would need either a new comparator primitive (a distinct-set bound) or a
+  runtime fix, and reading `succession/execute.rs` to confirm the write-path root cause is
+  more than this phase's remaining budget. Left for the next planner alongside the
+  MergeLedger/Catalog-Commits triage above, since both bear on the same question: does the
+  maintenance layer's Delta-targeting write path need work that outsizes this outcome's
+  "only fix what's needed for a run to complete" licence. **To keep `cargo test` green**,
+  the committed Databricks parity report and its liveness ratchet
+  (`dbx_registry_entries_are_all_live`, mirroring `registry_entries_are_all_live`) were
+  deliberately NOT added this phase — landing them over a report showing an unregistered
+  divergence would make the standing offline gate permanently red. The six offline tests,
+  the shared `parity_support` generalisation (tasks 1-5), the two scripts (tasks 6-7), and
+  the `gold.events_enriched` backfill (task 8) are all committed and green
+  (`bash .claude/scripts/verify-phase.sh`). See `phases/08-summary.md`. Nothing left the
+  outcome; nothing added to `## Out of scope`.
 - 2026-09-13 (research note, not a phase decision — **planner triage needed**): **the "Spark
   has no cross-table transaction" premise behind `MergeLedger`/`ReconciliationLedger`/
   `TombstoneLedger`'s permanent Spark absence (`docs/specs/state.md` §"Which dialects realise
@@ -675,6 +725,40 @@ of the models or the tooling.
   `smelt`-spawning call sites). Nothing left the outcome; nothing added to `## Out of scope`.
 
 ## Blocked
+
+- **2026-09-13 — phase 8 (dual-target parity).** `silver_actor_naming` has 520 more rows
+  on Databricks than DuckDB after the live sweep (`duckdb_only=0, databricks_only=520`;
+  Databricks holds 26,177 `DISTINCT` rows against DuckDB's 25,700 over the identical
+  source, with individual `(actor_id, created_at)` pairs duplicated up to 7x on
+  Databricks). `silver.actor_naming` is a succession-grain model
+  (`models/silver/actor_naming.sql`) maintained by the succession-patch technique's
+  tombstone mechanism (`crates/smelt-runtime/src/maintenance_driver/succession/
+  execute.rs`); DuckDB's write path collapses a redelivered duplicate event onto the same
+  succession row, Databricks' apparently does not. Root cause not yet confirmed past this
+  point (see the phase 8 implement decision-log entry above for the full measurement).
+  Candidate options for the next planner:
+  1. **Read `succession/execute.rs`'s MERGE/patch statement** to confirm whether it relies
+     on a ledger-backed idempotence check this repo's own 2026-09-13 research note
+     (Catalog Commits / cross-table transactions on Delta) already flags as possibly wrong
+     for Databricks specifically — if so, this may be the SAME root cause as that note
+     rather than a second one, and the two should be triaged together.
+  2. **Add a distinct-set comparator bound** to `parity_support` (e.g. `DivergenceBound::
+     DuplicateTolerant` — the two sides' `SELECT DISTINCT` row sets must match exactly,
+     only cardinality may differ, and only in the direction of the licensed side never
+     having FEWER distinct rows) if the duplication turns out to be a genuinely accepted,
+     if ugly, behaviour rather than a bug worth fixing.
+  3. **Fix the write path** if root-caused to a bounded, real defect (matching this
+     outcome's exception for "the only way a run completes at all" would not apply here,
+     since the run does complete — this would need to be justified as small enough to not
+     belong to the deferred `databricks-correctness` outcome, or explicitly folded into
+     that outcome instead).
+  Whichever route is chosen, `crates/smelt-cli/tests/github_activity_dual_target.rs`'s
+  Databricks sweep, `scripts/dbx-dogfood-parity.sh`, and `scripts/dbx_dogfood_export.py`
+  are already built, tested and committed (phase 8) — the remaining work is re-running the
+  `dbx-snapshot`/`manifest`/live-test sequence once `silver_actor_naming` is resolved, then
+  restoring `08-parity.json` and its liveness-ratchet test (removed this phase to keep
+  `cargo test` green — see `parity_support`'s and `github_activity_dual_target.rs`'s
+  module doc comments for exactly what was deferred).
 
 - **2026-09-12 — phase 4b (provisioning run).** Two things a human must settle.
 
