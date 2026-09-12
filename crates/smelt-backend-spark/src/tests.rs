@@ -6,6 +6,52 @@
 use smelt_backend::{PartitionRange, PartitionSpec};
 
 use crate::sql;
+use crate::{is_table_not_view_error, is_view_not_table_error};
+
+// ─── Drop-type-mismatch error recognition ──────────────────────────────────
+
+#[test]
+fn drop_view_mismatch_recognises_databricks_message() {
+    assert!(is_table_not_view_error(
+        "[DROP_COMMAND_TYPE_MISMATCH] Cannot drop a table with DROP VIEW. \
+         Use DROP TABLE instead. SQLSTATE: 42809"
+    ));
+}
+
+#[test]
+fn drop_view_mismatch_recognises_oss_spark_messages() {
+    assert!(is_table_not_view_error(
+        "[WRONG_COMMAND_FOR_OBJECT_TYPE] The operation DROP VIEW requires a VIEW."
+    ));
+    assert!(is_table_not_view_error("DROP VIEW requires a VIEW."));
+}
+
+#[test]
+fn drop_table_mismatch_recognises_databricks_message() {
+    assert!(is_view_not_table_error(
+        "[DROP_COMMAND_TYPE_MISMATCH] Cannot drop a view with DROP TABLE. \
+         Use DROP VIEW instead."
+    ));
+}
+
+#[test]
+fn drop_table_mismatch_recognises_oss_spark_messages() {
+    assert!(is_view_not_table_error(
+        "[WRONG_COMMAND_FOR_OBJECT_TYPE] The operation DROP TABLE requires a TABLE."
+    ));
+    assert!(is_view_not_table_error("my_table is a VIEW, not a TABLE."));
+}
+
+#[test]
+fn unrelated_error_is_not_swallowed() {
+    let msg = "[TABLE_OR_VIEW_NOT_FOUND] Table or view not found: cat.schema.tbl";
+    assert!(!is_table_not_view_error(msg));
+    assert!(!is_view_not_table_error(msg));
+
+    let msg = "[PERMISSION_DENIED] User does not have permission to drop cat.schema.tbl";
+    assert!(!is_table_not_view_error(msg));
+    assert!(!is_view_not_table_error(msg));
+}
 
 // ─── SQL Generation Tests ──────────────────────────────────────────────────
 

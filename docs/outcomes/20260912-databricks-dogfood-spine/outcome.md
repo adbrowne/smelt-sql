@@ -162,7 +162,7 @@ of the models or the tooling.
 | 5 | **[live]** Load at least two fixture days through the loader; verify counts and the redelivered slice | done |
 | 6 | **[live]** First full refresh of the whole model set on Databricks; record every compile refusal and runtime failure rather than fixing in place | done |
 | 6b | **[live]** Unblock the Databricks run path so more than one model can complete: make the maintenance fingerprint's hash spelling dialect-dispatched (`sha2(x, 256)` on Spark/Databricks) behind a single owner plus a structural gate, reconcile the bare-host/scheme mismatch between the wizard's `SMELT_DBX_HOST` and the `type: databricks` target contract, then re-run the full refresh to a clean baseline and record what remains | done |
-| 6c | **[live]** Recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` as the drop-type-mismatch condition in `SparkBackend::drop_view_if_exists`/`drop_table_if_exists` (one pure, tested predicate per direction), then land the first clean full refresh of the whole model set and record what remains | planned |
+| 6c | **[live]** Recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` as the drop-type-mismatch condition in `SparkBackend::drop_view_if_exists`/`drop_table_if_exists` (one pure, tested predicate per direction), then land the first clean full refresh of the whole model set and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | pending |
 | 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | pending |
 | 9 | **[live]** Trust the numbers: full-refresh oracle in `smelt_dogfood_oracle` vs incremental state after each window | pending |
@@ -170,6 +170,23 @@ of the models or the tooling.
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-12 (phase 6c implement): **row 6c done — drop-type-mismatch fix confirmed live; the
+  three previously-failing bootstrap models now succeed, and one new, unrelated blocker
+  surfaced.** `is_table_not_view_error`/`is_view_not_table_error` (`crates/smelt-backend-spark/
+  src/lib.rs`) now recognise Unity Catalog's `[DROP_COMMAND_TYPE_MISMATCH]` text alongside the
+  two vanilla-Spark shapes, gated by 5 new tests with no regression on the existing 31. The
+  re-run full refresh landed 11 success / 1 failed / 4 skipped (16 total): `bronze.events`,
+  `silver.actor_naming`, `silver.repo_naming` all now succeed. The one remaining failure is a
+  new, unrelated dialect gap — `silver.actor_sessions` casts to a bare `CAST(x AS VARCHAR)`,
+  which Databricks' parser rejects with `[DATATYPE_MISSING_SIZE]` since Spark requires a
+  length on `VARCHAR` as a cast target (fix candidate: emit `STRING` instead of `VARCHAR` for
+  an unqualified string cast on Spark/Databricks dialects) — 3 more models skip as its
+  dependents. Since 11/16 models still complete, the outcome's own "only fix what's needed for
+  a run to complete at all" exception does not apply, so this is recorded rather than fixed
+  (`06c-summary.md`), left for row 7's planner to schedule (either as a small fix ahead of the
+  incremental windows, or an explicit exclusion). Nothing left the outcome; nothing added to
+  `## Out of scope`.
 
 - 2026-09-12 (phase 6c plan): **reshape — inserted row 6c between 6b and the incremental
   windows.** Criterion 6 has two halves and only the second is rowed: the full refresh of the

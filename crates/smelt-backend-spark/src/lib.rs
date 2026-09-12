@@ -334,6 +334,26 @@ impl SparkBackend {
     }
 }
 
+/// True when a DROP VIEW/DROP TABLE error message indicates the name is
+/// actually occupied by a TABLE, not a VIEW (OSS Spark and Unity Catalog each
+/// spell this differently).
+pub(crate) fn is_table_not_view_error(msg: &str) -> bool {
+    msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE")
+        || msg.contains("DROP VIEW requires a VIEW")
+        || (msg.contains("DROP_COMMAND_TYPE_MISMATCH")
+            && msg.contains("Cannot drop a table with DROP VIEW"))
+}
+
+/// True when a DROP TABLE error message indicates the name is actually
+/// occupied by a VIEW, not a TABLE (OSS Spark and Unity Catalog each spell
+/// this differently).
+pub(crate) fn is_view_not_table_error(msg: &str) -> bool {
+    msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE")
+        || msg.contains("is a VIEW")
+        || (msg.contains("DROP_COMMAND_TYPE_MISMATCH")
+            && msg.contains("Cannot drop a view with DROP TABLE"))
+}
+
 #[async_trait]
 impl Backend for SparkBackend {
     async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
@@ -360,7 +380,7 @@ impl Backend for SparkBackend {
             .await;
         if let Err(ref e) = drop_result {
             let msg = e.to_string();
-            if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
+            if is_view_not_table_error(&msg) {
                 tracing::debug!(
                     "DROP TABLE failed (object is a VIEW): {} — retrying with DROP VIEW",
                     table_name
@@ -437,7 +457,7 @@ impl Backend for SparkBackend {
             Ok(()) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
+                if is_view_not_table_error(&msg) {
                     // The name is occupied by a VIEW from a previous run; drop it instead.
                     self.py_execute_no_result(&sql::drop_view(&table_name))
                         .await
@@ -457,9 +477,7 @@ impl Backend for SparkBackend {
                 // Silently succeed: the name is occupied by a table (which will be cleaned
                 // up by the subsequent drop_table_if_exists call in execute_model).
                 let msg = e.to_string();
-                if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE")
-                    || msg.contains("DROP VIEW requires a VIEW")
-                {
+                if is_table_not_view_error(&msg) {
                     Ok(())
                 } else {
                     Err(e)
