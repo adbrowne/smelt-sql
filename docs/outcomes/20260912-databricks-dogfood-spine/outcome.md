@@ -1,7 +1,8 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** blocked
+**Status:** active — the criterion-11 design question is settled (2026-09-14 decision log
+entry); rows 11j (offline) and 11k (live) carry it out
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -185,8 +186,14 @@ of the models or the tooling.
 | 11g | **[live]** Resume 11e from its task 3 under the 11f wheel: redeploy (wheel + Volume seed), one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
 | 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | done |
 | 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
+| 11j | Bootstrap tooling, offline: a `smelt state seed-interval` command that writes one model's interval directly into `.smelt/targets/<target>/intervals.json` using the model's real current hash, so a target with no local run history (the Volume-resident `databricks_job` store) can be seeded from data already known to be ingested, gated with no workspace | planned |
+| 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | planned |
 
 ## Blocked
+
+- **RESOLVED 2026-09-14 (human decision, see Decision log): the design decision below is made
+  — seed `databricks_job`'s interval history rather than generalize `--auto`.** Rows 11j/11k
+  carry it out; this entry is kept as the record of why the outcome stalled at `blocked`.
 
 - **2026-09-13 — outcome-level: criterion 11 is open on a design decision no phase can make
   unreviewed; every phase row is `done` or `blocked`.** Criteria 1-10 are met and evidenced by the
@@ -425,6 +432,26 @@ of the models or the tooling.
   the next implement pass.
 
 ## Decision log
+
+- 2026-09-14 (human decision): **seed, don't generalize — criterion 11 unblocks with a narrow
+  local fix, not a resolution of the general `--auto`/backend-resident-state question.** Of the
+  outcome-level `## Blocked` entry's four candidates, none is adopted wholesale. Instead: since
+  `databricks_job` is going to be the **sole** future writer of its own interval history (no
+  more manual local runs against `smelt_dogfood` once the schedule is live), there is nothing
+  ongoing to keep in sync — the only real gap is that its Volume-resident interval store has
+  never been *given* the history that the schema's own `ingested_date` column already proves.
+  A one-time bootstrap tool that writes that history directly, keyed by the target's real
+  ingestion frontier, closes the gap with no change to `--auto`'s semantics and no unification
+  of the `databricks`/`databricks_job` identities. This is closest in spirit to candidate (b)
+  but deliberately does not adopt (b)'s location-keyed-store generalization, since that
+  generalization has no more work to do here after the one-time seed. The broader question —
+  should `--auto` reconcile against a cloud target's own resident state in general, for a
+  target that sees genuinely concurrent local and job writes — stays open, now recorded as a
+  Known Divergence in `docs/specs/run_state.md` rather than only in this outcome's `##
+  Blocked` section, so a future cloud target's plan has a citable pointer. New rows 11j
+  (offline: the seed tool) and 11k (live: seed the Volume and complete the three scheduled
+  runs) carry this out; row 11i is left as the historical record of the five real bugs it
+  fixed. Outcome `Status` returns to `active`.
 
 - 2026-09-13 (outcome-level plan pass): **no reshape, no new row — the outcome is flipped to
   `blocked`.** Every phase row is `done` or `blocked`, so there was nothing to plan. Criterion 11
