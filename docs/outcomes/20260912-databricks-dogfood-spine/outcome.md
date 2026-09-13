@@ -188,6 +188,19 @@ of the models or the tooling.
 
 ## Blocked
 
+- 2026-09-13 (phase 11i implement): **no `phases/11i-plan.md` exists.** The outcome table
+  carries row 11i as `planned`, but no plan step has written its detailed plan yet — only
+  11a–11h have `*-plan.md` files (11h's implement pass wrote `11h-plan.md` itself when
+  resuming from the same gap logged just below). The implement step executes an
+  already-planned phase; it does not author the plan itself. Row 11i stays `planned` (this is
+  not an implementation blocker, it's a missing plan step) so the next planner picks it up:
+  write `phases/11i-plan.md` from the outcome-table one-liner (resume 11g from its task 3
+  under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence
+  redeploy, three consecutive scheduled runs, run reports pulled from the Volume compared
+  against a full-refresh oracle per criterion 8, compute recorded against criterion 4's
+  quotas, the `volume_probe` verdict written up in `docs-site/`, daily cadence restored)
+  before the next implement pass.
+
 - 2026-09-13 (phase 11h implement): **no `phases/11h-plan.md` exists.** The outcome table
   carries row 11h as `planned`, but no plan step has written its detailed plan yet — only
   11a–11g have `*-plan.md` files. The implement step executes an already-planned phase; it
