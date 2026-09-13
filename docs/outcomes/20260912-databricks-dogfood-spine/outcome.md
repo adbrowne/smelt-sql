@@ -179,10 +179,28 @@ of the models or the tooling.
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
 | 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
-| 11d | Ambient form, offline: a `databricks` target whose `host` **and** `token` are both absent builds its session from the workload's own ambient workspace context (no `.host(...)` call at all), replacing the spec's measured-false claim that a job exports `DATABRICKS_HOST`; `host` present with `token` absent and `host` absent with `token` present both keep their current meanings (the latter refused with a diagnostic). Threaded through the config validator, `SessionArgs::Databricks`, `SparkBackend::new_databricks`, `DatabricksAdapter`, the `databricks_job` target and the dogfood loader's three duplicated host-resolution sites — all gated with no workspace | planned |
+| 11d | Ambient form, offline: a `databricks` target whose `host` **and** `token` are both absent builds its session from the workload's own ambient workspace context (no `.host(...)` call at all), replacing the spec's measured-false claim that a job exports `DATABRICKS_HOST`; `host` present with `token` absent and `host` absent with `token` present both keep their current meanings (the latter refused with a diagnostic). Threaded through the config validator, `SessionArgs::Databricks`, `SparkBackend::new_databricks`, `DatabricksAdapter`, the `databricks_job` target and the dogfood loader's three duplicated host-resolution sites — all gated with no workspace | done |
 | 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 11d implement): **row 11d done — the ambient form (no explicit host) lands
+  entirely offline.** `Config::validate_targets` now refuses `token` present with `host` absent
+  (naming both keys) and passes cleanly when both are absent; `SessionArgs::Databricks.host`
+  became `Option<String>` end to end (`plan_session`, `SparkBackend::new_databricks`,
+  `smelt-backends::create_backend`, dropping its own now-redundant "requires 'host'" bail);
+  `DatabricksAdapter.__init__` defaults `host=None` and skips `.host(...)` on the builder when
+  absent; `dbx-dogfood-loader.py`'s three duplicated `SMELT_DBX_HOST`-or-exit blocks collapsed
+  into one `_connect()` helper; `examples/github_activity/smelt.yml`'s `databricks_job` target
+  dropped `host: ${DATABRICKS_HOST}` entirely. Spec delta landed in `multi_backend.md`
+  §"Connection security", `smelt_yml.md` §"Target shape", and the docs-site targets page. All
+  seven planned tests landed and pass, including one driving the real
+  `databricks_adapter.py.__init__` against a stubbed Connect builder. Found during verification:
+  `crates/smelt-core/src/config.rs`'s legitimate growth (validation logic + new tests) tripped
+  the large-file ratchet — re-baselined via `.claude/scripts/large-file-check.sh --update`
+  rather than shrinking, since the growth is exactly this phase's own scope. `bash
+  .claude/scripts/verify-phase.sh` ALL GREEN. Nothing left the outcome; nothing added to `##
+  Out of scope`. See `phases/11d-summary.md`.
 
 - 2026-09-13 (phase 11d plan, reshape): **split the 11c residue into an offline fix (11d) and a
   live resume (11e), and settled 11c's open design decision in favour of its route (a).** The

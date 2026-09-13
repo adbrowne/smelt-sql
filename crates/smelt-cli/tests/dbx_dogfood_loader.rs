@@ -614,7 +614,19 @@ fn load_arrow_table_default_mode_still_replaces() {
 /// flow (mode selection, DDL statement list) can be exercised with no
 /// `pyarrow`/`databricks-connect` dependency and no network.
 fn run_loader_with_fake_adapter(driver_tail: &str) -> Output {
+    run_loader_with_fake_adapter_env(driver_tail, Some("fake-host"))
+}
+
+/// Same as [`run_loader_with_fake_adapter`], but `host_env` controls whether
+/// `SMELT_DBX_HOST` is set (`Some(..)`) or absent from the environment
+/// (`None`) — the ambient form the loader's `_connect()` helper must handle
+/// with no error.
+fn run_loader_with_fake_adapter_env(driver_tail: &str, host_env: Option<&str>) -> Output {
     let loader_path = format!("{:?}", loader_py().display().to_string());
+    let host_env_line = match host_env {
+        Some(host) => format!("os.environ[\"SMELT_DBX_HOST\"] = {host:?}"),
+        None => "os.environ.pop(\"SMELT_DBX_HOST\", None)".to_string(),
+    };
     let script = format!(
         r#"
 import sys, types, importlib.util, json, os
@@ -622,7 +634,7 @@ import sys, types, importlib.util, json, os
 log = []
 
 class FakeAdapter:
-    def __init__(self, host, catalog=None, token=None):
+    def __init__(self, host=None, catalog=None, token=None):
         log.append(["init", host, catalog, token])
     def table_exists(self, name):
         log.append(["table_exists", name])
@@ -652,7 +664,7 @@ fake_pkg.databricks_adapter = fake_mod
 sys.modules["smelt"] = fake_pkg
 sys.modules["smelt.databricks_adapter"] = fake_mod
 
-os.environ["SMELT_DBX_HOST"] = "fake-host"
+{host_env_line}
 os.environ.pop("SMELT_DBX_TOKEN", None)
 
 spec = importlib.util.spec_from_file_location("dbx_loader", {loader_path})
@@ -664,6 +676,7 @@ spec.loader.exec_module(loader_mod)
 print(json.dumps(log))
 "#,
         loader_path = loader_path,
+        host_env_line = host_env_line,
     );
     Command::new("python3")
         .args(["-c", &script])
@@ -739,6 +752,129 @@ fn apply_ddl_executes_exactly_the_emitted_ddl() {
             "executed statement not found verbatim in --emit-ddl output:\n{stmt}\n---\n{emitted}"
         );
     }
+}
+
+fn databricks_adapter_py() -> PathBuf {
+    repo_root().join("python/smelt/databricks_adapter.py")
+}
+
+/// Drives `python/smelt/databricks_adapter.py`'s real `__init__` against a
+/// stub `databricks.connect.DatabricksSession` builder (no real
+/// `databricks-connect` package needed), recording which builder methods are
+/// called. `host` is `None` for the ambient form, `Some(..)` otherwise.
+fn run_adapter_init_with_stub_builder(python: &Path, host: Option<&str>) -> Vec<String> {
+    let adapter_path = format!("{:?}", databricks_adapter_py().display().to_string());
+    let host_py = match host {
+        Some(h) => format!("{h:?}"),
+        None => "None".to_string(),
+    };
+    let script = format!(
+        r#"
+import sys, types, importlib.util, json
+
+calls = []
+
+class FakeBuilder:
+    def serverless(self, v):
+        calls.append("serverless")
+        return self
+    def host(self, h):
+        calls.append("host")
+        return self
+    def token(self, t):
+        calls.append("token")
+        return self
+    def getOrCreate(self):
+        calls.append("getOrCreate")
+        class FakeCatalog:
+            def setCurrentCatalog(self, c):
+                pass
+        class FakeSpark:
+            catalog = FakeCatalog()
+        return FakeSpark()
+
+class FakeDatabricksSession:
+    builder = FakeBuilder()
+
+connect_mod = types.ModuleType("databricks.connect")
+connect_mod.DatabricksSession = FakeDatabricksSession
+databricks_pkg = types.ModuleType("databricks")
+databricks_pkg.connect = connect_mod
+sys.modules["databricks"] = databricks_pkg
+sys.modules["databricks.connect"] = connect_mod
+
+spec = importlib.util.spec_from_file_location("databricks_adapter", {adapter_path})
+adapter_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(adapter_mod)
+
+adapter_mod.DatabricksAdapter(host={host_py}, catalog="workspace")
+
+print(json.dumps(calls))
+"#,
+        adapter_path = adapter_path,
+        host_py = host_py,
+    );
+    let out = Command::new(python)
+        .args(["-c", &script])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", python.display()));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("expected a JSON call log")
+}
+
+/// The ambient form (`host=None`) calls `.serverless(True)` and
+/// `.getOrCreate()` but never `.host(...)`; a target with a host calls
+/// `.host(...)` too.
+#[test]
+fn adapter_omits_host_builder_call_when_ambient() {
+    let Some(python) = dbx_venv_python() else {
+        eprintln!("Skipping — build .smelt-dbx-venv via scripts/dbx-dogfood-venv.sh to enable");
+        return;
+    };
+    let ambient_calls = run_adapter_init_with_stub_builder(&python, None);
+    assert!(
+        ambient_calls.contains(&"serverless".to_string()),
+        "expected .serverless(...) to be called: {ambient_calls:?}"
+    );
+    assert!(
+        !ambient_calls.contains(&"host".to_string()),
+        "ambient form must not call .host(...): {ambient_calls:?}"
+    );
+
+    let hosted_calls =
+        run_adapter_init_with_stub_builder(&python, Some("my-workspace.cloud.databricks.com"));
+    assert!(
+        hosted_calls.contains(&"host".to_string()),
+        "a target with a host must call .host(...): {hosted_calls:?}"
+    );
+}
+
+/// A scheduled job task's ambient form: no `SMELT_DBX_HOST` in the
+/// environment at all. The loader must complete via `_connect()` rather than
+/// exiting with "SMELT_DBX_HOST is not set", and the fake adapter's `init`
+/// call records `host=None`.
+#[test]
+fn loader_runs_ambiently_with_no_host_env() {
+    let out = run_loader_with_fake_adapter_env("loader_mod.cmd_execute(\"2026-08-06\")", None);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = last_line_json(&out);
+    let init_call = log
+        .iter()
+        .find(|c| c[0] == "init")
+        .unwrap_or_else(|| panic!("expected an init call: {log:?}"));
+    assert_eq!(
+        init_call[1],
+        serde_json::Value::Null,
+        "expected the adapter's init call to record host=None: {log:?}"
+    );
 }
 
 #[test]

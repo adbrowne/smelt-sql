@@ -171,8 +171,12 @@ fn bundle_smelt_comes_from_the_locally_built_wheel() {
     );
 }
 
+/// `docs/outcomes/20260912-databricks-dogfood-spine/phases/11d-plan.md` test
+/// 7: the `databricks_job` target is fully ambient — neither `host` nor
+/// `token` — and the bundle's job environments export no
+/// `SMELT_DBX_HOST`/`DATABRICKS_HOST` for it.
 #[test]
-fn bundle_job_target_is_ambient_and_carries_no_literal_credential() {
+fn job_target_is_ambient() {
     let smelt_yml = read(&bundle_dir().join("smelt.yml"));
     let doc: serde_yaml::Value = serde_yaml::from_str(&smelt_yml).unwrap();
     let target = &doc["targets"]["databricks_job"];
@@ -181,6 +185,11 @@ fn bundle_job_target_is_ambient_and_carries_no_literal_credential() {
         target.get("token").is_none(),
         "databricks_job target must carry no `token` key — the job's own environment supplies \
          Databricks credentials"
+    );
+    assert!(
+        target.get("host").is_none(),
+        "databricks_job target must carry no `host` key — the ambient form builds its session \
+         with no explicit host at all"
     );
 
     for path in [
@@ -197,6 +206,24 @@ fn bundle_job_target_is_ambient_and_carries_no_literal_credential() {
         assert!(
             !text.contains("https://") || !text.contains("token="),
             "{path:?} must not contain a URL-embedded token literal"
+        );
+    }
+
+    // `databricks.yml` legitimately documents `DATABRICKS_HOST` as the
+    // Databricks CLI's own workspace-auth mechanism for `bundle
+    // validate`/`deploy`/`run` — that is the *deployer's* credential, not
+    // the deployed job task's environment, so only the job resource and its
+    // task scripts are checked for a host-bearing variable.
+    for path in [
+        bundle_dir().join("resources/github_activity_job.yml"),
+        bundle_dir().join("dbx_job/load_next_day.py"),
+        bundle_dir().join("dbx_job/run_smelt.py"),
+    ] {
+        let text = read(&path);
+        assert!(
+            !text.contains("SMELT_DBX_HOST") && !text.contains("DATABRICKS_HOST"),
+            "{path:?} must export no host-bearing env var for the job target — measured \
+             (phase 11c) that a Free Edition serverless job task never receives one"
         );
     }
 }

@@ -19,7 +19,7 @@ import pyarrow as pa
 class DatabricksAdapter:
     """Wraps a Databricks Connect `DatabricksSession` for SQL execution with Arrow results."""
 
-    def __init__(self, host, catalog=None, token=None):
+    def __init__(self, host=None, catalog=None, token=None):
         # PyO3's embedded interpreter reaches this venv's site-packages via a
         # bare PYTHONPATH entry (`scripts/dbx-dogfood-env.sh`), not real venv
         # activation, so the venv's own `distutils-precedence.pth` (which
@@ -45,7 +45,13 @@ class DatabricksAdapter:
         # unmodified — no smelt-side parsing or rewriting of the host.
         self.host = host
 
-        builder = DatabricksSession.builder.host(host).serverless(True)
+        builder = DatabricksSession.builder.serverless(True)
+        if host:
+            builder = builder.host(host)
+        # else: no explicit host at all — the ambient form, honouring
+        # whatever workspace context the runtime (e.g. a serverless job
+        # task's own Connect channel) already established
+        # (`docs/specs/multi_backend.md` §"Connection security").
         if token:
             builder = builder.token(token)
         # else: ambient credentials — the form a workload running inside the

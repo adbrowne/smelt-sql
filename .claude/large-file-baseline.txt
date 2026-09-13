@@ -12,6 +12,7 @@ crates/smelt-backend-duckdb/src/lib.rs 1902
 crates/smelt-cli/src/commands/explain.rs 1196
 crates/smelt-cli/src/explain.rs 2595
 crates/smelt-cli/src/test_compiler.rs 1908
+crates/smelt-cli/tests/dbx_dogfood_loader.rs 1087
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1441
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
@@ -22,7 +23,7 @@ crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
 crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
 crates/smelt-cli/tests/resume.rs 1061
 crates/smelt-cli/tests/since_upstream.rs 1274
-crates/smelt-core/src/config.rs 4304
+crates/smelt-core/src/config.rs 4370
 crates/smelt-core/src/discovery.rs 1090
 crates/smelt-core/src/graph.rs 1555
 crates/smelt-core/src/metadata.rs 3652

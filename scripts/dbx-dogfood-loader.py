@@ -176,16 +176,20 @@ def cmd_emit_ddl():
         print(stmt + ";\n")
 
 
-def cmd_apply_ddl():
+def _connect():
+    """Build a `DatabricksAdapter` from the environment. `SMELT_DBX_HOST` and
+    `SMELT_DBX_TOKEN` are both optional — a serverless job task's own ambient
+    workspace context supplies what a laptop session needs an explicit host
+    and token for (`docs/specs/multi_backend.md` §"Connection security")."""
     from smelt.databricks_adapter import DatabricksAdapter
 
     host = os.environ.get("SMELT_DBX_HOST")
-    if not host:
-        print("SMELT_DBX_HOST is not set — source scripts/dbx-dogfood-env.sh first", file=sys.stderr)
-        sys.exit(1)
     token = os.environ.get("SMELT_DBX_TOKEN")
+    return DatabricksAdapter(host, catalog=CATALOG, token=token)
 
-    adapter = DatabricksAdapter(host, catalog=CATALOG, token=token)
+
+def cmd_apply_ddl():
+    adapter = _connect()
     try:
         for stmt in ddl_statements():
             adapter.execute_sql_no_result(stmt)
@@ -350,15 +354,7 @@ def cmd_next_day_dry_run(store_dir):
 
 
 def cmd_next_day():
-    from smelt.databricks_adapter import DatabricksAdapter
-
-    host = os.environ.get("SMELT_DBX_HOST")
-    if not host:
-        print("SMELT_DBX_HOST is not set — source scripts/dbx-dogfood-env.sh first", file=sys.stderr)
-        sys.exit(1)
-    token = os.environ.get("SMELT_DBX_TOKEN")
-
-    adapter = DatabricksAdapter(host, catalog=CATALOG, token=token)
+    adapter = _connect()
     try:
         loaded_days = set()
         if adapter.table_exists(LEDGER_TABLE):
@@ -392,15 +388,7 @@ def cmd_dry_run_store(date, store_dir):
 
 
 def cmd_execute(date):
-    from smelt.databricks_adapter import DatabricksAdapter
-
-    host = os.environ.get("SMELT_DBX_HOST")
-    if not host:
-        print("SMELT_DBX_HOST is not set — source scripts/dbx-dogfood-env.sh first", file=sys.stderr)
-        sys.exit(1)
-    token = os.environ.get("SMELT_DBX_TOKEN")
-
-    adapter = DatabricksAdapter(host, catalog=CATALOG, token=token)
+    adapter = _connect()
     try:
         if adapter.table_exists(LEDGER_TABLE):
             already = adapter.execute_sql(

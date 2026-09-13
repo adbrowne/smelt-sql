@@ -157,16 +157,16 @@ pub async fn create_backend(
             {
                 use smelt_backend_spark::SparkBackend;
 
-                let host = target_config
-                    .host
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Databricks target requires 'host' field"))?;
+                // `Config::validate_targets` already refused `token` present
+                // with `host` absent, so a missing `host` here is the
+                // ambient form, not an error.
+                let host = target_config.host.as_deref();
 
                 let default_catalog = "workspace".to_string();
                 let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
 
                 tracing::info!("Backend [{}]: Databricks", target_name);
-                tracing::info!("Host: {}", host);
+                tracing::info!("Host: {}", host.unwrap_or("<ambient>"));
                 tracing::info!("Catalog: {}", catalog);
 
                 // `token` is never logged — connection-security rule
@@ -182,7 +182,11 @@ pub async fn create_backend(
                     )
                     .await
                     .map_err(|e| {
-                        anyhow::anyhow!("Failed to connect to Databricks workspace {}: {}", host, e)
+                        anyhow::anyhow!(
+                            "Failed to connect to Databricks workspace {}: {}",
+                            host.unwrap_or("<ambient>"),
+                            e
+                        )
                     })?,
                 ))
             }

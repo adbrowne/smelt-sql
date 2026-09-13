@@ -144,7 +144,11 @@ impl SparkBackend {
     ///
     /// # Arguments
     /// * `host` - Workspace hostname (no scheme, no trailing slash), e.g.
-    ///   `my-workspace.cloud.databricks.com`.
+    ///   `my-workspace.cloud.databricks.com`. `None` selects the ambient
+    ///   form — no explicit host at all, honouring whatever workspace
+    ///   context the runtime already established
+    ///   (`docs/specs/multi_backend.md` §"Connection security"). Requires
+    ///   `token` to also be `None`.
     /// * `token` - `${ENV}`-resolved personal access token / service-principal
     ///   secret. `None` selects the client's ambient Databricks credentials
     ///   (`docs/specs/smelt_yml.md` §"Target shape").
@@ -156,12 +160,12 @@ impl SparkBackend {
     /// (`docs/specs/multi_backend.md` §"Connection security") requires every
     /// rendering path for a `databricks` target to redact it.
     pub async fn new_databricks(
-        host: &str,
+        host: Option<&str>,
         token: Option<&str>,
         catalog: &str,
         schema: &str,
     ) -> Result<Self, BackendError> {
-        let plan = session::plan_session(SparkFlavor::Databricks, None, Some(host), token);
+        let plan = session::plan_session(SparkFlavor::Databricks, None, host, token);
         let module = plan.module;
         let class = plan.class;
         let session::SessionArgs::Databricks {
@@ -192,7 +196,7 @@ impl SparkBackend {
                     })?;
 
                     let adapter = cls
-                        .call1((&plan_host, &catalog, plan_token.as_deref()))
+                        .call1((plan_host.as_deref(), &catalog, plan_token.as_deref()))
                         .map_err(|e| {
                             BackendError::connection_failed(format!(
                                 "Failed to create DatabricksSession: {}",
@@ -227,7 +231,7 @@ impl SparkBackend {
 
         tracing::info!(
             "Databricks session established (host={}, catalog={}, schema={})",
-            plan_host,
+            plan_host.as_deref().unwrap_or("<ambient>"),
             backend.catalog,
             backend.schema
         );

@@ -887,15 +887,20 @@ token came from `${ENV}` interpolation or the ambient-credential fallback (`toke
 is never written to a log line, a run report, a diagnostic, or an error message: every
 rendering path for a `databricks` target config redacts the field.
 
-A `databricks` target has a second, credential-free form: `token` absent **and** the target
-running from inside the workspace it targets, such as a Databricks Job task. There, `host`
-still names an `${ENV}` reference rather than a literal — but the value is not a secret, since a
-Databricks job automatically exports its own workspace hostname (`DATABRICKS_HOST`) into the
-task's runtime environment, so no developer config supplies it. The session authenticates with
-whatever ambient Databricks credentials that environment provides. This form carries no secret
-for a log line to leak in the first place, so the redaction rule above is vacuous here rather
-than relied upon — the same code path applies unconditionally regardless of which form produced
-the config.
+A `databricks` target has a second, credential-free form: **both** `host` and `token` absent,
+for a target running from inside the workspace it targets, such as a Databricks Job task.
+Measured against a real Free Edition serverless job task (`docs/outcomes/
+20260912-databricks-dogfood-spine/phases/11c-summary.md`): no host-bearing
+`DATABRICKS_*`/`DBX_*` environment variable is exported into the task's runtime at all — the
+runtime's own ambient channel is a pre-established Spark Connect session (`SPARK_REMOTE`), not
+an env-var host. The ambient form therefore omits `host` as well as `token`: the session is
+built with no explicit host or token call on the Databricks Connect builder at all, honouring
+whatever workspace context the runtime already established. `token` present with `host` absent
+is a hard configuration error naming both keys — a token carries no workspace address, so that
+combination cannot be the ambient form and cannot be a working `host`-present form either. This
+form carries no secret for a log line to leak in the first place, so the redaction rule above is
+vacuous here rather than relied upon — the same code path applies unconditionally regardless of
+which form produced the config.
 
 ### Loading data into a backend
 Loading external rows into a backend (seeds, test fixtures, an Arrow batch) must not assume the

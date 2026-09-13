@@ -1617,11 +1617,14 @@ impl Config {
 
     /// Per-target key-placement validation (`smelt_yml.md` §"Target shape").
     /// Today this is enforced for `databricks` targets only: `host` is
-    /// required (and must be a bare hostname), and each of the eight keys
+    /// required unless the target is in **ambient form** (`token` also
+    /// absent — the workload's own workspace context supplies both), a
+    /// present `host` must be a bare hostname, and each of the eight keys
     /// belonging to another backend's shape is a hard error naming both the
     /// key and the backend — Free Edition's serverless compute has no
     /// warehouse path or format choice, so a silently-dropped `warehouse:`
-    /// would lose the user's intent rather than reject it.
+    /// would lose the user's intent rather than reject it. `token` present
+    /// with `host` absent is refused: a token carries no workspace address.
     pub fn validate_targets(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         for (name, target) in &self.targets {
@@ -1629,10 +1632,11 @@ impl Config {
                 continue;
             }
             match &target.host {
-                None => errors.push(format!(
-                    "targets.{name}: `databricks` target requires `host` (workspace hostname, \
-                     e.g. `my-workspace.cloud.databricks.com`)"
+                None if target.token.is_some() => errors.push(format!(
+                    "targets.{name}: `token` requires `host` (workspace hostname, e.g. \
+                     `my-workspace.cloud.databricks.com`) — a token carries no workspace address"
                 )),
+                None => {}
                 Some(host) if host.contains("://") || host.ends_with('/') => {
                     errors.push(format!(
                         "targets.{name}: `host` must be a bare hostname with no scheme and no \
@@ -2176,11 +2180,13 @@ targets:
             .expect_err("unrecognised `type:` must still error");
     }
 
-    /// A `databricks` target with no `host` is a load error naming the key;
-    /// a `host` carrying a scheme or trailing slash is rejected.
+    /// A `databricks` target with `token` present and `host` absent is a
+    /// load error naming both keys; a `host` carrying a scheme or trailing
+    /// slash is rejected when `host` is present.
     #[test]
     fn databricks_target_requires_host() {
         let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("SMELT_DBX_TEST_TOKEN", "secret");
         std::fs::write(
             dir.path().join("smelt.yml"),
             r#"
@@ -2188,13 +2194,20 @@ name: test_project
 targets:
   dbx:
     type: databricks
+    token: ${SMELT_DBX_TEST_TOKEN}
 "#,
         )
         .unwrap();
-        let err = Config::load(dir.path()).expect_err("missing host must be a hard error");
+        let err = Config::load(dir.path()).expect_err("token without host must be a hard error");
+        std::env::remove_var("SMELT_DBX_TEST_TOKEN");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("host"),
-            "error must name the missing `host` key: {err}"
+            message.contains("host"),
+            "error must name `host`: {message}"
+        );
+        assert!(
+            message.contains("token"),
+            "error must name `token`: {message}"
         );
 
         std::fs::write(
@@ -2212,6 +2225,59 @@ targets:
         assert!(
             err.to_string().contains("host"),
             "error must name `host`: {err}"
+        );
+    }
+
+    /// A `databricks` target with neither `host` nor `token` is the ambient
+    /// form and loads cleanly — the workload's own workspace context
+    /// supplies both.
+    #[test]
+    fn databricks_ambient_target_omits_host_and_token() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    catalog: workspace
+    schema: smelt_dogfood
+"#,
+        )
+        .unwrap();
+        let config = Config::load(dir.path()).expect("ambient databricks target must load");
+        let target = &config.targets["dbx"];
+        assert_eq!(target.host, None);
+        assert_eq!(target.token, None);
+    }
+
+    /// `token` present with `host` absent is refused, naming both keys.
+    #[test]
+    fn databricks_token_without_host_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("SMELT_DBX_TEST_TOKEN2", "secret");
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  dbx:
+    type: databricks
+    token: ${SMELT_DBX_TEST_TOKEN2}
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path()).expect_err("token without host must error");
+        std::env::remove_var("SMELT_DBX_TEST_TOKEN2");
+        let message = err.to_string();
+        assert!(
+            message.contains("host"),
+            "error must name `host`: {message}"
+        );
+        assert!(
+            message.contains("token"),
+            "error must name `token`: {message}"
         );
     }
 

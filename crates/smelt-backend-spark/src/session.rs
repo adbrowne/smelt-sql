@@ -30,7 +30,12 @@ pub enum SessionArgs {
         connect_url: String,
     },
     Databricks {
-        host: String,
+        /// Absent means the session is built with no explicit host at
+        /// all — the ambient form, honouring whatever workspace context
+        /// the runtime (e.g. a serverless job task's own Connect channel)
+        /// already established (`docs/specs/multi_backend.md` §"Connection
+        /// security"). Requires `token` to also be absent.
+        host: Option<String>,
         /// Absent means the session authenticates with the client's ambient
         /// Databricks credentials rather than an explicit token
         /// (`docs/specs/smelt_yml.md` §"Target shape").
@@ -69,7 +74,7 @@ pub fn plan_session(
             module: "smelt.databricks_adapter",
             class: "DatabricksAdapter",
             args: SessionArgs::Databricks {
-                host: host.unwrap_or_default().to_string(),
+                host: host.map(str::to_string),
                 token: token.map(str::to_string),
             },
         },
@@ -106,7 +111,7 @@ mod tests {
         assert_eq!(
             plan.args,
             SessionArgs::Databricks {
-                host: "my-workspace.cloud.databricks.com".to_string(),
+                host: Some("my-workspace.cloud.databricks.com".to_string()),
                 token: Some("secret-token".to_string()),
             }
         );
@@ -123,7 +128,22 @@ mod tests {
         assert_eq!(
             plan.args,
             SessionArgs::Databricks {
-                host: "my-workspace.cloud.databricks.com".to_string(),
+                host: Some("my-workspace.cloud.databricks.com".to_string()),
+                token: None,
+            }
+        );
+    }
+
+    /// A fully ambient `databricks` target (both `host` and `token` absent)
+    /// carries no host in its session args at all — the workload's own
+    /// workspace context supplies it.
+    #[test]
+    fn plan_session_databricks_ambient_carries_no_host() {
+        let plan = plan_session(SparkFlavor::Databricks, None, None, None);
+        assert_eq!(
+            plan.args,
+            SessionArgs::Databricks {
+                host: None,
                 token: None,
             }
         );

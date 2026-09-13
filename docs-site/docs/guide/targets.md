@@ -236,7 +236,7 @@ targets:
 | Field | Required | Description |
 |---|---|---|
 | `type` | Yes | Must be `databricks`. |
-| `host` | Yes | Workspace hostname. Must be a **bare hostname** — no scheme, no trailing slash (e.g. `my-workspace.cloud.databricks.com`, not `https://my-workspace.cloud.databricks.com/`). |
+| `host` | Required unless `token` is also absent | Workspace hostname. Must be a **bare hostname** — no scheme, no trailing slash (e.g. `my-workspace.cloud.databricks.com`, not `https://my-workspace.cloud.databricks.com/`). Absent together with `token` is the ambient form (see "Deployment" below); `host` absent with `token` present is refused, naming both keys. |
 | `token` | No | A `${ENV}` reference to a service-principal secret or personal access token. **Must** be a `${VAR}` reference — a literal token value is a hard configuration error, never a warning, because the value is a whole-workspace credential that would otherwise sit in a checked-in file. When absent, the session authenticates with the client's ambient Databricks credentials instead. |
 | `catalog` | No | Unity Catalog catalog name. Defaults to `workspace`. |
 | `schema` | Yes | Unity Catalog schema holding created tables and views. |
@@ -319,9 +319,22 @@ fetch step are needed for the binary itself. This is a placeholder for a PyPI de
 release tracks the CLI's `dev` branch, the `artifacts:` block is dropped in favour of a pinned
 `smelt-sql==<version>` in the job environment's dependencies.
 
-The job's own `databricks` target authenticates with the **ambient** session — no `token` key at
-all, and `host` supplied by the job's own runtime environment rather than a developer's config
-(see "Credentials" above). The project itself, including its `.smelt/` run state, lives on a
+The job's own `databricks` target authenticates with the **ambient** session — neither `host`
+nor `token` is a key on it at all:
+
+```yaml
+targets:
+  databricks_job:
+    type: databricks
+    catalog: workspace
+    schema: smelt_dogfood
+```
+
+Measured against a real Free Edition serverless job task: no host-bearing `DATABRICKS_*`/`DBX_*`
+environment variable is exported into the task's runtime, only a pre-established Spark Connect
+channel (`SPARK_REMOTE`). The session is therefore built with no explicit host or token call on
+the Databricks Connect builder at all, honouring whatever workspace context the runtime already
+established (see "Credentials" above). The project itself, including its `.smelt/` run state, lives on a
 Unity Catalog Volume — declared as a bundle resource (`resources/volume.yml`) rather than assumed
 pre-existing — instead of the job's own ephemeral workspace-files checkout, so each scheduled run
 is a genuine incremental window over the previous one rather than a fresh start. `bundle deploy`
