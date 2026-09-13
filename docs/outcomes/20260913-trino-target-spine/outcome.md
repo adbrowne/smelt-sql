@@ -148,7 +148,7 @@ not an answer — every cell is still established by execution.
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | done |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | done |
 | 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | done |
-| 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | planned |
+| 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | done |
 | 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
 
 ## Decision log
@@ -495,5 +495,17 @@ not an answer — every cell is still established by execution.
   stand as written. Phase 10 splits the skip proof two ways — unset ⇒ skip everywhere (test-side
   census), tier-up-in-CI ⇒ a skipped leg *fails* the job (workflow-side guard) — because in CI,
   where `SMELT_TRINO_URL` is set, the vacuous-pass risk is a green job in which nothing ran.
+
+- **2026-09-14 — phase 10: the CI job, live-confirmed with zero skips.**
+  `trino-integration` in `compat.yml` mirrors `spark-parity`'s gate exactly
+  (`needs: changes` + `!cancelled()` + schedule/label/`changes` triple), runs
+  `-p smelt-backend-trino` and the three CLI legs (`trino_smoke`,
+  `seed_parity`, `materialization_parity`) each under a `set -o pipefail` +
+  `grep -qi skipping` no-skip guard, and tears down with `if: always()`. Ran
+  the exact command list against the live tier before committing: 60 backend
+  tests + 6 CLI tests, zero `skip` lines in either captured log.
+  `statement_client.rs` appears in the plan's five-file skip census but has
+  no live leg at all (stub-coordinator only) — the test asserts that fact
+  instead of forcing it into the shared-gate shape.
 
 ## Blocked

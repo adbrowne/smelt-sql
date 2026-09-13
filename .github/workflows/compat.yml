@@ -14,16 +14,17 @@ env:
 
 jobs:
   changes:
-    name: Detect Spark-relevant changes
+    name: Detect Spark/Trino-relevant changes
     runs-on: ubuntu-latest
     outputs:
       spark: ${{ steps.filter.outputs.spark }}
+      trino: ${{ steps.filter.outputs.trino }}
     steps:
       # Skipped on schedule: github.event.before is unset for schedule events, so the
       # base-ref fallback below resolves to the literal string 'HEAD~1', which
-      # paths-filter cannot fetch as a remote refspec. Downstream spark jobs already
-      # run unconditionally on schedule (github.event_name == 'schedule'), so this
-      # job's output isn't needed on that trigger.
+      # paths-filter cannot fetch as a remote refspec. Downstream spark/trino jobs
+      # already run unconditionally on schedule (github.event_name == 'schedule'), so
+      # this job's output isn't needed on that trigger.
       - name: Checkout code
         if: github.event_name != 'schedule'
         uses: actions/checkout@v6
@@ -48,6 +49,18 @@ jobs:
               - 'crates/smelt-parser/src/**'
               - 'python/**'
               - 'scripts/spark-*.sh'
+              - '.github/workflows/compat.yml'
+            trino:
+              - 'crates/smelt-backend-trino/**'
+              - 'crates/smelt-backends/**'
+              - 'crates/smelt-cli/tests/trino_*'
+              - 'crates/smelt-cli/tests/common/**'
+              - 'crates/smelt-runtime/**'
+              - 'crates/smelt-dialect/**'
+              - 'examples/trino_spine/**'
+              - 'scripts/trino-*'
+              - 'scripts/trino-catalog/**'
+              - 'scripts/README-trino.md'
               - '.github/workflows/compat.yml'
 
   parse-equivalence:
@@ -432,6 +445,74 @@ jobs:
       - name: Stop Spark Connect
         if: always()
         run: bash scripts/spark-down.sh
+
+  trino-integration:
+    name: Trino/Iceberg Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    needs: changes
+    # Run on schedule (nightly), when explicitly labeled, or when this PR/push
+    # touches Trino-relevant paths (backend crate, parity tests, dialect
+    # surface, the compose tier itself).
+    # !cancelled() guards against a `changes`-job failure silently skipping this
+    # job on nightly/labeled runs (a needed job's failure skips dependents unless
+    # the if: carries a status-check function).
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.trino == 'true') }}
+
+    env:
+      DUCKDB_LIB_DIR: /usr/local/lib
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup DuckDB system library
+        uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-trino-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Start Trino/Iceberg/MinIO tier
+        run: |
+          bash scripts/trino-up.sh
+          source scripts/trino-env.sh
+          {
+            echo "SMELT_TRINO_URL=${SMELT_TRINO_URL}"
+            echo "SMELT_TRINO_USER=${SMELT_TRINO_USER}"
+            echo "SMELT_TRINO_CATALOG=${SMELT_TRINO_CATALOG}"
+            echo "SMELT_TRINO_SCHEMA=${SMELT_TRINO_SCHEMA}"
+          } >> "$GITHUB_ENV"
+
+      # No pyspark/venv/Ivy steps here — Trino is pure Rust HTTP, which is the point.
+      - name: Run smelt-backend-trino test suite (stub + live legs)
+        run: |
+          set -o pipefail
+          cargo test -p smelt-backend-trino --quiet 2>&1 | tee trino-backend-test.log | tail -60
+          if grep -qi skipping trino-backend-test.log; then
+            echo "::error::a Trino leg in smelt-backend-trino skipped with the tier up — SMELT_TRINO_URL should be set in this job"
+            exit 1
+          fi
+
+      - name: Run Trino CLI parity legs (trino_smoke, seed_parity, materialization_parity)
+        run: |
+          set -o pipefail
+          cargo test -p smelt-cli --test trino_smoke --test seed_parity --test materialization_parity --quiet 2>&1 | tee trino-cli-test.log | tail -60
+          if grep -qi skipping trino-cli-test.log; then
+            echo "::error::a Trino leg in smelt-cli skipped with the tier up — SMELT_TRINO_URL should be set in this job"
+            exit 1
+          fi
+
+      - name: Stop Trino/Iceberg/MinIO tier
+        if: always()
+        run: bash scripts/trino-down.sh
 
   maintenance-conformance-spark:
     name: Maintenance Conformance Spark Twin (Delta, Docker)

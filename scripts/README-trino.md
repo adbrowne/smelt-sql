@@ -75,3 +75,19 @@ cargo test -p smelt-backend-trino               # backend integration tests
 
 With `SMELT_TRINO_URL` unset, the same commands compile and pass with all
 Trino-targeted tests skipped.
+
+## In CI
+
+The `trino-integration` job in `.github/workflows/compat.yml` brings up the
+tier, runs `smelt-backend-trino`'s test suite plus the CLI's `trino_smoke`,
+`seed_parity` and `materialization_parity` legs, and tears the tier down
+(`if: always()`). Like `spark-parity`, it runs on the nightly `schedule`,
+when a PR carries the `run-docker-tests` label, or when the `changes` job's
+path filter flags a Trino-relevant change.
+
+Locally, an unset `SMELT_TRINO_URL` is the correct green outcome — every
+Trino-targeted test skips rather than fails. In this CI job the URL *is* set
+by the tier startup step, so a skip there means a leg silently ran against
+nothing; the job greps its captured test output for a skip line and fails
+loudly if it finds one, rather than reporting a green run in which nothing
+actually exercised Trino.
