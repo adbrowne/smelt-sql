@@ -127,7 +127,7 @@ including its null-safe join spelling.
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | done |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | done |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | done |
-| 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | pending |
+| 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | planned |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | pending |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | pending |
@@ -247,5 +247,22 @@ including its null-safe join spelling.
   `compile.rs` tests pushed that file from 4233 to 4306 lines (`SqlCompiler` test helpers
   are `pub(crate)`, so they can't live in a separate integration-test file); resynced via
   `large-file-check.sh --update`. See `phases/04-summary.md`.
+
+- **2026-09-14 — phase 5 planned; no phase-table reshape.** Phase 4's summary explicitly deferred
+  nothing. One mechanism decision the outcome could not have anticipated, settled in the plan rather
+  than left to the implement step: `census::classify` returns `Verified` for any `AUDITED_DIALECTS`
+  member, so adding Trino to that list — which phase 5 must do, since it is what drives the offline
+  totality gates, the fixture gate and the print-for-every-dialect gate — would flip all 232 census
+  rows to `Verified` on the strength of a *schema* leg alone, asserting exactly the "unverified =
+  passing" equivalence this outcome exists to deny. Resolved by making `Verified` leg-aware: Trino
+  joins `AUDITED_DIALECTS` in phase 5 but not the both-legs-live set the census consults, so the
+  census stays at 232 rows until phase 6's value leg drives it to zero and deletes it. Phase 6's row
+  keeps ownership of the Trino ledger *rows* and the ratchet; phase 5 lands only the
+  `dialect_gaps_trino` baseline metric that `baseline_names_exactly_the_audited_dialects` forces the
+  moment Trino is audited, plus any `Leg::Schema` row for a pair the live coordinator actually
+  rejects. Second decision: the Trino oracle reads the coordinator's reported column metadata and
+  decodes no row data, so the recorded `array(...)` Arrow-decode divergence cannot masquerade as a
+  rejected probe. Unlike phase 3, this phase has no offline fallback — the legs are the
+  never-skip-green ones, so an unreachable tier is `<<PHASE_BLOCKED>>`, not a stated verdict.
 
 ## Blocked
