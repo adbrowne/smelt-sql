@@ -1,7 +1,7 @@
 # Outcome: A `type: trino` target exists, stands up from `docker compose`, and materializes a model as an Iceberg table
 
 **Created:** 2026-09-13
-**Status:** active
+**Status:** done
 **Driver:** loop. Nothing here needs a cloud account, a credential or a human gate — only
 Docker. Phases that need the live server must emit `<<PHASE_BLOCKED>>` when
 `scripts/trino-env.sh` cannot reach it, **never skip green**: an unset `SMELT_TRINO_URL` that
@@ -518,5 +518,47 @@ not an answer — every cell is still established by execution.
   `smelt-backend-trino`'s counts were already right from earlier phases. Hand-forward decision-log
   entries landed in all four sibling outcomes (`-emission`, `-ledger`, `-incremental`,
   `-dogfood`), each scoped to only what that outcome must act on. T1 is closed.
+
+- **2026-09-14 — OUTCOME COMPLETE. All nine success criteria met; evidence, criterion by
+  criterion, from the phase summaries.** (1) Spec-first — phase 1 wrote the `trino` target shape
+  into `multi_backend.md` §Surface and `smelt_yml.md` §"Target shape" with the capability column
+  entering as `?`; phase 3 landed the parsing half, refusing every foreign key by name and a
+  literal `password` pre-interpolation via the generalised `LITERAL_SECRET_KEYS` table, fixture-
+  proved under `examples/`. The refusal channel is `ConfigError::LoadError`, not a
+  `DiagnosticCode` — ruled 2026-09-13 above, following the `databricks` precedent. (2)
+  `DialectId::Trino`/`SqlDialect::Trino` are exhaustive; phase 2's explicit wildcard audit caught
+  `type_cast_sql`'s `_ =>` arm that would have emitted `FLOAT`/`BLOB` silently, and the one
+  surviving wildcard (`Signature::engine_native`'s implicit `Native`) is recorded as a Known
+  Divergence owned by `20260913-trino-emission`. (3) The tier stands up from `scripts/trino-up.sh`
+  over pinned images (`trinodb/trino:483`, `apache/iceberg-rest-fixture:1.10.1`, two
+  `quay.io/minio/*` releases), idempotent *structurally* — named volumes, not host bind mounts,
+  so the `chmod`-on-root-owned-leftover failure `spark-up.sh` hit cannot recur; `README-trino.md`
+  records the pins. (4) `smelt-backend-trino` implements the whole trait over `reqwest` +
+  `rustls-tls` — no Python, no venv, no third-party client — with `nextUri` paging and typed
+  `BackendError` mapping, proved by an `axum` stub with `SMELT_TRINO_URL` unset and against the
+  live tier. (5) 27 probes executed against the live coordinator, zero skipped; the Spark(Delta)
+  prior held on 19 of 26 flags and broke on 7, every `✗` quoting its measured error, and the two
+  `SqlDialect` language properties phase 2 landed conservatively `false` both measured `true`.
+  (6) `load_table` round-trips the whole `seeds.md` type set and rejects NULL in a non-nullable
+  field; the bulk path is a chunked `INSERT … SELECT CAST(…) FROM (VALUES …)` at ~6,000 rows/s,
+  chosen by measurement with the Parquet-staging alternative recorded as unreachable from the
+  target shape (an escalation, not an absorption); `seed_parity` has a Trino leg. The phase also
+  found and fixed a real protocol bug — without `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`
+  a `timestamp(6)` silently truncates to milliseconds on read-back, on every read through this
+  client. (7) Phase 9 materialized a table and a view end-to-end via `execute_project` with zero
+  diagnostics and a run report, wired into `materialization_parity` through an opt-in
+  `targets_to_run_with_trino`; it found two further real bugs (eager `MaintenanceDialect`
+  resolution for models declaring no probes, and nothing ever calling `ensure_schema`). (8)
+  `trino-integration` in `compat.yml` mirrors `spark-parity`'s gate, and the skip proof is split
+  two ways — unset ⇒ skip everywhere (test-side census), tier-up-in-CI ⇒ a skipped leg *fails*
+  the job — because a green job in which nothing ran is the failure mode that matters. The exact
+  command list ran live before commit: 60 backend + 6 CLI tests, zero skip lines. (9)
+  `verify-phase.sh` ALL GREEN at phase 11 on this commit (`3972ad92a`), `hardening-baseline.txt`
+  carries `smelt-backend-trino` entries rather than absorbing counts elsewhere, and the tier
+  binds no port or container name the Spark/BigQuery/Databricks tiers use. What this outcome
+  deliberately did *not* close is recorded, not silently left: the implicit-`Native` emission
+  hole, the absent `maintenance_dialect`, the absent `dialect_audit` leg and the Trino
+  `array(...)` → Arrow decode gap are §Known Divergences, and all four sibling outcomes carry a
+  dated hand-forward entry naming exactly what they inherit.
 
 ## Blocked
