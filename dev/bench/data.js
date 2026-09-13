@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789282759213,
+  "lastUpdate": 1789282763154,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.77824,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "3b05f095cde029afdb93832f73377ed26a0b5f45",
+          "message": "outcome(databricks-dogfood-spine): plan phase 11c\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-13T16:04:01+10:00",
+          "tree_id": "ea8f85885ceeba791b2e48801f40c7c792ee86a8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3b05f095cde029afdb93832f73377ed26a0b5f45"
+        },
+        "date": 1789282761666,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.019596116775432,
+            "unit": "MB/s"
           }
         ]
       }
