@@ -1251,15 +1251,44 @@ resolves nested widening to a table rewrite.
 - **Partition-pruned cross-engine reads.** The `read_parquet()` substitution reads the full
   Parquet glob on every downstream run; partition pruning at the exchange boundary is a
   performance gap, not a correctness one. Deferred.
-- **The Databricks capability matrix column is inherited, not independently verified.** The
-  `databricks` target's `BackendCapabilities` column (§Surface capability matrix) is copied
-  from the Spark (Delta) profile with only `null_safe_equality` and `supports_native_ivm`
-  reasoned about directly; each flag has not yet been individually executed against a live
-  Databricks workspace the way the DuckDB/Spark/BigQuery columns have. Tracked by
-  `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`.
+- **The Databricks capability matrix column is measured against a live workspace for the
+  flags the `github_activity` dogfood pipeline exercises; the rest remain inherited.** A full
+  refresh, eleven consecutive incremental windows, a dual-target parity sweep against DuckDB,
+  and three full-refresh-oracle equivalence checks all ran live against a Databricks Free
+  Edition workspace. That live run measured Delta/Unity-Catalog semantics, `merge_into`,
+  column-scoped merge, `IS NOT DISTINCT FROM` null-safe equality, and Unity Catalog's
+  schema-evolution DDL — every flag `examples/github_activity`'s 16 models reach. Flags no
+  model in that pipeline exercises (e.g. the merge-not-matched-by-source and staged-relation-
+  group rows) remain inherited from the Spark (Delta) column, unverified live. Evidence:
+  `docs/outcomes/20260912-databricks-dogfood-spine/phases/08-parity.json`,
+  `phases/09b-equivalence.json` (dated 2026-09-13),
+  `docs/handoffs/2026-09-13-databricks-findings.md`.
 - **No cross-engine exchange for Databricks.** §"Cross-engine data exchange" refuses a
   cross-backend edge into or out of a `databricks` target outright; a Volumes-based exchange
   path is a later design, not attempted here.
+- **A succession-grain cell with no realisable `TombstoneLedger` (every Spark/Databricks
+  target today) rebuilds the whole presented table on every incremental window, never a
+  window-forward patch.** `docs/specs/state.md` §"The degradation contract" states the
+  mechanism; the cost is O(source) per window rather than O(window), invisible at the
+  `github_activity` fixture's scale but a real trade-off at production scale. Measured live on
+  `silver.actor_naming`: this fixed a live 7x row-duplication defect on the incremental write
+  path (`docs/handoffs/2026-09-13-databricks-findings.md`, "Defects fixed in place" item 6)
+  rather than merely documenting a pre-existing cost. Whether Databricks' Catalog Commits
+  feature can unlock a
+  real `MergeLedger`/`TombstoneLedger` on this backend specifically — closing the gap at the
+  root rather than accepting the cost — is open triage, not investigated here; see the handoff.
+- **`gold.events_enriched`'s key-addressed model-edge cell downgrades to `DeleteInsert` at
+  plan-derivation time on Delta/Databricks, rather than realising a fingerprint sidecar.**
+  §"The fingerprint sidecar capability" states the flagless-target consequence for a
+  `mutable_snapshot`-driven repair-family/model-edge cell as an execution-time
+  `UnsupportedOnBackend` refusal; for this cell's shape (`KeyDiscovery::EnrichmentKeyed`, whose
+  ideal technique is `ColumnScopedMerge`, not a plain `PerGroupRecompute`) availability
+  resolution instead downgrades it to `DeleteInsert` before execution, per
+  `docs/specs/state.md` §"The degradation contract". The trade: a `DeleteInsert` cell of this
+  shape forgoes the unwindowed, run-level heal a `ColumnScopedMerge` cell performs on every
+  run, producing a small, bounded, registered `UnorderedColumnDivergence` against a
+  ledger-backed target — measured and bounded, not a correctness gap. See
+  `docs/handoffs/2026-09-13-databricks-findings.md` finding 1.
 - **Databricks has no native-IVM emission.** `supports_native_ivm` is `false` for
   `databricks()` — smelt emits no Enzyme statements, so `refresh: materialized_view` hard-errors
   on this backend exactly as it does on DuckDB and both Spark profiles.

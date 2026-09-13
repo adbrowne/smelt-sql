@@ -215,6 +215,83 @@ smelt run --target bigquery_prod
 
 Prefer a service account scoped to the datasets it needs over a user credential.
 
+### Databricks
+
+A `databricks` target reaches a Databricks workspace through Databricks Connect — a serverless
+compute session, not a SQL warehouse or a plain Spark Connect URL. It is specified against
+Databricks **Free Edition**'s constraints: serverless-only compute and mandatory Unity Catalog,
+so a target names a `catalog` and `schema` (Unity Catalog's addressing) rather than Spark's
+`connect_url`/`warehouse`/`format`.
+
+```yaml
+targets:
+  databricks_prod:
+    type: databricks
+    host: my-workspace.cloud.databricks.com
+    token: ${SMELT_DBX_TOKEN}
+    catalog: workspace
+    schema: analytics
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | Yes | Must be `databricks`. |
+| `host` | Yes | Workspace hostname. Must be a **bare hostname** — no scheme, no trailing slash (e.g. `my-workspace.cloud.databricks.com`, not `https://my-workspace.cloud.databricks.com/`). |
+| `token` | No | A `${ENV}` reference to a service-principal secret or personal access token. **Must** be a `${VAR}` reference — a literal token value is a hard configuration error, never a warning, because the value is a whole-workspace credential that would otherwise sit in a checked-in file. When absent, the session authenticates with the client's ambient Databricks credentials instead. |
+| `catalog` | No | Unity Catalog catalog name. Defaults to `workspace`. |
+| `schema` | Yes | Unity Catalog schema holding created tables and views. |
+
+A `databricks` target hard-errors, naming both the offending key and the backend, on any key
+belonging to another backend's shape: `connect_url`, `warehouse`, `format`, `database`,
+`settings`, `project`, `dataset`, and `location`. These are never silently ignored — Free
+Edition's serverless compute has no host-visible warehouse directory and no format choice, so a
+silently-dropped `warehouse:` would lose a user's intent rather than reject it.
+
+smelt compiles the same logical models against Databricks using the SparkSQL dialect, with
+Databricks-specific spellings layered on top where Unity Catalog diverges from vanilla Spark
+(e.g. its own `DROP_COMMAND_TYPE_MISMATCH` error text on a self-referential bootstrap model).
+Loading data into a `databricks` target goes through the backend's own Arrow load path — never a
+host-path file the serverless session cannot see, since there is no persistent local filesystem
+to hand it one.
+
+There is no cross-engine data exchange into or out of a `databricks` target today — the
+Parquet-glob substitution other backend pairs use has no Volumes-based equivalent yet.
+
+Databricks is verified against a live Free Edition workspace: a full refresh, eleven consecutive
+incremental windows, a dual-target parity sweep against DuckDB, and a full-refresh-oracle
+equivalence check all ran against `examples/github_activity`'s 16-model pipeline. See
+[`docs/handoffs/2026-09-13-databricks-findings.md`](https://github.com/adbrowne/smelt-sql/blob/main/docs/handoffs/2026-09-13-databricks-findings.md)
+for the full findings, including the registered divergences and what remains open.
+
+#### Credentials
+
+The Databricks backend authenticates with a `${ENV}`-supplied token (service-principal OAuth
+machine-to-machine or a personal access token) or, when `token` is omitted, the client's ambient
+Databricks credentials — never a literal value in `smelt.yml`.
+
+```bash
+export SMELT_DBX_TOKEN="$(cat /path/to/minted/token)"
+smelt run --target databricks_prod
+```
+
+#### Free Edition constraints
+
+Databricks Free Edition carries no bill, so in place of a budget cap these are the measured
+quotas that bound a project targeting it:
+
+- **Serverless-only, Unity-Catalog-mandatory.** No SQL warehouse path, no format choice — this
+  is why `warehouse` and `format` are refused keys rather than tolerated-but-ignored ones.
+- **Max 5 concurrent job tasks per account**, one SQL warehouse capped at `2X-Small`.
+- **No fixed storage GB cap** — governed by an account-wide fair-usage policy instead; exceeding
+  it suspends compute rather than deleting data.
+- **No published session idle timeout.** A serverless session can be torn down server-side on
+  the order of single-digit seconds after the last statement — harmless (a `UserWarning`, not a
+  failure) but worth expecting if you see `INVALID_HANDLE.SESSION_CLOSED` in logs.
+- **A succession-grain incremental model rebuilds from the whole source on every window**, not
+  just the window, because Databricks/Delta has no realisable tombstone ledger for the
+  window-forward patch route — correct, but O(source) per window rather than O(window). See
+  `docs/specs/state.md` §"The degradation contract".
+
 ## Switching targets
 
 Use the `--target` flag on any command:
