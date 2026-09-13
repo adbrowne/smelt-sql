@@ -148,7 +148,7 @@ not an answer — every cell is still established by execution.
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | done |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | done |
 | 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | done |
-| 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
+| 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | planned |
 | 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
 
 ## Decision log
@@ -487,5 +487,13 @@ not an answer — every cell is still established by execution.
   criterion here (no criterion projects an array type), so it is recorded under "## Out of
   scope" and as a `multi_backend.md` Known Divergence rather than given a phase row. No other
   remaining row changed: phase 8's summary confirmed phases 9-11 are still the right three.
+
+- **2026-09-14 (phase 10 planning) — no reshape.** Phase 9's two forward items were checked
+  against the remaining table and neither earns a row: the array-decode gap is already recorded
+  under "## Out of scope" (no criterion projects an array type), and the double `ensure_schema`
+  call is an accepted idempotent no-op, not a correctness or criterion matter. Phases 10 and 11
+  stand as written. Phase 10 splits the skip proof two ways — unset ⇒ skip everywhere (test-side
+  census), tier-up-in-CI ⇒ a skipped leg *fails* the job (workflow-side guard) — because in CI,
+  where `SMELT_TRINO_URL` is set, the vacuous-pass risk is a green job in which nothing ran.
 
 ## Blocked
