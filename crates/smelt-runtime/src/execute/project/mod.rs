@@ -153,6 +153,7 @@ pub async fn execute_project(
         },
         request.dry_run,
         request.invoke_external_steps,
+        request.assume_external_steps_fresh,
         &cancel,
         reporter,
         &run_id,

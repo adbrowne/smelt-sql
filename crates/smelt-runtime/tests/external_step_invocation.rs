@@ -81,7 +81,12 @@ fn build_db_and_graph(
     )
 }
 
-fn make_request(select: Vec<String>, dry_run: bool, invoke_external_steps: bool) -> ExecuteRequest {
+fn make_request(
+    select: Vec<String>,
+    dry_run: bool,
+    invoke_external_steps: bool,
+    assume_external_steps_fresh: bool,
+) -> ExecuteRequest {
     ExecuteRequest {
         target: "dev".to_string(),
         select,
@@ -105,6 +110,7 @@ fn make_request(select: Vec<String>, dry_run: bool, invoke_external_steps: bool)
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps,
+        assume_external_steps_fresh,
     }
 }
 
@@ -173,7 +179,7 @@ async fn step_runs_before_its_consumer() {
     let (db, graph) = build_db_and_graph(&project_dir, &config);
     execute_project(
         "run-1".to_string(),
-        make_request(vec!["consumer".to_string()], false, true),
+        make_request(vec!["consumer".to_string()], false, true, false),
         Arc::clone(&config),
         graph,
         db,
@@ -211,7 +217,7 @@ async fn nonzero_exit_fails_run_naming_step() {
     let (db, graph) = build_db_and_graph(&project_dir, &config);
     let err = execute_project(
         "run-1".to_string(),
-        make_request(vec!["consumer".to_string()], false, true),
+        make_request(vec!["consumer".to_string()], false, true, false),
         Arc::clone(&config),
         graph,
         db,
@@ -277,7 +283,7 @@ async fn unspawnable_command_refuses() {
     let (db, graph) = build_db_and_graph(&project_dir, &config);
     let err = execute_project(
         "run-1".to_string(),
-        make_request(vec!["consumer".to_string()], false, true),
+        make_request(vec!["consumer".to_string()], false, true, false),
         Arc::clone(&config),
         graph,
         db,
@@ -310,7 +316,7 @@ async fn dry_run_reaching_step_refuses() {
     let (db, graph) = build_db_and_graph(&project_dir, &config);
     let err = execute_project(
         "run-1".to_string(),
-        make_request(vec!["consumer".to_string()], true, true),
+        make_request(vec!["consumer".to_string()], true, true, false),
         Arc::clone(&config),
         graph,
         db,
@@ -343,7 +349,7 @@ async fn environment_declining_invocation_refuses() {
     let (db, graph) = build_db_and_graph(&project_dir, &config);
     let err = execute_project(
         "run-1".to_string(),
-        make_request(vec!["consumer".to_string()], false, false),
+        make_request(vec!["consumer".to_string()], false, false, false),
         Arc::clone(&config),
         graph,
         db,
@@ -360,6 +366,63 @@ async fn environment_declining_invocation_refuses() {
         err.to_string().contains("ExternalStepNotInvocable"),
         "got: {err}"
     );
+}
+
+/// `invoke_external_steps: false` + `assume_external_steps_fresh: true` (the
+/// caller's narrow, opt-in carve-out — `docs/specs/sources.md` §Semantics
+/// 12) declines to spawn the step's `command:` at all and trusts the
+/// already-produced source instead: the run succeeds against a table this
+/// test pre-populates directly, never through the loader script.
+#[tokio::test]
+async fn skip_flag_declines_invocation_and_trusts_existing_source() {
+    if !duckdb_cli_available() {
+        eprintln!(
+            "duckdb CLI not on PATH — skipping skip_flag_declines_invocation_and_trusts_existing_source"
+        );
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let db_path = tmp.path().join("run.duckdb");
+    let config = scaffold(&project_dir, &db_path);
+    // The loader script would fail loudly if ever invoked — proof below that
+    // it never runs.
+    write_loader_script(&project_dir, "#!/bin/bash\nexit 7\n");
+
+    // Simulate an orchestrator (e.g. a Databricks Job) that already landed
+    // the source through its own separate task, ahead of this run.
+    std::process::Command::new("duckdb")
+        .arg(db_path.to_str().unwrap())
+        .arg("CREATE TABLE main.sources_raw_events AS SELECT 1 AS id")
+        .output()
+        .expect("pre-populate source table");
+
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    execute_project(
+        "run-1".to_string(),
+        make_request(vec!["consumer".to_string()], false, false, true),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("a skipped-and-trusted step must let the run proceed against existing data");
+
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("reopen duckdb");
+    let rows = backend
+        .execute_sql("SELECT id FROM main.consumer")
+        .await
+        .expect("consumer table must exist");
+    assert_eq!(rows[0].num_rows(), 1);
 }
 
 /// A step whose produced source no selected model reads is never invoked —
@@ -403,7 +466,7 @@ async fn unreached_step_is_not_invoked() {
     let (db, graph) = build_db_and_graph(&project_dir, &config);
     execute_project(
         "run-1".to_string(),
-        make_request(vec!["standalone".to_string()], false, true),
+        make_request(vec!["standalone".to_string()], false, true, false),
         Arc::clone(&config),
         graph,
         db,
@@ -436,7 +499,7 @@ async fn selecting_the_step_alone_invokes_it_and_builds_no_models() {
     let (db, graph) = build_db_and_graph(&project_dir, &config);
     let outcome = execute_project(
         "run-1".to_string(),
-        make_request(vec!["loader".to_string()], false, true),
+        make_request(vec!["loader".to_string()], false, true, false),
         Arc::clone(&config),
         graph,
         db,

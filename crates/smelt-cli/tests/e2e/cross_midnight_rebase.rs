@@ -240,6 +240,7 @@ async fn run_single_day_window(
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     };
 
     execute_project(
@@ -1390,6 +1391,7 @@ async fn chained_run_is_refused_or_ordered_never_parallel() {
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     };
 
     let reporter = SqlCapturingReporter::new();

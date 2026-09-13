@@ -239,6 +239,7 @@ fn build_request(
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 
@@ -444,6 +445,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             resume: false,
             technique_overrides: vec![],
             invoke_external_steps: true,
+        assume_external_steps_fresh: false,
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

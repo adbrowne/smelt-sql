@@ -142,6 +142,7 @@ fn base_request(target: &str, resume: bool) -> ExecuteRequest {
         resume,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

@@ -42,6 +42,7 @@ pub(super) fn select_request(target: &str, model: &str, start: &str, end: &str) 
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

@@ -238,6 +238,7 @@ async fn batched_write_clamp_does_not_widen_to_scan_margin() {
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     };
 
     let outcome = execute_project(

@@ -195,6 +195,7 @@ fn make_request(full_refresh: bool, allow_full_refresh: bool) -> ExecuteRequest 
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

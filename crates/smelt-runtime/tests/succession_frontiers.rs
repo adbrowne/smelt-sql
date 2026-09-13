@@ -109,6 +109,7 @@ fn request(start: &str, end: &str, rebuild: bool, full_refresh: bool) -> Execute
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

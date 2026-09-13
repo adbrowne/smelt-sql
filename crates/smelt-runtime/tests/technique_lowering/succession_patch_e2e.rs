@@ -106,6 +106,7 @@ fn request_with_rebuild(start: &str, end: &str, rebuild: bool) -> ExecuteRequest
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

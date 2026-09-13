@@ -171,6 +171,14 @@ pub trait RunReporter: Send + Sync {
     /// fires — no manifest is ever written for this run
     /// (`docs/specs/run_state.md` §"Run report").
     fn external_step_failed(&self, _run_id: &str, _step: &str, _exit_code: i32, _error: &str) {}
+
+    /// A reached external step was **not** invoked — the run declined
+    /// invocation (`invoke_external_steps: false`) and the caller asserted
+    /// its produced sources are already fresh (`assume_external_steps_fresh:
+    /// true`), the narrow carve-out in `docs/specs/sources.md` §Semantics
+    /// 12. Called once per skipped step, before the run manifest records it
+    /// as `RunOutcomeKind::Skipped`. Default: no-op.
+    fn external_step_skipped(&self, _run_id: &str, _step: &str) {}
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that

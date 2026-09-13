@@ -47,9 +47,11 @@ pub struct ExternalStepRunRecord {
     /// Source addresses the step declares in `produces:`.
     pub produces: Vec<String>,
     pub duration_ms: u64,
-    /// Always `Success` — a failed step aborts before this record is
-    /// created. Kept as `RunOutcomeKind` rather than a bare unit so it
-    /// mirrors `ModelRunRecord::outcome` and serializes the same way.
+    /// `Success` for an invoked step (a failed step aborts before this
+    /// record is created, so `Failed` never appears here) or `Skipped` for a
+    /// step declined-and-trusted under `assume_external_steps_fresh`
+    /// (`docs/specs/sources.md` §Semantics 12) — `command` is empty and
+    /// `duration_ms` is `0` in that case, since nothing was spawned.
     pub outcome: RunOutcomeKind,
 }
 

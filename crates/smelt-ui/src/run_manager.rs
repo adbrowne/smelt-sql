@@ -186,6 +186,7 @@ fn to_runtime_request(request: RunExecuteRequest) -> smelt_runtime::ExecuteReque
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

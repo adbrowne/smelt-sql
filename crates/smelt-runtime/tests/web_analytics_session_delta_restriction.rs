@@ -596,6 +596,7 @@ fn live_request(start: &str, end: &str) -> ExecuteRequest {
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

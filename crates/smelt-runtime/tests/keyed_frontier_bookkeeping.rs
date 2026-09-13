@@ -488,6 +488,7 @@ fn run_request(start: Option<&str>, end: Option<&str>) -> ExecuteRequest {
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

@@ -44,14 +44,17 @@ pub struct ExternalStepFailedError {
 }
 
 /// Invoke every step in `required_steps`, in the given (sorted) order,
-/// before any model executes. Refusal checks run first: a dry run or an
+/// before any model executes. Refusal checks run first: a dry run always
+/// refuses with `ExternalStepNotInvocable` rather than spawning anything. An
 /// environment declining external invocation (`invoke_external_steps ==
-/// false`) refuses with `ExternalStepNotInvocable` rather than spawning
-/// anything, so a run never proceeds against a reached step's possibly-
-/// stale produced sources. Refusal branches return before any reporter
-/// event fires. Returns one [`ExternalStepRunRecord`] per successfully
-/// invoked step, keyed by step address, for the caller to fold into the run
-/// manifest.
+/// false`) also refuses **unless** `assume_external_steps_fresh` is set, in
+/// which case every required step is instead treated as already satisfied —
+/// the caller's affirmative claim, not a probed proof
+/// (`docs/specs/sources.md` §Semantics 12's named carve-out) — and recorded
+/// as `RunOutcomeKind::Skipped` rather than invoked. Refusal branches return
+/// before any reporter event fires. Returns one [`ExternalStepRunRecord`]
+/// per successfully invoked or trusted-skipped step, keyed by step address,
+/// for the caller to fold into the run manifest.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn invoke_required_steps(
     required_steps: &[String],
@@ -60,6 +63,7 @@ pub(crate) async fn invoke_required_steps(
     ctx: &StepRunContext,
     dry_run: bool,
     invoke_external_steps: bool,
+    assume_external_steps_fresh: bool,
     cancel: &CancellationToken,
     reporter: &dyn RunReporter,
     run_id: &str,
@@ -78,11 +82,36 @@ pub(crate) async fn invoke_required_steps(
         .into());
     }
     if !invoke_external_steps {
-        return Err(ExternalStepNotInvocableError {
-            step: required_steps[0].clone(),
-            reason: "this run environment does not invoke external steps".to_string(),
+        if !assume_external_steps_fresh {
+            return Err(ExternalStepNotInvocableError {
+                step: required_steps[0].clone(),
+                reason: "this run environment does not invoke external steps".to_string(),
+            }
+            .into());
         }
-        .into());
+
+        let mut skipped = Vec::new();
+        for step_addr in required_steps {
+            let Some(step) = steps_by_addr.get(step_addr) else {
+                continue;
+            };
+            tracing::info!(
+                "Skipping external step '{}': caller asserts its produced sources are already \
+                 fresh",
+                step_addr
+            );
+            reporter.external_step_skipped(run_id, step_addr);
+            skipped.push((
+                step_addr.clone(),
+                ExternalStepRunRecord {
+                    command: Vec::new(),
+                    produces: step.produces.clone(),
+                    duration_ms: 0,
+                    outcome: RunOutcomeKind::Skipped,
+                },
+            ));
+        }
+        return Ok(skipped);
     }
 
     let mut records = Vec::new();

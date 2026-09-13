@@ -230,6 +230,7 @@ async fn self_referential_backfill_converges_to_sequential_running_balance() {
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     };
 
     let outcome = execute_project(

@@ -138,6 +138,7 @@ fn base_request(target: &str, retry_max: Option<u32>) -> ExecuteRequest {
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps: true,
+        assume_external_steps_fresh: false,
     }
 }
 

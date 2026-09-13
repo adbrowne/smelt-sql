@@ -178,13 +178,30 @@ pub struct ExecuteRequest {
 
     /// Whether this run may invoke a reached external step
     /// (`docs/specs/sources.md` §"Externally-produced sources (black-box
-    /// steps)"). `true` (the default) is the CLI's posture — no flag exists
-    /// to turn this off. An embedder (e.g. the UI's plan-preview endpoint)
-    /// that cannot or should not shell out sets this to `false`; a run that
-    /// reaches a step with this `false` refuses with `ExternalStepNotInvocable`
-    /// rather than proceeding against the step's possibly-stale output.
+    /// steps)"). `true` (the default) is the CLI's posture unless
+    /// `--skip-external-steps` is passed. An embedder (e.g. the UI's
+    /// plan-preview endpoint) that cannot or should not shell out sets this
+    /// to `false`; a run that reaches a step with this `false` refuses with
+    /// `ExternalStepNotInvocable` rather than proceeding against the step's
+    /// possibly-stale output — *unless* [`Self::assume_external_steps_fresh`]
+    /// is also set.
     #[serde(default = "default_true")]
     pub invoke_external_steps: bool,
+
+    /// The caller's affirmative claim that every reached step's produced
+    /// sources are already current for this run's window, so a reached step
+    /// should be treated as satisfied rather than refusing
+    /// (`docs/specs/sources.md` §Semantics 12's named carve-out). Only takes
+    /// effect when [`Self::invoke_external_steps`] is `false`; has no effect
+    /// otherwise (a run that can invoke a step always does, never skips on
+    /// trust alone). `false` (the default) is the CLI's `smelt run` posture;
+    /// `smelt run --skip-external-steps` sets both fields together. smelt
+    /// does not verify this claim — it is the caller's to keep, and every
+    /// skipped step is recorded (`ExternalStepSkipped`, `outcome:
+    /// RunOutcomeKind::Skipped`) so the run manifest shows what was trusted
+    /// rather than invoked.
+    #[serde(default)]
+    pub assume_external_steps_fresh: bool,
 }
 
 fn default_true() -> bool {

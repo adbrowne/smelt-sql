@@ -136,6 +136,7 @@ fn make_request(select: Vec<String>, dry_run: bool, invoke_external_steps: bool)
         resume: false,
         technique_overrides: vec![],
         invoke_external_steps,
+        assume_external_steps_fresh: false,
     }
 }
 
