@@ -99,16 +99,24 @@ def main():
             project_dir,
             "--target",
             "databricks_job",
-            # Without an explicit `--start`/`--end`, `smelt run` refuses the
-            # `sources.raw.github_loader` external step with
-            # `ExternalStepNotInvocable` (measured phase 11i: no value for
-            # its `{run_date}` placeholder) — this task and `load_next_day`
-            # are separate Databricks Job tasks with no shared process state,
-            # so neither can hand the other the date directly. `--auto`
-            # ("process only uncovered intervals since last run") derives the
-            # window itself from what `load_next_day` just landed, which is
-            # exactly a scheduled run's job.
+            # `--auto` ("process only uncovered intervals since last run")
+            # derives the window from the seeded `databricks_job` interval
+            # history (11j/11k), which is exactly a scheduled run's job.
             "--auto",
+            # `sources.raw.github_loader`'s `command:` is the DuckDB-CLI
+            # dev-target loader (`load_day.sh`) — it cannot run against
+            # Databricks serverless compute at all (measured phase 11k:
+            # `ExternalStepFailed: ... exit code 127`). The separate
+            # `load_next_day` task (this job's first task) already loaded
+            # the window this run derives above, through the ambient
+            # Databricks Connect session `load_next_day.py` requires — the
+            # job's own task ordering (`depends_on` in `databricks.yml`) is
+            # the freshness guarantee this flag trusts rather than proves
+            # (`docs/specs/sources.md` §Semantics 12's named carve-out;
+            # human decision recorded in
+            # `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`
+            # 2026-09-14).
+            "--skip-external-steps",
         ],
         check=True,
         env=env,
