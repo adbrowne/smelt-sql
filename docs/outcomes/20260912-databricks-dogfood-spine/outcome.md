@@ -1,7 +1,7 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** blocked
+**Status:** active
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -178,7 +178,7 @@ of the models or the tooling.
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
-| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
+| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
 
 ## Decision log
 
@@ -1293,3 +1293,13 @@ of the models or the tooling.
   still open) so the ~40-minute three-run wait survives the ~1-hour OAuth token TTL without a
   manual remint. Once (1) and (2) are settled, row 11c resumes from task 5 of `phases/11c-plan.md`
   with nothing else to redo — tasks 1-4 are committed and green.
+
+- **2026-09-13 — human unblock: `CREATE VOLUME` grant applied.** The owning identity ran
+  `scripts/dbx-grant-volume.sql` against `workspace.smelt_dogfood`. `bash scripts/dbx-verify.sh`
+  re-run clean: reachability, both schemas' `SHOW TABLES`, and the out-of-scope-write refusal
+  all pass. `gpg-agent`'s `default-cache-ttl`/`max-cache-ttl` also raised to 43200s per the 4b(b)
+  follow-up, so a headless resume of 11c's ~40-minute three-run wait should survive the OAuth
+  token's ~1-hour TTL without a manual remint. Outcome status flipped `blocked` -> `active`, row
+  11c flipped `blocked` -> `pending`; resumes from task 5 of `phases/11c-plan.md`. Point (2) of
+  the prior entry (whether a schema-level grant suffices for a bundle-created managed Volume on
+  Free Edition) is not yet confirmed — the next `deploy` attempt is what tests it.
