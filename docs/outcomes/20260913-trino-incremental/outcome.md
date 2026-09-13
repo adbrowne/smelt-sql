@@ -158,6 +158,16 @@ approximated.
 
 ## Decision log
 
+- **2026-09-14 — hand-forward from `20260913-trino-target-spine` phase 11.** Measured, for this
+  outcome to act on: `maintenance_dialect` returns `Err` for `SqlDialect::Trino` today, so no
+  incremental/maintenance family runs on a `trino` target until this outcome lands one
+  (`docs/specs/multi_backend.md` §Known Divergences) — a full refresh is the only route in the
+  meantime. Capability cells measured `false` that bound the reachable family set:
+  `supports_native_ivm`, `supports_merge_not_matched_by_source`, `supports_merge_schema_write`,
+  `supports_insert_overwrite` (emulated, like DuckDB's and BigQuery's). Measured `true`, available
+  to build on: `supports_create_or_replace_table`, `supports_merge`, `supports_column_scoped_merge`,
+  `supports_staged_relation_group`.
+
 - 2026-09-13 (scaffold, before phase 1): **some incremental features are accepted as unsupported on
   Trino for now.** Ruling by the programme owner, paired with the ruling that Trino's transaction
   support equals Spark's (recorded in `20260913-trino-ledger`'s decision log). Consequence for this

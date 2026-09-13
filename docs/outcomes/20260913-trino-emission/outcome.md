@@ -136,4 +136,13 @@ including its null-safe join spelling.
 
 ## Decision log
 
+- **2026-09-14 — hand-forward from `20260913-trino-target-spine` phase 11.** T1 closed leaving
+  the implicit-`Native` emission hole open (`Signature::emission_at` claims every built-in is
+  natively spelled on Trino with no probe backing that claim — `docs/specs/multi_backend.md`
+  §Known Divergences). Measured grammar gaps this outcome should treat as its starting probe
+  list: no `QUALIFY`, no `::` cast, no trailing commas, no `PIVOT` clause, no pipe syntax
+  (`|>`); the `[a,b]` array-literal syntax *does* work on Trino (unlike Spark). No
+  `AUDITED_DIALECTS` entry exists for Trino yet in `dialect_audit` — phase 5/6 above is the
+  first Trino leg of that gate.
+
 ## Blocked

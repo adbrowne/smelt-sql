@@ -149,7 +149,7 @@ not an answer — every cell is still established by execution.
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | done |
 | 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | done |
 | 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | done |
-| 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | planned |
+| 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | done |
 
 ## Decision log
 
@@ -507,5 +507,16 @@ not an answer — every cell is still established by execution.
   `statement_client.rs` appears in the plan's five-file skip census but has
   no live leg at all (stub-coordinator only) — the test asserts that fact
   instead of forcing it into the shared-gate shape.
+
+- **2026-09-14 — phase 11: close.** Added the `### Trino` section to
+  `docs-site/docs/guide/targets.md` (shape, credentials, running the local tier, a Limitations
+  list naming every measured-`✗` capability), three new §Known Divergences entries in
+  `docs/specs/multi_backend.md` (no maintenance dialect, no `dialect_audit` leg,
+  `supports_transactional_ddl = false` is the client not Trino), and
+  `crates/smelt-core/tests/trino_docs_freshness.rs` gating all four claims against source rather
+  than restating them. `hardening_budget` two-sided green with no baseline change needed —
+  `smelt-backend-trino`'s counts were already right from earlier phases. Hand-forward decision-log
+  entries landed in all four sibling outcomes (`-emission`, `-ledger`, `-incremental`,
+  `-dogfood`), each scoped to only what that outcome must act on. T1 is closed.
 
 ## Blocked

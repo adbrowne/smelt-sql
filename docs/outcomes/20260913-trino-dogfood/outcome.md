@@ -116,4 +116,14 @@ input to a later `trino-correctness` outcome that this outcome does not create.
 
 ## Decision log
 
+- **2026-09-14 — hand-forward from `20260913-trino-target-spine` phase 11.** Two measured gaps
+  for this outcome to route around or close: a model projecting a Trino `array(...)` result
+  column does not decode to Arrow yet — the HTTP statement client's result-page decoder has no
+  arm for the JSON shape Trino's `/v1/statement` protocol uses for array cells
+  (`docs/specs/multi_backend.md` §Known Divergences), so an array-typed projection will fail a
+  dogfood run rather than silently misread it; and `print_body_for_dialect` has an
+  `unimplemented!()` reachable path for some construct on `SqlDialect::Trino` not yet exercised
+  by T1's narrower fixture set — expect it to surface on a wider real pipeline before this
+  outcome's phase 1 finishes model selection.
+
 ## Blocked

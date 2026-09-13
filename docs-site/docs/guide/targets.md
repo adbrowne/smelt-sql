@@ -363,6 +363,110 @@ exhausted. The loader's own DuckDB access prefers the `duckdb` Python module ove
 a CLI binary, since a serverless Databricks Python environment installs packages but has no CLI
 on `PATH`.
 
+### Trino
+
+A `trino` target reaches a Trino coordinator over its own HTTP statement protocol
+(`POST /v1/statement`, paging through `nextUri`) from pure Rust — no Python interpreter, no
+venv, and no third-party client library in the path. It runs against Trino's **Iceberg**
+connector only: the connector, not Trino itself, decides the write surface, and `MERGE`,
+`UPDATE`, `DELETE` and `CREATE OR REPLACE TABLE` exist on Iceberg but not on Hive, which the
+whole incremental/ledger story downstream of this target depends on.
+
+```yaml
+targets:
+  trino_prod:
+    type: trino
+    host: trino.example.com
+    port: 8443
+    user: smelt
+    catalog: iceberg
+    schema: analytics
+    tls: true
+    password: ${SMELT_TRINO_PASSWORD}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | Yes | Must be `trino`. |
+| `host` | Yes | Coordinator hostname. Must be a **bare hostname** — no scheme, no trailing slash (e.g. `trino.example.com`, not `https://trino.example.com/`). Trino has no ambient form: `host`, `catalog` and `user` are required unconditionally. |
+| `port` | No | Coordinator port. Defaults to `8080` when `tls` is unset or `false`, `443` once `tls: true`. |
+| `user` | Yes | Trino session user, sent as the `X-Trino-User` header. |
+| `catalog` | Yes | The Iceberg catalog name — the connector choice, and never guessed. |
+| `schema` | No | Schema holding created tables and views. Defaults to `main`. |
+| `tls` | No | Selects `https` and the `443` default port. Defaults to `false` (plain `http`, the unauthenticated local tier). |
+| `password` | No | A `${ENV}` reference to the session password, sent as HTTP Basic auth alongside `user`. **Must** be a `${VAR}` reference — a literal password is a hard configuration error, never a warning, because the value is a whole-coordinator credential that would otherwise sit in a checked-in file. Absent means no `Authorization` header at all — the unauthenticated local Docker tier's default. |
+
+A `trino` target hard-errors, naming both the offending key and the backend, on any key
+belonging to another backend's shape: `connect_url`, `warehouse`, `format`, `database`,
+`settings`, `project`, `dataset`, `location`, and `token` (Databricks' credential key — a
+`trino` target authenticates with `password` instead, so a Databricks-shaped credential left
+over from a copy-paste is never silently ignored).
+
+smelt compiles the same logical models against Trino using its own dialect
+(`SqlDialect::Trino`). Loading data into a `trino` target goes through the client's own bulk
+`INSERT INTO … SELECT CAST(…) FROM (VALUES …)` path, chunked at 1,000 rows per statement — Trino
+carries no object-store credential of its own (`host`/`port`/`user`/`catalog`/`schema`/`tls`/
+`password` only), so a staged-Parquet-into-object-storage load path is not available.
+
+#### Credentials
+
+The Trino backend authenticates with HTTP Basic auth built from `user` and a `${ENV}`-supplied
+`password` — never a literal value in `smelt.yml`. `password` absent selects the unauthenticated
+form the local Docker tier runs with.
+
+```bash
+export SMELT_TRINO_PASSWORD="$(cat /path/to/minted/password)"
+smelt run --target trino_prod
+```
+
+The resolved password never reaches a log line, a run report, a diagnostic, or an error
+message — every rendering path for a `trino` target config redacts the field.
+
+#### Running the local tier
+
+The Trino target is developed against a pinned `docker compose` tier: a Trino coordinator, an
+Iceberg REST catalog, and MinIO object storage.
+
+```bash
+bash scripts/trino-up.sh      # coordinator on :18080 (SMELT_TRINO_PORT to override);
+                               # Iceberg REST + MinIO are internal-only
+source scripts/trino-env.sh   # export SMELT_TRINO_URL + catalog/schema/user
+bash scripts/trino-down.sh    # remove all three containers and their named volumes
+```
+
+See `scripts/README-trino.md` for the pinned image versions and why the tier uses named
+volumes rather than bind mounts. Trino-targeted tests are gated on `SMELT_TRINO_URL`: unset,
+they skip; set, they run against the live tier — the same pattern as Spark's, BigQuery's and
+Databricks' integration tests. CI runs the same tier in the gated `trino-integration` job.
+
+#### Limitations
+
+Trino's capability profile was established by executing the statement each flag names against
+a live coordinator (`docs/specs/multi_backend.md` §"Capability matrix"), not by reading its
+documentation. Measured `✗`s:
+
+- `supports_qualify` — no `QUALIFY` clause; a smelt model using it is lowered to a subquery.
+- `supports_double_colon_cast` — no `x::T` cast syntax.
+- `supports_trailing_commas` — a trailing comma before `)` or `FROM` is a syntax error.
+- `supports_pipe_syntax` / `supports_pipe_set_drop_rename` — no native `|>` pipe query support.
+- `supports_transactional_ddl` — smelt's stateless `/v1/statement` HTTP client has no session
+  continuity across `START TRANSACTION`/DDL/`ROLLBACK`; this measures the client, not a Trino
+  grammar rejection.
+- `supports_merge_not_matched_by_source` — no `WHEN NOT MATCHED BY SOURCE` merge clause.
+- `supports_merge_schema_write` — no implicit schema-widening write through a `MERGE`.
+- `supports_insert_overwrite` — no native `INSERT OVERWRITE`; emulated like DuckDB's and
+  BigQuery's.
+- `supports_native_ivm` / `supports_retraction` — no native incremental-view-maintenance or
+  retraction support; smelt's own maintenance layer does not run on Trino yet (below).
+- `supports_alter_column_using` — no `ALTER COLUMN ... USING` type-changing syntax.
+- `supports_fingerprint_sidecar` — no delta-restriction admission over an external
+  `mutable_snapshot` source's fingerprint diff.
+
+Two gaps beyond the capability matrix: **no incremental/maintenance family runs on a `trino`
+target yet** — `maintenance_dialect` refuses `SqlDialect::Trino`, so a full refresh is the only
+route today — and **a model projecting an `array(...)` column does not decode from Trino to
+Arrow yet**. Both are tracked in `docs/specs/multi_backend.md` §Known Divergences.
+
 ## Switching targets
 
 Use the `--target` flag on any command:

@@ -1210,6 +1210,22 @@ resolves nested widening to a table rewrite.
   arm for the JSON shape Trino's `/v1/statement` protocol uses for array cells. No plan is yet
   tracking the close.
 
+- **No maintenance dialect on Trino.** `maintenance_dialect` returns `Err` for
+  `SqlDialect::Trino`, so no incremental/maintenance family runs on a `trino` target today — a
+  full refresh is the only route. Owner: `docs/outcomes/20260913-trino-incremental/`.
+
+- **No `dialect_audit` Trino leg.** The cross-engine emission audit's `AUDITED_DIALECTS` is a
+  three-member test-local const that does not include Trino, so Trino has no fixture, probe,
+  ledger row or baseline metric, and `docs/reference/dialect-coverage.md` has no Trino column.
+  Owner: `docs/outcomes/20260913-trino-emission/`.
+
+- **`supports_transactional_ddl = false` measures smelt's client, not Trino's grammar.** The
+  measured `Client does not support transactions` error comes from smelt's stateless
+  `/v1/statement` HTTP client having no session continuity across `START TRANSACTION`/DDL/
+  `ROLLBACK`, not from Trino rejecting the statements themselves. Stated so a later outcome does
+  not spend effort "fixing" Trino for a limitation that is smelt's client design. Owner:
+  `docs/outcomes/20260913-trino-ledger/`.
+
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,
   not a path smelt takes. Tracked in `docs/research/20260816-bigquery-backend.md`.

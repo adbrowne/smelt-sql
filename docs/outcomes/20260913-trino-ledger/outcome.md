@@ -163,6 +163,17 @@ land near or above Delta's.
 
 ## Decision log
 
+- **2026-09-14 — hand-forward from `20260913-trino-target-spine` phase 11.** Measured, for this
+  outcome to act on: `supports_transactional_ddl = false` is smelt's stateless `/v1/statement`
+  HTTP client having no session continuity across `START TRANSACTION`/DDL/`ROLLBACK` — client
+  design, not a Trino grammar rejection (`docs/specs/multi_backend.md` §Known Divergences); the
+  staged-relation-group pattern (phase 7 above) has no temp-table primitive to build it from —
+  Trino/Iceberg has no session-scoped temp tables; `null_safe_equality` is `IS NOT DISTINCT FROM`
+  (matching DuckDB/BigQuery), not Spark's `<=>`; and the Delta-shaped residency prior this
+  outcome's scaffold decision assumed held for schema-evolution DDL on most cells but not all —
+  see T1's measured seven-flag divergence list in `docs/specs/multi_backend.md` §"Capability
+  matrix" before assuming Spark(Delta) parity on an unconfirmed cell.
+
 - 2026-09-13 (scaffold, before phase 1): **Trino's transaction support is taken as equivalent to
   Spark's, and some incremental features are accepted as unsupported on Trino for now.** Ruling by
   the programme owner. `state.md` §"Which dialects realise which structure" already records
