@@ -17,7 +17,7 @@ resources:
           spark_python_task:
             python_file: ../dbx_job/load_next_day.py
             parameters:
-              - "{{job.trigger.time.iso_date}}"
+              - "--next-day"
 
         - task_key: smelt_run
           depends_on:
@@ -40,6 +40,7 @@ resources:
             dependencies:
               - databricks-connect==15.4.5
               - pyarrow
+              - duckdb
 
         - environment_key: smelt_env
           spec:

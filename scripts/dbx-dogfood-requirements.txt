@@ -10,3 +10,9 @@
 # co-install `pyspark` here.
 databricks-connect==15.4.5
 pyarrow
+
+# The loader's own DuckDB access (scripts/dbx-dogfood-loader.py) prefers this
+# module over shelling out to a `duckdb` CLI binary — a serverless Databricks
+# Python environment has no CLI on PATH, only whatever this environment's
+# dependencies: list installs.
+duckdb

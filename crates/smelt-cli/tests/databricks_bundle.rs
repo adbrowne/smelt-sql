@@ -247,6 +247,136 @@ fn bundle_targets_name_the_dogfood_workspace_as_a_target_entry() {
     );
 }
 
+/// `docs/outcomes/20260912-databricks-dogfood-spine/phases/11b-plan.md` test
+/// 6: the `smelt_run` task's `--project-dir` and the declared Volume
+/// resource must derive from the *same* `${var.…}` references, so they
+/// cannot drift into naming two different paths.
+#[test]
+fn bundle_declares_the_volume_the_smelt_run_task_points_at() {
+    let volume_yml = read(&bundle_dir().join("resources/volume.yml"));
+    let doc: serde_yaml::Value = serde_yaml::from_str(&volume_yml).unwrap();
+    let volumes = doc["resources"]["volumes"]
+        .as_mapping()
+        .expect("resources.volumes is a mapping");
+    assert_eq!(volumes.len(), 1, "expected exactly one volume resource");
+    let volume = volumes.values().next().unwrap();
+
+    let catalog = volume["catalog_name"]
+        .as_str()
+        .expect("catalog_name is a string");
+    let schema = volume["schema_name"]
+        .as_str()
+        .expect("schema_name is a string");
+    let name = volume["name"].as_str().expect("name is a string");
+    assert_eq!(catalog, "${var.catalog}");
+    assert_eq!(schema, "${var.schema}");
+    assert_eq!(name, "${var.volume_name}");
+
+    let job = the_one_job();
+    let tasks = job["tasks"].as_sequence().unwrap();
+    let smelt_run = tasks
+        .iter()
+        .find(|t| t["task_key"].as_str() == Some("smelt_run"))
+        .expect("smelt_run task exists");
+    let volume_path = smelt_run["spark_python_task"]["parameters"][0]
+        .as_str()
+        .expect("first parameter is the project path");
+
+    for var in ["${var.catalog}", "${var.schema}", "${var.volume_name}"] {
+        assert!(
+            volume_path.contains(var),
+            "smelt_run's --project-dir `{volume_path}` must reference the same bundle \
+             variable `{var}` the volume resource does"
+        );
+    }
+}
+
+/// Test 7: `loader_env`'s `dependencies:` must cover every module the loader
+/// imports at runtime (parsed from the loader file, not restated) — the
+/// live gap was `duckdb`, added by 11b's Python-module DuckDB access path.
+#[test]
+fn bundle_loader_environment_declares_every_dependency_the_loader_imports() {
+    let loader_text = read(&repo_root().join("scripts/dbx-dogfood-loader.py"));
+    // Third-party imports the loader performs at module scope or inside a
+    // function body — stdlib names are excluded by this fixed list rather
+    // than derived, since there is no cheap way to distinguish stdlib from
+    // third-party without a resolved environment.
+    let stdlib = [
+        "os",
+        "re",
+        "sys",
+        "json",
+        "argparse",
+        "subprocess",
+        "io",
+        "smelt",
+    ];
+    let mut imported = std::collections::BTreeSet::new();
+    for line in loader_text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("import ") {
+            let module = rest.split(&[' ', '.', ','][..]).next().unwrap_or("").trim();
+            if !module.is_empty() {
+                imported.insert(module.to_string());
+            }
+        }
+    }
+    imported.retain(|m| !stdlib.contains(&m.as_str()));
+
+    let job = the_one_job();
+    let environments = job["environments"]
+        .as_sequence()
+        .expect("job.environments is a sequence");
+    let loader_env = environments
+        .iter()
+        .find(|e| e["environment_key"].as_str() == Some("loader_env"))
+        .expect("loader_env exists");
+    let deps = loader_env["spec"]["dependencies"]
+        .as_sequence()
+        .expect("loader_env.spec.dependencies is a sequence")
+        .iter()
+        .map(|d| d.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    for module in &imported {
+        assert!(
+            deps.iter()
+                .any(|d| d == module || d.starts_with(&format!("{module}=="))),
+            "loader imports `{module}` but loader_env.dependencies is {deps:?}"
+        );
+    }
+}
+
+/// Test 8: the seed stage's copy list must name `smelt.yml` and `models/`
+/// and must never name `.smelt` — re-seeding a deployed project must not be
+/// able to destroy the ledger that makes each run incremental.
+#[test]
+fn bundle_seed_never_overwrites_run_state() {
+    let script = read(&repo_root().join("scripts/dbx-bundle.sh"));
+    let seed_items_line = script
+        .lines()
+        .find(|l| l.trim_start().starts_with("SEED_ITEMS="))
+        .unwrap_or_else(|| panic!("expected a SEED_ITEMS= line in dbx-bundle.sh:\n{script}"));
+
+    assert!(
+        seed_items_line.contains("smelt.yml"),
+        "seed copy list must name smelt.yml: {seed_items_line}"
+    );
+    assert!(
+        seed_items_line.contains("models"),
+        "seed copy list must name models/: {seed_items_line}"
+    );
+    assert!(
+        !seed_items_line.contains(".smelt"),
+        "seed copy list must never name .smelt (the run-state ledger): {seed_items_line}"
+    );
+
+    assert!(
+        script.contains("seed"),
+        "expected a seed subcommand wired into dbx-bundle.sh"
+    );
+}
+
 #[test]
 fn databricks_bundle_validate_is_clean() {
     if Command::new("databricks")

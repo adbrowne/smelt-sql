@@ -1,0 +1,19 @@
+# The Unity Catalog Volume the `smelt_run` task's `--project-dir` parameter
+# points at (docs/outcomes/20260912-databricks-dogfood-spine/phases/11b-plan.md).
+# Declared as a bundle resource — rather than assumed pre-existing — so
+# `bundle deploy` creates it and `scripts/dbx-bundle.sh seed` has somewhere to
+# copy the project into on first deploy. The catalog/schema/name fields are
+# the *same* `${var.…}` references `resources/github_activity_job.yml`'s
+# `smelt_run` task composes its `--project-dir` path from, so the two cannot
+# drift apart into naming two different paths.
+resources:
+  volumes:
+    smelt_dogfood_project:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.volume_name}
+      volume_type: MANAGED
+      comment: >-
+        Holds a copy of examples/github_activity (smelt.yml, models/) and its
+        .smelt/ run state, so each scheduled run is a genuine incremental
+        window over the previous one rather than a fresh checkout.

@@ -64,6 +64,18 @@ fn run_loader(args: &[&str]) -> Output {
         .unwrap_or_else(|e| panic!("failed to spawn dbx-dogfood-loader.py: {e}"))
 }
 
+/// Whether the system `python3` can `import duckdb` — the Python-module
+/// DuckDB access path phase 11b adds alongside the CLI fallback. Not
+/// installed in every dev environment, so tests exercising it explicitly
+/// skip (with a printed reason) rather than failing when it's absent.
+fn duckdb_module_importable() -> bool {
+    Command::new("python3")
+        .args(["-c", "import duckdb"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn duckdb_scalar(sql: &str) -> i64 {
     let out = Command::new("duckdb")
         .args([":memory:", "-json", "-c", sql])
@@ -742,6 +754,198 @@ fn apply_ddl_needs_no_network_to_emit() {
     assert!(
         out.status.success(),
         "--emit-ddl must need no credential or network: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `docs/outcomes/20260912-databricks-dogfood-spine/phases/11b-plan.md`
+/// test 1: `--next-day` against an empty dry-run store resolves to the
+/// fixture's first day, not today's real calendar date.
+#[test]
+fn loader_next_day_picks_the_earliest_unloaded_fixture_day() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = tmp.path().join("store");
+
+    let out = run_loader(&["--next-day", "--dry-run-store", store.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(FIXTURE_DAYS[0]),
+        "expected the fixture's first day ({}) to be loaded, got: {stdout}",
+        FIXTURE_DAYS[0]
+    );
+
+    let ledger = std::fs::read_to_string(store.join("loader_days.txt")).expect("read ledger");
+    assert_eq!(ledger.trim(), FIXTURE_DAYS[0]);
+}
+
+/// Test 2: three successive `--next-day` invocations against the same store
+/// load the fixture's first three days, in order.
+#[test]
+fn loader_next_day_advances_across_consecutive_invocations() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = tmp.path().join("store");
+
+    for expected_day in &FIXTURE_DAYS[0..3] {
+        let out = run_loader(&["--next-day", "--dry-run-store", store.to_str().unwrap()]);
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(*expected_day),
+            "expected day {expected_day} to be loaded, got: {stdout}"
+        );
+    }
+
+    let ledger = std::fs::read_to_string(store.join("loader_days.txt")).expect("read ledger");
+    let recorded: Vec<&str> = ledger.lines().map(str::trim).collect();
+    assert_eq!(recorded, &FIXTURE_DAYS[0..3]);
+}
+
+/// Test 3: once every fixture day is already recorded, `--next-day` exits 0
+/// with an explicit message rather than erroring or fabricating a day — a
+/// scheduled run after the fixture runs out must not fail the job.
+#[test]
+fn loader_next_day_is_a_no_op_once_the_fixture_is_exhausted() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = tmp.path().join("store");
+    std::fs::create_dir_all(&store).expect("mkdir store");
+    let ledger = store.join("loader_days.txt");
+    let all_days = FIXTURE_DAYS.join("\n") + "\n";
+    std::fs::write(&ledger, &all_days).expect("write ledger");
+
+    let out = run_loader(&["--next-day", "--dry-run-store", store.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "an exhausted fixture must exit 0, not fail the job: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .to_lowercase();
+    assert!(
+        combined.contains("no fixture days remain") || combined.contains("nothing left to load"),
+        "expected an explicit exhaustion message, got: {combined}"
+    );
+
+    let ledger_after = std::fs::read_to_string(&ledger).expect("read ledger");
+    assert_eq!(
+        ledger_after, all_days,
+        "an exhausted fixture must not append a fabricated day to the ledger"
+    );
+}
+
+/// Test 4: the `duckdb` Python module path and the `duckdb` CLI path must
+/// produce byte-identical Arrow IPC bytes for the same query, for every
+/// fixture day — otherwise a serverless run (module path) and a local dry
+/// run (CLI path) could silently load different rows.
+#[test]
+fn loader_arrow_slices_are_identical_across_duckdb_access_paths() {
+    if !duckdb_module_importable() {
+        eprintln!(
+            "Skipping — `duckdb` Python module not importable (pip install duckdb to enable)"
+        );
+        return;
+    }
+
+    let python_dir = repo_root().join("python");
+    for day in FIXTURE_DAYS {
+        let script = format!(
+            r#"
+import sys
+sys.path.insert(0, {python_dir:?})
+sys.path.insert(0, {scripts_dir:?})
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("dbx_loader", {loader_path:?})
+loader_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(loader_mod)
+
+modulus = loader_mod.parsed_modulus()
+sql = loader_mod.events_select_sql({day:?}, modulus)
+
+module_bytes = loader_mod.duckdb_query_arrow(sql)
+
+import subprocess
+proc = subprocess.run(
+    ["duckdb", ":memory:", "-c", f"LOAD arrow; COPY ({{sql}}) TO '/dev/stdout' (FORMAT arrow)"],
+    capture_output=True,
+    check=True,
+)
+cli_bytes = proc.stdout
+
+assert module_bytes == cli_bytes, "module and CLI Arrow bytes diverge for day {day}"
+print("match")
+"#,
+            python_dir = python_dir,
+            scripts_dir = repo_root().join("scripts"),
+            loader_path = loader_py(),
+            day = day,
+        );
+        let out = Command::new("python3")
+            .args(["-c", &script])
+            .current_dir(repo_root())
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn python3: {e}"));
+        assert!(
+            out.status.success(),
+            "day {day} stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("match"));
+    }
+}
+
+/// Test 5: with `duckdb` scrubbed off `PATH`, the loader's dry-run path
+/// still succeeds — proving the module access path works with no CLI
+/// binary present, exactly the shape a serverless Python environment has.
+#[test]
+fn loader_runs_without_the_duckdb_cli_on_path() {
+    if !duckdb_module_importable() {
+        eprintln!(
+            "Skipping — `duckdb` Python module not importable (pip install duckdb to enable)"
+        );
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let store = tmp.path().join("store");
+
+    // Scrub PATH of any directory containing a `duckdb` binary, leaving only
+    // enough for `python3` itself to resolve.
+    let python3_path = Command::new("which")
+        .arg("python3")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let python3_dir = python3_path
+        .as_deref()
+        .and_then(|p| Path::new(p).parent())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let out = Command::new("python3")
+        .arg(loader_py())
+        .args(["--next-day", "--dry-run-store", store.to_str().unwrap()])
+        .current_dir(repo_root())
+        .env("PATH", python3_dir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn dbx-dogfood-loader.py: {e}"));
+    assert!(
+        out.status.success(),
+        "loader must run with no `duckdb` CLI on PATH when the Python module is importable: \
+         stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }

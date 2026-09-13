@@ -41,13 +41,32 @@ Modes:
                                          instead of touching a real
                                          workspace — proves the guard and the
                                          read path with no credential.
+    --next-day [--dry-run-store <dir>]  Resolves the day itself: the earliest
+                                         fixture day the ledger (the live
+                                         `_loader_days` table, or the dry-run
+                                         store) has not yet recorded, then
+                                         loads it exactly as --date D would.
+                                         A scheduled run has no real calendar
+                                         relationship to the fixed historical
+                                         fixture, so it must advance its own
+                                         ledger rather than trust wall-clock
+                                         time. Exits 0 with a message, never
+                                         an error, once the fixture is
+                                         exhausted.
 
 The idempotence guard always runs BEFORE any frame is built (matching
 load_day.sh's own `_loader_days` check): an already-loaded day is a no-op
 that touches neither the fixture nor Unity Catalog / the dry-run store.
+
+DuckDB access prefers the `duckdb` Python module and falls back to the
+`duckdb` CLI binary only when the module is not importable — a serverless
+Databricks Python environment installs Python packages but has no CLI binary
+on PATH, so the module path is what actually runs in production; the CLI
+fallback exists for a local shell that has the binary but not the package.
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -196,16 +215,67 @@ def cmd_emit_sql(date):
     )
 
 
-def duckdb_query_arrow(sql):
-    """Runs `sql` against the fixture via the `duckdb` CLI and returns Arrow IPC
-    stream bytes (stdlib subprocess only — no Python duckdb/pyarrow dependency
-    is needed for this step, matching load_day.sh's own use of the CLI).
+def _duckdb_module():
+    """The importable `duckdb` Python module, or None. Cached per-process:
+    called on every query, and the import itself is the expensive part when
+    it fails (a full sys.path scan)."""
+    if not hasattr(_duckdb_module, "_cached"):
+        try:
+            import duckdb as duckdb_module
 
-    `arrow` moved out of DuckDB's core/autoload-known extension set into the
-    community repository, so unlike `parquet` it is never autoloaded — an
-    explicit `LOAD` is required even once `INSTALL ... FROM community` has
-    cached it on disk (`duckdb :memory: -c "INSTALL arrow FROM community"`,
-    a one-time step this function does not perform itself)."""
+            _duckdb_module._cached = duckdb_module
+        except ImportError:
+            _duckdb_module._cached = None
+    return _duckdb_module._cached
+
+
+def duckdb_rows(sql):
+    """Runs `sql` against the fixture and returns a list of row tuples, via
+    the `duckdb` Python module when importable, else the `duckdb` CLI. One
+    SQL definition, two access paths — a serverless Databricks Python
+    environment has the module but no CLI binary on PATH."""
+    duckdb_module = _duckdb_module()
+    if duckdb_module is not None:
+        con = duckdb_module.connect(":memory:")
+        try:
+            return con.execute(sql).fetchall()
+        finally:
+            con.close()
+    proc = subprocess.run(
+        ["duckdb", ":memory:", "-json", "-c", sql],
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"duckdb query failed: {proc.stderr.decode(errors='replace')}")
+    rows = json.loads(proc.stdout.decode())
+    return [tuple(row.values()) for row in rows]
+
+
+def duckdb_query_arrow(sql):
+    """Runs `sql` against the fixture and returns Arrow IPC stream bytes, via
+    the `duckdb` Python module when importable, else the `duckdb` CLI.
+
+    The CLI path needs an explicit `LOAD arrow`: `arrow` moved out of
+    DuckDB's core/autoload-known extension set into the community
+    repository, so unlike `parquet` it is never autoloaded even once
+    `INSTALL ... FROM community` has cached it on disk
+    (`duckdb :memory: -c "INSTALL arrow FROM community"`, a one-time step
+    this function does not perform itself)."""
+    duckdb_module = _duckdb_module()
+    if duckdb_module is not None:
+        import pyarrow as pa
+
+        con = duckdb_module.connect(":memory:")
+        try:
+            table = con.execute(sql).arrow()
+        finally:
+            con.close()
+        sink = pa.BufferOutputStream()
+        writer = pa.ipc.new_stream(sink, table.schema)
+        writer.write_table(table)
+        writer.close()
+        return sink.getvalue().to_pybytes()
     proc = subprocess.run(
         [
             "duckdb",
@@ -222,17 +292,17 @@ def duckdb_query_arrow(sql):
 
 
 def duckdb_scalar(sql):
-    proc = subprocess.run(
-        ["duckdb", ":memory:", "-json", "-c", sql],
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"duckdb query failed: {proc.stderr.decode(errors='replace')}")
-    import json
+    return duckdb_rows(sql)[0][0]
 
-    rows = json.loads(proc.stdout.decode())
-    return list(rows[0].values())[0]
+
+def fixture_days():
+    """Every distinct day the fixture holds, ascending — the pool `--next-day`
+    picks its candidate from."""
+    rows = duckdb_rows(
+        f"SELECT DISTINCT CAST(created_at AS DATE) AS d FROM read_parquet('{SAMPLE_PARQUET}') "
+        "ORDER BY d"
+    )
+    return [str(r[0]) for r in rows]
 
 
 def ledger_path(store_dir):
@@ -250,6 +320,58 @@ def dry_run_already_loaded(store_dir, date):
 def dry_run_record(store_dir, date):
     with open(ledger_path(store_dir), "a", encoding="utf-8") as f:
         f.write(date + "\n")
+
+
+def dry_run_loaded_days(store_dir):
+    path = ledger_path(store_dir)
+    if not os.path.exists(path):
+        return set()
+    with open(path, encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
+
+
+def next_unloaded_day(loaded_days):
+    """The earliest fixture day not in `loaded_days`, or None once the fixture
+    is exhausted — the one predicate both the dry-run and live `--next-day`
+    paths share."""
+    for day in fixture_days():
+        if day not in loaded_days:
+            return day
+    return None
+
+
+def cmd_next_day_dry_run(store_dir):
+    os.makedirs(store_dir, exist_ok=True)
+    day = next_unloaded_day(dry_run_loaded_days(store_dir))
+    if day is None:
+        print("no fixture days remain to load", file=sys.stderr)
+        return
+    cmd_dry_run_store(day, store_dir)
+
+
+def cmd_next_day():
+    from smelt.databricks_adapter import DatabricksAdapter
+
+    host = os.environ.get("SMELT_DBX_HOST")
+    if not host:
+        print("SMELT_DBX_HOST is not set — source scripts/dbx-dogfood-env.sh first", file=sys.stderr)
+        sys.exit(1)
+    token = os.environ.get("SMELT_DBX_TOKEN")
+
+    adapter = DatabricksAdapter(host, catalog=CATALOG, token=token)
+    try:
+        loaded_days = set()
+        if adapter.table_exists(LEDGER_TABLE):
+            result = adapter.execute_sql(f"SELECT day FROM {LEDGER_TABLE}")
+            loaded_days = {str(v.as_py()) for v in result.column("day")}
+        day = next_unloaded_day(loaded_days)
+    finally:
+        adapter.close()
+
+    if day is None:
+        print("no fixture days remain to load", file=sys.stderr)
+        return
+    cmd_execute(day)
 
 
 def cmd_dry_run_store(date, store_dir):
@@ -306,6 +428,7 @@ def main():
     parser.add_argument("--apply-ddl", action="store_true")
     parser.add_argument("--emit-sql", action="store_true")
     parser.add_argument("--emit-slice-sql", action="store_true")
+    parser.add_argument("--next-day", action="store_true")
     parser.add_argument("--date")
     parser.add_argument("--dry-run-store")
     args = parser.parse_args()
@@ -325,6 +448,14 @@ def main():
         if not args.date:
             parser.error("--emit-slice-sql requires --date")
         cmd_emit_slice_sql(args.date)
+        return
+    if args.next_day:
+        if args.date:
+            parser.error("--next-day resolves its own date — do not pass --date")
+        if args.dry_run_store:
+            cmd_next_day_dry_run(args.dry_run_store)
+        else:
+            cmd_next_day()
         return
     if not args.date:
         parser.error("--date is required")

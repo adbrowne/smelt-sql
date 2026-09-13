@@ -307,6 +307,8 @@ bash scripts/dbx-bundle.sh validate     # databricks bundle validate — schema-
                                          # bundle against a local stub; needs no workspace
 bash scripts/dbx-bundle.sh deploy       # databricks bundle deploy — uploads the bundle and
                                          # the locally-built wheel
+bash scripts/dbx-bundle.sh seed         # copies smelt.yml and models/ onto the Volume —
+                                         # never .smelt/, so it cannot reset run state
 bash scripts/dbx-bundle.sh run github_activity_daily   # databricks bundle run
 ```
 
@@ -320,8 +322,20 @@ release tracks the CLI's `dev` branch, the `artifacts:` block is dropped in favo
 The job's own `databricks` target authenticates with the **ambient** session — no `token` key at
 all, and `host` supplied by the job's own runtime environment rather than a developer's config
 (see "Credentials" above). The project itself, including its `.smelt/` run state, lives on a
-Unity Catalog Volume rather than the job's own ephemeral workspace-files checkout, so each
-scheduled run is a genuine incremental window over the previous one rather than a fresh start.
+Unity Catalog Volume — declared as a bundle resource (`resources/volume.yml`) rather than assumed
+pre-existing — instead of the job's own ephemeral workspace-files checkout, so each scheduled run
+is a genuine incremental window over the previous one rather than a fresh start. `bundle deploy`
+creates the Volume; `scripts/dbx-bundle.sh seed` then copies `smelt.yml` and `models/` onto it.
+Re-running `seed` is safe to repeat — it never touches `.smelt/`, the run-state ledger that makes
+incremental windows possible, so a re-seed cannot silently reset a deployed project's state.
+
+The loader task passes `--next-day` rather than a literal date: the fixture the dogfood pipeline
+replays holds a fixed historical range with no relationship to the job trigger's real calendar
+date, so a scheduled run advances the fixture by its own ledger (the live `_loader_days` table)
+instead of trusting wall-clock time, and exits cleanly (not as a job failure) once the fixture is
+exhausted. The loader's own DuckDB access prefers the `duckdb` Python module over shelling out to
+a CLI binary, since a serverless Databricks Python environment installs packages but has no CLI
+on `PATH`.
 
 ## Switching targets
 

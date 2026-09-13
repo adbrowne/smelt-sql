@@ -177,7 +177,7 @@ of the models or the tooling.
 | 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | done |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
-| 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | planned |
+| 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
 | 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing, their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
 
 ## Decision log
@@ -198,6 +198,17 @@ of the models or the tooling.
   deploy-and-observe work is row 11c unchanged, plus 11a's open question about the Volume FUSE
   layer's advisory locking and rename atomicity, which only a live Volume can answer. Nothing
   added to `## Out of scope`.
+
+- 2026-09-13 (phase 11b implement): **row 11b done — all three defects closed offline.** The
+  loader gained `--next-day` (earliest fixture day the ledger hasn't recorded, live `_loader_days`
+  table or dry-run store); DuckDB access now prefers the importable `duckdb` Python module over a
+  CLI shell-out, falling back to the CLI only when the module is absent; the Unity Catalog Volume
+  is now a declared bundle resource (`resources/volume.yml`) seeded by a new `scripts/dbx-bundle.sh
+  seed` subcommand that never touches `.smelt/`. `databricks bundle validate` passes locally with
+  the new resource present. See `phases/11b-summary.md` for the full "For the next planner" list
+  — notably, neither `duckdb` nor `pyarrow` were importable in this session's ambient Python, so
+  the module/CLI Arrow-byte parity test skipped rather than ran; 11c should rebuild
+  `.smelt-dbx-venv` to pick up the new `duckdb` pin before relying on that gate.
 
 - 2026-09-13 (phase 11a implement): **row 11a done — the Asset Bundle, CLI pinning and offline
   `validate` gate all landed and are green.** Two of the plan's own assumptions turned out wrong
