@@ -182,7 +182,9 @@ of the models or the tooling.
 | 11d | Ambient form, offline: a `databricks` target whose `host` **and** `token` are both absent builds its session from the workload's own ambient workspace context (no `.host(...)` call at all), replacing the spec's measured-false claim that a job exports `DATABRICKS_HOST`; `host` present with `token` absent and `host` absent with `token` present both keep their current meanings (the latter refused with a diagnostic). Threaded through the config validator, `SessionArgs::Databricks`, `SparkBackend::new_databricks`, `DatabricksAdapter`, the `databricks_job` target and the dogfood loader's three duplicated host-resolution sites — all gated with no workspace | done |
 | 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | blocked |
 | 11f | Make the deployed wheel installable on Databricks serverless compute, offline: a single-owner `scripts/dbx-wheel-build.sh` builds smelt's `bindings = "bin"` wheel against a declared **manylinux_2_28** floor (`maturin --zig` first, a manylinux Docker container as the documented fallback) and refuses to emit a wheel tagged above that floor or left unrepaired; `databricks.yml`'s `smelt_wheel` artifact calls it instead of a bare `maturin build`; gated by the script's own `verify` mode under test plus a structural bundle test, and proved by building a real compliant wheel with no workspace | done |
-| 11g | **[live]** Resume 11e from its task 3 under the 11f wheel: redeploy (wheel + Volume seed), one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | planned |
+| 11g | **[live]** Resume 11e from its task 3 under the 11f wheel: redeploy (wheel + Volume seed), one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
+| 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | planned |
+| 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | planned |
 
 ## Decision log
 
@@ -1265,6 +1267,67 @@ of the models or the tooling.
   state is still current. `phases/11e-runs.json` and
   `phases/11e-equivalence.json` do not exist; `github_activity_dbx_scheduled.rs`'s three tests
   skip (print-and-return) rather than hard-fail until a future phase commits them.
+
+- **2026-09-13 — phase 11g (resume 11e under 11f's wheel, live). Blocked on a second,
+  orthogonal wheel-platform defect.** Tasks 1-4 done: the three `github_activity_dbx_scheduled.rs`
+  tests repointed to `phases/11g-*` evidence paths (still skip-on-missing, since no evidence
+  landed); `dbx-verify.sh` green; redeploy under 11f's `manylinux_2_28` wheel; seed confirmed to
+  leave `.smelt/` untouched (still just `lock`); the manual smoke run (task 4) run before any
+  cadence compression, per the plan's own rationale for ordering it first.
+
+  **One real bug found and fixed along the way, before the blocker.** `dbx-wheel-build.sh`'s
+  `do_build` diffed the `dist/` directory's *filename set* before and after the build to detect
+  "did a wheel get written" — but `maturin` writes the same filename (same version, same tags)
+  on every rebuild, so a second build of an already-present wheel reported "wrote no new wheel"
+  and aborted even though the build genuinely succeeded. Fixed: compare against a `mktemp`
+  marker's mtime (`find -newer`) instead of a before/after set diff.
+
+  **The blocker.** The redeployed smoke run still failed installing the wheel:
+  `smelt_sql-0.3.2-cp312-cp312-manylinux_2_28_x86_64.whl is not a supported wheel on this
+  platform` — the exact same pip error 11e hit, even though 11f's glibc floor fix is in place and
+  verified correct by `dbx-wheel-build.sh verify`. Investigated two candidate causes:
+  1. **Python ABI mismatch (real, fixed).** Databricks serverless environment version 2 (the
+     `client: "2"` every job environment declares) ships Python **3.11.10**, confirmed via
+     Databricks' own release notes. `maturin`'s `bindings = "bin"` always tags the wheel with
+     whatever interpreter it resolves on `PATH` — cp312, since `dbx-wheel-build.sh`'s zig-bootstrap
+     venv was pinned to Python 3.12 (that pin existed only to build `zig` itself, not because the
+     wheel's target Python mattered — nothing else in this script cared before now). Fixed:
+     pinned the venv to Python 3.11 (both the `uv venv --python` invocation and the Docker
+     builder's `/opt/python/cp311-cp311/bin`), producing a `cp311-cp311` wheel. This is a real,
+     necessary fix, but redeploying and re-running the smoke run under it hit the **identical**
+     pip error, just cp311 named instead of cp312 — proving a second, independent cause.
+  2. **Architecture variability (the actual blocker, unfixed).** Databricks' own docs
+     (`docs/compute/serverless/dependencies`, confirmed via `WebFetch`): "A notebook or job can
+     run on either `aarch64` or `x86_64`, and the architecture can change between runs" — with no
+     documented way to pin one. `dbx-wheel-build.sh` builds an `x86_64`-only wheel (the dev
+     machine's own architecture, and the only one `--zig`/the Docker manylinux image target here).
+     A `bindings = "bin"` wheel embeds a compiled Rust binary plus the vendored `libduckdb.so`, so
+     it is unavoidably architecture-specific — there is no `py3-none-any` escape hatch available
+     to a native-extension wheel the way there is for pure-Python dependencies. Databricks' own
+     recommended fix is exactly this shape: ship both `aarch64` and `x86_64` wheel variants,
+     each constrained to its architecture via a `platform_machine` environment marker in the
+     `smelt_env` environment's `dependencies` list (currently a single `../../../dist/*.whl` glob
+     that assumes one wheel).
+
+  **Why this is not this phase's own fix.** Building a second, `aarch64`-targeted wheel needs
+  new infrastructure 11f never scoped: an `aarch64` cross-compilation path (`zig`'s target
+  triple, or a second Docker image) *and* an `aarch64` `libduckdb.so` to vendor (the currently
+  vendored one is `x86_64`-only), plus `dbx-wheel-build.sh` producing and verifying two wheels
+  instead of one, plus rewriting `github_activity_job.yml`'s `smelt_env.dependencies` from a bare
+  glob to two explicit, `platform_machine`-scoped entries. That is a genuine design decision
+  (which cross-compilation route, whether to vendor a second DuckDB binary) rather than a patch,
+  matching exactly the shape 11e's own wheel blocker had before 11f scoped it. The next planner
+  should land it as its own offline row (buildable and testable with no workspace — cross-
+  compilation and a structural test of the two-entry, marker-scoped dependency list) before
+  resuming this phase's remaining live legs (cadence compression, three scheduled runs, the
+  criterion-8 comparison, the compute tally, the docs-site writeup, cadence restore).
+
+  **State left in the workspace:** deployed at the committed daily cadence (`0 0 6 * * ?`,
+  `UNPAUSED`) with the `cp311`/`manylinux_2_28` wheel — an improvement over 11e's state, but the
+  scheduled run will still fail whenever it lands on `aarch64` compute until the dual-arch wheel
+  lands. The Volume and `.smelt/` are unchanged from 11e/9f's prior state (still 12 fixture days
+  loaded, `2026-08-05`..`2026-08-16`). `phases/11g-runs.json` and `phases/11g-equivalence.json`
+  do not exist; the three `github_activity_dbx_scheduled.rs` tests still skip.
 
 - **2026-09-13 — phase 11c (deploy + three scheduled runs, live).** Deploy, seed, the
   compressed-cadence redeploy, and the `volume_probe` job all succeeded (probe verdict: `flock`

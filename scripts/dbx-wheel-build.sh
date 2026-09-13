@@ -114,6 +114,16 @@ verify_wheel() {
 # `python3-venv` package) if a system `zig` is not already present.
 # `ziglang` ships its binary at `<package>/zig`, not on PATH, so a symlink
 # into the venv's `bin/` is what actually makes `zig` resolvable.
+#
+# This venv's `python3` is also the interpreter maturin resolves first on
+# PATH, which matters beyond zig: `bindings = "bin"` still tags the wheel
+# with that interpreter's exact `cpXYZ-cpXYZ` ABI (maturin always builds one
+# wheel per interpreter, version-specific tag, for bin bindings — the
+# abi3-* escape hatch is pyo3-extension-only). Pinned to 3.11 because
+# Databricks serverless environment version 2 (the `client: "2"` this
+# bundle's job tasks declare) ships Python 3.11.10 — a cp312 wheel measured
+# phase 11g: `pip` refuses it outright ("not a supported wheel on this
+# platform"), independent of the manylinux glibc floor above.
 ensure_zig() {
   if command -v zig >/dev/null 2>&1; then
     return 0
@@ -129,7 +139,7 @@ ensure_zig() {
 
   if [[ ! -x "${zig_link}" ]]; then
     echo "zig not found on PATH — bootstrapping ziglang into ${venv_dir} (one-time)" >&2
-    if ! uv venv --python 3.12 --allow-existing "${venv_dir}" >&2; then
+    if ! uv venv --python 3.11 --allow-existing "${venv_dir}" >&2; then
       echo "ERROR: 'uv venv' failed to create ${venv_dir} — install zig yourself and put it on PATH, or set SMELT_WHEEL_BUILDER=docker" >&2
       exit 1
     fi
@@ -213,7 +223,7 @@ build_with_docker() {
     "quay.io/pypa/manylinux_2_28_x86_64" \
     bash -c "
       set -euo pipefail
-      export PATH=/opt/python/cp312-cp312/bin:\$HOME/.cargo/bin:\$PATH
+      export PATH=/opt/python/cp311-cp311/bin:\$HOME/.cargo/bin:\$PATH
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain '${rust_channel}'
       pip install --quiet maturin
       mkdir -p /tmp/duckdb-lib
@@ -230,8 +240,11 @@ do_build() {
   echo "building smelt wheel via SMELT_WHEEL_BUILDER=${BUILDER} (floor: ${MANYLINUX_FLOOR})" >&2
 
   mkdir -p "${DIST_DIR}"
-  local before
-  before="$(find "${DIST_DIR}" -maxdepth 1 -name '*.whl' 2>/dev/null | sort)"
+  # A marker file's mtime, not a before/after filename-set diff: maturin
+  # writes the same filename (same version, same tags) on every rebuild, so
+  # a set diff sees no "new" file even though the wheel was just rebuilt.
+  local marker
+  marker="$(mktemp)"
 
   if [[ "${BUILDER}" != "docker" ]]; then
     local duckdb_lib_dir
@@ -255,10 +268,9 @@ do_build() {
       ;;
   esac
 
-  local after
-  after="$(find "${DIST_DIR}" -maxdepth 1 -name '*.whl' 2>/dev/null | sort)"
   local new_wheels
-  new_wheels="$(comm -13 <(echo "${before}") <(echo "${after}") | sed '/^$/d')"
+  new_wheels="$(find "${DIST_DIR}" -maxdepth 1 -name '*.whl' -newer "${marker}" 2>/dev/null | sort)"
+  rm -f "${marker}"
 
   if [[ -z "${new_wheels}" ]]; then
     echo "ERROR: build reported success but wrote no new wheel to ${DIST_DIR}" >&2

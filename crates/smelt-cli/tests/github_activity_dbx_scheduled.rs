@@ -12,9 +12,13 @@
 //! maintenance plan, not of how a run was triggered.
 //!
 //! Report-driven: both committed reports are read here, not measured. They
-//! are written by the live phase 11e session driving
-//! `scripts/dbx-bundle.sh runs`, `scripts/dbx-dogfood-oracle.sh`, and the
-//! same equivalence-sweep machinery `github_activity_dbx_oracle.rs` uses.
+//! are written by a future live phase driving `scripts/dbx-bundle.sh runs`,
+//! `scripts/dbx-dogfood-oracle.sh`, and the same equivalence-sweep machinery
+//! `github_activity_dbx_oracle.rs` uses. Phase 11g attempted this and hit a
+//! second wheel-platform defect beyond 11f's scope (Databricks serverless
+//! compute lands each run on either `aarch64` or `x86_64` with no way to
+//! pin it — `dbx-wheel-build.sh` builds `x86_64` only), so evidence is not
+//! yet committed; see `outcome.md` `## Blocked`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -33,13 +37,12 @@ fn repo_root() -> PathBuf {
 }
 
 const RUNS_REPORT_PATH: &str =
-    "docs/outcomes/20260912-databricks-dogfood-spine/phases/11e-runs.json";
+    "docs/outcomes/20260912-databricks-dogfood-spine/phases/11g-runs.json";
 const EQUIVALENCE_REPORT_PATH: &str =
-    "docs/outcomes/20260912-databricks-dogfood-spine/phases/11e-equivalence.json";
+    "docs/outcomes/20260912-databricks-dogfood-spine/phases/11g-equivalence.json";
 
-/// `None` until a live phase 11e session commits `phases/11e-runs.json` —
-/// these three consecutive scheduled runs are wall-clock-bound (criterion 11
-/// needs three real `trigger: PERIODIC` firings) and blocked as of this
+/// `None` until a live phase commits `phases/11g-runs.json` — these three
+/// consecutive scheduled runs are wall-clock-bound and blocked as of this
 /// commit (see `## Blocked`), so the tests below skip rather than hard-fail
 /// until that evidence lands, matching the report-driven pattern
 /// `github_activity_dbx_oracle.rs`'s own history uses while a sweep is
@@ -57,7 +60,7 @@ fn runs_report() -> Option<serde_json::Value> {
     )
 }
 
-/// `None` until the same live session commits `phases/11e-equivalence.json`
+/// `None` until the same live session commits `phases/11g-equivalence.json`
 /// — see `runs_report`'s doc comment.
 fn equivalence_report() -> Option<serde_json::Value> {
     let path = repo_root().join(EQUIVALENCE_REPORT_PATH);
@@ -92,7 +95,7 @@ fn scheduled_runs(report: &serde_json::Value) -> Vec<&serde_json::Value> {
 #[test]
 fn three_consecutive_scheduled_runs_succeeded() {
     let Some(report) = runs_report() else {
-        eprintln!("Skipping — phases/11e-runs.json not yet committed (see outcome.md ## Blocked)");
+        eprintln!("Skipping — phases/11g-runs.json not yet committed (see outcome.md ## Blocked)");
         return;
     };
     let runs = scheduled_runs(&report);
@@ -166,7 +169,7 @@ fn three_consecutive_scheduled_runs_succeeded() {
 #[test]
 fn scheduled_runs_advanced_the_fixture() {
     let Some(report) = runs_report() else {
-        eprintln!("Skipping — phases/11e-runs.json not yet committed (see outcome.md ## Blocked)");
+        eprintln!("Skipping — phases/11g-runs.json not yet committed (see outcome.md ## Blocked)");
         return;
     };
     let runs = scheduled_runs(&report);
@@ -204,7 +207,7 @@ fn report_checkpoints(report: &serde_json::Value) -> Vec<&serde_json::Value> {
 fn scheduled_state_matches_its_full_refresh_oracle() {
     let Some(report) = equivalence_report() else {
         eprintln!(
-            "Skipping — phases/11e-equivalence.json not yet committed (see outcome.md ## Blocked)"
+            "Skipping — phases/11g-equivalence.json not yet committed (see outcome.md ## Blocked)"
         );
         return;
     };
