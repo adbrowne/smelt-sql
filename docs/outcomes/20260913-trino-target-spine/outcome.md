@@ -139,7 +139,7 @@ not an answer — every cell is still established by execution.
 | 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | done |
 | 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | done |
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | done |
-| 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
+| 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | planned |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` and the spec table written together, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
@@ -276,5 +276,14 @@ not an answer — every cell is still established by execution.
   `[1, "hello"]` confirming the write went through to MinIO and back, and a second `trino-up.sh`
   run with no intervening `down` reached ready again — the idempotency requirement, satisfied
   structurally by named volumes rather than by leftover-detection logic.
+
+- **2026-09-14 — phase 5's client is `reqwest` over pure Rust, and its tests run against a
+  local `axum` stub coordinator rather than the Docker tier.** `reqwest` 0.12 is already in
+  `Cargo.lock` (pulled by `libduckdb-sys`), so a direct `default-features = false` +
+  `rustls-tls` dependency adds no new compilation graph — cheaper than hand-rolling HTTP over
+  `hyper`, and it keeps criterion 4's "no Python interpreter, no venv, no third-party client"
+  promise. The tests bind an `axum` router (already a workspace dependency via `smelt-ui`) on an
+  ephemeral port so paging, error mapping and header assertions are provable with
+  `SMELT_TRINO_URL` unset — the live tier is phase 6's oracle, not phase 5's.
 
 ## Blocked
