@@ -16,7 +16,7 @@ crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1441
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
 crates/smelt-cli/tests/github_activity_bq_oracle.rs 1002
-crates/smelt-cli/tests/github_activity_dual_target.rs 1266
+crates/smelt-cli/tests/github_activity_dual_target.rs 1358
 crates/smelt-cli/tests/github_activity_oracle.rs 1069
 crates/smelt-cli/tests/incremental/schema_evolution.rs 1741
 crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406

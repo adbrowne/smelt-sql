@@ -13,9 +13,9 @@
           "scope": "compared"
         },
         {
-          "incr_only": 9,
+          "incr_only": 2,
           "incr_rows": 29405,
-          "oracle_only": 9,
+          "oracle_only": 2,
           "oracle_rows": 29405,
           "relation": "gold_events_enriched",
           "scope": "compared"
@@ -70,9 +70,9 @@
         },
         {
           "incr_only": 0,
-          "incr_rows": 29911,
+          "incr_rows": 29303,
           "oracle_only": 0,
-          "oracle_rows": 29911,
+          "oracle_rows": 29303,
           "relation": "silver_actor_naming",
           "scope": "compared"
         },
@@ -118,9 +118,9 @@
         },
         {
           "incr_only": 0,
-          "incr_rows": 29911,
+          "incr_rows": 29306,
           "oracle_only": 0,
-          "oracle_rows": 29911,
+          "oracle_rows": 29306,
           "relation": "silver_repo_naming",
           "scope": "compared"
         },
@@ -149,9 +149,9 @@
           "scope": "compared"
         },
         {
-          "incr_only": 10,
+          "incr_only": 3,
           "incr_rows": 32758,
-          "oracle_only": 10,
+          "oracle_only": 3,
           "oracle_rows": 32758,
           "relation": "gold_events_enriched",
           "scope": "compared"
@@ -206,9 +206,9 @@
         },
         {
           "incr_only": 0,
-          "incr_rows": 33332,
+          "incr_rows": 32647,
           "oracle_only": 0,
-          "oracle_rows": 33332,
+          "oracle_rows": 32647,
           "relation": "silver_actor_naming",
           "scope": "compared"
         },
@@ -254,9 +254,9 @@
         },
         {
           "incr_only": 0,
-          "incr_rows": 33332,
+          "incr_rows": 32651,
           "oracle_only": 0,
-          "oracle_rows": 33332,
+          "oracle_rows": 32651,
           "relation": "silver_repo_naming",
           "scope": "compared"
         },
@@ -285,9 +285,9 @@
           "scope": "compared"
         },
         {
-          "incr_only": 16,
+          "incr_only": 9,
           "incr_rows": 36762,
-          "oracle_only": 16,
+          "oracle_only": 9,
           "oracle_rows": 36762,
           "relation": "gold_events_enriched",
           "scope": "compared"
@@ -342,9 +342,9 @@
         },
         {
           "incr_only": 0,
-          "incr_rows": 37395,
+          "incr_rows": 36650,
           "oracle_only": 0,
-          "oracle_rows": 37395,
+          "oracle_rows": 36650,
           "relation": "silver_actor_naming",
           "scope": "compared"
         },
@@ -390,9 +390,9 @@
         },
         {
           "incr_only": 0,
-          "incr_rows": 37395,
+          "incr_rows": 36654,
           "oracle_only": 0,
-          "oracle_rows": 37395,
+          "oracle_rows": 36654,
           "relation": "silver_repo_naming",
           "scope": "compared"
         },

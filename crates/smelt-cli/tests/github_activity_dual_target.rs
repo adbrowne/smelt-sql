@@ -31,11 +31,15 @@
 //! without evidence and evidence cannot be left unregistered
 //! ([`registry_entries_are_all_live`]).
 //!
-//! The Databricks sweep has no committed report or liveness ratchet yet — a
-//! second, unresolved divergence surfaced by the live run needs a
-//! root-caused bound before that ratchet can be added without going
-//! permanently red; see `docs/outcomes/20260912-databricks-dogfood-spine/
-//! outcome.md` §Blocked, phase 8.
+//! `docs/outcomes/20260912-databricks-dogfood-spine/phases/08-parity.json` is
+//! the Databricks sweep's committed output, measured under phase 9e's
+//! ledgerless-succession-rebuild fix and re-run by phase 9f: the only
+//! remaining divergence is `gold_events_enriched`'s registered
+//! `UnorderedColumnDivergence` (deferred to `databricks-correctness`, per
+//! phase 7b's decision log). [`DBX_DIVERGENCE_REGISTRY`] is checked against
+//! it in both directions by [`dbx_registry_entries_are_all_live`], and
+//! [`the_committed_parity_report_shows_no_unregistered_difference`] fails on
+//! any unregistered difference.
 //!
 //! # The comparator and the landing seam
 //!
@@ -1117,21 +1121,17 @@ fn databricks_relation_set_mismatch_fails() {
 // The live Databricks sweep
 // ---------------------------------------------------------------------------
 //
-// There is still no committed report or liveness ratchet
-// (`dbx_registry_entries_are_all_live` / `registry_entries_are_all_live`'s
-// Databricks counterpart): phase 9d's from-scratch replay hit a SECOND
-// live-only gap in 9c's fix, since fixed offline by phase 9e —
-// `rebuild_succession_state` now branches on `cell.state_downgraded` before
-// its `realises_tombstone_ledger` gate and routes a downgraded cell through
-// `emit_succession_full_rebuild_ledgerless`, which writes the presented arm
-// alone (no tombstone DDL, no ledger DELETE/INSERT, no clock-tie probe).
-// 9e's own test (`tests/succession_downgraded_rebuild.rs`) executes this
-// path against a real DuckDB backend, closing the gap 9c's dispatch-only
-// tests left invisible offline. `08-parity.json` still does not exist,
-// though, so this file's report gates are restored by phase 9f's live
-// replay, not here. See
-// `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` §Blocked,
-// phase 9d, and phase 9e's summary for the fix.
+// Phase 9d's from-scratch replay hit a SECOND live-only gap in 9c's fix,
+// fixed offline by phase 9e: `rebuild_succession_state` now branches on
+// `cell.state_downgraded` before its `realises_tombstone_ledger` gate and
+// routes a downgraded cell through `emit_succession_full_rebuild_ledgerless`,
+// which writes the presented arm alone (no tombstone DDL, no ledger
+// DELETE/INSERT, no clock-tie probe). 9e's own test
+// (`tests/succession_downgraded_rebuild.rs`) executes this path against a
+// real DuckDB backend, closing the gap 9c's dispatch-only tests left
+// invisible offline. Phase 9f re-ran this sweep under the fix —
+// `silver_actor_naming`'s `dbx_only` moved from 520 to 0 — and committed the
+// refreshed `08-parity.json`; the report gates below are restored against it.
 
 /// The default day count/checkpoint parsed out of
 /// `scripts/dbx-dogfood-parity.sh` matches the constant this file's own live
@@ -1257,7 +1257,102 @@ fn duckdb_and_databricks_agree_on_every_model() {
     );
 }
 
+// ---------------------------------------------------------------------------
 // The committed Databricks parity report, and the two-sided liveness ratchet
-// over it (`dbx_registry_entries_are_all_live`), are added once a phase lands
-// a fresh `08-parity.json` measured under a `rebuild_succession_state` that
-// actually completes on Databricks — see the section comment above.
+// over it
+// ---------------------------------------------------------------------------
+
+/// The measured result of the live Databricks sweep, as committed by phase
+/// 9f's post-fix replay.
+fn dbx_parity_report() -> serde_json::Value {
+    let path = repo_root().join(DBX_PARITY_REPORT_PATH);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read the committed parity report {path:?}: {e}"));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
+}
+
+/// Relations the committed Databricks report shows diverging at *any*
+/// compared checkpoint. Mirrors `divergent_relations` above under this
+/// sweep's own `duck_only`/`dbx_only` field names.
+fn dbx_divergent_relations(report: &serde_json::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for cp in report_checkpoints(report) {
+        for rel in cp["relations"].as_array().expect("relations array") {
+            let duck_only = rel["duck_only"].as_i64().expect("duck_only");
+            let dbx_only = rel["dbx_only"].as_i64().expect("dbx_only");
+            if duck_only != 0 || dbx_only != 0 {
+                out.insert(rel["relation"].as_str().expect("relation name").to_string());
+            }
+        }
+    }
+    out
+}
+
+/// **Criterion 7, closed.** At the committed checkpoint, every compared
+/// relation's row-for-row content agrees between DuckDB and Databricks —
+/// zero rows in both directions of a whole-row multiset difference — unless
+/// the relation carries a registered [`DBX_DIVERGENCE_REGISTRY`] entry, in
+/// which case the divergence is licensed rather than a violation.
+#[test]
+fn the_committed_parity_report_shows_no_unregistered_difference() {
+    let report = dbx_parity_report();
+    let registered: BTreeSet<String> = DBX_DIVERGENCE_REGISTRY
+        .iter()
+        .map(|e| e.relation.to_string())
+        .collect();
+    let mut offenders = Vec::new();
+    for cp in report_checkpoints(&report) {
+        let label = cp["label"].as_str().expect("label");
+        for rel in cp["relations"].as_array().expect("relations") {
+            let relation = rel["relation"].as_str().expect("relation name");
+            if registered.contains(relation) {
+                continue;
+            }
+            let duck_only = rel["duck_only"].as_i64().expect("duck_only");
+            let dbx_only = rel["dbx_only"].as_i64().expect("dbx_only");
+            if duck_only != 0 || dbx_only != 0 {
+                offenders.push(format!(
+                    "{label}/{relation}: duck_only={duck_only}, dbx_only={dbx_only}"
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the committed parity report shows DuckDB and Databricks disagreeing with no \
+         registered licence — each of these is a finding for a follow-on \
+         databricks-correctness outcome, not something to register away silently: {offenders:?}"
+    );
+}
+
+/// The two-sided liveness ratchet. An entry naming a relation the committed
+/// report shows agreeing is stale and must be deleted; a relation the report
+/// shows diverging with no entry is an unregistered divergence — caught here
+/// rather than only by
+/// [`the_committed_parity_report_shows_no_unregistered_difference`] so a
+/// healed divergence forces the entry out instead of just going quiet.
+/// Mirrors `registry_entries_are_all_live` above and
+/// `github_activity_dbx_oracle.rs::equivalence_registry_entries_are_all_live`.
+#[test]
+fn dbx_registry_entries_are_all_live() {
+    let report = dbx_parity_report();
+    let measured = dbx_divergent_relations(&report);
+    let registered: BTreeSet<String> = DBX_DIVERGENCE_REGISTRY
+        .iter()
+        .map(|e| e.relation.to_string())
+        .collect();
+
+    let stale: Vec<&String> = registered.difference(&measured).collect();
+    assert!(
+        stale.is_empty(),
+        "DBX_DIVERGENCE_REGISTRY entries name relations the committed parity report shows \
+         agreeing at every compared checkpoint — delete them: {stale:?}"
+    );
+    let unregistered: Vec<&String> = measured.difference(&registered).collect();
+    assert!(
+        unregistered.is_empty(),
+        "the committed parity report shows these relations diverging with no registry \
+         entry — register each with a root-caused reason and a checkable bound: \
+         {unregistered:?}"
+    );
+}

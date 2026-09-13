@@ -168,17 +168,44 @@ of the models or the tooling.
 | 6f | **[live]** Elide the window frame on `LAG`/`LEAD` when emitting SparkSQL/Databricks (Spark refuses any frame on an offset function; the SQL standard and DuckDB both ignore it, so elision is semantics-preserving) via a registry `Emission::Rewrite` verdict planned from the source CST outside the printer, then re-run the full refresh to a clean 16/16 and record what remains | done |
 | 7 | **[live]** Three or more consecutive incremental windows, run reports captured, frontier and engine-resident state inspected between runs | done |
 | 7b | **[live]** Give the Databricks/Delta target a realisable route for `gold.events_enriched`'s key-addressed model-edge cell — either realise the fingerprint sidecar on Delta, or downgrade the cell at plan-derivation time rather than refusing at execution (the shape `20260906-bigquery-correctness` phase 11 took for its three T5 `bail!` sites). Row 7's three windows recorded no further incremental-path refusal beyond this one — it recurs identically (same model, same error) in every window and is otherwise the only gap — so 7b's scope is exactly this one cell; re-run the windows to a clean 16/16 once it lands | done |
-| 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | blocked |
+| 8 | **[live]** Dual-target parity DuckDB vs Databricks over the same rows, via the generalised comparator; register each difference with a reason or fail | done |
 | 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | done |
-| 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
+| 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | done |
 | 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | done |
-| 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | blocked |
+| 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | done |
 | 9e | Land the ledger-free succession full rebuild 9c's dispatch fix needs: `rebuild_succession_state` stops refusing when the cell is `state_downgraded`, emitting the presented arm alone (no tombstone DDL, no ledger delete/insert, no clock-tie probe) through one new single-owned emitter in `smelt-logical`, gated by a test that *executes* the downgraded path against a real DuckDB backend rather than only asserting the dispatch decision | done |
-| 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | planned |
+| 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | done |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9f implement): **row 9f done — criteria 7 and 8 closed on post-fix live
+  numbers; rows 8, 9b and 9d come off `## Blocked`.** Resumed 9d's staged state (8 fixture days,
+  26,220 rows, 2026-08-05..08-12) unchanged; built the binary from HEAD so the live legs ran
+  under 9e's `emit_succession_full_rebuild_ledgerless` fix. A full refresh over
+  `[2026-08-05, 2026-08-13)` landed a clean **16/16**, with `silver.actor_naming` at exactly
+  25,700 rows (matching DuckDB) instead of the pre-fix 26,177 with up to 7x duplication. Windows
+  9/10/11 (`2026-08-13/14/15`) each ran 16/16 and matched their oracle refresh exactly at every
+  relation, including `silver_actor_naming`. The equivalence sweep
+  (`09b-equivalence.json`) confirms `silver_actor_naming` exact at all three checkpoints;
+  `gold_events_enriched` alone diverges, matching its already-registered
+  `UnorderedColumnDivergence`. The parity leg — an 11-day DuckDB replay (after clearing a stale
+  local `examples/github_activity/.smelt/targets/dev` + `target/dev.duckdb` from an earlier
+  session that tripped `SourceMutationProfileViolated` on a fresh reload) against the Databricks
+  end state — measured `silver_actor_naming`'s `dbx_only` at **0** (was 520 in the pre-fix
+  `08-parity.json`); only `gold_events_enriched` still diverges, identically bounded. Landed the
+  two deferred report gates in `github_activity_dual_target.rs`
+  (`the_committed_parity_report_shows_no_unregistered_difference`,
+  `dbx_registry_entries_are_all_live`, plus their `dbx_parity_report`/`dbx_divergent_relations`
+  helpers) red-green against the fresh `08-parity.json` — 26/26 offline. The three deferral
+  comments (module doc, the "live Databricks sweep" section header, and the trailing stub) were
+  replaced with what actually landed. `cargo test -p smelt-cli --test github_activity_dbx_oracle`
+  stays 18/18 against the refreshed `09b-equivalence.json`.
+  `cargo test -p smelt-runtime --test succession_downgraded_rebuild --test statement_parity` and
+  `cargo test -p smelt-cli --test maintenance_conformance` all green, untouched by this phase.
+  `bash .claude/scripts/verify-phase.sh` green. See `phases/09f-summary.md`. Nothing left the
+  outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 9e implement): **row 9e done — the ledger-free succession full rebuild
   lands entirely offline.** `presented_arm_statement` extracted as the shared fold both
@@ -911,8 +938,11 @@ of the models or the tooling.
 
 ## Blocked
 
-- **2026-09-13 — phase 9d (replay under 9c's fix, live). A second live-only gap in 9c's fix,
-  never reachable by 9c's own offline tests.** The reset stage, the loader/DDL sequence and the
+- **2026-09-13 — phase 9d (replay under 9c's fix, live). RESOLVED by phases 9e/9f — 9e's
+  ledgerless rebuild closed the gap offline, and 9f's replay confirms it live (clean 16/16
+  full refresh, `silver_actor_naming` exact at all three windows, `dbx_only` 520 → 0). Original
+  text kept for context.** A second live-only gap in 9c's fix, never reachable by 9c's own
+  offline tests. The reset stage, the loader/DDL sequence and the
   8-day fixture reload (days 2026-08-05 through 2026-08-12, `workspace.smelt_dogfood.
   github_events` at 26,220 rows) all completed cleanly. `smelt run --target databricks
   --full-refresh --allow-full-refresh --event-time-start 2026-08-05 --event-time-end
@@ -976,7 +1006,10 @@ of the models or the tooling.
   stage, the checkpoint-lockstep tests, the `state.md` spec delta) is already committed and does
   not need repeating.
 
-- **2026-09-13 — phase 9b (equivalence oracle, live).** Three checkpoints (w09/w10/w11,
+- **2026-09-13 — phase 9b (equivalence oracle, live). RESOLVED by phase 9f — the re-measured
+  sweep under 9e's fix is clean (`silver_actor_naming` exact at all three checkpoints, as it
+  already was here; only `gold_events_enriched`'s already-registered divergence remains) and
+  the two deferred report gates now land. Original text kept for context.** Three checkpoints (w09/w10/w11,
   `2026-08-13/14/15`) measured; the sweep is not clean, per the plan's own contingency
   (commit evidence, land tests 2-4 only, block, hand to 9c). Two relations violate:
   1. **`gold_events_enriched`** — `9/9`, `10/10`, `16/16` (`incr_only`/`oracle_only`) at
@@ -1003,7 +1036,10 @@ of the models or the tooling.
 - **2026-09-13 — phase 8 (dual-target parity). RESOLVED by phase 9c — see the 9c decision-log
   entry below for the root cause and fix; route 1 (a re-read of `succession/execute.rs`'s
   MERGE/patch statement) turned out to name the wrong mechanism, route 3 (fix the write path)
-  is what landed, at a smaller scope than either candidate anticipated.** Original text kept
+  is what landed, at a smaller scope than either candidate anticipated. Live-re-measured and
+  closed by phase 9f: the re-run `08-parity.json` shows `silver_actor_naming` at `dbx_only=0`
+  (was 520), and `the_committed_parity_report_shows_no_unregistered_difference` /
+  `dbx_registry_entries_are_all_live` are now hard gates.** Original text kept
   for context: `silver_actor_naming` has 520 more rows
   on Databricks than DuckDB after the live sweep (`duckdb_only=0, databricks_only=520`;
   Databricks holds 26,177 `DISTINCT` rows against DuckDB's 25,700 over the identical

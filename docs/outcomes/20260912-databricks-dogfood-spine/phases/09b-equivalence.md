@@ -1,7 +1,7 @@
 | relation | w09 (2026-08-13) | w10 (2026-08-14) | w11 (2026-08-15) |
 |---|---|---|---|
 | `bronze_events` | = | = | = |
-| `gold_events_enriched` | -9/+9 | -10/+10 | -16/+16 |
+| `gold_events_enriched` | -2/+2 | -3/+3 | -9/+9 |
 | `gold_repo_activity_daily` | = | = | = |
 | `gold_repo_dim` | = | = | = |
 | `marts_daily_active_contributors` | = | = | = |
