@@ -179,8 +179,23 @@ of the models or the tooling.
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
 | 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
+| 11d | Ambient form, offline: a `databricks` target whose `host` **and** `token` are both absent builds its session from the workload's own ambient workspace context (no `.host(...)` call at all), replacing the spec's measured-false claim that a job exports `DATABRICKS_HOST`; `host` present with `token` absent and `host` absent with `token` present both keep their current meanings (the latter refused with a diagnostic). Threaded through the config validator, `SessionArgs::Databricks`, `SparkBackend::new_databricks`, `DatabricksAdapter`, the `databricks_job` target and the dogfood loader's three duplicated host-resolution sites — all gated with no workspace | planned |
+| 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 11d plan, reshape): **split the 11c residue into an offline fix (11d) and a
+  live resume (11e), and settled 11c's open design decision in favour of its route (a).** The
+  outcome answers the question itself: criterion 11 requires the job's target to authenticate
+  with the *ambient* session, "no token, no `${ENV}` secret" — so a host read from an `${ENV}`
+  reference is already outside what the criterion describes, and route (b) (injecting a host via
+  a bundle mechanism so the `${DATABRICKS_HOST}`-reading paths survive unmodified) would preserve
+  a contract the outcome never asked for. 11c's measurement is decisive on the facts too: no
+  host-bearing variable exists in a serverless job task's environment, while `SPARK_REMOTE` — an
+  already-established Connect channel — does, which is exactly what a host-less builder honours.
+  So 11d makes "ambient" mean *no explicit host either*, spec-first, and 11e re-runs the live legs
+  11c never reached. Nothing left the outcome; nothing added to `## Out of scope`.
+
 
 - 2026-09-13 (phase 11c implement, resumed attempt): **blocked on a real ambient-host gap after
   fixing two other genuine job-launch defects.** Deploy, seed, the compressed-cadence redeploy,
