@@ -1120,21 +1120,18 @@ fn databricks_relation_set_mismatch_fails() {
 // There is still no committed report or liveness ratchet
 // (`dbx_registry_entries_are_all_live` / `registry_entries_are_all_live`'s
 // Databricks counterpart): phase 9d's from-scratch replay hit a SECOND
-// live-only gap in 9c's fix — `rebuild_succession_state`
-// (`crates/smelt-runtime/src/maintenance_driver/succession/execute.rs:339`)
-// carries the exact same unconditional `realises_tombstone_ledger` gate as
-// `execute_succession_maintenance`, so 9c's dispatch change (route a
-// `state_downgraded` cell to `rebuild_succession_state` rather than the
-// window-forward loop) still refuses on Databricks: it just moved the same
-// bail from one function to the other. 9c's own differential test
-// (`explain_maintenance/databricks_succession_differential.rs`) and its
-// resolver-level regression test only assert the *dispatch decision*
-// (`state_downgraded` routes to `rebuild_succession_state`), never execute
-// that function against a live backend, so this gap was invisible offline.
-// See `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` §Blocked,
-// phase 9d, for the fix candidates. Restored once a follow-up phase lands a
-// `rebuild_succession_state` route that does not require a ledger the
-// backend cannot realise.
+// live-only gap in 9c's fix, since fixed offline by phase 9e —
+// `rebuild_succession_state` now branches on `cell.state_downgraded` before
+// its `realises_tombstone_ledger` gate and routes a downgraded cell through
+// `emit_succession_full_rebuild_ledgerless`, which writes the presented arm
+// alone (no tombstone DDL, no ledger DELETE/INSERT, no clock-tie probe).
+// 9e's own test (`tests/succession_downgraded_rebuild.rs`) executes this
+// path against a real DuckDB backend, closing the gap 9c's dispatch-only
+// tests left invisible offline. `08-parity.json` still does not exist,
+// though, so this file's report gates are restored by phase 9f's live
+// replay, not here. See
+// `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` §Blocked,
+// phase 9d, and phase 9e's summary for the fix.
 
 /// The default day count/checkpoint parsed out of
 /// `scripts/dbx-dogfood-parity.sh` matches the constant this file's own live

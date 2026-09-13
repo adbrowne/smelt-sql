@@ -397,7 +397,14 @@ Statefulness is an **admission input resolved late**. Plan derivation proceeds i
    `TombstoneLedger`, the `DeleteInsert` region is the whole presented table, so every run
    rebuilds the model in full from the whole source seen so far rather than patching forward
    from the last window — the cost the contract trades for correctness, since a window-forward
-   patch route has no way to retract a delete event it never saw a tombstone for.
+   patch route has no way to retract a delete event it never saw a tombstone for. What that
+   full rebuild writes and skips is exact: it writes the presented table alone — the same fold
+   the ledger-bearing rebuild's own presented arm produces, so the two engines' presented
+   tables stay row- and column-identical — and touches no tombstone relation at all, forgoing
+   the clock-tie probe whose domain CTE reads a ledger this backend has none of. A `(k, t)` tie
+   is therefore resolved by the rebuild fold's own deterministic tie-break rather than being
+   caught ahead of time by the probe — the second cost the contract trades for correctness on
+   such a backend.
 
 The downgrade is sound by construction: every recompute-family technique satisfies the same
 equivalence invariant (`incremental_models.md` §"The equivalence invariant"), so availability

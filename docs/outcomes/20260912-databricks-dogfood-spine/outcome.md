@@ -173,12 +173,33 @@ of the models or the tooling.
 | 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
 | 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | done |
 | 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | blocked |
-| 9e | Land the ledger-free succession full rebuild 9c's dispatch fix needs: `rebuild_succession_state` stops refusing when the cell is `state_downgraded`, emitting the presented arm alone (no tombstone DDL, no ledger delete/insert, no clock-tie probe) through one new single-owned emitter in `smelt-logical`, gated by a test that *executes* the downgraded path against a real DuckDB backend rather than only asserting the dispatch decision | planned |
+| 9e | Land the ledger-free succession full rebuild 9c's dispatch fix needs: `rebuild_succession_state` stops refusing when the cell is `state_downgraded`, emitting the presented arm alone (no tombstone DDL, no ledger delete/insert, no clock-tie probe) through one new single-owned emitter in `smelt-logical`, gated by a test that *executes* the downgraded path against a real DuckDB backend rather than only asserting the dispatch decision | done |
 | 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9e implement): **row 9e done — the ledger-free succession full rebuild
+  lands entirely offline.** `presented_arm_statement` extracted as the shared fold both
+  `emit_succession_full_rebuild` and the new `emit_succession_full_rebuild_ledgerless` call, so
+  the two paths cannot drift; the new emitter is infallible and dialect-blind (no
+  `check_succession_dialect` call), matching the plan. `rebuild_succession_state` now branches
+  on `cell.state_downgraded` before the `realises_tombstone_ledger` guard, taking the
+  ledger-free path with empty ensure/cleanup lists through the same
+  `retry_backend_call`/`execute_write_with_bookkeeping` seam. The new
+  `tests/succession_downgraded_rebuild.rs` executes the downgraded path against a real DuckDB
+  backend (test 3 in the plan's numbering), confirms it reports exactly one statement (test 4),
+  confirms the non-downgraded backstop still works (test 5, asserted against DuckDB's own
+  `realises_tombstone_ledger() == true` since a genuinely ledger-less backend isn't available
+  offline), and confirms idempotent re-runs (test 6). `docs/specs/state.md` §"The degradation
+  contract" extended with what the downgraded rebuild writes/skips, per the plan's spec delta.
+  All named verification gates green, `bash .claude/scripts/verify-phase.sh` green (fmt and
+  clippy needed one round of fixes: `cargo fmt` on the new files, and
+  `#[allow(clippy::too_many_arguments)]` on both new `smelt-logical` functions, matching this
+  module's existing convention). Task 7's deferral comment in
+  `github_activity_dual_target.rs` updated to describe the fix and point restoration of the
+  report gates at phase 9f. Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 9e plan): **Split 9d's residue into an offline fix row (9e) and a live
   replay row (9f); 9d stays blocked as the record of the finding.** 9d's summary root-caused the

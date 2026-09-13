@@ -341,6 +341,95 @@ fn full_rebuild_group_is_transactional_and_replaces_the_ledger() {
     );
 }
 
+#[test]
+fn emit_succession_full_rebuild_ledgerless_emits_only_the_presented_arm() {
+    let model_select_sql = "SELECT customer_id, changed_at, tier, LEAD(changed_at) OVER \
+                                 (PARTITION BY customer_id ORDER BY changed_at) AS valid_to FROM \
+                                 raw.customer_changes";
+    let output_columns = vec![
+        "customer_id".to_string(),
+        "changed_at".to_string(),
+        "tier".to_string(),
+        "valid_to".to_string(),
+    ];
+    let lead_derived = vec![("valid_to".to_string(), "{lead}".to_string())];
+
+    // The presented arm's fold shape must not drift between the two
+    // callers of `presented_arm_statement` — compared at the same dialect,
+    // since `emit_create_table_as`'s per-dialect `USING DELTA` clause
+    // (needed by the window-forward `MERGE` loop, never issued for a
+    // downgraded cell) is orthogonal to what this test is proving.
+    let ledgerless_duckdb = emit_succession_full_rebuild_ledgerless(
+        "main.customer_history",
+        model_select_sql,
+        &keys(),
+        "changed_at",
+        &output_columns,
+        &lead_derived,
+        &[],
+        MaintenanceDialect::DuckDb,
+    );
+    let ledger_bearing = emit_succession_full_rebuild(
+        "main.customer_history",
+        model_select_sql,
+        "raw.customer_changes",
+        &keys(),
+        "changed_at",
+        &output_columns,
+        &lead_derived,
+        &[],
+        None,
+        "FALSE",
+        MaintenanceDialect::DuckDb,
+    )
+    .expect("a realisable succession dialect");
+    assert_eq!(
+        ledgerless_duckdb.statements[0].sql,
+        ledger_bearing.statements[0].sql
+    );
+
+    let ledgerless_spark = emit_succession_full_rebuild_ledgerless(
+        "main.customer_history",
+        model_select_sql,
+        &keys(),
+        "changed_at",
+        &output_columns,
+        &lead_derived,
+        &[],
+        MaintenanceDialect::Spark,
+    );
+    assert!(!ledgerless_spark.transactional);
+    assert_eq!(ledgerless_spark.statements.len(), 1);
+    assert!(
+        !ledgerless_spark.statements[0].sql.contains("__tombstones"),
+        "{}",
+        ledgerless_spark.statements[0].sql
+    );
+}
+
+#[test]
+fn emit_succession_full_rebuild_ledgerless_accepts_every_dialect() {
+    let model_select_sql = "SELECT customer_id, changed_at FROM raw.customer_changes";
+    let output_columns = vec!["customer_id".to_string(), "changed_at".to_string()];
+    for dialect in [
+        MaintenanceDialect::DuckDb,
+        MaintenanceDialect::Spark,
+        MaintenanceDialect::BigQuery,
+    ] {
+        let group = emit_succession_full_rebuild_ledgerless(
+            "main.customer_history",
+            model_select_sql,
+            &keys(),
+            "changed_at",
+            &output_columns,
+            &[],
+            &[],
+            dialect,
+        );
+        assert_eq!(group.statements.len(), 1);
+    }
+}
+
 /// The refusal is now *typed* rather than a panic (`CLAUDE.md` §"Fail-loud
 /// discipline"), and it names only the dialect that genuinely has no
 /// realisation: Spark, where Delta's lack of a cross-table transaction

@@ -330,6 +330,63 @@ pub async fn rebuild_succession_state(
     reporter: &dyn RunReporter,
     run_id: &str,
 ) -> Result<ExecutionResult> {
+    let dialect = smelt_backend::maintenance_dialect(backend.dialect());
+    let recipe = &cell.recipe;
+
+    // A `state_downgraded` cell (`docs/specs/state.md` §"The degradation
+    // contract") writes the presented arm alone, on any dialect — never the
+    // tombstone-ledger machinery below, which such a backend has no
+    // realisation of at all. This branch is keyed on the plan-derived
+    // `cell.state_downgraded` flag, never on `backend.dialect()`
+    // (`tests/state_guard_census.rs`'s discipline), so it is reachable and
+    // testable against a real DuckDB backend even though production only
+    // ever downgrades on a no-ledger dialect.
+    if cell.state_downgraded {
+        let start = Instant::now();
+        let output_columns: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
+
+        // Idempotent DDL, non-transactional — mirrors the ledger-bearing
+        // arm's own drop-before-rebuild step below.
+        backend
+            .drop_table_if_exists(schema, table)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("succession full-rebuild: failed to drop '{table}': {e}")
+            })?;
+
+        let group = smelt_logical::maintenance::emit::emit_succession_full_rebuild_ledgerless(
+            &cell.presented_table,
+            compiled_sql,
+            &recipe.key_cols,
+            &recipe.clock_col,
+            &output_columns,
+            &recipe.lead_derived,
+            &recipe.lag_derived,
+            dialect,
+        );
+        reporter.maintenance_statements(run_id, model_name, None, &group);
+
+        crate::execute::retry_backend_call(retry, || {
+            backend.execute_write_with_bookkeeping(&[], &[], &group)
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to execute succession ledgerless full-rebuild for model '{}': {}",
+                model_name,
+                e
+            )
+        })?;
+
+        let total_rows = backend.get_row_count(schema, table).await.unwrap_or(0);
+        return Ok(ExecutionResult {
+            model_name: model_name.to_string(),
+            duration: start.elapsed(),
+            row_count: total_rows,
+            preview: None,
+        });
+    }
+
     // The gate is DERIVED from the availability layer, never a dialect
     // comparison (`CLAUDE.md` §"Fail-loud discipline"; the structural census
     // in `tests/state_guard_census.rs`). The plan layer downgrades a
@@ -345,8 +402,6 @@ pub async fn rebuild_succession_state(
             )
         );
     }
-    let dialect = smelt_backend::maintenance_dialect(backend.dialect());
-    let recipe = &cell.recipe;
 
     let (key_cols_typed, clock_type) = resolve_ledger_column_types(model_name, recipe, columns)?;
     let tombstone_table =
