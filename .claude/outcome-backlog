@@ -3,14 +3,50 @@
 # the first entry whose outcome.md **Status:** is neither `done` nor `blocked`,
 # then advances to the next. Scaffold + append via /smelt:outcome.
 
-# --- active ---
-# The Databricks dogfood spine: the github_activity pipeline on a third target
-# (Databricks Free Edition) over the same rows as DuckDB and BigQuery. Split
-# driver: phases 1-3 and 10 are offline (spec, backend, venv + loader, evidence)
-# and grindable here; phase 4 provisions the workspace and credential (human);
-# phases 5-9 and 11 run live Databricks and must emit <<PHASE_BLOCKED>> whenever
-# scripts/dbx-dogfood-env.sh cannot reach the workspace.
-docs/outcomes/20260912-databricks-dogfood-spine
+# --- active: the Trino programme (adopted 2026-09-13) ---
+# Trino as a fifth backend and a fourth SQL dialect, from dialect/printer through
+# to the ledger. T1-T5 are listed in DEPENDENCY order and must not be reordered:
+# T2's audit legs execute SQL against a live engine, so T1's HTTP client and
+# compose tier come first; T4 consumes T3's state-residency verdict, which decides
+# which maintenance techniques are reachable at all; T5 proves T1-T4 on a real
+# pipeline over real rows.
+#
+# Unlike the BigQuery and Databricks spines, NOTHING here needs a cloud account, a
+# credential, a bill or a human provisioning gate — only Docker. So every outcome
+# is fully loop-grindable with no split driver. The one discipline that carries
+# over: a phase needing the live coordinator must emit <<PHASE_BLOCKED>> when
+# scripts/trino-env.sh cannot reach it, NEVER skip green. An audit or conformance
+# leg that skips is indistinguishable from one that passes — the same hole an
+# unset DUCKDB_LIB_DIR opened.
+#
+# Connector choice is load-bearing, not incidental: Iceberg (REST catalog + MinIO)
+# is the one profile, because the connector — not Trino — decides the write
+# surface. MERGE / UPDATE / DELETE / CREATE OR REPLACE TABLE exist on Iceberg and
+# do not exist on Hive, so T3 and T4 depend on that choice.
+#
+# Ruling of 2026-09-13, recorded in T3's and T4's decision logs: Trino's
+# transaction support is taken as EQUIVALENT TO SPARK'S, and some incremental
+# features are accepted as unsupported on Trino for now. Iceberg has Delta's
+# atomicity shape (per-table commits, no cross-table transaction), so T3 starts
+# from Spark's state-residency column — all five correctness structures a
+# permanent, reasoned `no` — and T4 therefore runs FULLY DEGRADED, following
+# maintenance_conformance_spark rather than the DuckDB leg. A phase that discovers
+# genuine cross-table atomicity on Iceberg must escalate it, not absorb it.
+docs/outcomes/20260913-trino-target-spine
+docs/outcomes/20260913-trino-emission
+docs/outcomes/20260913-trino-ledger
+docs/outcomes/20260913-trino-incremental
+docs/outcomes/20260913-trino-dogfood
+
+# --- delisted, not abandoned ---
+# docs/outcomes/20260912-databricks-dogfood-spine — the github_activity pipeline on
+#   Databricks Free Edition. Delisted 2026-09-13 to make room for the Trino
+#   programme, NOT dropped: criteria 1-10 were met and phase 11c (the Asset Bundle
+#   deploy) was in flight, unblocked by the CREATE VOLUME grant of commit c0fbc0097.
+#   It is being finished on its own branch and is expected complete before the Trino
+#   outcomes above run. Status: in its outcome.md is deliberately left `active` — it
+#   is not blocked, the grant landed. Re-list by uncommenting the line below.
+# docs/outcomes/20260912-databricks-dogfood-spine
 
 # --- human-gated, deliberately not listed ---
 # docs/outcomes/20260906-bigquery-unattended — Cloud Run Job, Scheduler, workload

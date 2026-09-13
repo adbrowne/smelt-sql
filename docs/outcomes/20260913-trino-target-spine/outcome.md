@@ -1,0 +1,150 @@
+# Outcome: A `type: trino` target exists, stands up from `docker compose`, and materializes a model as an Iceberg table
+
+**Created:** 2026-09-13
+**Status:** queued
+**Driver:** loop. Nothing here needs a cloud account, a credential or a human gate — only
+Docker. Phases that need the live server must emit `<<PHASE_BLOCKED>>` when
+`scripts/trino-env.sh` cannot reach it, **never skip green**: an unset `SMELT_TRINO_URL` that
+silently passes is the same hole an unset `DUCKDB_LIB_DIR` opened.
+**Source:** the five-outcome Trino programme agreed 2026-09-13 (this is T1 of T1–T5; siblings:
+`20260913-trino-emission`, `-trino-ledger`, `-trino-incremental`, `-trino-dogfood`).
+Pattern followed: `docs/outcomes/20260906-bigquery-dogfood-spine` and
+`docs/outcomes/20260912-databricks-dogfood-spine` (how a fourth backend was landed), and
+`scripts/spark-up.sh` (how a Docker-resident engine tier is scripted).
+**Spec anchors:** `docs/specs/multi_backend.md` §Surface (backends, capability matrix),
+§"Session initialization", §"Connection security", §"Loading data into a backend",
+§"Incremental & schema evolution per backend", §Known Divergences;
+`docs/specs/smelt_yml.md` §"Target shape"; `docs/specs/seeds.md` §"Type inference";
+`docs/specs/diagnostics.md`
+
+## The outcome
+
+smelt has a fifth backend and a fourth SQL dialect. A target declaring `type: trino` names a
+coordinator, a catalog and a schema, authenticates from an explicitly-supplied credential, and
+runs a model to completion as an Iceberg table — reached over Trino's own HTTP protocol from
+pure Rust, with no Python interpreter, no venv and no third-party client in the path.
+
+The engine it runs against is a committed, pinned `docker compose` tier — a Trino coordinator,
+an Iceberg REST catalog and MinIO object storage — brought up by one script in the shape
+`scripts/spark-up.sh` already established, so a contributor and CI stand up the same thing.
+Iceberg is the connector *because* the connector is what decides Trino's write surface: `MERGE`,
+`UPDATE`, `DELETE` and `CREATE OR REPLACE TABLE` exist on Iceberg and do not exist on Hive, so
+the whole incremental and ledger story downstream of this outcome depends on that choice.
+
+Crucially, the capability profile is **measured, not read**. `BackendCapabilities::trino_iceberg()`
+is populated by executing the statement each flag names against the live coordinator and
+recording what happened — the discipline `multi_backend.md` §Surface already requires ("A
+backend's column is established by executing the statement each flag names against a live
+instance of that backend, never by reading its documentation"). Trino is expected to be the
+first backend in the matrix with **no `PIVOT`**, no `QUALIFY`, no `::` cast, no `[a,b]` array
+literal, no `INSERT OVERWRITE`, no transactional DDL and **no temporary tables**; each of those
+is confirmed by execution here and its consequence handed to the sibling outcome that owns it.
+
+The useful prior is that **Trino sits near Spark (Delta)**, not near DuckDB. Iceberg and Delta
+have the same atomicity shape — per-table commits, no cross-table transaction — which is why
+`20260913-trino-ledger` starts from Spark's state-residency column rather than treating residency
+as an open question (ruling of 2026-09-13). That prior tells this outcome where to look hardest:
+the cells where Iceberg is expected to be *more* capable than Delta, and the handful where
+Trino's SQL surface is poorer than Spark's despite the shared storage semantics. It is a prior,
+not an answer — every cell is still established by execution.
+
+## Success criteria (checkable)
+
+1. **The target is specified before it is built.** `docs/specs/multi_backend.md` §Surface and
+   `docs/specs/smelt_yml.md` §"Target shape" describe the `trino` target: its keys
+   (`host`, `port`, `user`, `catalog`, `schema`, TLS on/off, password via `${ENV}` **only**),
+   its `SqlDialect::Trino` dialect, and its `BackendCapabilities::trino_iceberg()` profile.
+   Keys belonging to another target (`connect_url`, `warehouse`, `database`, `project`,
+   `dataset`) are **refused with a diagnostic, not ignored** — a named `DiagnosticCode` with a
+   fixture under `examples/broken/`. The capability matrix gains a Trino column, and the
+   §"Connection security" rule is stated for it: the credential never appears in a log line,
+   an error message, or a run report.
+2. **`DialectId::Trino` and `SqlDialect::Trino` exist and are exhaustive.** `DialectId::ALL`
+   carries four variants and `all_is_exhaustive` proves it; the slug is `trino` and round-trips;
+   every `match` over `SqlDialect` compiles without a wildcard arm that would have silently
+   absorbed the new variant. **This criterion deliberately does not claim emission coverage** —
+   `Signature::emission_at` returns `Native` for any `(dialect, position)` pair with no entry,
+   so the new variant enters asserting every built-in is natively spelled on Trino. That hole is
+   `20260913-trino-emission`'s subject; this outcome must record it in the decision log and in
+   `multi_backend.md` §Known Divergences rather than leave it unremarked.
+3. **The tier stands up from one script, pinned.** `scripts/trino-up.sh`, `trino-down.sh` and
+   `trino-env.sh` bring up and tear down a `docker compose` tier of pinned images — a Trino
+   coordinator, an Iceberg REST catalog, and MinIO — with the Iceberg catalog properties
+   committed under `scripts/` (not typed by hand), and export `SMELT_TRINO_URL` plus whatever
+   else the backend reads. `scripts/README-trino.md` records the version pins and why. The
+   script is idempotent and survives container-owned leftovers from a previous run — the
+   failure `scripts/spark-up.sh` actually hit, where a `chmod` on a root-owned leftover aborted
+   under `set -e` *before* `docker run` and every test then failed with no hint the server had
+   never started.
+4. **`smelt-backend-trino` implements the whole `Backend` trait over pure Rust HTTP.** Every
+   required method (`execute_sql`, `create_table_as`, `create_view_as`, `drop_*`,
+   `get_row_count`, `get_preview`, `table_exists`, `ensure_schema`, `dialect`, `capabilities`,
+   `load_table`) works against the live tier, driven by `POST /v1/statement` and `nextUri`
+   paging with Trino's own result pages decoded to Arrow. Trino error responses map to typed
+   `BackendError` variants — `QueryError`, `UnsupportedFeature`, a connection failure — never a
+   stringly-typed catch-all, and never a silent empty result. `create_materialized_view_as`
+   inherits the erroring default (`supports_native_ivm` is `false`).
+5. **The capability profile is established by execution and recorded.** For every flag in the
+   §Surface matrix there is a probe that executes the statement the flag names against the live
+   coordinator; the resulting column is written into both `BackendCapabilities::trino_iceberg()`
+   and the spec table in the same commit, and a conformance test asserts the constructor matches
+   the table. Where a flag is `✗`, the measured error is quoted in the decision log. The
+   expected-`✗` set above is a hypothesis this criterion tests, not a conclusion it assumes.
+6. **Data gets in.** `load_table` lands Arrow `RecordBatch`es at `catalog.schema.name` over the
+   seed type set of `seeds.md` §"Type inference", rejecting NULLs in a non-nullable Arrow field
+   as every other backend does, and round-tripping each supported type through Trino's own
+   type system (`TIMESTAMP(6)`, unbounded `VARCHAR`, `DECIMAL(p,s)`) back to the same smelt
+   `DataType`. The chosen bulk path (batched `INSERT … VALUES` versus staging Parquet into MinIO)
+   is a decision-log entry with the measured reason, and `seed_parity` covers Trino.
+7. **A model actually runs.** An example workspace compiles and materializes on the Trino
+   target end-to-end via `execute_project` — a table and a view — with zero diagnostics, the
+   rows readable back, and the run report written. Wired into `crates/smelt-cli`'s target-parity
+   suite the way Spark's and BigQuery's are.
+8. **CI runs it, gated the way Spark's is.** A `compat.yml` job stands up the compose tier and
+   runs the Trino integration tests, gated on `schedule`, the `run-docker-tests` label, or a
+   `changes` filter for Trino paths — mirroring `spark-integration`. When `SMELT_TRINO_URL` is
+   unset the tests **skip** (not fail), and a test proves the skip is a skip rather than a
+   vacuous pass.
+9. **Gates green.** `bash .claude/scripts/verify-phase.sh` passes and no ratchet is lowered:
+   in particular `.claude/hardening-baseline.txt` gains a `smelt-backend-trino` entry rather
+   than absorbing new `unwrap`/`expect` elsewhere, and `no_println_in_libraries` stays at zero.
+   The existing Spark, BigQuery and Databricks tiers are untouched — the new compose tier binds
+   no port and no container name they use.
+
+## Out of scope
+
+- **Every other Trino connector**: Hive, Delta Lake, Memory, JDBC/PostgreSQL, and Trino's
+  federation story (querying two catalogs in one statement). Iceberg is the one profile. A
+  second connector profile — `spark_delta()`/`spark_parquet()`-style — is a later outcome if a
+  real need appears, not a hedge taken now.
+- **Emission verdicts.** Which spelling each built-in takes on Trino, the `dialect_audit` Trino
+  legs, `dialect-coverage.md`'s Trino column and the implicit-`Native` gate all belong to
+  `20260913-trino-emission`. This outcome only makes them *executable* by providing a client.
+- **smelt's own state on Trino** (`20260913-trino-ledger`) and **the incremental/maintenance
+  families** (`20260913-trino-incremental`).
+- **Trino as a parser source dialect.** smelt SQL is the source dialect and Trino is a target
+  only, so no `smelt-parser-compat` corpus, differential or gaps-baseline work is implied.
+- **Trino materialized views and `REFRESH MATERIALIZED VIEW`** — `supports_native_ivm` stays
+  `false`; Trino's MV refresh is externally scheduled, not incremental maintenance.
+- **Operating Trino**: fault-tolerant execution, resource groups, spill, coordinator HA,
+  performance tuning, a multi-worker cluster. A single-coordinator tier is enough to prove a
+  backend.
+- **Unattended/scheduled execution** on the tier (the Databricks outcome's criterion 11 shape).
+
+## Phases
+
+| # | Phase | Status |
+|---|-------|--------|
+| 1 | Spec delta: the `trino` target shape and capability column in `multi_backend.md` + `smelt_yml.md`, the foreign-key refusal diagnostics, the connection-security rule, and the Known Divergence naming the implicit-`Native` emission hole this outcome does not close | pending |
+| 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | pending |
+| 3 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | pending |
+| 4 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
+| 5 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
+| 6 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
+| 7 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, `BackendCapabilities::trino_iceberg()` and the spec table written together, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
+| 8 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
+| 9 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
+
+## Decision log
+
+## Blocked
