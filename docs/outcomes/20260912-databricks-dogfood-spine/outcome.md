@@ -186,6 +186,18 @@ of the models or the tooling.
 | 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | planned |
 | 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | planned |
 
+## Blocked
+
+- 2026-09-13 (phase 11h implement): **no `phases/11h-plan.md` exists.** The outcome table
+  carries row 11h as `planned`, but no plan step has written its detailed plan yet — only
+  11a–11g have `*-plan.md` files. The implement step executes an already-planned phase; it
+  does not author the plan itself. Row 11h stays `planned` (this is not an implementation
+  blocker, it's a missing plan step) so the next planner picks it up: write
+  `phases/11h-plan.md` from the outcome-table one-liner (cross-compile an `aarch64` wheel via
+  `scripts/dbx-wheel-build.sh`, dual-arch `smelt_env.dependencies` in `github_activity_job.yml`
+  keyed on `platform_machine`, structural + `verify`-mode gates, no workspace needed) before
+  the next implement pass.
+
 ## Decision log
 
 - 2026-09-13 (phase 11g plan): **no reshape.** 11f closed the wheel blocker offline and
