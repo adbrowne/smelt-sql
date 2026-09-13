@@ -140,11 +140,12 @@ not an answer — every cell is still established by execution.
 | 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | done |
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | done |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | done |
-| 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
+| 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | planned |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
-| 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` and the spec table written together, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
-| 9 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
-| 10 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
+| 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
+| 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | pending |
+| 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
+| 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
 
 ## Decision log
 
@@ -285,5 +286,37 @@ not an answer — every cell is still established by execution.
   promise. The tests bind an `axum` router (already a workspace dependency via `smelt-ui`) on an
   ephemeral port so paging, error mapping and header assertions are provable with
   `SMELT_TRINO_URL` unset — the live tier is phase 6's oracle, not phase 5's.
+
+- **2026-09-14 — reshape: criterion 7's `execute_project` leg gets its own row (new phase 9).**
+  Phase 6's row said "a model materialized as an Iceberg table and read back", which reads as
+  either a `Backend`-trait-level materialization or a full `execute_project` run. Only the first
+  is reachable now: `dialect_and_capabilities` refuses Trino by name until phase 8 lands
+  `BackendCapabilities::trino_iceberg()` (ruling of 2026-09-14), so `SqlCompiler::new` — and
+  therefore `execute_project` — cannot construct a Trino compiler at all. Criterion 7 also asks
+  for a `smelt-cli` target-parity leg, which no row owned. Rather than let that arrive as
+  unplanned drift inside the CI or close phase, phase 6 is narrowed to the trait level (through
+  `execute_model`, which is where a table and a view are actually created) and a new phase 9
+  owns the end-to-end leg, placed after phase 8 because it depends on it. Former phases 9–10
+  renumbered 10–11; no summaries exist for them, so nothing is orphaned. Nothing left the
+  outcome.
+
+- **2026-09-14 — phase 6's `Backend::capabilities()` returns a provisional all-`false` profile,
+  pinned by a test.** `capabilities()` is a required trait method, so phase 6 must answer it, but
+  phase 8 owns the measured profile. Every flag `false` is the fail-safe direction — audited the
+  consumers (`maintenance_driver/driver.rs`, `schema_evolution.rs`,
+  `maintenance_driver/sidecar.rs`): a `false` makes smelt refuse the construct or take the
+  non-transactional path, never emit SQL Trino might reject. A test asserts *every* flag is
+  `false`, so the placeholder cannot rot into an unmeasured positive claim, and phase 8 deletes
+  both the constructor and the test in the same commit as the measured profile. Same shape as
+  phase 1's `?`-cells gate.
+
+- **2026-09-14 — `smelt-backend-trino` is a non-optional dependency of `smelt-backends`, unlike
+  `spark`/`bigquery`/`databricks`.** Those are feature-gated because their dependency graphs are
+  heavy and environment-bound (PyO3 + a Python interpreter, the Google SDK). Trino's is
+  `reqwest` with `rustls-tls`, already resolved in `Cargo.lock` via `libduckdb-sys`, so gating it
+  would buy no build time while hiding the `Backend` impl from the default `cargo test` and from
+  `clippy-gate.sh`'s two feature sets — exactly the "an audit leg that skips is
+  indistinguishable from one that passes" hole this outcome's driver note warns about. The live
+  legs self-gate on `SMELT_TRINO_URL` instead; compilation is never gated.
 
 ## Blocked
