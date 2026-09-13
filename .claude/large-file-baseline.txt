@@ -12,7 +12,7 @@ crates/smelt-backend-duckdb/src/lib.rs 1902
 crates/smelt-cli/src/commands/explain.rs 1196
 crates/smelt-cli/src/explain.rs 2595
 crates/smelt-cli/src/test_compiler.rs 1908
-crates/smelt-cli/tests/dbx_dogfood_loader.rs 1087
+crates/smelt-cli/tests/dbx_dogfood_loader.rs 1210
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1441
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573

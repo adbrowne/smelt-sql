@@ -66,8 +66,8 @@ use std::path::PathBuf;
 mod parity_support;
 use parity_support::{
     check_agreement_against, compare_databases, load_exported_snapshot, repo_root, synth_db,
-    violating_pair, DivergenceBound, EquivalenceManifest, RegisteredDivergence, RelationDiff,
-    SideLabels, DATABRICKS_EXCLUDED_MODELS,
+    violating_pair, EquivalenceManifest, RegisteredDivergence, RelationDiff, SideLabels,
+    DATABRICKS_EQUIVALENCE_DIVERGENCE_REGISTRY, DATABRICKS_EXCLUDED_MODELS,
 };
 
 /// The two sides of *this* sweep: Databricks' incrementally-maintained state,
@@ -224,70 +224,19 @@ fn adding_the_oracle_target_does_not_move_the_default() {
 // The divergence registry for this sweep
 // ---------------------------------------------------------------------------
 
-/// **Empty, and the bar for adding to it is high.** An entry here would not be
-/// an engine-compatibility note: it would license a model's incrementally
-/// maintained state to differ from its own full refresh, which is the promise
-/// `docs/specs/incremental_models.md` §"The equivalence invariant" makes. An
-/// entry must name the maintenance technique, the model, and the mechanism by
-/// which the incremental plan legitimately lags — the shape
-/// [`parity_support::DivergenceBound::MonotoneDivergence`] encodes. Anything
-/// that cannot be stated in those terms is a defect for a follow-on
-/// `databricks-correctness` outcome, recorded as a finding, never registered
-/// away.
+/// Shared with `github_activity_dbx_scheduled.rs`, which runs the identical
+/// comparison after three consecutive **scheduled** runs rather than a
+/// manually-driven sweep — see
+/// [`parity_support::DATABRICKS_EQUIVALENCE_DIVERGENCE_REGISTRY`]'s own doc
+/// comment for why the bar for an entry is high and what it must state.
 ///
-/// An empty registry plus a vacuous sweep would be indistinguishable from
-/// success, so the registry-consulting path is driven over a real mismatch by
+/// An empty-vs-vacuous-sweep distinction is exercised by
 /// [`an_unregistered_equivalence_violation_fails`] and
-/// [`the_equivalence_sweep_fails_closed_on_an_empty_registry`], and the
-/// committed report is checked for unregistered divergence once phase 9b
-/// commits one.
-const EQUIVALENCE_DIVERGENCE_REGISTRY: &[RegisteredDivergence] = &[RegisteredDivergence {
-    relation: "gold_events_enriched",
-    // Root cause, not a shrug — the identical bound and root cause
-    // `github_activity_dual_target.rs::DBX_DIVERGENCE_REGISTRY` already
-    // registers for the same relation. `gold.events_enriched`'s
-    // `current_repo_name` is a value-enrichment join against
-    // `gold.repo_dim` whose designed healing semantics
-    // (`crates/smelt-runtime/src/execute/enrichment_heal.rs`) run a
-    // `ColumnScopedMerge` cell once per run over the model's UNWINDOWED
-    // output. Phase 7b downgraded this cell's Databricks route from
-    // `PerGroupRecompute` (which the key-addressed driver can never
-    // dispatch for an `EnrichmentKeyed` cell) straight to `DeleteInsert`,
-    // because Spark/Delta has no `MergeLedger`
-    // (`docs/outcomes/20260912-databricks-dogfood-spine/phases/07b-plan.md`).
-    // `DeleteInsert` is window-scoped, so on Databricks `current_repo_name`
-    // freezes at whatever `gold.repo_dim` held on the day a row was FIRST
-    // written and is never retroactively healed by a later rename — this
-    // affects the **full-refresh oracle exactly as much as the incremental
-    // leg**, because the oracle target runs the same plan, so the committed
-    // report shows the identical incr_only == oracle_only count at every
-    // checkpoint (9/10/16 at w09/w10/w11) rather than a one-sided
-    // divergence. No column other than `current_repo_name` diverges and no
-    // row is missing or extra, so the bound is unordered rather than
-    // monotone.
-    reason: "gold.repo_dim enrichment freezes at write time on Databricks: phase 7b downgraded \
-             the EnrichmentKeyed cell to window-scoped DeleteInsert (Spark/Delta has no \
-             MergeLedger), which sacrifices the unwindowed run-level heal DuckDB's \
-             ColumnScopedMerge cell performs. The same downgrade applies to both the \
-             incremental leg and this suite's own full-refresh oracle, so a pre-rename \
-             current_repo_name persists identically on both sides until databricks-correctness \
-             realises the fingerprint sidecar on Delta.",
-    bound: DivergenceBound::UnorderedColumnDivergence {
-        key_col: "id",
-        exact_columns: &[
-            "type",
-            "actor_id",
-            "actor_login",
-            "repo_id",
-            "repo_name",
-            "org_id",
-            "public",
-            "created_at",
-            "event_date",
-        ],
-        tolerant_columns: &["current_repo_name"],
-    },
-}];
+/// [`the_equivalence_sweep_fails_closed_on_an_empty_registry`], which pass
+/// an empty registry explicitly rather than relying on this one ever being
+/// empty.
+const EQUIVALENCE_DIVERGENCE_REGISTRY: &[RegisteredDivergence] =
+    DATABRICKS_EQUIVALENCE_DIVERGENCE_REGISTRY;
 
 /// The relations whose full refresh reads beyond the requested window on this
 /// target. Empty — see the module doc's "Where the oracle is a valid oracle"

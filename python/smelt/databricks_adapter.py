@@ -45,29 +45,50 @@ class DatabricksAdapter:
         # unmodified — no smelt-side parsing or rewriting of the host.
         self.host = host
 
-        builder = DatabricksSession.builder.serverless(True)
+        builder = DatabricksSession.builder
         if host:
-            builder = builder.host(host)
-        # else: no explicit host at all — the ambient form, honouring
-        # whatever workspace context the runtime (e.g. a serverless job
-        # task's own Connect channel) already established
-        # (`docs/specs/multi_backend.md` §"Connection security").
+            # `databricks.connect.session`'s builder routes to an entirely
+            # different branch the instant *any* of `.serverless(...)`,
+            # `.host(...)` or `.token(...)` is called — that branch always
+            # builds its own `Config(host=..., token=..., profile=...)` and
+            # never consults `SPARK_REMOTE` or a notebook's ambient session.
+            # So `.serverless(True)` is only safe to call alongside an
+            # explicit host: it never reaches the ambient ladder anyway, and
+            # Free Edition is serverless-only.
+            builder = builder.serverless(True).host(host)
+        # else: no explicit host at all — the ambient form. Calling *no*
+        # builder method here is load-bearing, not merely simpler: a
+        # `.serverless(True)` call still present when `host` is absent (as
+        # this adapter did through phase 11d) forces the same
+        # explicit-`Config()` branch and skips the ambient ladder
+        # (`_try_get_notebook_session()` then `SPARK_REMOTE`) — which is
+        # exactly the channel a serverless job task's own Connect session
+        # already established (`docs/specs/multi_backend.md`
+        # §"Connection security"; measured live, phase 11e).
         if token:
             builder = builder.token(token)
         # else: ambient credentials — the form a workload running inside the
         # workspace itself takes (`docs/specs/smelt_yml.md` §"Target shape").
         self.spark = builder.getOrCreate()
 
-        if catalog:
-            self.spark.catalog.setCurrentCatalog(catalog)
+        # No `setCurrentCatalog` call: every statement this adapter's callers
+        # issue is already catalog-and-schema-qualified
+        # (`crates/smelt-backend-spark/src/sql.rs::qualified_name`, called at
+        # every DDL/DML call site), so nothing depends on an implicit current
+        # catalog — which matters because `spark.catalog.*` is not safe to
+        # call on the ambient (notebook-borrowed) session at all: measured
+        # live (phase 11e), that session runs an ordinary `.sql(...)` query
+        # fine but raises `[NO_ACTIVE_SESSION] No active Spark session
+        # found` on every `Catalog` RPC (`setCurrentCatalog`,
+        # `setCurrentDatabase`, `tableExists` alike). `table_exists` below
+        # uses a plain `information_schema` query instead, for the same
+        # reason, on both the ambient and explicit-host paths.
 
     def select_current_schema(self, schema):
-        """Select the current database/schema.
-
-        Called after ensure_schema() has created the schema, so the schema
-        is guaranteed to exist before setCurrentDatabase is called.
-        """
-        self.spark.catalog.setCurrentDatabase(schema)
+        """No-op — see `__init__`'s comment on why this adapter never calls
+        `spark.catalog.setCurrentDatabase`. Kept so `SparkBackend` can call
+        it identically on either flavor
+        (`crates/smelt-backend-spark/src/lib.rs`)."""
 
     def execute_sql(self, sql):
         """Execute SQL and return a pyarrow.Table.
@@ -88,8 +109,20 @@ class DatabricksAdapter:
         self.spark.sql(sql)
 
     def table_exists(self, full_name):
-        """Check if a table exists by fully-qualified name."""
-        return self.spark.catalog.tableExists(full_name)
+        """Check if a table exists by fully-qualified name.
+
+        A plain `information_schema` query rather than
+        `spark.catalog.tableExists` — see `__init__`'s comment: every
+        `Catalog` RPC raises `NO_ACTIVE_SESSION` on the ambient
+        (notebook-borrowed) session, while an ordinary `.sql(...)` query
+        does not.
+        """
+        catalog, schema, table = full_name.split(".")
+        row = self.spark.sql(
+            f"SELECT count(*) AS c FROM {catalog}.information_schema.tables "
+            f"WHERE table_schema = '{schema}' AND table_name = '{table}'"
+        ).collect()
+        return row[0]["c"] > 0
 
     def get_row_count(self, full_name):
         """Get row count for a table."""
@@ -126,12 +159,21 @@ class DatabricksAdapter:
         if mode == "append":
             df.write.mode("append").saveAsTable(full_table_name)
         elif mode == "overwrite":
-            if self.spark.catalog.tableExists(full_table_name):
+            if self.table_exists(full_table_name):
                 self.spark.sql(f"DROP TABLE IF EXISTS {full_table_name}")
             df.write.saveAsTable(full_table_name)
         else:
             raise ValueError(f"unsupported load_arrow_table mode: {mode!r}")
 
     def close(self):
-        """Stop the Databricks session."""
-        self.spark.stop()
+        """Stop the Databricks session — but only one this adapter itself
+        built. The ambient form's session is the notebook/job runtime's own
+        shared session (`self.spark is` the object `_try_get_notebook_
+        session()` returned), not something this adapter owns: measured live
+        (phase 11e), calling `.stop()` on it tears the session down for the
+        rest of the process, so a second `_connect()` later in the same
+        script — exactly what `cmd_next_day()` then `cmd_execute()` do,
+        back to back — raises `[NO_ACTIVE_SESSION]` on its very first query.
+        """
+        if self.host:
+            self.spark.stop()

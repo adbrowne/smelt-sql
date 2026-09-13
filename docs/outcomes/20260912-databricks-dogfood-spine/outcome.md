@@ -180,9 +180,28 @@ of the models or the tooling.
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
 | 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
 | 11d | Ambient form, offline: a `databricks` target whose `host` **and** `token` are both absent builds its session from the workload's own ambient workspace context (no `.host(...)` call at all), replacing the spec's measured-false claim that a job exports `DATABRICKS_HOST`; `host` present with `token` absent and `host` absent with `token` present both keep their current meanings (the latter refused with a diagnostic). Threaded through the config validator, `SessionArgs::Databricks`, `SparkBackend::new_databricks`, `DatabricksAdapter`, the `databricks_job` target and the dogfood loader's three duplicated host-resolution sites — all gated with no workspace | done |
-| 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | planned |
+| 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | blocked |
 
 ## Decision log
+
+- 2026-09-13 (phase 11e implement, attempt 1): **row 11e blocked — the smoke run's own purpose
+  (catch defects before compressing the cadence) worked exactly as designed, fixing four real
+  ambient-session bugs, but a fifth, unrelated wheel-compatibility defect stopped the smoke run
+  short of task 5.** See `## Blocked`'s phase 11e entry for the full root-cause chain (five bugs,
+  four fixed with a new offline test each) and the open blocker (the `smelt_wheel` artifact's
+  bare `maturin build` stamps a `manylinux_2_39` tag the built binary genuinely needs — confirmed
+  by a failed `--compatibility manylinux_2_28` attempt naming specific offending glibc symbol
+  versions — which Databricks serverless compute's installer rejects; fixing this needs a
+  manylinux-compliant build environment, either a Docker container or `maturin build --zig`,
+  which is an infrastructure decision for the next planner rather than a patch here). The three
+  new tests in `github_activity_dbx_scheduled.rs` (task 1 of the plan) are committed and skip
+  (rather than hard-fail) until a future phase commits `phases/11e-runs.json`/`phases/
+  11e-equivalence.json`, mirroring phase 9b's precedent for a report-driven gate whose evidence
+  doesn't exist yet. `bash .claude/scripts/verify-phase.sh` is ALL GREEN (the large-file ratchet
+  needed one `--update` for the new tests' legitimate growth, matching 11d's precedent). The
+  workspace is left reachable, at the committed daily cadence, with one extra fixture day
+  (`2026-08-16`) genuinely loaded by the one `load_next_day` run that got all the way through.
+  Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 11e plan): **no reshape — 11e stays one row, with a manual smoke run
   inserted ahead of the compressed cadence.** 11e is the outcome's last row and already carries
@@ -1116,6 +1135,99 @@ of the models or the tooling.
   `smelt`-spawning call sites). Nothing left the outcome; nothing added to `## Out of scope`.
 
 ## Blocked
+
+- **2026-09-13 — phase 11e (smoke run, live).** The smoke run (task 4) surfaced **four
+  independent, real bugs in the ambient-session path** 11d's offline fix did not — and could
+  not have — caught, since none of them are reachable without a live serverless job task. All
+  four are root-caused, fixed, covered by a new red→green offline test each, and committed;
+  `bash .claude/scripts/verify-phase.sh` is ALL GREEN. A fifth, unrelated blocker remains open:
+  the `smelt_run` task's wheel fails to install on Databricks serverless compute at all.
+
+  **Fixed, in the order the live loop surfaced them** (each confirmed by redeploying and
+  re-running `bash scripts/dbx-bundle.sh run github_activity_daily` — a ~40s round trip, so this
+  was cheap to iterate on despite the count):
+  1. `DatabricksAdapter.__init__` called `.serverless(True)` unconditionally, even on the
+     ambient (`host=None`) path. `databricks.connect.session`'s real builder routes to an
+     unconditional `Config(host=..., token=..., profile=...)` branch the instant *any* of
+     `.serverless(...)`/`.host(...)`/`.token(...)` is called — a branch that never consults
+     `SPARK_REMOTE` or a notebook's bound `spark` object. 11d's own offline test
+     (`adapter_omits_host_builder_call_when_ambient`) asserted `.serverless(True)` **must** be
+     called even when ambient, which is precisely backwards; the stub it drove records calls but
+     never modelled this branching, so the gate passed while the design was wrong. Fixed:
+     `.serverless(True)` moves inside `if host:`; the test now asserts the opposite.
+  2. `load_next_day.py` shelled out to `dbx-dogfood-loader.py` via `subprocess.run`. A serverless
+     job task's ambient Connect channel is bound to the exact process Databricks launches this
+     file's code in (first `_try_get_notebook_session()`'s `IPython` namespace lookup, then
+     `SPARK_REMOTE`, a `unix://`-scheme local domain socket private to that process); a child
+     `subprocess.run` process inherits the `SPARK_REMOTE` env var's *text* but not the channel it
+     names, and plain PySpark's Spark Connect client refuses a non-`sc://` URL outright
+     (`[INVALID_CONNECT_URL]`). Fixed: `load_next_day.py` now imports
+     `dbx-dogfood-loader.py` by path (`importlib.util.spec_from_file_location`, the same
+     technique the Rust test suite already uses to drive it) and calls `cmd_next_day()`
+     in-process.
+  3. Every `spark.catalog.*` RPC (`setCurrentCatalog`, `setCurrentDatabase`, `tableExists`) raised
+     `[NO_ACTIVE_SESSION] No active Spark session found` on the ambient session specifically —
+     reproduced on a screen-fresh session with no prior query — while an ordinary `.sql(...)`
+     query on the identical session object succeeded. Since every statement this adapter's
+     callers issue is already catalog-and-schema-qualified
+     (`crates/smelt-backend-spark/src/sql.rs::qualified_name`), nothing depends on the two
+     `setCurrent*` calls at all — deleted outright, not merely skipped. `table_exists` still needs
+     a real answer, so it now queries `{catalog}.information_schema.tables` via plain `.sql(...)`
+     instead.
+  4. `DatabricksAdapter.close()` called `self.spark.stop()` unconditionally. On the ambient path
+     `self.spark` **is** the notebook/job runtime's own shared session object (`adapter.spark is
+     nb_spark`, confirmed live) — not something this adapter built — so `.stop()` tears the
+     session down for the rest of the process. `cmd_next_day()` closes its adapter in a `finally`
+     block, then `cmd_execute()` opens a second adapter over the *same* ambient session: that
+     second adapter's very first query then raised `[NO_ACTIVE_SESSION]`, which is the failure
+     signature that made bugs 3 and 4 easy to conflate at first — bug 3 reproduces on a
+     screen-fresh session with zero prior queries, bug 4 only reproduces on a *second* `_connect()`
+     after a `close()`. Fixed: `close()` now calls `.stop()` only when `self.host` is set.
+  5. A fifth bug in the same class was fixed without needing a live round-trip: `duckdb_query_arrow`
+     called `con.execute(sql).arrow()` and assumed the result was always a `pyarrow.Table`. The
+     serverless job environment's pinned duckdb/pyarrow versions return a `RecordBatchReader`
+     instead (this repo's dev venv returns a `Table`, so no local test had ever exercised the
+     reader branch) — `pa.ipc.new_stream(...).write_table(...)` only accepts a `Table`, so
+     `write_table(reader)` raised `TypeError`. Fixed: normalize with `.read_all()` when the result
+     is a `RecordBatchReader`.
+
+  With all five landed, `load_next_day` completed successfully end to end — a scheduled-shaped
+  smoke run's loader task finally advances the fixture and lands rows, live, for the first time
+  this outcome.
+
+  **The open blocker.** `smelt_run` — the job's second task — fails during library installation:
+  `smelt_sql-0.3.2-cp312-cp312-manylinux_2_39_x86_64.whl is not a supported wheel on this
+  platform`. `databricks.yml`'s `smelt_wheel` artifact builds with a bare `maturin build --release`
+  on this development machine, which stamps the wheel with whatever glibc version the build host
+  actually links against — `manylinux_2_39` here — and Databricks serverless compute's installer
+  rejects it as unsupported. Confirmed live (no further live round-trip needed): `maturin build
+  --compatibility manylinux_2_28` on this same checkout fails outright — `Your library is not
+  manylinux_2_28 compliant because of the presence of too-recent versioned symbols` naming
+  `GLIBC_2.29` through `GLIBC_2.39` in both `libc.so.6` and `libm.so.6` — so this is not a wrong
+  tag to relabel; the binary genuinely needs an older-glibc build environment to produce a wheel
+  Databricks serverless compute will install; `maturin`'s own suggested remedy is building inside
+  a manylinux Docker container (or, alternatively, `maturin build --zig` cross-compilation, not
+  yet evaluated here). Deliberately not fixed in this phase: adding a manylinux/zig build step to
+  `databricks.yml`'s `smelt_wheel` artifact `build:` command is an infrastructure decision (which
+  manylinux floor to target, Docker vs. zig, whether the build host running `bundle deploy` even
+  has Docker available in CI) rather than a quick patch, and this outcome's `Out of scope`
+  section already excludes "Databricks-native capabilities" and paid-tier machinery but says
+  nothing about the build toolchain — the next planner should decide the target manylinux floor
+  and land it as its own row before resuming the live legs.
+
+  **State left in the workspace:** the deployed job is at the committed daily cadence
+  (`0 0 6 * * ?`, `UNPAUSED`) — the compressed-cadence redeploy (task 5) was never reached, since
+  the smoke run (task 4) is the gate ahead of it and stayed red throughout this session on the
+  wheel blocker. The Volume, its seeded `smelt.yml`/`models/`, and `.smelt/` are unchanged from
+  11c/9f's prior state. The `load_next_day` run that succeeded after bugs 1-4 were fixed (before
+  bug 5 was found) landed fixture day **`2026-08-16`** for real: `workspace.smelt_dogfood.
+  _loader_days` now holds 12 rows (`2026-08-05`..`2026-08-16`, one more than 9f's committed
+  11-day end state) and `github_events` holds 40,911 rows. This is not undone — it is exactly
+  what a scheduled run is meant to do and matches the outcome's stated population — but the next
+  live phase should account for it (a 12th day already loaded) rather than assume 9f's 11-day
+  state is still current. `phases/11e-runs.json` and
+  `phases/11e-equivalence.json` do not exist; `github_activity_dbx_scheduled.rs`'s three tests
+  skip (print-and-return) rather than hard-fail until a future phase commits them.
 
 - **2026-09-13 — phase 11c (deploy + three scheduled runs, live).** Deploy, seed, the
   compressed-cadence redeploy, and the `volume_probe` job all succeeded (probe verdict: `flock`

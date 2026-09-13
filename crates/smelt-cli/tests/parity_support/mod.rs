@@ -114,6 +114,71 @@ pub const BIGQUERY_EXCLUDED_MODELS: &[&str] =
 /// set.
 pub const DATABRICKS_EXCLUDED_MODELS: &[&str] = &[];
 
+/// The registered equivalence divergence between Databricks' incrementally
+/// maintained state and its own full-refresh oracle
+/// (`docs/specs/incremental_models.md` §"The equivalence invariant"). Shared
+/// by every suite that runs this comparison — `github_activity_dbx_oracle.rs`
+/// (the manually-driven three windows) and `github_activity_dbx_scheduled.rs`
+/// (the same comparison after three consecutive **scheduled** runs,
+/// `docs/outcomes/20260912-databricks-dogfood-spine/phases/11e-plan.md`) —
+/// so the licensed divergence is stated once rather than restated per
+/// trigger mechanism. An entry here would not be an engine-compatibility
+/// note: it would license a model's incrementally maintained state to differ
+/// from its own full refresh. An entry must name the maintenance technique,
+/// the model, and the mechanism by which the incremental plan legitimately
+/// lags — the shape [`DivergenceBound::MonotoneDivergence`] encodes.
+/// Anything that cannot be stated in those terms is a defect for a follow-on
+/// `databricks-correctness` outcome, recorded as a finding, never registered
+/// away.
+pub const DATABRICKS_EQUIVALENCE_DIVERGENCE_REGISTRY: &[RegisteredDivergence] =
+    &[RegisteredDivergence {
+        relation: "gold_events_enriched",
+        // Root cause, not a shrug — the identical bound and root cause
+        // `github_activity_dual_target.rs::DBX_DIVERGENCE_REGISTRY` already
+        // registers for the same relation. `gold.events_enriched`'s
+        // `current_repo_name` is a value-enrichment join against
+        // `gold.repo_dim` whose designed healing semantics
+        // (`crates/smelt-runtime/src/execute/enrichment_heal.rs`) run a
+        // `ColumnScopedMerge` cell once per run over the model's UNWINDOWED
+        // output. Phase 7b downgraded this cell's Databricks route from
+        // `PerGroupRecompute` (which the key-addressed driver can never
+        // dispatch for an `EnrichmentKeyed` cell) straight to `DeleteInsert`,
+        // because Spark/Delta has no `MergeLedger`
+        // (`docs/outcomes/20260912-databricks-dogfood-spine/phases/07b-plan.md`).
+        // `DeleteInsert` is window-scoped, so on Databricks `current_repo_name`
+        // freezes at whatever `gold.repo_dim` held on the day a row was FIRST
+        // written and is never retroactively healed by a later rename — this
+        // affects the **full-refresh oracle exactly as much as the incremental
+        // leg**, because the oracle target runs the same plan, so the committed
+        // report shows the identical incr_only == oracle_only count at every
+        // checkpoint rather than a one-sided divergence. No column other than
+        // `current_repo_name` diverges and no row is missing or extra, so the
+        // bound is unordered rather than monotone.
+        reason:
+            "gold.repo_dim enrichment freezes at write time on Databricks: phase 7b downgraded \
+             the EnrichmentKeyed cell to window-scoped DeleteInsert (Spark/Delta has no \
+             MergeLedger), which sacrifices the unwindowed run-level heal DuckDB's \
+             ColumnScopedMerge cell performs. The same downgrade applies to both the \
+             incremental leg and this suite's own full-refresh oracle, so a pre-rename \
+             current_repo_name persists identically on both sides until databricks-correctness \
+             realises the fingerprint sidecar on Delta.",
+        bound: DivergenceBound::UnorderedColumnDivergence {
+            key_col: "id",
+            exact_columns: &[
+                "type",
+                "actor_id",
+                "actor_login",
+                "repo_id",
+                "repo_name",
+                "org_id",
+                "public",
+                "created_at",
+                "event_date",
+            ],
+            tolerant_columns: &["current_repo_name"],
+        },
+    }];
+
 pub fn is_compared(name: &str) -> bool {
     !EXCLUDED_PREFIXES.iter().any(|p| name.starts_with(p))
         && !EXCLUDED_SUFFIXES.iter().any(|s| name.ends_with(s))

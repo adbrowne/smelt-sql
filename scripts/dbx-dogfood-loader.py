@@ -275,6 +275,14 @@ def duckdb_query_arrow(sql):
             table = con.execute(sql).arrow()
         finally:
             con.close()
+        # `.arrow()` returns a `pyarrow.Table` on some duckdb/pyarrow version
+        # pairs and a `pyarrow.RecordBatchReader` on others (measured live,
+        # phase 11e: the serverless job environment's pin returns a reader,
+        # while this repo's dev venv returns a Table) — `new_stream(...)
+        # .write_table(...)` below only accepts a Table, so normalize here
+        # rather than pinning a specific duckdb/pyarrow combination.
+        if isinstance(table, pa.RecordBatchReader):
+            table = table.read_all()
         sink = pa.BufferOutputStream()
         writer = pa.ipc.new_stream(sink, table.schema)
         writer.write_table(table)

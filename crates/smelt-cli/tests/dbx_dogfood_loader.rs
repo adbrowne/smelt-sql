@@ -482,19 +482,31 @@ class FakeDF:
     def __init__(self, log):
         self.write = FakeWriter(log)
 
-class FakeCatalog:
-    def __init__(self, log):
-        self.log = log
-    def tableExists(self, name):
-        self.log.append(["tableExists", name])
-        return True
+class FakeRow:
+    def __init__(self, c):
+        self.c = c
+    def __getitem__(self, key):
+        return self.c
+
+class FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+    def collect(self):
+        return self._rows
 
 class FakeSpark:
     def __init__(self, log):
         self.log = log
-        self.catalog = FakeCatalog(log)
     def sql(self, s):
+        # `table_exists` queries `information_schema.tables` (no
+        # `spark.catalog.*` — see databricks_adapter.py's module doc): the
+        # log entry stays "tableExists" so this stub's shape doesn't leak
+        # into the assertions below.
+        if "information_schema.tables" in s:
+            self.log.append(["tableExists", s])
+            return FakeResult([FakeRow(1)])
         self.log.append(["sql", s])
+        return None
     def createDataFrame(self, table):
         self.log.append(["createDataFrame", type(table).__module__ + "." + type(table).__name__])
         return FakeDF(self.log)
@@ -786,11 +798,9 @@ class FakeBuilder:
         return self
     def getOrCreate(self):
         calls.append("getOrCreate")
-        class FakeCatalog:
-            def setCurrentCatalog(self, c):
-                pass
         class FakeSpark:
-            catalog = FakeCatalog()
+            def stop(self):
+                calls.append("stop")
         return FakeSpark()
 
 class FakeDatabricksSession:
@@ -807,7 +817,8 @@ spec = importlib.util.spec_from_file_location("databricks_adapter", {adapter_pat
 adapter_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter_mod)
 
-adapter_mod.DatabricksAdapter(host={host_py}, catalog="workspace")
+adapter = adapter_mod.DatabricksAdapter(host={host_py}, catalog="workspace")
+adapter.close()
 
 print(json.dumps(calls))
 "#,
@@ -826,9 +837,15 @@ print(json.dumps(calls))
     serde_json::from_slice(&out.stdout).expect("expected a JSON call log")
 }
 
-/// The ambient form (`host=None`) calls `.serverless(True)` and
-/// `.getOrCreate()` but never `.host(...)`; a target with a host calls
-/// `.host(...)` too.
+/// The ambient form (`host=None`) calls **no** builder method before
+/// `.getOrCreate()` — not even `.serverless(True)` — because
+/// `databricks.connect.session`'s real builder routes to an unconditional
+/// `Config(...)` branch the instant any of `.serverless(...)`/`.host(...)`/
+/// `.token(...)` is called, which skips the ambient ladder
+/// (`SPARK_REMOTE`/notebook session) entirely. Measured live (phase 11e):
+/// a `.serverless(True)` call surviving on the ambient path is exactly what
+/// broke every scheduled job task's Connect session. A target with a host
+/// calls both `.serverless(...)` and `.host(...)`.
 #[test]
 fn adapter_omits_host_builder_call_when_ambient() {
     let Some(python) = dbx_venv_python() else {
@@ -837,8 +854,11 @@ fn adapter_omits_host_builder_call_when_ambient() {
     };
     let ambient_calls = run_adapter_init_with_stub_builder(&python, None);
     assert!(
-        ambient_calls.contains(&"serverless".to_string()),
-        "expected .serverless(...) to be called: {ambient_calls:?}"
+        ambient_calls.is_empty() || ambient_calls == ["getOrCreate"],
+        "the ambient form must call no builder method before .getOrCreate() — a \
+         .serverless(...)/.host(...)/.token(...) call here forces the real builder's \
+         explicit-Config() branch and skips the SPARK_REMOTE/notebook ambient ladder: \
+         {ambient_calls:?}"
     );
     assert!(
         !ambient_calls.contains(&"host".to_string()),
@@ -850,6 +870,39 @@ fn adapter_omits_host_builder_call_when_ambient() {
     assert!(
         hosted_calls.contains(&"host".to_string()),
         "a target with a host must call .host(...): {hosted_calls:?}"
+    );
+    assert!(
+        hosted_calls.contains(&"serverless".to_string()),
+        "a target with an explicit host must still call .serverless(True) — Free Edition is \
+         serverless-only: {hosted_calls:?}"
+    );
+}
+
+/// `close()` must not stop the ambient (notebook-borrowed) session — it is
+/// the job runtime's own shared session, not something this adapter built.
+/// Measured live (phase 11e): `cmd_next_day()` closes its adapter in a
+/// `finally` block, then `cmd_execute()` opens a second adapter over the
+/// *same* ambient session — a `.stop()` call surviving in the first adapter's
+/// `close()` kills that session for the second one's very first query
+/// (`[NO_ACTIVE_SESSION]`). A hosted (explicit) session must still be
+/// stopped, since this adapter built it itself.
+#[test]
+fn close_stops_only_a_session_this_adapter_built() {
+    let Some(python) = dbx_venv_python() else {
+        eprintln!("Skipping — build .smelt-dbx-venv via scripts/dbx-dogfood-venv.sh to enable");
+        return;
+    };
+    let ambient_calls = run_adapter_init_with_stub_builder(&python, None);
+    assert!(
+        !ambient_calls.contains(&"stop".to_string()),
+        "close() must not call .stop() on the ambient session: {ambient_calls:?}"
+    );
+
+    let hosted_calls =
+        run_adapter_init_with_stub_builder(&python, Some("my-workspace.cloud.databricks.com"));
+    assert!(
+        hosted_calls.contains(&"stop".to_string()),
+        "close() must call .stop() on an explicitly-built session: {hosted_calls:?}"
     );
 }
 
@@ -1040,6 +1093,76 @@ print("match")
         );
         assert!(String::from_utf8_lossy(&out.stdout).contains("match"));
     }
+}
+
+/// `duckdb_query_arrow` must normalize a `RecordBatchReader` — the shape
+/// `.arrow()` returns on some duckdb/pyarrow version pairs — to a `Table`
+/// before handing it to `pa.ipc.new_stream(...).write_table(...)`, which
+/// only accepts a `Table`. Measured live (phase 11e): the serverless job
+/// environment's pinned duckdb/pyarrow versions return a reader here while
+/// this repo's dev venv returns a Table, so the local venv's own
+/// `con.execute(sql).arrow()` never exercises the reader branch — this test
+/// fakes `duckdb` in `sys.modules` to force it regardless of which
+/// combination happens to be installed locally.
+#[test]
+fn duckdb_query_arrow_normalizes_a_record_batch_reader() {
+    let Some(python) = dbx_venv_python() else {
+        eprintln!("Skipping — build .smelt-dbx-venv via scripts/dbx-dogfood-venv.sh to enable");
+        return;
+    };
+    let python_dir = repo_root().join("python");
+    let scripts_dir = repo_root().join("scripts");
+    let script = format!(
+        r#"
+import sys
+sys.path.insert(0, {python_dir:?})
+sys.path.insert(0, {scripts_dir:?})
+import types
+import pyarrow as pa
+
+table = pa.table({{"a": [1, 2, 3]}})
+
+class FakeExecuteResult:
+    def arrow(self):
+        return pa.RecordBatchReader.from_batches(table.schema, table.to_batches())
+
+class FakeConnection:
+    def execute(self, sql):
+        return FakeExecuteResult()
+    def close(self):
+        pass
+
+fake_duckdb = types.ModuleType("duckdb")
+fake_duckdb.connect = lambda path: FakeConnection()
+sys.modules["duckdb"] = fake_duckdb
+
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("dbx_loader", {loader_path:?})
+loader_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(loader_mod)
+
+ipc_bytes = loader_mod.duckdb_query_arrow("SELECT 1")
+reader = pa.ipc.open_stream(ipc_bytes)
+result = reader.read_all()
+assert result.to_pydict() == table.to_pydict(), result.to_pydict()
+print("ok")
+"#,
+        python_dir = python_dir,
+        scripts_dir = scripts_dir,
+        loader_path = loader_py(),
+    );
+    let out = Command::new(&python)
+        .args(["-c", &script])
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", python.display()));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("ok"));
 }
 
 /// Test 5: with `duckdb` scrubbed off `PATH`, the loader's dry-run path

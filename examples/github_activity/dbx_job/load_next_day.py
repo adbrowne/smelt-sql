@@ -2,21 +2,37 @@
 (docs/outcomes/20260912-databricks-dogfood-spine/outcome.md criterion 11).
 
 Databricks Jobs has no shell-command task type, so this thin
-`spark_python_task` shells out to the already-tested
-scripts/dbx-dogfood-loader.py rather than reimplementing its logic — reuse,
-not a second loader. `databricks.yml`'s `sync.paths` puts both
-`scripts/` and `python/` alongside this bundle's synced files even though
-neither lives under the bundle root, so both are reachable at fixed relative
-offsets from this file once deployed.
+`spark_python_task` imports and calls the already-tested
+scripts/dbx-dogfood-loader.py's `cmd_next_day()` directly, **in this same
+process**, rather than reimplementing its logic — reuse, not a second
+loader. `databricks.yml`'s `sync.paths` puts both `scripts/` and `python/`
+alongside this bundle's synced files even though neither lives under the
+bundle root, so both are reachable at fixed relative offsets from this file
+once deployed.
 
-Passes `--next-day` rather than a date: the fixture holds a fixed historical
-range with no relationship to `{{job.trigger.time.iso_date}}`'s real
-calendar date, so a scheduled run must advance the fixture by its own
-ledger (the live `_loader_days` table) instead of trusting wall-clock time.
+In-process, not `subprocess.run`, is load-bearing (measured live, phase
+11e): a serverless job task's ambient Databricks Connect session
+(`docs/specs/multi_backend.md` §"Connection security") is bound to the
+notebook-style REPL process Databricks itself launches this file's code
+in — `databricks.connect`'s ambient ladder first looks for a `spark`/`sc`
+object already bound in *this* process's IPython namespace, and its
+fallback (`SPARK_REMOTE`) names a local `unix://` domain socket private to
+that same process, which plain PySpark's Spark Connect client refuses
+outright (`[INVALID_CONNECT_URL] ... must start with 'sc://'`). A child
+`subprocess.run` process has neither: it can inherit the `SPARK_REMOTE` env
+var by value, but not the process-bound channel it names, and it has no
+share of the parent's IPython kernel namespace either. Calling
+`cmd_next_day()` in-process instead lets the ambient `DatabricksAdapter()`
+construction inside it see the same namespace this file's own code runs in.
+
+Passes no date: the fixture holds a fixed historical range with no
+relationship to `{{job.trigger.time.iso_date}}`'s real calendar date, so a
+scheduled run must advance the fixture by its own ledger (the live
+`_loader_days` table) instead of trusting wall-clock time.
 """
 
+import importlib.util
 import os
-import subprocess
 import sys
 
 # Databricks' serverless job-environment launcher (`client: "2"`) runs this
@@ -34,11 +50,17 @@ _PYTHON_DIR = os.path.join(_SYNC_ROOT, "python")
 
 
 def main():
-    env = dict(os.environ)
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = f"{_PYTHON_DIR}{os.pathsep}{existing}" if existing else _PYTHON_DIR
+    if _PYTHON_DIR not in sys.path:
+        sys.path.insert(0, _PYTHON_DIR)
 
-    subprocess.run([sys.executable, _LOADER, "--next-day"], check=True, env=env)
+    # `dbx-dogfood-loader.py`'s filename is not a valid module name (hyphens),
+    # so it is loaded by path — the same technique
+    # `crates/smelt-cli/tests/dbx_dogfood_loader.rs` already uses to drive it
+    # without a real install.
+    spec = importlib.util.spec_from_file_location("dbx_dogfood_loader", _LOADER)
+    loader_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loader_mod)
+    loader_mod.cmd_next_day()
 
 
 if __name__ == "__main__":
