@@ -107,11 +107,24 @@ include:
 # alongside the bundle root even though neither lives under it — the same
 # pattern databricks/bundle-examples' share_files_across_bundles uses for
 # code outside the bundle root.
+#
+# `include: dist/*.whl` overrides this bundle root's own `.gitignore`
+# (`dist/`) — the artifact `build` step above mirrors both wheels into
+# `examples/github_activity/dist/` precisely so `smelt_env.dependencies`
+# can reference them at a synced path, but `sync.paths`' default sync
+# honours `.gitignore` the same way `git` does, so the mirrored wheels were
+# silently dropped from every deploy's uploaded `files/` tree — the run
+# task then failed with "Library installation failed: ... does not exist"
+# at that exact path (phase 11k, docs/outcomes/20260912-databricks-dogfood-
+# spine/phases/11k-summary.md). `include` is the documented override for
+# exactly this shape (config.Sync in `databricks bundle schema`).
 sync:
   paths:
     - .
     - ../../scripts
     - ../../python
+  include:
+    - dist/*.whl
 
 targets:
   dogfood:

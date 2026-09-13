@@ -1,8 +1,11 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** active — the criterion-11 design question is settled (2026-09-14 decision log
-entry); rows 11j (offline) and 11k (live) carry it out
+**Status:** blocked — 11j's seed bootstrap worked (11k confirmed `--auto` now derives a real
+window), but surfaced a new, unreviewed design question one layer deeper: external-step
+invocation has no frontier/freshness awareness at all, so `sources.raw.github_loader` (the
+DuckDB-CLI dev-target loader) is unconditionally re-invoked and cannot run against Databricks.
+See `## Blocked` and `docs/outcomes/20260912-databricks-dogfood-spine/phases/11k-summary.md`.
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -187,9 +190,40 @@ of the models or the tooling.
 | 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | done |
 | 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
 | 11j | Bootstrap tooling, offline: a `smelt state seed-interval` command that writes one model's interval directly into `.smelt/targets/<target>/intervals.json` using the model's real current hash, so a target with no local run history (the Volume-resident `databricks_job` store) can be seeded from data already known to be ingested, gated with no workspace | done |
-| 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | planned |
+| 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 
 ## Blocked
+
+- **2026-09-14 — phase 11k (live): frontier seeding worked; the blocker moved one layer deeper,
+  to external-step invocation.** The seed bootstrap (11j's tool, carried out live by 11k) fixed
+  exactly what it targeted — `--auto` now derives a real, non-empty window from
+  `databricks_job`'s seeded interval history, confirmed by the smoke run's failure changing from
+  `ExternalStepNotInvocable` (no window) to `ExternalStepFailed` (the step itself failed). Along
+  the way 11k also root-caused and fixed a genuine, unrelated deploy bug: `examples/
+  github_activity/.gitignore`'s `dist/` entry made `bundle deploy`'s default file sync silently
+  drop the built wheels (`sync.include: [dist/*.whl]` in `databricks.yml` fixes it, gated by the
+  existing `databricks_bundle` structural test).
+
+  **The new design question**: `sources.raw.github_loader`'s single `external_step:` declaration
+  (`models/sources/raw/github_loader.yml`) is shared across every target, and its `command:`
+  (`load_day.sh`) is the DuckDB-CLI dev-target loader — it cannot run against Databricks
+  serverless compute at all (no `duckdb` binary, no local parquet path, writes a local
+  `target/dev.duckdb`). `invoke_external_steps` is hardcoded `true` in every CLI call site
+  (`crates/smelt-cli/src/commands/run.rs:256,573`, `build.rs:241,446`, `rebuild.rs:72`,
+  `bakeoff/run.rs:324`) with no target override, and even a configurable version would today hard
+  -refuse the run rather than trust data the job's separate `load_next_day` task already landed
+  (`docs/specs/sources.md` §Semantics 12's deliberate "never read possibly-stale content instead"
+  rule). `dbx_job/load_next_day.py`'s own doc comment further rules out simply pointing the step
+  at a Databricks loader: it must run in-process inside the job's notebook-style REPL to see the
+  ambient Databricks Connect session, and `invoke_required_steps` always spawns a real child
+  process, which has no share of that session.
+
+  Three candidate directions, not adopted here — see `phases/11k-summary.md` for the full
+  reasoning behind each: (1) give external steps their own interval/frontier tracking, parallel
+  to models', so an already-covered window skips re-invocation; (2) a real "declines invocation,
+  trusts already-produced sources" mode gated on an explicit freshness *proof*, not blind trust;
+  (3) target-aware dispatch inside the step's own `command:` doing a freshness check instead of a
+  load — blocked on its own tension with 11d's ambient-only (no host/token) design commitment.
 
 - **RESOLVED 2026-09-14 (human decision, see Decision log): the design decision below is made
   — seed `databricks_job`'s interval history rather than generalize `--auto`.** Rows 11j/11k
@@ -432,6 +466,19 @@ of the models or the tooling.
   the next implement pass.
 
 ## Decision log
+
+- 2026-09-14 (phase 11k, live): **the seed worked; the blocker moved one layer deeper, to
+  external-step invocation, not frontier detection.** After seeding `databricks_job`'s interval
+  history (11j's tool) and fixing an unrelated deploy bug (`.gitignore`'s `dist/` entry silently
+  excluded the built wheels from `bundle deploy`'s sync — fixed with `sync.include` in
+  `databricks.yml`), the smoke run's failure changed from `ExternalStepNotInvocable` (no window)
+  to `ExternalStepFailed` (`load_day.sh` not found / not runnable on serverless) — proof `--auto`
+  now derives a real window. But `sources.raw.github_loader`'s single, target-agnostic
+  `external_step:` is the DuckDB-CLI dev-target loader; it cannot run against Databricks at all,
+  and `invoke_external_steps` is hardcoded `true` with no target-level override and a deliberate
+  fail-loud refusal (never trust possibly-stale produced sources) if it were made configurable.
+  This is a new, unreviewed design question — see `## Blocked` and
+  `phases/11k-summary.md`. Outcome `Status` returns to `blocked`.
 
 - 2026-09-14 (human decision): **seed, don't generalize — criterion 11 unblocks with a narrow
   local fix, not a resolution of the general `--auto`/backend-resident-state question.** Of the
