@@ -17,6 +17,7 @@
 #
 #     source scripts/dbx-dogfood-env.sh
 #     bash scripts/dbx-auth.sh   # mint/refresh the one-hour OAuth token
+#     bash scripts/dbx-dogfood-oracle.sh reset   # ONLY for a from-scratch replay (phase 9d)
 #     bash scripts/dbx-dogfood-oracle.sh duck-types
 #     bash scripts/dbx-dogfood-oracle.sh window 9
 #     bash scripts/dbx-dogfood-oracle.sh oracle 9
@@ -29,10 +30,15 @@
 #       databricks_incremental_matches_its_oracle_at_every_window -- --nocapture
 #     bash scripts/dbx-dogfood-oracle.sh report
 #
-# `window` and `oracle` are the only stages that write to the workspace, and
-# each only ever runs `smelt run` — never a hand-issued DDL/DML statement.
-# `snapshot` is read-only (delegates to scripts/dbx_dogfood_export.py, which
-# issues only SELECTs).
+# `window` and `oracle` are the only ordinary stages that write to the
+# workspace, and each only ever runs `smelt run` — never a hand-issued
+# DDL/DML statement. `snapshot` is read-only (delegates to
+# scripts/dbx_dogfood_export.py, which issues only SELECTs). `reset` is the
+# ONE destructive stage (precedent: scripts/bq-dogfood-oracle-dataset.sh's
+# `drop`) — it exists solely to replay the whole dogfood history from
+# scratch under a fixed binary (phase 9d), and its target schemas are
+# hardcoded literals, never read from SMELT_DBX_CATALOG/SMELT_DBX_SCHEMA, so
+# no environment override can widen its blast radius.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
@@ -55,6 +61,46 @@ venv_python() {
   local python_bin="$REPO/.smelt-dbx-venv/bin/python"
   [[ -x "$python_bin" ]] || python_bin="python3"
   echo "$python_bin"
+}
+
+# The one destructive stage: replay from scratch (phase 9d). Hardcoded to
+# EXACTLY `workspace.smelt_dogfood` and `workspace.smelt_dogfood_oracle` —
+# never `${SMELT_DBX_CATALOG}`/`${SMELT_DBX_SCHEMA}` — so no environment
+# override can point this at another catalog or schema. Every table in both
+# schemas is dropped EXCEPT `workspace.smelt_dogfood.github_events`, which is
+# TRUNCATEd rather than dropped: the source's own declaration
+# (`examples/github_activity/smelt.yml`) is the contract, and dropping the
+# table would require re-provisioning it. Also clears the local `.smelt/`
+# run-state directories for the `databricks`/`databricks_oracle` targets, so
+# the frontier starts cold to match the truncated source.
+stage_reset() {
+  local python_bin query_py schema tables tbl
+  # shellcheck source=scripts/dbx-dogfood-env.sh
+  . "$REPO/scripts/dbx-dogfood-env.sh" >&2
+  python_bin="$(venv_python)"
+  query_py="$REPO/scripts/dbx_dogfood_query.py"
+
+  for schema in workspace.smelt_dogfood workspace.smelt_dogfood_oracle; do
+    echo "resetting ${schema}..." >&2
+    tables="$("$python_bin" "$query_py" "SHOW TABLES IN ${schema}" \
+      | python3 -c 'import json, sys
+for line in sys.stdin:
+    print(json.loads(line)["tableName"])')"
+    while IFS= read -r tbl; do
+      [[ -z "$tbl" ]] && continue
+      if [[ "$schema" == "workspace.smelt_dogfood" && "$tbl" == "github_events" ]]; then
+        echo "  TRUNCATE TABLE ${schema}.${tbl}" >&2
+        "$python_bin" "$query_py" "TRUNCATE TABLE ${schema}.${tbl}" >/dev/null
+      else
+        echo "  DROP TABLE ${schema}.${tbl}" >&2
+        "$python_bin" "$query_py" "DROP TABLE IF EXISTS ${schema}.${tbl}" >/dev/null
+      fi
+    done <<<"$tables"
+  done
+
+  rm -rf "$EXAMPLE_DIR/.smelt/targets/databricks" "$EXAMPLE_DIR/.smelt/targets/databricks_oracle"
+  echo "reset complete: workspace.smelt_dogfood.github_events truncated; every other object in \
+both dogfood schemas dropped; local run-state cleared" >&2
 }
 
 # Delegates to the parity script's own `duck` stage for the type-reference
@@ -180,6 +226,7 @@ PY
 }
 
 case "${1:-}" in
+  reset) stage_reset ;;
   duck-types) stage_duck_types ;;
   window) stage_window "${2:-}" ;;
   oracle) stage_oracle "${2:-}" ;;
@@ -187,7 +234,7 @@ case "${1:-}" in
   manifest) stage_manifest ;;
   report) stage_report ;;
   *)
-    echo "usage: $0 {duck-types|window <n>|oracle <n>|snapshot <n>|manifest|report}" >&2
+    echo "usage: $0 {reset|duck-types|window <n>|oracle <n>|snapshot <n>|manifest|report}" >&2
     exit 2
     ;;
 esac

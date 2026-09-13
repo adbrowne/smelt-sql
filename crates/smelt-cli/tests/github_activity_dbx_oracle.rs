@@ -451,6 +451,60 @@ fn the_oracle_driver_declares_the_checkpoint_schedule_the_sweep_expects() {
     );
 }
 
+/// Phase 9d's from-scratch replay needs a destructive reset stage, and it
+/// must be provably scoped to the two dogfood schemas: statically hardcoded
+/// literals, never the overridable `SMELT_DBX_CATALOG`/`SMELT_DBX_SCHEMA`
+/// variables, and truncating (never dropping) `github_events` — the source's
+/// own declaration is the contract, not something this stage may destroy.
+#[test]
+fn oracle_driver_declares_a_reset_stage_scoped_to_the_dogfood_schemas() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/dbx-dogfood-oracle.sh"))
+        .expect("read scripts/dbx-dogfood-oracle.sh");
+
+    assert!(
+        script.contains("stage_reset()"),
+        "expected a `stage_reset` stage for phase 9d's from-scratch replay"
+    );
+    assert!(
+        script.contains("reset) stage_reset ;;"),
+        "the `reset` stage must be dispatchable from the script's case statement"
+    );
+    assert!(
+        script.contains("workspace.smelt_dogfood workspace.smelt_dogfood_oracle"),
+        "the reset stage's schema list must be the two dogfood schemas, named as literals"
+    );
+    assert!(
+        script.contains(r#"TRUNCATE TABLE ${schema}.${tbl}"#),
+        "github_events must be truncated, not dropped, when the loop reaches it"
+    );
+    assert!(
+        script.contains(r#"DROP TABLE IF EXISTS ${schema}.${tbl}"#),
+        "every other table in the two schemas must be dropped so the replay starts clean"
+    );
+
+    // The reset stage's own body must never read the overridable catalog/schema
+    // env vars — only the hardcoded `workspace.smelt_dogfood`/
+    // `workspace.smelt_dogfood_oracle` literals above may drive what it touches.
+    let reset_start = script.find("stage_reset()").expect("stage_reset defined");
+    let reset_end = script[reset_start..]
+        .find("\n}\n")
+        .map(|i| reset_start + i)
+        .expect("stage_reset has a closing brace");
+    let reset_body = &script[reset_start..reset_end];
+    for forbidden in [
+        "SMELT_DBX_CATALOG",
+        "SMELT_DBX_SCHEMA",
+        "DROP SCHEMA",
+        "DROP DATABASE",
+    ] {
+        assert!(
+            !reset_body.contains(forbidden),
+            "stage_reset must never reference `{forbidden}` — its blast radius must be \
+             statically provable, not environment-overridable: {reset_body}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The committed report, and the gates over it
 // ---------------------------------------------------------------------------

@@ -1117,18 +1117,47 @@ fn databricks_relation_set_mismatch_fails() {
 // The live Databricks sweep
 // ---------------------------------------------------------------------------
 //
-// Unlike the BigQuery sweep, there is deliberately no committed report or
-// liveness ratchet yet (`dbx_registry_entries_are_all_live` /
-// `registry_entries_are_all_live`'s Databricks counterpart): the live sweep
-// below found a second, unresolved divergence
-// (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` §Blocked,
-// phase 8) that this phase did not root-cause to a checkable bound. Adding
-// that ratchet now, over a report showing an unregistered divergence, would
-// make it permanently red for every future `cargo test`. It is restored once
-// the remaining divergence is registered or fixed.
+// There is still no committed report or liveness ratchet
+// (`dbx_registry_entries_are_all_live` / `registry_entries_are_all_live`'s
+// Databricks counterpart): phase 9d's from-scratch replay hit a SECOND
+// live-only gap in 9c's fix — `rebuild_succession_state`
+// (`crates/smelt-runtime/src/maintenance_driver/succession/execute.rs:339`)
+// carries the exact same unconditional `realises_tombstone_ledger` gate as
+// `execute_succession_maintenance`, so 9c's dispatch change (route a
+// `state_downgraded` cell to `rebuild_succession_state` rather than the
+// window-forward loop) still refuses on Databricks: it just moved the same
+// bail from one function to the other. 9c's own differential test
+// (`explain_maintenance/databricks_succession_differential.rs`) and its
+// resolver-level regression test only assert the *dispatch decision*
+// (`state_downgraded` routes to `rebuild_succession_state`), never execute
+// that function against a live backend, so this gap was invisible offline.
+// See `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` §Blocked,
+// phase 9d, for the fix candidates. Restored once a follow-up phase lands a
+// `rebuild_succession_state` route that does not require a ledger the
+// backend cannot realise.
 
-/// The measured result of the live Databricks sweep. Not yet committed — see
-/// the section comment above.
+/// The default day count/checkpoint parsed out of
+/// `scripts/dbx-dogfood-parity.sh` matches the constant this file's own live
+/// sweep and the parity report it produces expect, so script and suite
+/// cannot drift. Mirrors
+/// `github_activity_dbx_oracle.rs::the_oracle_driver_declares_the_checkpoint_schedule_the_sweep_expects`.
+#[test]
+fn the_parity_driver_declares_the_checkpoint_the_sweep_expects() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/dbx-dogfood-parity.sh"))
+        .expect("read scripts/dbx-dogfood-parity.sh");
+
+    assert!(
+        script.contains(r#"DAYS="${PARITY_DAYS:-11}""#),
+        "the script's default day count has drifted from the 11-day phase 9d replay: {script}"
+    );
+    assert!(
+        script.contains(r#"CHECKPOINTS="${PARITY_CHECKPOINTS:-11}""#),
+        "the script's default checkpoint has drifted from the single day-11 checkpoint: {script}"
+    );
+}
+
+/// The measured result of the live Databricks sweep, committed by phase 9d's
+/// from-scratch replay.
 const DBX_PARITY_REPORT_PATH: &str =
     "docs/outcomes/20260912-databricks-dogfood-spine/phases/08-parity.json";
 
@@ -1230,3 +1259,8 @@ fn duckdb_and_databricks_agree_on_every_model() {
         failures.join("\n\n")
     );
 }
+
+// The committed Databricks parity report, and the two-sided liveness ratchet
+// over it (`dbx_registry_entries_are_all_live`), are added once a phase lands
+// a fresh `08-parity.json` measured under a `rebuild_succession_state` that
+// actually completes on Databricks — see the section comment above.

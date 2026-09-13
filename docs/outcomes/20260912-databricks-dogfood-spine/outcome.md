@@ -172,7 +172,7 @@ of the models or the tooling.
 | 9a | Oracle harness, offline: the `databricks_oracle` target and its `databricks_oracle:` source-name entries (anti-vacuity gated), the equivalence sweep over the shared `parity_support` seam with its negative controls, and `scripts/dbx-dogfood-oracle.sh`'s stages — all provable with no workspace | done |
 | 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
 | 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | done |
-| 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | planned |
+| 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | blocked |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
@@ -191,6 +191,20 @@ of the models or the tooling.
   closes criteria 7 and 8 together in one live sequence instead of paying for two replays; rows 8
   and 9b are flipped by 9d's own evidence. Nothing left the outcome; nothing added to
   `## Out of scope`.
+
+- 2026-09-13 (phase 9d implement): **9d blocked on a second live-only gap in 9c's fix.** The
+  offline scaffolding (spec delta to `docs/specs/state.md` §"The degradation contract"; the
+  `dbx-dogfood-oracle.sh reset` stage and its test; the parity script's 11-day/checkpoint
+  defaults and its lockstep test) landed and is committed. The live replay's reset, DDL and
+  8-day reload all succeeded (`github_events` at 26,220 rows, verified against the raw fixture's
+  per-day counts), but the full refresh then failed on both succession-grain models:
+  `rebuild_succession_state` — the function 9c's dispatch fix routes a `state_downgraded` cell
+  to — carries the same unconditional tombstone-ledger gate as the function it was routed away
+  from, so the fix never actually reaches Databricks. 9c's own tests only assert the dispatch
+  *decision*, never execute either function against a real backend, so no offline gate caught
+  this. See `## Blocked`'s phase 9d entry for the root cause, the state left in the workspace,
+  and three candidate fix routes for a follow-up phase (tentatively 9e). Rows 8 and 9b stay
+  `## Blocked` under their existing entries; 9d's own row is `blocked` rather than `done`.
 
 - 2026-09-13 (phase 9c implement): **row 9c done — criterion 8 closed, and the Databricks
   succession-fold defect root-caused and fixed, entirely offline.** Criterion 8: registered
@@ -857,6 +871,71 @@ of the models or the tooling.
   `smelt`-spawning call sites). Nothing left the outcome; nothing added to `## Out of scope`.
 
 ## Blocked
+
+- **2026-09-13 — phase 9d (replay under 9c's fix, live). A second live-only gap in 9c's fix,
+  never reachable by 9c's own offline tests.** The reset stage, the loader/DDL sequence and the
+  8-day fixture reload (days 2026-08-05 through 2026-08-12, `workspace.smelt_dogfood.
+  github_events` at 26,220 rows) all completed cleanly. `smelt run --target databricks
+  --full-refresh --allow-full-refresh --event-time-start 2026-08-05 --event-time-end
+  2026-08-13` then failed on both succession-grain models (`silver.actor_naming`,
+  `silver.repo_naming`) with `Feature not supported by Spark SQL: succession-patch technique
+  (window-forward driver)`.
+
+  **Root cause.** 9c's dispatch fix (`crates/smelt-runtime/src/execute/project/mod.rs:2557-2561`)
+  routes a `cell.state_downgraded` succession cell to `rebuild_succession_state` instead of the
+  window-forward loop — but `rebuild_succession_state` itself
+  (`crates/smelt-runtime/src/maintenance_driver/succession/execute.rs:339`) carries the exact
+  same unconditional `if !realises_tombstone_ledger(backend.dialect()) { bail!(...) }` guard as
+  `execute_succession_maintenance`. So the routing change never actually reaches Databricks: it
+  just moves the same refusal from one function to the other. 9c's own verification — the
+  differential test (`explain_maintenance/databricks_succession_differential.rs`) and the
+  resolver-level regression test (`state_downgraded_cell_still_dispatches_marked_for_full_rebuild`)
+  — only assert the *dispatch decision* (a downgraded cell resolves live and is marked for full
+  rebuild); neither calls `rebuild_succession_state` or `execute_succession_maintenance` against
+  a real backend, so this gap was invisible offline. 9c's own "For the next planner" note flagged
+  this class of risk generically ("re-run ... to get fresh, correct numbers under the fix") but
+  did not anticipate the fix itself would still refuse.
+
+  **Why this is not this phase's own fix.** `rebuild_succession_state` builds and reads a
+  tombstone table (`tombstone_table_ddl`, the clock-tie probe, `emit_succession_full_rebuild`'s
+  own signature) as part of its normal operation — it was written for the case where a ledger
+  IS realisable (DuckDB's own full-refresh-of-an-existing-ledger path) and never adapted for a
+  backend where `StateStructure::TombstoneLedger` has no realisation at all. Making it work for
+  that case needs a real design answer (does a downgraded full rebuild skip the tombstone table
+  and clock-tie probe entirely, given `docs/specs/state.md`'s new §"The degradation contract"
+  sentence that the recompute region is the whole presented table and there is no ledger to
+  probe against? or does it need a ledger-free variant of `emit_succession_full_rebuild`?) —
+  not a boolean-check fix like 9c's, and not something to improvise mid-replay.
+
+  **State left behind.** The Databricks workspace (`workspace.smelt_dogfood`) holds 8 days of
+  loaded source data (2026-08-05 through 2026-08-12, `github_events` at 26,220 rows,
+  `github_events_arrival` populated identically) and NO model tables — the full refresh failed
+  before writing any model, including the 14 non-succession models (the run aborts the whole
+  batch on any model failure). `workspace.smelt_dogfood_oracle` is empty (post-reset, untouched).
+  Left in this state deliberately: the next fix attempt can re-run the full refresh directly
+  from task 4 of `phases/09d-plan.md` without repeating the reset/reload. No `.smelt/targets/`
+  local state exists for `databricks`/`databricks_oracle` (cleared by the reset stage, never
+  recreated since no run succeeded).
+
+  **Candidate fix routes for the next planner:**
+  1. Give `rebuild_succession_state` a `cell.state_downgraded`-gated branch that skips the
+     tombstone table and clock-tie probe entirely and emits a bare `CREATE OR REPLACE TABLE …
+     AS SELECT` over `emit_succession_full_rebuild`'s `ROW_NUMBER() … = 1` shape restricted to
+     non-delete-flagged rows — no ledger read or write at all, matching "the recompute region is
+     the whole presented table" literally.
+  2. Same target shape, but reached by a distinct new function
+     (`rebuild_succession_state_ledgerless` or similar) rather than a branch inside the existing
+     one, if the ledger-bearing and ledger-free bodies diverge enough that a shared function
+     becomes an `if` maze — matching the single-owned-emitter discipline `CLAUDE.md` §
+     "Maintenance-plan purity" asks for.
+  3. Add a live execution leg to the offline differential test (or a new one) that exercises
+     `rebuild_succession_state`/`execute_succession_maintenance` against SOME dialect gate
+     (even a synthetic no-ledger dialect on DuckDB, if constructible) so this class of gap is
+     caught next time without needing a live Databricks run at all.
+  Whichever route is chosen: re-run task 4 onward of `phases/09d-plan.md` (the full refresh, then
+  windows 9-11, then both sweeps) once the fix lands — the offline scaffolding (the `reset`
+  stage, the checkpoint-lockstep tests, the `state.md` spec delta) is already committed and does
+  not need repeating.
 
 - **2026-09-13 — phase 9b (equivalence oracle, live).** Three checkpoints (w09/w10/w11,
   `2026-08-13/14/15`) measured; the sweep is not clean, per the plan's own contingency

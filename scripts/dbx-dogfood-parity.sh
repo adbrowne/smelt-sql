@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dbx-dogfood-parity.sh — drive `examples/github_activity` on DuckDB and
-# snapshot the Databricks state phases 5-7b already built over the same
-# fixture days, so the offline comparator in
+# snapshot the Databricks state built over the same fixture days, so the
+# offline comparator in
 # `crates/smelt-cli/tests/github_activity_dual_target.rs` can prove
 # criterion 7 ("the two targets agree") over one shared population.
 # Modelled on scripts/bq-dogfood-parity.sh, generalised over the target per
@@ -23,7 +23,7 @@
 # script never drops or re-creates it. `dbx-snapshot` only ever issues
 # `SELECT`s (scripts/dbx_dogfood_export.py).
 #
-# The DuckDB leg replays the SAME eight fixture days as a fresh full-refresh
+# The DuckDB leg replays the SAME eleven fixture days as a fresh full-refresh
 # run — `examples/github_activity/run_incremental.py`, not a
 # re-implementation of it — so the comparison is over identical inputs. The
 # Databricks leg is whatever `smelt run --target databricks` already left in
@@ -38,12 +38,13 @@ OUT_DIR="${PARITY_OUT_DIR:-$REPO/target/phase8}"
 SMELT_BIN="${SMELT_BIN:-$REPO/target/debug/smelt}"
 
 START_DATE="${PARITY_START_DATE:-2026-08-05}"
-DAYS="${PARITY_DAYS:-8}"
-# The single comparison point: after all eight fixture days. Databricks'
-# state (phases 5-7b) is likewise the end state of three incremental windows
-# over the same eight days, not a per-window replay — there is nothing here
-# resembling the BigQuery driver's thirty-checkpoint schedule.
-CHECKPOINTS="${PARITY_CHECKPOINTS:-8}"
+DAYS="${PARITY_DAYS:-11}"
+# The single comparison point: after all eleven fixture days (phase 9d's
+# replay — eight full-refresh days plus the three oracle-sweep windows 9-11
+# folded on top). Databricks' state is likewise the end state of that
+# replay, not a per-window schedule — there is nothing here resembling the
+# BigQuery driver's thirty-checkpoint schedule.
+CHECKPOINTS="${PARITY_CHECKPOINTS:-11}"
 
 # Phases 6b-6f closed every construct Spark/Databricks refused, so nothing is
 # excluded here — kept in lockstep with DATABRICKS_EXCLUDED_MODELS in

@@ -390,7 +390,14 @@ Statefulness is an **admission input resolved late**. Plan derivation proceeds i
    `EnrichmentKeyed` (the value-enrichment join shape) addresses only a `ColumnScopedMerge`
    cell — no execution route dispatches an `EnrichmentKeyed` `PerGroupRecompute` cell, so a
    `ColumnScopedMerge` cell of this shape whose merge ledger is unavailable downgrades straight
-   to `DeleteInsert`, never through an unexecutable `PerGroupRecompute` intermediate.
+   to `DeleteInsert`, never through an unexecutable `PerGroupRecompute` intermediate. For a
+   **succession-grain** cell (`incremental_shapes.md` §"The succession grain"), the technique
+   this downgrade replaces is `SuccessionPatch`, whose `StateStructure::TombstoneLedger`
+   requirement a backend either realises or does not; on a backend with no realisable
+   `TombstoneLedger`, the `DeleteInsert` region is the whole presented table, so every run
+   rebuilds the model in full from the whole source seen so far rather than patching forward
+   from the last window — the cost the contract trades for correctness, since a window-forward
+   patch route has no way to retract a delete event it never saw a tombstone for.
 
 The downgrade is sound by construction: every recompute-family technique satisfies the same
 equivalence invariant (`incremental_models.md` §"The equivalence invariant"), so availability
