@@ -327,7 +327,9 @@ impl Signature {
         self
     }
 
-    /// The emission verdict for `dialect` at `position`.
+    /// The emission verdict `dialect` at `position` explicitly declares, if
+    /// any — `None` where [`Self::emission_at`] would fall back to the
+    /// implicit `Native` default.
     ///
     /// Lookup consults the exact `(dialect, position)` pair first, then
     /// `(dialect, Position::Any)`, and stops — there is deliberately no
@@ -336,8 +338,13 @@ impl Signature {
     /// caller that decided a call's actual position is the only one
     /// entitled to fall back to `Any`; a lookup that fell from one concrete
     /// position to another would answer a different question than the one
-    /// asked. A pair with no entry at all is `Native`.
-    pub fn emission_at(&self, dialect: DialectId, position: Position) -> Emission {
+    /// asked.
+    ///
+    /// This is the registry-owned distinction between "stated" and
+    /// "defaulted" — a coverage gate (e.g. the Trino census,
+    /// `docs/specs/multi_backend.md` §"Cross-engine emission audit") needs to
+    /// tell the two apart, which [`Self::emission_at`] alone cannot.
+    pub fn stated_emission_at(&self, dialect: DialectId, position: Position) -> Option<Emission> {
         self.emission
             .iter()
             .find(|(d, p, _)| *d == dialect && *p == position)
@@ -347,6 +354,14 @@ impl Signature {
                     .find(|(d, p, _)| *d == dialect && *p == Position::Any)
             })
             .map(|(_, _, e)| *e)
+    }
+
+    /// The emission verdict for `dialect` at `position`. A pair with no
+    /// entry at all is `Native`.
+    ///
+    /// Delegates to [`Self::stated_emission_at`] for the actual lookup.
+    pub fn emission_at(&self, dialect: DialectId, position: Position) -> Emission {
+        self.stated_emission_at(dialect, position)
             .unwrap_or(Emission::Native)
     }
 

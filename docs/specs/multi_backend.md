@@ -736,6 +736,15 @@ registry supports, not a Trino special case; Trino is simply the dialect whose a
 to be written down, because it is the first dialect added *after* the registry's default already
 existed.
 
+A dialect introduced after the registry default may record its outstanding `unverified` pairs in
+a **shrink-only census file** (`.claude/trino-emission-census.txt` for Trino) while the verdicts
+and audit legs that close them are still being built. The census is two-sided exactly like the
+gap ratchet: a pair absent from it fails immediately, so a newly-added built-in can never silently
+acquire a claim on the introduced dialect, and a recorded pair that has since gained an explicit
+verdict or an audit-leg observation is a stale-census failure telling you to tighten the file. The
+census is deleted, not grandfathered, once its count reaches zero, at which point `unverified`
+reverts to a plain failure for that dialect with no census to fall back on.
+
 **Probes are derived from registry data, not authored by hand.** `SyntaxForm` determines the
 spelling (`a % b` versus `MOD(a, b)`); `kind` determines which positions apply. A small override
 table covers the minority where a type-correct argument is not a meaningful one — regex patterns,

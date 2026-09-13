@@ -147,3 +147,25 @@ fn skip_semantics_are_not_contradicted() {
         "the `SMELT_TRINO_URL` paragraph does not exclude the audit legs from its skip claim"
     );
 }
+
+/// §"Cross-engine emission audit" must state the shrink-only census rule
+/// (phase 2's coverage gate) alongside the `unverified`/`passing`/`gap`
+/// vocabulary.
+#[test]
+fn census_rule_is_stated() {
+    let text = read_spec("multi_backend.md");
+    let sect = section(&text, "### Cross-engine emission audit");
+
+    assert!(
+        sect.contains("census"),
+        "§\"Cross-engine emission audit\" does not state the shrink-only census rule"
+    );
+    assert!(
+        sect.contains("trino-emission-census.txt"),
+        "§\"Cross-engine emission audit\" does not name the Trino census file"
+    );
+    assert!(
+        sect.to_lowercase().contains("shrink-only") || sect.contains("shrink only"),
+        "§\"Cross-engine emission audit\" does not state the census is shrink-only"
+    );
+}

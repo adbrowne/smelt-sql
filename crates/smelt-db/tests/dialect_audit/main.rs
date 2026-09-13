@@ -4,6 +4,7 @@
 //! the enumeration is **total** — an entry with no probe is reported by name,
 //! never dropped. Offline; the engine legs land alongside it.
 
+mod census;
 mod fixture;
 mod ledger;
 

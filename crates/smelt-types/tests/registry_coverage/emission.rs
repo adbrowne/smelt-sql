@@ -85,6 +85,36 @@ fn floor_divide_is_unsupported_everywhere_it_has_no_safe_lowering() {
 }
 
 #[test]
+fn stated_emission_at_distinguishes_stated_from_defaulted() {
+    // An explicit `(dialect, position)` row.
+    let sig = BuiltinRegistry::resolve("EXPLODE").expect("EXPLODE");
+    assert_eq!(
+        sig.stated_emission_at(DialectId::DuckDb, Position::Any),
+        Some(Emission::Rename("UNNEST"))
+    );
+
+    // A `Position::Any` row still answers a concrete-position lookup via the
+    // documented fallback.
+    let caret = BuiltinRegistry::resolve("^").expect("^");
+    assert_eq!(
+        caret.stated_emission_at(DialectId::SparkSql, Position::Scalar),
+        Some(Emission::Template("POWER({0}, {1})")),
+    );
+
+    // Where `emission_at` would fall back to the implicit `Native` default,
+    // `stated_emission_at` reports `None` rather than manufacturing a verdict.
+    let lower = BuiltinRegistry::resolve("LOWER").expect("LOWER");
+    assert_eq!(
+        lower.stated_emission_at(DialectId::DuckDb, Position::Any),
+        None
+    );
+    assert_eq!(
+        lower.emission_at(DialectId::DuckDb, Position::Any),
+        Emission::Native
+    );
+}
+
+#[test]
 fn an_unlisted_dialect_defaults_to_native() {
     let sig = BuiltinRegistry::resolve("LOWER").expect("LOWER");
     for d in DialectId::ALL {

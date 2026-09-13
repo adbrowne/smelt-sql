@@ -18,7 +18,7 @@ use crate::ledger::{self, Verdict};
 /// The concrete positions an entry's own kind can occupy — the same
 /// enumeration `probe.rs::positions` uses to derive probes, so the table
 /// renders exactly the positions the audit actually exercises.
-fn applicable_positions(kind: ExprKind) -> &'static [Position] {
+pub(crate) fn applicable_positions(kind: ExprKind) -> &'static [Position] {
     match kind {
         ExprKind::Scalar => &[Position::Scalar],
         ExprKind::Agg => &[
@@ -33,7 +33,7 @@ fn applicable_positions(kind: ExprKind) -> &'static [Position] {
 /// A short label for a concrete position, used only in the per-position
 /// rendering below (never `Position::Any`, which is a lookup wildcard, not a
 /// position a call occupies).
-fn position_label(position: Position) -> &'static str {
+pub(crate) fn position_label(position: Position) -> &'static str {
     match position {
         Position::Any => unreachable!("Position::Any is a lookup wildcard, never rendered"),
         Position::Scalar => "scalar",

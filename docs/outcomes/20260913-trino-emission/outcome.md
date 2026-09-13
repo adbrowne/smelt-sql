@@ -124,7 +124,7 @@ including its null-safe join spelling.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | done |
-| 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | planned |
+| 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | done |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | pending |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | pending |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | pending |
@@ -169,5 +169,15 @@ including its null-safe join spelling.
   cannot silently acquire a Trino claim), and the census is deleted at zero rather than
   grandfathered. Phase 2 carries the one-paragraph spec delta stating this; phase 6's row is
   amended to own the deletion.
+- **2026-09-14 — phase 2 done.** The coverage gate landed: `Signature::stated_emission_at`
+  distinguishes a stated verdict from the implicit `Native` default (`emission_at` now
+  delegates to it); `crates/smelt-db/tests/dialect_audit/census.rs` classifies every
+  `(entry, position)` pair for a dialect into `Stated`/`Verified`/`Gap`/`Unverified`, with a
+  ledger `Gap`/`Divergent` row checked ahead of the registry's own verdict (a pair the registry
+  states `Native` for that a live sweep found broken is `Gap`, not `Stated`). 237 pairs are
+  `Unverified` for Trino today, all named line-for-line in `.claude/trino-emission-census.txt`
+  (generated via `SMELT_REGEN_TRINO_CENSUS=1`); phases 3–6 drive that count to zero and delete
+  the file. `report::applicable_positions`/`position_label` were widened to `pub(crate)` so the
+  census module reuses the coverage table's own position axis rather than re-deriving it.
 
 ## Blocked
