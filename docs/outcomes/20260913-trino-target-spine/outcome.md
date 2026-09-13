@@ -141,7 +141,7 @@ not an answer — every cell is still established by execution.
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | done |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | done |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | done |
-| 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
+| 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | planned |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
 | 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | pending |
 | 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
@@ -333,5 +333,22 @@ not an answer — every cell is still established by execution.
   `bigint`. `create_view_as_then_read_back_and_drop` initially asserted `Int64Array` and failed
   against the live tier; fixed to `Int32Array` with a comment recording the distinction, since a
   wrong assumption here would have silently under-tested `arrow_convert`'s type mapping.
+
+- **2026-09-14 — phase 7 measures the `INSERT`-over-HTTP path; Parquet staging into MinIO is not
+  reachable from the target shape this outcome specified.** Criterion 6 wants the bulk path
+  chosen by measurement. Only one candidate is actually available to measure: the `trino` target
+  carries `host`/`port`/`user`/`catalog`/`schema`/TLS/`password` and **no object-store
+  credentials**, so smelt cannot write a Parquet file into MinIO for the Iceberg connector to
+  read without new target keys — a `smelt_yml.md` §"Target shape" change wider than this outcome.
+  Phase 7 therefore measures the `INSERT INTO … SELECT CAST(…) FROM (VALUES …)` path and records
+  the numbers. If measurement shows that path inadequate at seed scale, that is an escalation
+  (a spec change to the target shape) to be recorded and raised, **not** absorbed into the phase.
+
+- **2026-09-14 — the `seed_parity` Trino leg is a separate test, not a `targets_to_run()` member.**
+  `targets_to_run()` is consumed by every W1+ suite in `smelt-cli`, most of which run
+  `smelt build`; `dialect_and_capabilities` refuses Trino by name until phase 8, so adding Trino
+  to that helper would turn currently-green suites red for a reason unrelated to seeding.
+  `smelt seed` itself never constructs a `SqlCompiler` (verified: `commands/seed.rs` reaches only
+  `create_backend`), so the CLI seed leg is genuinely reachable now and is not deferred.
 
 ## Blocked
