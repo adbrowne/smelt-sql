@@ -137,7 +137,7 @@ not an answer — every cell is still established by execution.
 |---|-------|--------|
 | 1 | Spec delta: the `trino` target shape and capability column in `multi_backend.md` + `smelt_yml.md`, the foreign-key refusal diagnostics, the connection-security rule, and the Known Divergence naming the implicit-`Native` emission hole this outcome does not close | done |
 | 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | done |
-| 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | pending |
+| 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | planned |
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | pending |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
@@ -208,5 +208,16 @@ not an answer — every cell is still established by execution.
   Building Trino audit coverage now would be out of scope; leaving `DialectId::ALL`
   non-exhaustive would violate criterion 2. Added a 3-member `AUDITED_DIALECTS` const scoped to
   this test file only; `DialectId::ALL` itself is untouched. See phase 2 summary.
+
+- **2026-09-14 — phase 3 makes `dialect_and_capabilities` fallible rather than landing a
+  placeholder `BackendCapabilities::trino_iceberg()`.** `BackendType::Trino` forces
+  `smelt-runtime/src/compile.rs`'s `(dialect, capabilities)` match to answer for Trino, but the
+  2026-09-13 ruling above reserves the capability profile for phase 8, where the constructor and
+  the spec table are written in one commit. A placeholder constructor would be exactly the
+  unmeasured claim `capability_conformance.rs` and the `?`-cells gate exist to prevent, and
+  aliasing Trino onto `BackendCapabilities::spark()` would bake in the Delta-shaped prior the
+  outcome insists is a prior and not an answer. So the function returns `Result` and refuses
+  Trino by name — the same fail-loud shape phase 2 gave `maintenance_dialect` and
+  `ddl_backend_for_dialect`. Phase 8 narrows the error away.
 
 ## Blocked
