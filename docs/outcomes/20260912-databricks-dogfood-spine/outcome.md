@@ -1,7 +1,7 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** active
+**Status:** blocked
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -188,6 +188,64 @@ of the models or the tooling.
 
 ## Blocked
 
+- **2026-09-13 — outcome-level: criterion 11 is open on a design decision no phase can make
+  unreviewed; every phase row is `done` or `blocked`.** Criteria 1-10 are met and evidenced by the
+  committed summaries (1-3 by phases 1/2/3; 4 by 4c; 5 by 5; 6 by 6-6f's clean 16/16 full refresh;
+  7 by 7/7b and 9f's re-measured windows; 8 by 9f's `08-parity.json` and `09b-equivalence.json`;
+  9 by phase 10's findings handoff, spec updates and docs-site page; 10 by every phase's green
+  `verify-phase.sh`). **Criterion 11 is not met**: the bundle, the dual-arch wheel, the ambient
+  `databricks_job` target, the self-driving loader and the Volume-resident project directory are
+  all committed, deployed and gated (11a/11b/11d/11f/11h, and 11i's five live infra fixes), but
+  **no scheduled run has ever completed** — `smelt run --auto` inside the job fails before any
+  model executes.
+
+  **The decision a human must make.** `--auto`'s frontier detection
+  (`compute_auto_time_range`, `crates/smelt-cli/src/commands/run_setup.rs:185`) reads
+  `FileStore::new(project_dir, target)` — a file-resident interval store keyed by *target name*
+  under the project's own `.smelt/`. Inside the job that store is empty, so `latest` is `None`,
+  `--auto` returns `None`, and the run refuses with `ExternalStepNotInvocable: '{run_date}' has
+  no value in this run`. Two facts this planning pass established sharpen 11i's framing:
+
+  1. **Re-keying the store alone cannot fix it.** 11i observed the Volume's `.smelt/` holding
+     only a `lock` file — no manifest, no interval history at all. The 12 fixture days already in
+     `workspace.smelt_dogfood` were landed by the *local* `databricks` target, whose interval
+     store lives on the dev machine and is never synced to the Volume. So candidate (b) of 11i's
+     list (one interval store shared by `databricks` and `databricks_job`, keyed by physical
+     location rather than target name) is necessary-but-not-sufficient: the job side would still
+     start from nothing unless the store is also seeded or made backend-resident.
+  2. **"No history" does not reduce to "full refresh".** The obvious narrow answer — `--auto`
+     with no interval history bootstraps with a full refresh instead of refusing — does not close
+     it, because the models are parameterised on `{run_date}`: a bootstrap still needs a concrete
+     window, and deriving that window is the same frontier question.
+
+  **Candidate directions** (each needs a spec edit before a plan, per the spec-first rule):
+  (a) **Backend-resident frontier.** `--auto` reconciles against the target's own resident state
+      (the ledger already living in the warehouse) rather than the local interval store, for
+      targets whose state is engine-resident. Most principled and target-agnostic; the largest
+      change; touches `docs/specs/run_state.md` and the equivalence invariant, and is adjacent to
+      the already-contemplated state-residency programme.
+  (b) **Location-keyed store plus an explicit seed.** Key the interval store by the target's
+      physical location (`catalog.schema`) so `databricks` and `databricks_job` are one identity,
+      and have `scripts/dbx-bundle.sh seed` push the existing interval history onto the Volume.
+      Smallest change, matches this repo's "identity falls out of physical structure" instinct,
+      but makes the Volume's state a copy of a dev machine's — which drifts.
+  (c) **Source-derived bootstrap window.** `--auto` with no history derives its window from the
+      declared sources' own observed range (e.g. `min/max(ingested_date)`), making the first run
+      self-starting with no seed and no ledger read. Narrower than (a), but invents a second
+      frontier notion unless specified as part of one.
+  (d) **Explicit window handed across by the job.** The loader task computes `--start`/`--end`
+      and passes them via `dbutils.jobs.taskValues`. Unblocks criterion 11 fastest; 11i already
+      judged it worst, as it authors an ad hoc frontier mechanism outside smelt's own.
+
+  **Also worth settling in the same decision:** whether BigQuery's dogfood spine has the identical
+  `--auto`/target-aliasing gap and simply never exercised it (11i flagged this; unverified).
+
+  **State left clean.** The bundle is deployed at the committed daily cadence (`0 0 6 * * ?`,
+  UNPAUSED); nothing is compressed or mid-deploy. Row 11i (and its predecessors 11c/11e/11g)
+  resume from their live legs the moment a direction is chosen — no offline work is pending on
+  any of them. Row 4b remains superseded by 4c. The follow-on `databricks-correctness` outcome
+  this spine feeds is unaffected: criterion 9's handoff is banked.
+
 - **2026-09-13 — phase 11i (live legs, sixth attempt).** The plan landed and the credential
   was live; this pass got substantially further than any prior attempt — past deploy, past
   the wheel install, past the ambient-session config load, into `smelt run` itself — and
@@ -367,6 +425,19 @@ of the models or the tooling.
   the next implement pass.
 
 ## Decision log
+
+- 2026-09-13 (outcome-level plan pass): **no reshape, no new row — the outcome is flipped to
+  `blocked`.** Every phase row is `done` or `blocked`, so there was nothing to plan. Criterion 11
+  serves the outcome and therefore cannot be deferred out, and it is *not* moved to
+  `## Out of scope`: the remaining work is a single design decision (how `--auto` finds its
+  frontier for a cloud target whose state is not local), recorded in `## Blocked` with four
+  candidate directions and the two facts this pass established that rule out the two smallest
+  ones. A planner could have picked a direction unilaterally, but each candidate changes
+  user-visible `--auto` semantics for *every* cloud target and touches `docs/specs/run_state.md`
+  and the equivalence invariant, which the spec-first rule puts ahead of a plan and a human ahead
+  of both; phase 11i's own summary reached the same judgement ("this needs a design decision, not
+  another live attempt"). Blocking here hands the call to a human and lets the loop advance to the
+  queued Trino programme, which needs no cloud account at all.
 
 - 2026-09-13 (phase 11i plan): **row 11i un-blocked by writing its plan; no other reshape.**
   11i had been flipped to `blocked` five consecutive times by implement passes whose sole
