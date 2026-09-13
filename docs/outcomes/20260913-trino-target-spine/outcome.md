@@ -130,6 +130,10 @@ not an answer — every cell is still established by execution.
   performance tuning, a multi-worker cluster. A single-coordinator tier is enough to prove a
   backend.
 - **Unattended/scheduled execution** on the tier (the Databricks outcome's criterion 11 shape).
+- **Decoding a Trino `array(...)` result column to Arrow** (phase 8 discovery). No criterion
+  here needs array-typed model output — the seed type set of `seeds.md` §"Type inference" has
+  no array type and phase 9's example workspace projects scalars — so this stays a recorded
+  Known Divergence for whichever outcome first needs it, not a phase row.
 
 ## Phases
 
@@ -143,7 +147,7 @@ not an answer — every cell is still established by execution.
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | done |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | done |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | done |
-| 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | pending |
+| 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | planned |
 | 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
 | 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
 
@@ -447,5 +451,23 @@ not an answer — every cell is still established by execution.
   the 2026-09-13 entry above guards against — and marks the two rows in the table as spec-only.
   Closing that pre-existing spec↔struct drift for all six columns is not this outcome's work.
   No phase-table reshape: phase 7's summary surfaced nothing that changes the remaining rows.
+
+- **2026-09-14 (phase 9 planning) — the Trino parity leg is opt-in per suite, not folded into
+  `targets_to_run`.** `crates/smelt-cli/tests/common/mod.rs`'s `targets_to_run(label)` feeds ten
+  parity suites. Adding Trino to it would light up `incremental_parity`, `merge_parity`,
+  `schema_evolution_parity` and `source_seed` on Trino in one step — work owned by
+  `20260913-trino-incremental` and `-trino-ledger`, whose verdicts (which maintenance techniques
+  are even reachable on Iceberg) are not in hand. Phase 9 therefore adds
+  `TargetKind::Trino { schema }` to the enum — so every existing `match` must acknowledge it,
+  no wildcard — plus a separate `targets_to_run_with_trino(label)` that only
+  `materialization_parity` calls. The sibling outcomes widen the opt-in as their verdicts land.
+  The variant arms in the not-yet-wired suites panic naming the owning outcome rather than
+  returning a plausible-looking placeholder.
+
+- **2026-09-14 (phase 9 planning) — reshape: the array-decode gap leaves the outcome.** Phase 8
+  flagged that a Trino `array(...)` result column does not decode to Arrow. It serves no success
+  criterion here (no criterion projects an array type), so it is recorded under "## Out of
+  scope" and as a `multi_backend.md` Known Divergence rather than given a phase row. No other
+  remaining row changed: phase 8's summary confirmed phases 9-11 are still the right three.
 
 ## Blocked
