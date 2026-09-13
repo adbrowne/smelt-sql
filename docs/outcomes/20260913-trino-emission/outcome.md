@@ -126,7 +126,7 @@ including its null-safe join spelling.
 | 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | done |
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | done |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | done |
-| 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | pending |
+| 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | planned |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | pending |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | pending |
@@ -211,5 +211,26 @@ including its null-safe join spelling.
   regenerated at `a642eb91a`, itself unrelated to this outcome). Resynced via
   `large-file-check.sh --update` rather than blocking phase 3 on unrelated pre-existing drift —
   flagged for the next planner in case it recurs and warrants investigation.
+
+- **2026-09-14 — phase 4 planned; no phase-table reshape.** Phase 3's summary named no work
+  needing a new row (its one hand-forward, the pre-existing six-file large-file baseline drift,
+  is advisory and serves no success criterion — it stays out of the table). The decision
+  criterion 3 demands is taken here rather than left to the implement step: **`PIVOT`/`UNPIVOT`
+  on Trino is refused at compile time, not lowered.** Reason: smelt already refuses both for
+  *every* target at the diagnostic layer (`check_unsupported_constructs`,
+  `UnsupportedConstruct` — output columns depend on data values), and a Trino lowering would
+  have to enumerate the `IN`-list values to name its own output columns, which is exactly the
+  projection smelt declines to derive and must not recover from printed SQL
+  (`architecture.md` §"Source-derived projection"). So no lowering is admissible, and the real
+  gap is narrower than the phase row assumed: the *dialect* layer would print `PIVOT` verbatim
+  to Trino, because `compile_with_sql` runs no diagnostics query. Phase 4 closes that with a
+  clause-level refusal keyed on a new `SqlDialect::supports_pivot`, in the same place
+  §"Clause-level dialect refusals" already puts the aggregate-`FILTER` and `INTERVAL`-frame
+  refusals — no printer branch on `SqlDialect::Trino`, so `emission_ownership` stays green.
+  Also surfaced while reading: the spec contradicts itself on this flag — §Surface's matrix row
+  and its Spark-prior paragraph say Trino accepts `PIVOT`, while §"Operator lowering" says it
+  was measured `false`. Phase 4 settles it against a live coordinator first (phase 3's
+  precedent), blocks rather than guesses if the tier cannot be brought up, and if the probe
+  measures `true` states a `Native` verdict and corrects the other sentence instead.
 
 ## Blocked
