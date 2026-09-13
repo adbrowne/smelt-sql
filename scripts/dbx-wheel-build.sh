@@ -11,8 +11,15 @@
 # wheel tagged above that floor, or an unrepaired plain `linux_*` wheel, on
 # disk for `bundle deploy` to upload.
 #
-#     bash scripts/dbx-wheel-build.sh                 # build (default): writes dist/, verifies its own output
-#     bash scripts/dbx-wheel-build.sh verify <wheel>   # check one wheel's platform tag against the floor, no build
+#     bash scripts/dbx-wheel-build.sh                        # build all (default): x86_64 + aarch64, writes dist/, verifies output
+#     bash scripts/dbx-wheel-build.sh build [x86_64|aarch64|all]
+#     bash scripts/dbx-wheel-build.sh verify <wheel>          # check one wheel's platform tag against the floor, no build
+#
+# Databricks serverless compute can land a job task on either aarch64 or
+# x86_64, and there is no pinning mechanism on the platform side (docs.
+# databricks.com/compute/serverless/dependencies, confirmed 11g) — so the
+# bundle needs a compliant wheel for both architectures, not just the build
+# host's own.
 #
 # SMELT_WHEEL_BUILDER selects the build path:
 #   zig     (default) — `maturin build --zig --compatibility manylinux_2_28`.
@@ -41,7 +48,7 @@ BUILDER="${SMELT_WHEEL_BUILDER:-zig}"
 DIST_DIR="${REPO_ROOT}/dist"
 
 usage() {
-  echo "usage: $(basename "$0") [build] | verify <wheel>" >&2
+  echo "usage: $(basename "$0") [build [x86_64|aarch64|all]] | verify <wheel>" >&2
   exit 1
 }
 
@@ -181,6 +188,57 @@ resolve_duckdb_lib_dir() {
   return 1
 }
 
+# Makes sure the `aarch64-unknown-linux-gnu` Rust target is installed,
+# idempotently — matches `ensure_zig`'s shape (check, bootstrap if missing,
+# clear error over a deep maturin failure).
+ensure_aarch64_target() {
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "ERROR: rustup not found on PATH — cannot add the aarch64-unknown-linux-gnu target" >&2
+    exit 1
+  fi
+  if rustup target list --installed | grep -qx "aarch64-unknown-linux-gnu"; then
+    return 0
+  fi
+  echo "aarch64-unknown-linux-gnu target not installed — adding it (one-time)" >&2
+  if ! rustup target add aarch64-unknown-linux-gnu >&2; then
+    echo "ERROR: 'rustup target add aarch64-unknown-linux-gnu' failed" >&2
+    exit 1
+  fi
+}
+
+# Makes sure an aarch64 libduckdb.so is cached on disk, downloading it the
+# same way build_with_docker already pulls DuckDB for its container, and
+# prints the cached directory on stdout. `duckdb-sys` links against
+# libduckdb at compile time, so cross-building for aarch64 needs an aarch64
+# libduckdb.so, not the host's own x86_64 one.
+ensure_aarch64_duckdb_lib() {
+  local cache_dir="${REPO_ROOT}/target/duckdb-lib/aarch64"
+  if [[ -e "${cache_dir}/libduckdb.so" ]]; then
+    echo "${cache_dir}"
+    return 0
+  fi
+  mkdir -p "${cache_dir}"
+  echo "aarch64 libduckdb.so not cached — downloading v${DUCKDB_VERSION} (one-time)" >&2
+  local zip_path
+  zip_path="$(mktemp)"
+  # DuckDB's own release asset naming is "arm64", not "aarch64" (measured
+  # against the v1.5.4 release manifest) — Rust's target triple spells it
+  # aarch64, DuckDB's asset filenames spell it arm64, and this script bridges
+  # the two.
+  if ! curl -sL --fail "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-arm64.zip" -o "${zip_path}"; then
+    rm -f "${zip_path}"
+    echo "ERROR: failed to download aarch64 libduckdb.so v${DUCKDB_VERSION}" >&2
+    exit 1
+  fi
+  if ! unzip -oq "${zip_path}" libduckdb.so -d "${cache_dir}"; then
+    rm -f "${zip_path}"
+    echo "ERROR: failed to unzip aarch64 libduckdb.so into ${cache_dir}" >&2
+    exit 1
+  fi
+  rm -f "${zip_path}"
+  echo "${cache_dir}"
+}
+
 clean_stale_build_artifacts() {
   rm -rf \
     "${REPO_ROOT}/target/release/build/libduckdb-sys-"* \
@@ -192,15 +250,43 @@ clean_stale_build_artifacts() {
 }
 
 build_with_zig() {
+  local arch="$1"
   ensure_zig
   ensure_cargo_zigbuild
-  (
-    cd "${REPO_ROOT}"
-    maturin build --release --zig --compatibility "${MANYLINUX_FLOOR}" --out "${DIST_DIR}"
-  )
+
+  if [[ "${arch}" == "aarch64" ]]; then
+    ensure_aarch64_target
+    local aarch64_duckdb_lib
+    aarch64_duckdb_lib="$(ensure_aarch64_duckdb_lib)"
+    # maturin cross-compiling a foreign target cannot execute a
+    # target-architecture Python to discover it (there isn't one on this
+    # host), so the interpreter must be named explicitly. The host's own
+    # cp311 venv (already the interpreter maturin resolves for the x86_64
+    # build) supplies the same version/ABI tag; zig alone cross-compiles the
+    # Rust binary, so the interpreter that stamps the wheel's tag never needs
+    # to run under the target architecture.
+    local venv_dir="${SMELT_ZIG_VENV:-${REPO_ROOT}/target/smelt-zig-venv}"
+    (
+      cd "${REPO_ROOT}"
+      export DUCKDB_LIB_DIR="${aarch64_duckdb_lib}"
+      export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+      maturin build --release --zig --target aarch64-unknown-linux-gnu --compatibility "${MANYLINUX_FLOOR}" --interpreter "${venv_dir}/bin/python3.11" --out "${DIST_DIR}"
+    )
+  else
+    (
+      cd "${REPO_ROOT}"
+      maturin build --release --zig --compatibility "${MANYLINUX_FLOOR}" --out "${DIST_DIR}"
+    )
+  fi
 }
 
 build_with_docker() {
+  local arch="$1"
+  if [[ "${arch}" == "aarch64" ]]; then
+    echo "ERROR: SMELT_WHEEL_BUILDER=docker cannot build aarch64 — cross-arch emulation inside quay.io/pypa/manylinux_2_28_aarch64 needs binfmt/QEMU this box is not known to have. Set SMELT_WHEEL_BUILDER=zig for aarch64, or build on a native aarch64 host." >&2
+    exit 1
+  fi
+
   if ! command -v docker >/dev/null 2>&1; then
     echo "ERROR: docker not found on PATH — install docker to use SMELT_WHEEL_BUILDER=docker, or set SMELT_WHEEL_BUILDER=zig" >&2
     exit 1
@@ -236,8 +322,9 @@ build_with_docker() {
     "
 }
 
-do_build() {
-  echo "building smelt wheel via SMELT_WHEEL_BUILDER=${BUILDER} (floor: ${MANYLINUX_FLOOR})" >&2
+do_build_one() {
+  local arch="$1"
+  echo "building smelt wheel (${arch}) via SMELT_WHEEL_BUILDER=${BUILDER} (floor: ${MANYLINUX_FLOOR})" >&2
 
   mkdir -p "${DIST_DIR}"
   # A marker file's mtime, not a before/after filename-set diff: maturin
@@ -257,10 +344,10 @@ do_build() {
 
   case "${BUILDER}" in
     zig)
-      build_with_zig
+      build_with_zig "${arch}"
       ;;
     docker)
-      build_with_docker
+      build_with_docker "${arch}"
       ;;
     *)
       echo "ERROR: unsupported SMELT_WHEEL_BUILDER '${BUILDER}' — only zig and docker are wired" >&2
@@ -292,11 +379,31 @@ do_build() {
   fi
 }
 
+do_build() {
+  local requested="${1:-all}"
+  case "${requested}" in
+    x86_64)
+      do_build_one x86_64
+      ;;
+    aarch64)
+      do_build_one aarch64
+      ;;
+    all)
+      do_build_one x86_64
+      do_build_one aarch64
+      ;;
+    *)
+      echo "ERROR: unsupported arch '${requested}' — only x86_64, aarch64 and all are wired" >&2
+      exit 1
+      ;;
+  esac
+}
+
 main() {
   local cmd="${1:-build}"
   case "${cmd}" in
     build)
-      do_build
+      do_build "${2:-all}"
       ;;
     verify)
       local wheel="${2:-}"

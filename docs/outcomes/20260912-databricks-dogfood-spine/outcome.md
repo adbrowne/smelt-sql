@@ -183,7 +183,7 @@ of the models or the tooling.
 | 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | blocked |
 | 11f | Make the deployed wheel installable on Databricks serverless compute, offline: a single-owner `scripts/dbx-wheel-build.sh` builds smelt's `bindings = "bin"` wheel against a declared **manylinux_2_28** floor (`maturin --zig` first, a manylinux Docker container as the documented fallback) and refuses to emit a wheel tagged above that floor or left unrepaired; `databricks.yml`'s `smelt_wheel` artifact calls it instead of a bare `maturin build`; gated by the script's own `verify` mode under test plus a structural bundle test, and proved by building a real compliant wheel with no workspace | done |
 | 11g | **[live]** Resume 11e from its task 3 under the 11f wheel: redeploy (wheel + Volume seed), one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
-| 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | planned |
+| 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | done |
 | 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | planned |
 
 ## Blocked
@@ -206,6 +206,25 @@ of the models or the tooling.
   the three `github_activity_dbx_scheduled.rs` gates flip from skip-when-missing to hard,
   since this phase is the one that lands their evidence. The smoke run stays ahead of the
   cadence compression and now doubles as the live proof that the manylinux_2_28 wheel installs.
+
+- 2026-09-13 (phase 11h implement): **the arch-scoped glob disambiguates by the wheel filename's
+  trailing `_x86_64.whl`/`_aarch64.whl` suffix, not by restating `manylinux_2_28`.** The plan's
+  own test 3 wording ("a glob ending `manylinux_2_28_x86_64.whl`") would have broken the plan's
+  own test 4 (`smelt_wheel_floor_is_stated_once`, which forbids `manylinux` appearing anywhere
+  in the bundle YAML) — the two are mutually exclusive as written. Kept test 4's single-ownership
+  invariant (it's the one guarding against floor drift) and narrowed test 3 to check for the arch
+  suffix alone, which is all that's actually needed to disambiguate the two files.
+- 2026-09-13 (phase 11h implement): **DuckDB's release asset is named `libduckdb-linux-arm64.zip`,
+  not `-aarch64.zip`** as the plan's decided section stated — confirmed against the v1.5.4 release
+  manifest. Rust's target triple spells the arch `aarch64`; DuckDB's own asset filename spells it
+  `arm64`. Fixed the download URL and added `curl --fail` so a future asset-naming drift fails
+  loud instead of silently downloading an HTML 404 page as a "zip".
+- 2026-09-13 (phase 11h implement): **cross-compiling with maturin needs an explicit `--interpreter`
+  naming a *local* (host-arch) Python whose version matches the target** — maturin cannot execute
+  a foreign-arch interpreter to introspect it, and passing a bare `python3` symlink fails
+  ("could not determine version from interpreter name"); the venv's own `python3.11` symlink
+  works, since only the Rust binary is cross-compiled (via zig) — the interpreter is used solely
+  to stamp the wheel's `cp311` tag, never executed under the target architecture.
 
 - 2026-09-13 (phase 11f implement): **`maturin build --zig --compatibility manylinux_2_28`
   produced a compliant wheel on the first try** — no docker fallback was needed on this host.

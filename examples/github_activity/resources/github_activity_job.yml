@@ -53,8 +53,14 @@ resources:
         - environment_key: smelt_env
           spec:
             client: "2"
+            # Serverless compute can land this task on either architecture
+            # with no pinning mechanism on the platform side, and it can
+            # change between runs (docs.databricks.com/compute/serverless/
+            # dependencies) — so both wheels ship, disambiguated by a
+            # platform_machine marker rather than a single unscoped glob.
             dependencies:
-              - ../../../dist/*.whl
+              - ../../../dist/*_x86_64.whl; platform_machine == "x86_64"
+              - ../../../dist/*_aarch64.whl; platform_machine == "aarch64"
 
     # A one-off job, run manually (`scripts/dbx-bundle.sh run volume_probe`),
     # never scheduled — it measures the deployed Volume's FUSE-layer

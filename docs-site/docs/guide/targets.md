@@ -325,6 +325,13 @@ installer refuses if it is newer than the platform provides. The script builds a
 declared manylinux compatibility floor instead, and refuses to leave a wheel tagged above that
 floor — or an unrepaired non-manylinux wheel — on disk for `bundle deploy` to upload.
 
+Serverless compute can also land a job task on either `aarch64` or `x86_64` hardware, and which
+one it gets can change between runs — there is no pinning mechanism on the platform side. So the
+script builds one wheel per architecture (cross-compiling the `aarch64` wheel with `zig` from the
+same `x86_64` dev host), and the job's `smelt_env.dependencies` lists both, each scoped by a
+`platform_machine` environment marker so the installer picks the one matching whichever
+architecture the run actually landed on.
+
 The job's own `databricks` target authenticates with the **ambient** session — neither `host`
 nor `token` is a key on it at all:
 

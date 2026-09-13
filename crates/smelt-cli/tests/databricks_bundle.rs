@@ -657,6 +657,118 @@ fn smelt_wheel_floor_is_stated_once() {
     }
 }
 
+/// Phase 11h test 1: `verify` accepts an `aarch64` manylinux tag exactly as
+/// it accepts `x86_64` — `glibc_version_for_tag` parses the glibc
+/// major/minor from the tag body and never looks at the trailing arch
+/// suffix, so this is a regression guard on existing behaviour, not new
+/// parsing logic.
+#[test]
+fn wheel_verify_accepts_an_aarch64_manylinux_tag() {
+    let status = Command::new("bash")
+        .arg(repo_root().join("scripts/dbx-wheel-build.sh"))
+        .arg("verify")
+        .arg("smelt_sql-0.3.2-cp311-cp311-manylinux_2_28_aarch64.whl")
+        .status()
+        .expect("run dbx-wheel-build.sh verify");
+    assert!(
+        status.success(),
+        "verify must accept an aarch64 manylinux_2_28 wheel"
+    );
+}
+
+/// Phase 11h test 2: `SMELT_WHEEL_BUILDER=docker build aarch64` refuses
+/// outright — cross-arch emulation inside the manylinux_2_28_aarch64
+/// container needs binfmt/QEMU this box is not known to have, so the script
+/// must say so rather than silently building the wrong arch or hanging on
+/// an emulated pull.
+#[test]
+fn dbx_wheel_build_rejects_docker_for_aarch64() {
+    let output = Command::new("bash")
+        .arg(repo_root().join("scripts/dbx-wheel-build.sh"))
+        .arg("build")
+        .arg("aarch64")
+        .env("SMELT_WHEEL_BUILDER", "docker")
+        .output()
+        .expect("run dbx-wheel-build.sh build aarch64");
+    assert!(
+        !output.status.success(),
+        "build aarch64 under SMELT_WHEEL_BUILDER=docker must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("aarch64"),
+        "error must name aarch64: {stderr}"
+    );
+    assert!(
+        stderr.contains("docker"),
+        "error must name docker: {stderr}"
+    );
+}
+
+/// Phase 11h test 3: `smelt_env.dependencies` is exactly two entries, each
+/// scoped to one architecture by a `platform_machine` marker, replacing the
+/// old bare `../../../dist/*.whl` — Databricks serverless compute can land a
+/// job task on either `aarch64` or `x86_64` with no pinning mechanism on the
+/// platform side (docs/outcomes/20260912-databricks-dogfood-spine/phases/
+/// 11h-plan.md).
+#[test]
+fn smelt_env_dependencies_are_arch_scoped() {
+    let job = the_one_job();
+    let environments = job["environments"]
+        .as_sequence()
+        .expect("job.environments is a sequence");
+    let smelt_env = environments
+        .iter()
+        .find(|e| e["environment_key"].as_str() == Some("smelt_env"))
+        .expect("smelt_env exists");
+    let deps = smelt_env["spec"]["dependencies"]
+        .as_sequence()
+        .expect("smelt_env.spec.dependencies is a sequence")
+        .iter()
+        .map(|d| d.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        deps.len(),
+        2,
+        "smelt_env.dependencies must be exactly two entries, one per architecture: {deps:?}"
+    );
+    assert!(
+        !deps.iter().any(|d| d == "../../../dist/*.whl"),
+        "smelt_env.dependencies must not contain the old unscoped glob: {deps:?}"
+    );
+
+    // The glob disambiguates by the wheel filename's own trailing arch
+    // suffix (`_x86_64.whl` / `_aarch64.whl`), not by restating the
+    // manylinux floor — that spelling stays single-owned in
+    // dbx-wheel-build.sh per `smelt_wheel_floor_is_stated_once`.
+    let x86 = deps
+        .iter()
+        .find(|d| d.contains("x86_64"))
+        .unwrap_or_else(|| panic!("expected an x86_64-scoped entry: {deps:?}"));
+    assert!(
+        x86.contains("platform_machine == \"x86_64\""),
+        "x86_64 entry must carry a platform_machine marker: {x86}"
+    );
+    assert!(
+        x86.contains("_x86_64.whl"),
+        "x86_64 entry must glob a wheel ending _x86_64.whl: {x86}"
+    );
+
+    let arm = deps
+        .iter()
+        .find(|d| d.contains("aarch64"))
+        .unwrap_or_else(|| panic!("expected an aarch64-scoped entry: {deps:?}"));
+    assert!(
+        arm.contains("platform_machine == \"aarch64\""),
+        "aarch64 entry must carry a platform_machine marker: {arm}"
+    );
+    assert!(
+        arm.contains("_aarch64.whl"),
+        "aarch64 entry must glob a wheel ending _aarch64.whl: {arm}"
+    );
+}
+
 #[test]
 fn databricks_bundle_validate_is_clean() {
     if Command::new("databricks")
