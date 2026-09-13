@@ -178,7 +178,7 @@ of the models or the tooling.
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
-| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
+| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | planned |
 
 ## Decision log
 
@@ -1303,3 +1303,19 @@ of the models or the tooling.
   11c flipped `blocked` -> `pending`; resumes from task 5 of `phases/11c-plan.md`. Point (2) of
   the prior entry (whether a schema-level grant suffices for a bundle-created managed Volume on
   Free Edition) is not yet confirmed — the next `deploy` attempt is what tests it.
+
+- **2026-09-13 (phase 11c re-plan, post-unblock): no reshape — row 11c stays one row; its plan
+  is rewritten as a resume.** The first 11c attempt landed tasks 1-4 (schedule variable,
+  `pause_status: UNPAUSED`, the `volume_probe` job, the `dbx-bundle.sh` token-export fix) and
+  blocked at `deploy` on the missing `CREATE VOLUME` grant, now applied. Rather than adding an
+  `11d` row for the remainder, `phases/11c-plan.md` is replaced with a plan numbered from the
+  deploy onwards; the original is preserved in git at `4d6952a2a^`. Two additions the summary
+  earned a place for: (a) `scripts/dbx-bundle.sh` gains a read-only `runs` subcommand, because
+  the original task 7 assumed a wrapped `databricks jobs list-runs` that does not exist and the
+  three-scheduled-run wait cannot be polled without one; (b) a structural test that every live
+  subcommand exports `DATABRICKS_TOKEN` as well as `DATABRICKS_HOST`, locking in the token bug
+  that would otherwise have broken every future `deploy`/`run`/`seed`. The summary's open
+  question — whether a schema-level grant suffices for a bundle-created *managed* Volume on Free
+  Edition — stays a blocking contingency inside the row (candidate route:
+  `databricks bundle deployment bind` against a human-pre-created Volume), not a speculative new
+  row; the next `deploy` is what settles it.
