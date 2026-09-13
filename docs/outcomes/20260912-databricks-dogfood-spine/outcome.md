@@ -188,6 +188,19 @@ of the models or the tooling.
 
 ## Blocked
 
+- 2026-09-13 — human unblock: **credential refreshed.** Root cause of the four-attempt "Invalid
+  Token" streak: a bad passphrase had gotten cached in `gpg-agent` (around the same time its
+  `default-cache-ttl`/`max-cache-ttl` was raised to 43200s for the 4b(b) follow-up), so every
+  `dbx-auth.sh` run since was decrypting with the wrong cached passphrase and failing silently
+  with `gcry_kdf_derive failed: Invalid data` / `decryption failed: Bad session key` — never
+  re-prompting. Fixed by `gpgconf --kill gpg-agent` (forces a fresh prompt, clears the bad
+  cache) followed by `bash scripts/dbx-auth.sh` with the correct passphrase. Re-verified:
+  `bash scripts/dbx-verify.sh` passes clean — reachability on both schemas
+  (`workspace.smelt_dogfood`, `workspace.smelt_dogfood_oracle`), and the out-of-scope-write
+  refusal. The one remaining prerequisite for 11i is unchanged and is not human-gated: write
+  `phases/11i-plan.md` from the outcome-table one-liner (resume 11g from its task 3 under the
+  11h dual-arch wheel) — the next planner pass does this.
+
 - 2026-09-13 (phase 11i implement, fourth attempt): **unchanged from the third attempt.** Still
   no `phases/11i-plan.md` (verified: only `phases/11i-summary.md` exists in the phases
   directory, no `-plan.md`), and the cached Databricks credential is still rejected: `source
