@@ -97,6 +97,21 @@ declared `produces:`, its literal (unsubstituted) `command:` argv, its cadence a
 description, and the models that directly consume its produced sources — without ever
 spawning the command.
 
+## Declining invocation and trusting existing sources: `--skip-external-steps`
+
+`smelt run --skip-external-steps` is a narrow, explicit opt-in that changes the
+`ExternalStepNotInvocable` refusal above: instead of refusing, every reached step is treated
+as already satisfied and the run proceeds against its produced sources as they currently
+stand. Nothing is invoked, and smelt does not verify that the sources are actually fresh —
+this is the caller's own affirmative claim, recorded as a skipped step in the run manifest.
+
+This exists for an orchestrator that is itself the authority on freshness: its own task
+graph already guarantees a separate task landed the window before this `smelt run` task
+starts — for example, a Databricks Job whose first task loads the day's data and whose
+second task runs `smelt run --skip-external-steps` against it, with the job's own task
+ordering (not smelt) providing the freshness guarantee. Pass this flag only when something
+outside smelt has already made that guarantee true; smelt has no way to check it for you.
+
 ## When to use a step vs. an out-of-band pipeline
 
 Reach for an external step when the loader is something a run needs to have happened

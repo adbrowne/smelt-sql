@@ -322,7 +322,7 @@ pub async fn run_bakeoff(
                         technique,
                     }],
                     invoke_external_steps: true,
-        assume_external_steps_fresh: false,
+                    assume_external_steps_fresh: false,
                 };
                 let run_id = format!("bakeoff-{schema}-{i}");
                 let backend_factory = CliBackendFactory {

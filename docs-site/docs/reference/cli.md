@@ -202,6 +202,7 @@ smelt run [OPTIONS]
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
 | `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with-jobs). |
 | `--resume` | | bool | `false` | Resume a previously partially-failed run: skip any model that succeeded last time with an unchanged definition, and rerun everything else. See [`--resume` — continue after a partial failure](#-resume-continue-after-a-partial-failure). |
+| `--skip-external-steps` | | bool | `false` | Decline to invoke any reached [external step](../guide/external-steps.md) and trust that its produced sources are already fresh for this run's window, instead of refusing with `ExternalStepNotInvocable`. A narrow, explicit carve-out for a caller that is itself the authority on freshness — an orchestrator (e.g. a Databricks Job) whose own task graph guarantees a separate task already landed the window before this run starts. smelt does not verify the claim; a caller that cannot make this guarantee must not pass this flag. |
 
 A maintained (incremental) model whose stored table already exists refuses to fold a data delta
 over a pending, non-eclipsed, unapproved definition delta — a redefined column or added field

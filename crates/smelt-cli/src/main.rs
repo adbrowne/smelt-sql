@@ -262,6 +262,18 @@ struct RunArgs {
     /// to resume from (`docs/specs/run_state.md` §"`--resume` semantics").
     #[arg(long = "resume")]
     resume: bool,
+
+    /// Decline to invoke any reached external step and trust that its
+    /// produced sources are already fresh for this run's window, instead of
+    /// refusing with `ExternalStepNotInvocable`. A narrow, explicit
+    /// carve-out (`docs/specs/sources.md` §Semantics 12) for a caller that
+    /// is itself the authority on freshness — an orchestrator (e.g. a
+    /// Databricks Job) whose own task graph guarantees a separate task
+    /// already landed the window before this run starts. smelt does not
+    /// verify the claim; a caller that cannot make this guarantee must not
+    /// pass this flag.
+    #[arg(long = "skip-external-steps")]
+    skip_external_steps: bool,
 }
 
 #[derive(Parser)]
