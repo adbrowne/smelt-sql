@@ -1,7 +1,7 @@
 # Outcome: Every built-in's Trino spelling is a stated, probed verdict — no built-in reaches Trino on an implicit `Native`
 
 **Created:** 2026-09-13
-**Status:** queued
+**Status:** active
 **Driver:** loop. Docker only, no credential, no human gate. The audit's live legs must emit
 `<<PHASE_BLOCKED>>` when the coordinator is unreachable, **never skip green** — an audit that
 skips is indistinguishable from an audit that passes, which is the precise failure this outcome
@@ -123,7 +123,7 @@ including its null-safe join spelling.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | pending |
+| 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | planned |
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | pending |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | pending |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | pending |
@@ -144,5 +144,11 @@ including its null-safe join spelling.
   (`|>`); the `[a,b]` array-literal syntax *does* work on Trino (unlike Spark). No
   `AUDITED_DIALECTS` entry exists for Trino yet in `dialect_audit` — phase 5/6 above is the
   first Trino leg of that gate.
+- **2026-09-14 — outcome activated, phase 1 planned.** No reshape: T1's hand-forward is
+  already absorbed into the phase table (the measured gap list drives phases 3–5, and the
+  positive finding that `[a, b]` array literals work on Trino is a stated `Native` verdict
+  rather than a lowering). Phase 1 additionally owns reconciling the §Surface `SMELT_TRINO_URL`
+  *skip* sentence with this outcome's never-skip-green discipline for the audit legs — the two
+  statements would otherwise contradict each other in the same spec.
 
 ## Blocked
