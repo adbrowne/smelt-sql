@@ -57,10 +57,11 @@ fn trino_target_shape_is_specified() {
 }
 
 /// `docs/specs/multi_backend.md` §Surface capability matrix must have a Trino
-/// column, and every Trino cell in it must read `?` — a value would be an
-/// unmeasured claim (the column is measured by execution in phase 8).
+/// column, and no Trino cell may read `?` — every cell was measured by
+/// execution in phase 8, and the Trino column must have exactly as many
+/// rows as the DuckDB column.
 #[test]
-fn trino_capability_column_exists_and_is_unmeasured() {
+fn trino_capability_column_is_measured() {
     let text = read_spec("multi_backend.md");
 
     let header_start = text
@@ -82,24 +83,35 @@ fn trino_capability_column_exists_and_is_unmeasured() {
         .unwrap_or(text.len());
     let table = &text[header_start..table_end];
 
-    let mut non_question_rows = Vec::new();
+    let mut question_rows = Vec::new();
+    let mut duckdb_row_count = 0;
+    let mut trino_row_count = 0;
     for line in table.lines().skip(2) {
         if !line.starts_with('|') {
             continue;
         }
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-        // cells[0] is empty (leading `|`), cells[1] is the flag name, last Trino
-        // column is the second-to-last non-empty cell.
+        // cells[0] is empty (leading `|`), cells[1] is the flag name, cells[2]
+        // is the DuckDB column, last Trino column is the second-to-last
+        // non-empty cell.
+        if cells.len() > 2 && !cells[2].is_empty() {
+            duckdb_row_count += 1;
+        }
         if let Some(trino_cell) = cells.iter().rev().find(|c| !c.is_empty()) {
-            if *trino_cell != "?" {
-                non_question_rows.push(line.to_string());
+            trino_row_count += 1;
+            if *trino_cell == "?" {
+                question_rows.push(line.to_string());
             }
         }
     }
 
     assert!(
-        non_question_rows.is_empty(),
-        "capability matrix has Trino cells that are not `?` (unmeasured): {non_question_rows:?}"
+        question_rows.is_empty(),
+        "capability matrix still has unmeasured (`?`) Trino cells: {question_rows:?}"
+    );
+    assert_eq!(
+        trino_row_count, duckdb_row_count,
+        "Trino column has {trino_row_count} rows but DuckDB column has {duckdb_row_count}"
     );
 }
 
@@ -116,6 +128,17 @@ fn trino_native_emission_hole_is_recorded() {
     assert!(
         text.contains("20260913-trino-emission"),
         "§Known Divergences does not name the `20260913-trino-emission` outcome as owner"
+    );
+}
+
+/// §Known Divergences no longer claims the Trino capability column is
+/// unmeasured — phase 8 measured it and deleted that entry.
+#[test]
+fn trino_unmeasured_divergence_is_gone() {
+    let text = read_spec("multi_backend.md");
+    assert!(
+        !text.contains("The Trino capability column is unmeasured"),
+        "§Known Divergences still claims the Trino capability column is unmeasured"
     );
 }
 

@@ -53,15 +53,14 @@ impl SqlDialect {
     /// Expected ")" but got "("`. DuckDB has it, and Spark SQL has had it
     /// since 3.0.
     ///
-    /// Trino in fact supports `FILTER (WHERE …)`, but this lands as a
-    /// conservative `false` — refusing the construct rather than emitting SQL
-    /// Trino might reject — until phase 8 of
-    /// `docs/outcomes/20260913-trino-target-spine/outcome.md` measures the
-    /// real value against a live engine.
+    /// Trino supports `FILTER (WHERE …)`, measured against a live coordinator
+    /// in phase 8 of `docs/outcomes/20260913-trino-target-spine/outcome.md`
+    /// (`crates/smelt-backend-trino/tests/capability_probes.rs`):
+    /// `max(n) FILTER (WHERE n > 0)` executes cleanly.
     pub fn supports_aggregate_filter_clause(self) -> bool {
         match self {
-            SqlDialect::DuckDB | SqlDialect::SparkSQL => true,
-            SqlDialect::BigQuery | SqlDialect::Trino => false,
+            SqlDialect::DuckDB | SqlDialect::SparkSQL | SqlDialect::Trino => true,
+            SqlDialect::BigQuery => false,
         }
     }
 
@@ -74,15 +73,15 @@ impl SqlDialect {
     /// numeric form — a live run got `400 Syntax error: Unexpected keyword
     /// PRECEDING`. DuckDB and Spark SQL both accept the interval form.
     ///
-    /// Trino's actual support is unmeasured; this lands as a conservative
-    /// `false` — refusing the construct rather than emitting SQL Trino might
-    /// reject — until phase 8 of
-    /// `docs/outcomes/20260913-trino-target-spine/outcome.md` measures the
-    /// real value against a live engine.
+    /// Trino accepts the interval form, measured against a live coordinator
+    /// in phase 8 of `docs/outcomes/20260913-trino-target-spine/outcome.md`
+    /// (`crates/smelt-backend-trino/tests/capability_probes.rs`):
+    /// `sum(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL '2' DAY PRECEDING AND
+    /// CURRENT ROW)` executes cleanly.
     pub fn supports_interval_range_frame(self) -> bool {
         match self {
-            SqlDialect::DuckDB | SqlDialect::SparkSQL => true,
-            SqlDialect::BigQuery | SqlDialect::Trino => false,
+            SqlDialect::DuckDB | SqlDialect::SparkSQL | SqlDialect::Trino => true,
+            SqlDialect::BigQuery => false,
         }
     }
 }
@@ -107,7 +106,7 @@ pub enum NullSafeEqualitySpelling {
 /// Capabilities of a backend.
 ///
 /// Used to determine what SQL features can be used directly vs. need rewriting.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BackendCapabilities {
     /// Supports QUALIFY clause for window function filtering
     pub supports_qualify: bool,
@@ -431,6 +430,89 @@ impl BackendCapabilities {
     pub fn databricks() -> Self {
         Self::spark_delta()
     }
+
+    /// Capabilities for a `trino` target over the Iceberg REST catalog
+    /// (`docs/specs/multi_backend.md` §"Trino / Iceberg target").
+    ///
+    /// Every flag below was established by executing the statement it names
+    /// against a live coordinator (`scripts/trino-up.sh`,
+    /// `crates/smelt-backend-trino/tests/capability_probes.rs`), not read
+    /// from documentation — the capability matrix in
+    /// `docs/specs/multi_backend.md` §Surface is normative and the
+    /// conformance test asserts this constructor against it. The prior going
+    /// in was that Trino sits near Spark (Delta) (same per-table-commit,
+    /// no-cross-table-transaction atomicity shape); it held on most flags but
+    /// broke on seven — see `docs/specs/multi_backend.md` §Surface capability
+    /// matrix paragraph for the full comparison.
+    pub fn trino_iceberg() -> Self {
+        Self {
+            // `QUALIFY` is not Trino grammar: `mismatched input 'QUALIFY'`.
+            supports_qualify: false,
+            // `CREATE OR REPLACE TABLE ... AS SELECT` succeeds.
+            supports_create_or_replace_table: true,
+            supports_create_or_replace_view: true,
+            supports_merge: true,
+            supports_pivot: true,
+            supports_date_literal: true,
+            supports_concat_operator: true,
+            // `SELECT [1,2,3]` (and `cardinality([1,2,3])`) both execute.
+            supports_array_literal: true,
+            // `START TRANSACTION` over the stateless `/v1/statement` HTTP
+            // client fails with a Trino-side "Client does not support
+            // transactions" — measured, not assumed.
+            supports_transactional_ddl: false,
+            // `SELECT 1::INTEGER` fails to parse; Trino has no `::` operator.
+            supports_double_colon_cast: false,
+            // A trailing comma before `<EOF>` fails to parse.
+            supports_trailing_commas: false,
+            // `INSERT OVERWRITE` is not Trino grammar (`Expecting: 'INTO'`).
+            supports_insert_overwrite: false,
+            // `CREATE MATERIALIZED VIEW` over the Iceberg REST catalog is
+            // refused outright: "createMaterializedView is not supported for
+            // Iceberg REST catalog".
+            supports_native_ivm: false,
+            supports_retraction: false,
+            // `ALTER TABLE ... ADD COLUMN s.b INTEGER` against a `ROW(a
+            // INTEGER)` column succeeds.
+            supports_struct_field_ddl: true,
+            // `ALTER TABLE ... ALTER COLUMN n SET DATA TYPE VARCHAR USING
+            // ...` fails to parse — no `USING` clause in Trino's grammar.
+            supports_alter_column_using: false,
+            // `ALTER TABLE ... ADD COLUMN items.element.b INTEGER` against an
+            // `ARRAY(ROW(a INTEGER))` column succeeds.
+            supports_nested_array_ddl: true,
+            // Inserting a row with an extra column Trino's target schema
+            // does not have is rejected ("Insert query has mismatched column
+            // types"), not auto-added.
+            supports_merge_schema_write: false,
+            // `ALTER TABLE ... RENAME COLUMN old_name TO new_name` followed
+            // by `SELECT new_name` reads the prior data back — Iceberg's
+            // field-ID column tracking survives the rename with no rewrite.
+            supports_column_mapping: true,
+            // `FROM t |> WHERE ...` fails to parse on this pinned coordinator
+            // version (`trinodb/trino:483`).
+            supports_pipe_syntax: false,
+            requires_schema_init: true,
+            // An explicit partial `WHEN MATCHED THEN UPDATE SET lbl =
+            // s.lbl` (leaving `n` untouched) executes — the shape the
+            // column-scoped merge transform needs; DuckDB/Spark's `SET *`
+            // shorthand is a separate syntactic question this flag does not
+            // gate, and Trino does reject that shorthand specifically.
+            supports_column_scoped_merge: true,
+            dialect: SqlDialect::Trino,
+            // `SELECT * EXCLUDE (n)` fails to parse; Trino has none of the
+            // `* REPLACE` / `* EXCLUDE` / `* RENAME` trio.
+            supports_pipe_set_drop_rename: false,
+            // `SELECT 1 IS NOT DISTINCT FROM NULL` executes; `SELECT 1 <=>
+            // NULL` fails to parse.
+            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
+            // The fingerprint sidecar is a smelt-implemented mechanism, not
+            // an engine capability — it has no Trino/Iceberg implementation
+            // today, so this is an implementation-scope fact rather than
+            // something a live probe can measure.
+            supports_fingerprint_sidecar: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -508,11 +590,10 @@ mod tests {
     fn trino_dialect_identity_and_language_properties() {
         assert_eq!(SqlDialect::Trino.name(), "Trino");
         assert_eq!(SqlDialect::Trino.id(), DialectId::Trino);
-        // Conservative provisional landing: false makes smelt refuse the
-        // construct rather than emit SQL Trino may reject. Phase 8 of
-        // docs/outcomes/20260913-trino-target-spine/outcome.md measures the
-        // real values against a live engine.
-        assert!(!SqlDialect::Trino.supports_aggregate_filter_clause());
-        assert!(!SqlDialect::Trino.supports_interval_range_frame());
+        // Measured against a live coordinator in phase 8 of
+        // docs/outcomes/20260913-trino-target-spine/outcome.md — both
+        // constructs execute cleanly.
+        assert!(SqlDialect::Trino.supports_aggregate_filter_clause());
+        assert!(SqlDialect::Trino.supports_interval_range_frame());
     }
 }

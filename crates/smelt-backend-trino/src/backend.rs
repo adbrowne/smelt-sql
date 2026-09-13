@@ -1,12 +1,12 @@
 //! The `Backend` trait implementation over the live Trino/Iceberg tier.
 //!
-//! [`Backend::capabilities`] is answered provisionally, per the outcome's
-//! decision log (`docs/outcomes/20260913-trino-target-spine/outcome.md`,
-//! 2026-09-13 "the spec's Trino capability column enters as `?`, not as a
-//! documentation-read guess"): it returns an all-`false` profile until phase
-//! 8 measures the real one by execution. `create_materialized_view_as`
-//! inherits the trait's erroring default — Trino has no native IVM to
-//! override it with.
+//! [`Backend::capabilities`] returns `BackendCapabilities::trino_iceberg()`,
+//! measured by execution against a live coordinator
+//! (`docs/outcomes/20260913-trino-target-spine/outcome.md` phase 8;
+//! `crates/smelt-backend-trino/tests/capability_probes.rs`).
+//! `create_materialized_view_as` inherits the trait's erroring default —
+//! Trino refuses `CREATE MATERIALIZED VIEW` over the Iceberg REST catalog
+//! outright, so there is no native IVM path to override it with.
 //!
 //! `delete_partitions`, `insert_into_from_query` and `insert_overwrite` also
 //! refuse by name: this outcome's Out of scope section reserves "the
@@ -21,7 +21,6 @@ use arrow::array::{Array, Int64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
-use smelt_dialect::NullSafeEqualitySpelling;
 
 use crate::arrow_convert::{arrow_type_to_trino_type, render_trino_literal};
 use crate::client::TrinoClient;
@@ -323,42 +322,11 @@ impl Backend for TrinoBackend {
     }
 
     fn capabilities(&self) -> BackendCapabilities {
-        // Provisional: every flag `false` until phase 8 measures the real
-        // profile by execution against the live coordinator and replaces
-        // this with `BackendCapabilities::trino_iceberg()`. Pinned by
-        // `capabilities_are_provisionally_all_false`.
-        BackendCapabilities {
-            supports_qualify: false,
-            supports_create_or_replace_table: false,
-            supports_create_or_replace_view: false,
-            supports_merge: false,
-            supports_pivot: false,
-            supports_date_literal: false,
-            supports_concat_operator: false,
-            supports_array_literal: false,
-            supports_transactional_ddl: false,
-            supports_double_colon_cast: false,
-            supports_trailing_commas: false,
-            supports_insert_overwrite: false,
-            supports_native_ivm: false,
-            supports_retraction: false,
-            supports_struct_field_ddl: false,
-            supports_alter_column_using: false,
-            supports_nested_array_ddl: false,
-            supports_merge_schema_write: false,
-            supports_column_mapping: false,
-            supports_pipe_syntax: false,
-            requires_schema_init: false,
-            supports_column_scoped_merge: false,
-            dialect: SqlDialect::Trino,
-            supports_pipe_set_drop_rename: false,
-            // Unmeasured — Trino's actual spelling is phase 8's job. Picked
-            // as the more common of the two spellings so a caller reading
-            // this field before phase 8 lands sees a real enum variant
-            // rather than an arbitrary default.
-            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
-            supports_fingerprint_sidecar: false,
-        }
+        // Measured by execution against the live coordinator, phase 8 of
+        // `docs/outcomes/20260913-trino-target-spine/outcome.md`
+        // (`crates/smelt-backend-trino/tests/capability_probes.rs`). Pinned
+        // by `capabilities_are_the_measured_profile`.
+        BackendCapabilities::trino_iceberg()
     }
 
     async fn load_table(
@@ -468,32 +436,10 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_are_provisionally_all_false() {
+    fn capabilities_are_the_measured_profile() {
         let caps = backend().capabilities();
-        assert!(!caps.supports_qualify);
-        assert!(!caps.supports_create_or_replace_table);
-        assert!(!caps.supports_create_or_replace_view);
-        assert!(!caps.supports_merge);
-        assert!(!caps.supports_pivot);
-        assert!(!caps.supports_date_literal);
-        assert!(!caps.supports_concat_operator);
-        assert!(!caps.supports_array_literal);
-        assert!(!caps.supports_transactional_ddl);
-        assert!(!caps.supports_double_colon_cast);
-        assert!(!caps.supports_trailing_commas);
-        assert!(!caps.supports_insert_overwrite);
-        assert!(!caps.supports_native_ivm);
-        assert!(!caps.supports_retraction);
-        assert!(!caps.supports_struct_field_ddl);
-        assert!(!caps.supports_alter_column_using);
-        assert!(!caps.supports_nested_array_ddl);
-        assert!(!caps.supports_merge_schema_write);
-        assert!(!caps.supports_column_mapping);
-        assert!(!caps.supports_pipe_syntax);
-        assert!(!caps.requires_schema_init);
-        assert!(!caps.supports_column_scoped_merge);
-        assert!(!caps.supports_pipe_set_drop_rename);
-        assert!(!caps.supports_fingerprint_sidecar);
+        assert_eq!(caps, BackendCapabilities::trino_iceberg());
+        assert_eq!(caps.dialect, SqlDialect::Trino);
     }
 
     fn int_schema(nullable: bool) -> SchemaRef {

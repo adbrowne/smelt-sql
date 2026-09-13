@@ -44,33 +44,33 @@ owners: [andrew]
 
   | Flag | DuckDB | Spark (Delta) | Spark (Parquet) | BigQuery | Databricks | Trino (Iceberg) |
   |------|:------:|:-------------:|:---------------:|:--------:|:----------:|:---------------:|
-  | `supports_qualify` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
-  | `supports_merge` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
-  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
-  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ | ✓ | ✓ | ? |
-  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
-  | `supports_pivot` | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
-  | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
-  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_transactional_ddl` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
-  | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) | ✓ | ? |
-  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_retraction` | ✗ | ✗ | ✗ | ✗ | ✗ | ? |
-  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
-  | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
-  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
-  | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ | ✓ | ? |
-  | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ | ✓ | ? |
-  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ | ✗ | ? |
-  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
-  | `supports_fingerprint_sidecar` (delta-restriction admission over an external `mutable_snapshot` source's synthesized fingerprint diff) | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
-  | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
-  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` | `<=>` | ? |
+  | `supports_qualify` | ✓ | ✗ | ✗ | ✓ | ✗ | ✗ |
+  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ | ✓ | ✗ | ✓ |
+  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_merge` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
+  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
+  | `supports_merge_not_matched_by_source` (spec-only; no struct field yet — §Known Divergences) | ✗ | ✓ | ✗ | ✓ | ✓ | ✗ |
+  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write; spec-only — §Known Divergences) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_pivot` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ | ✗ | ✓ |
+  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ | ✓ | ✗ | ✓ |
+  | `supports_transactional_ddl` | ✓ | ✗ | ✗ | ✓ | ✗ | ✗ |
+  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ | ✗ | ✗ |
+  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) | ✓ | ✗ (emulated) |
+  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+  | `supports_retraction` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
+  | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
+  | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ | ✓ | ✗ |
+  | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ | ✓ | ✓ |
+  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+  | `supports_fingerprint_sidecar` (delta-restriction admission over an external `mutable_snapshot` source's synthesized fingerprint diff) | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+  | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` | `<=>` | `IS NOT DISTINCT FROM` |
 
   The Databricks column equals the Spark (Delta) column in every flag except
   `null_safe_equality`, which follows Spark SQL's own `<=>` spelling rather than DuckDB's
@@ -80,13 +80,22 @@ owners: [andrew]
   These cells are inherited from the Spark (Delta) profile and not yet each independently
   executed against a live Databricks workspace (§Known Divergences).
 
-  Every Trino cell reads `?` — unmeasured — until it is executed against the live coordinator,
-  at which point the cell and `BackendCapabilities::trino_iceberg()` are written together in
-  the same commit. `?` is the honest spelling of *unmeasured*; seeding the column from Trino's
-  own documentation is exactly what the rule below this table forbids. The working prior is
-  that Trino sits near Spark (Delta) — Iceberg and Delta share the same per-table-commit,
-  no-cross-table-transaction atomicity shape — but that is a prior to test against, not a value
-  to write down (§Known Divergences).
+  The Trino column is measured: every cell was established by executing the statement it names
+  against a live coordinator (`scripts/trino-up.sh`,
+  `crates/smelt-backend-trino/tests/capability_probes.rs`), and `BackendCapabilities::trino_iceberg()`
+  was written together with this table in the same commit. The working prior going in was that
+  Trino sits near Spark (Delta) — Iceberg and Delta share the same per-table-commit,
+  no-cross-table-transaction atomicity shape — and it held on most flags: both refuse `QUALIFY`,
+  `::` casts, trailing commas, transactional DDL, native IVM/retraction, `ALTER COLUMN ...
+  USING`, pipe syntax and the star-modifier trio, while both accept `CREATE OR REPLACE VIEW`,
+  `MERGE`, column-scoped `MERGE`, the staged-relation-group pattern, `PIVOT`, `||`, struct-field
+  and nested-array DDL, and column mapping. It broke on seven flags: Trino accepts `CREATE OR
+  REPLACE TABLE`, a `DATE` literal, and the `[a,b]` array-literal syntax where Spark(Delta)
+  refuses all three; Trino refuses `WHEN NOT MATCHED BY SOURCE`, `INSERT OVERWRITE`, and an
+  implicit schema-widening write where Spark(Delta) accepts them; and Trino's null-safe
+  equality spelling is `IS NOT DISTINCT FROM` (matching DuckDB/BigQuery) rather than Spark's
+  `<=>`. Measured errors for every `✗` are quoted in
+  `docs/outcomes/20260913-trino-target-spine/outcome.md` §"Decision log".
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
   constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`,
@@ -1395,11 +1404,6 @@ resolves nested widening to a table rewrite.
   function registry claiming every built-in is spelled natively on Trino — a claim no probe has
   tested. `docs/outcomes/20260913-trino-emission/` owns closing this hole; until it does, a
   model may compile to SQL Trino rejects.
-- **The Trino capability column is unmeasured.** Every cell in the Trino (Iceberg) column of
-  the capability matrix above reads `?`; the column is a hypothesis (Trino sits near Spark
-  (Delta)) until a later phase of `docs/outcomes/20260913-trino-target-spine` executes each
-  flag against a live coordinator, and `capability_conformance.rs` therefore asserts nothing
-  about Trino yet.
 
 ## References
 

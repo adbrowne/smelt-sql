@@ -142,12 +142,64 @@ not an answer — every cell is still established by execution.
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | done |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | done |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | done |
-| 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | planned |
+| 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | done |
 | 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | pending |
 | 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
 | 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 8: the capability profile, measured against a live coordinator.**
+  27 probes ran in `crates/smelt-backend-trino/tests/capability_probes.rs`, zero skipped
+  (`SMELT_TRINO_URL` set). The prior — Trino sits near Spark (Delta) — held on 19 of 26 flags
+  and broke on 7. Measured errors for every `✗`, quoted verbatim:
+  - `supports_qualify`: `mismatched input 'QUALIFY'. Expecting: ',', 'CROSS', 'EXCEPT', ...`
+  - `supports_merge_not_matched_by_source` (spec-only): `mismatched input 'BY'. Expecting: 'AND', 'THEN'`
+  - `supports_transactional_ddl`: `Client does not support transactions` — a property of
+    smelt's stateless `/v1/statement` HTTP client (no session-token continuity across
+    `START TRANSACTION` / DDL / `ROLLBACK`), not a per-statement Trino grammar rejection like
+    the rest of this list.
+  - `supports_double_colon_cast`: `mismatched input '::'. Expecting: '%', '*', '+', ',', '-', ...`
+  - `supports_trailing_commas`: `mismatched input '<EOF>'. Expecting: '*', <expression>`
+  - `supports_insert_overwrite`: `mismatched input 'OVERWRITE'. Expecting: 'INTO'`
+  - `supports_native_ivm`: `createMaterializedView is not supported for Iceberg REST catalog`
+  - `supports_alter_column_using`: `mismatched input 'USING'. Expecting: '(', 'ARRAY', <EOF>`
+  - `supports_merge_schema_write`: `Insert query has mismatched column types: Table:
+    [integer], Query: [integer, varchar(1)]`
+  - `supports_pipe_syntax`: `mismatched input 'FROM'. Expecting: 'ALTER', 'ANALYZE', 'CALL', ...`
+    (measured against the pinned `trinodb/trino:483` coordinator)
+  - `supports_pipe_set_drop_rename`: `mismatched input 'EXCLUDE'. Expecting: ',', 'EXCEPT', ...`
+  - `null_safe_equality` spelling: `SELECT 1 <=> NULL` → `mismatched input '>'. Expecting:
+    'ALL', 'ANY', 'SOME', <expression>`; `IS NOT DISTINCT FROM` executes — Trino's spelling
+    matches DuckDB/BigQuery, not Spark.
+
+  The prior broke (Trino more capable than Spark(Delta)) on three: `supports_create_or_replace_table`,
+  `supports_date_literal`, `supports_array_literal` (`[1,2,3]` bracket syntax) all execute
+  cleanly on Trino where Spark(Delta) refuses them. `supports_array_literal` was probed via
+  `cardinality([1,2,3])` rather than selecting the array value — decoding a Trino `array(...)`
+  result to Arrow is a separate, unrelated gap this flag does not gate.
+
+  `supports_struct_field_ddl`, `supports_nested_array_ddl` and `supports_column_mapping` all
+  measured `true`: `ALTER TABLE ... ADD COLUMN s.b INTEGER` / `items.element.b INTEGER` both
+  succeed, and `ALTER TABLE ... RENAME COLUMN` followed by a `SELECT` on the new name reads the
+  prior data back — Iceberg's field-ID column tracking survives the rename with no table rewrite.
+
+  Both `SqlDialect` language properties phase 2 landed conservatively `false` measured `true`:
+  `FILTER (WHERE ...)` and `RANGE BETWEEN INTERVAL ... PRECEDING` both execute cleanly, matching
+  the doc-comment hints already left in `dialect.rs` ahead of this phase.
+
+  `supports_retraction` and `supports_fingerprint_sidecar` were not independently probed:
+  the former is meaningful only alongside `supports_native_ivm` (measured false, so retraction
+  is trivially false), the latter is an implementation-scope fact about smelt's own code (no
+  Trino/Iceberg fingerprint-sidecar implementation exists), not an engine capability a live
+  probe can measure — both are named in `every_capability_field_has_a_probe`'s
+  `not_independently_probed` list so the coverage gate stays honest about the carve-out.
+
+  For phase 9: `dialect_and_capabilities`'s refusal will now see `supports_qualify`,
+  `supports_double_colon_cast`, `supports_trailing_commas`, `supports_alter_column_using`,
+  `supports_pipe_syntax`, `supports_pipe_set_drop_rename`, `supports_transactional_ddl`,
+  `supports_insert_overwrite`, `supports_native_ivm` and `supports_merge_schema_write` as
+  `false` (refuse-worthy) and everything else in the matrix as `true`.
 
 - **2026-09-13 — the spec's Trino capability column enters as `?`, not as a documentation-read
   guess.** Criterion 1 wants the column in the matrix now; criterion 5 (and the rule under the

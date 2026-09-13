@@ -21,6 +21,7 @@ fn every_flag_matches_matrix() {
     let parquet = BackendCapabilities::spark_parquet();
     let bigquery = BackendCapabilities::bigquery();
     let databricks = BackendCapabilities::databricks();
+    let trino = BackendCapabilities::trino_iceberg();
 
     macro_rules! cell {
         ($caps:expr, $flag:ident, $expected:expr, $backend:literal) => {
@@ -321,6 +322,43 @@ fn every_flag_matches_matrix() {
         false,
         "Databricks"
     );
+
+    // Trino (Iceberg). Every cell below was established by executing the
+    // statement the flag names against a live coordinator
+    // (`crates/smelt-backend-trino/tests/capability_probes.rs`), phase 8 of
+    // `docs/outcomes/20260913-trino-target-spine/outcome.md`.
+    cell!(trino, supports_qualify, false, "Trino");
+    cell!(trino, supports_create_or_replace_table, true, "Trino");
+    cell!(trino, supports_create_or_replace_view, true, "Trino");
+    cell!(trino, supports_merge, true, "Trino");
+    cell!(trino, supports_pivot, true, "Trino");
+    cell!(trino, supports_date_literal, true, "Trino");
+    cell!(trino, supports_concat_operator, true, "Trino");
+    cell!(trino, supports_array_literal, true, "Trino");
+    // "Client does not support transactions" — measured against the
+    // stateless `/v1/statement` HTTP client.
+    cell!(trino, supports_transactional_ddl, false, "Trino");
+    cell!(trino, supports_double_colon_cast, false, "Trino");
+    cell!(trino, supports_trailing_commas, false, "Trino");
+    cell!(trino, supports_insert_overwrite, false, "Trino");
+    // "createMaterializedView is not supported for Iceberg REST catalog".
+    cell!(trino, supports_native_ivm, false, "Trino");
+    cell!(trino, supports_retraction, false, "Trino");
+    cell!(trino, supports_struct_field_ddl, true, "Trino");
+    cell!(trino, supports_alter_column_using, false, "Trino");
+    cell!(trino, supports_nested_array_ddl, true, "Trino");
+    cell!(trino, supports_merge_schema_write, false, "Trino");
+    cell!(trino, supports_column_mapping, true, "Trino");
+    cell!(trino, supports_pipe_syntax, false, "Trino");
+    cell!(trino, supports_pipe_set_drop_rename, false, "Trino");
+    cell!(trino, requires_schema_init, true, "Trino");
+    cell!(trino, supports_column_scoped_merge, true, "Trino");
+    assert_eq!(
+        trino.null_safe_equality,
+        NullSafeEqualitySpelling::IsNotDistinctFrom,
+        "Trino"
+    );
+    cell!(trino, supports_fingerprint_sidecar, false, "Trino");
 }
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a
