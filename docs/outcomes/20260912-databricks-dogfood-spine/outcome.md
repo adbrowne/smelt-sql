@@ -1,13 +1,14 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** blocked — every phase row is `done` or `blocked`. Criteria 1-10 are met and
+**Status:** blocked
+**Blocked summary:** every phase row is `done` or `blocked`. Criteria 1-10 are met and
 evidenced by the committed phase summaries; criterion 11 is not: no scheduled run has completed.
 11j's seed bootstrap worked (11k confirmed `--auto` now derives a real window), but surfaced a
 new, unreviewed design question one layer deeper: external-step invocation has no
 frontier/freshness awareness at all, so `sources.raw.github_loader` (the DuckDB-CLI dev-target
 loader) is unconditionally re-invoked and cannot run against Databricks. A human must choose a
-direction before any further phase is plannable — see the 2026-09-14 outcome-level entry at the
+direction before any further phase is plannable — see the 2026-09-14 outcome-level entries at the
 top of `## Blocked`, and `docs/outcomes/20260912-databricks-dogfood-spine/phases/11k-summary.md`.
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
@@ -196,6 +197,19 @@ of the models or the tooling.
 | 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 
 ## Blocked
+
+- **2026-09-14 — terminal judgement re-affirmed, and the loop-stall that hid it fixed.**
+  A PLAN step re-scanned the phase table: no row is `pending` or `planned`, so there was
+  nothing to plan. The judgement below stands unchanged — criteria 1-10 met, criterion 11
+  open on the external-step frontier question. The reason this outcome was dispatched again
+  at all is mechanical, not substantive: `outcome-loop.sh`'s `outcome_dir()` matches the
+  `**Status:**` value with an exact `case ... in done|blocked)`, and the previous pass wrote
+  `**Status:** blocked — every phase row is ...`. The trailing prose made the value
+  unrecognised, so the driver treated a blocked outcome as workable and would have re-picked
+  it on every iteration, never advancing to the queued Trino programme. The status value is
+  now the bare word `blocked`, its prose moved to a `**Blocked summary:**` line, and
+  `docs/outcome_loop.md` states the bare-word requirement so the next outcome to block does
+  not repeat it. **No phase work was done or attempted this pass.**
 
 - **2026-09-14 — outcome-level (terminal judgement): every phase row is now `done` or `blocked`;
   criteria 1-10 are met, criterion 11 is not.** Re-judged after 11k. The evidence for 1-10 is

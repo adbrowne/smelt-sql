@@ -23,7 +23,11 @@ phases/NN-summary.md  # written by the IMPLEMENT step at the end of phase NN
 per non-comment line. The loop works the first entry whose `outcome.md`
 `**Status:**` is neither `done` nor `blocked`, and advances to the next when a
 terminal sentinel marks it. Outcome statuses: `queued` → `active` → `done`
-(or `blocked` — recorded, skipped, surfaced to a human later). Scaffold and
+(or `blocked` — recorded, skipped, surfaced to a human later). The `**Status:**`
+line holds that **bare word and nothing else** — the driver matches it exactly, so
+an annotated `blocked — because ...` reads as an unrecognised status and the loop
+re-selects the outcome forever. Put the prose on a following `**Blocked summary:**`
+line instead. Scaffold and
 append a new outcome with `/smelt:outcome <name>`; reorder by editing the file.
 
 Phase statuses: `pending` → `planned` → `done` (or `blocked`, recorded and
