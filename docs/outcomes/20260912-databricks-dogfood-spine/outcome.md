@@ -1,7 +1,7 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** active
+**Status:** blocked
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -1269,3 +1269,27 @@ of the models or the tooling.
   (unconfirmed — untested against this workspace), the human instead pre-creates the Volume by
   hand and the bundle deploy step may need `databricks bundle deployment bind` to adopt it
   rather than create it, which would be new work for whichever phase resumes this row.
+
+- **2026-09-13 — outcome-level: no workable phase remains; criteria 1-10 met, criterion 11 open
+  on a human Unity Catalog grant.** Every phase row is `done` except 4b (superseded — row 4c
+  closed criterion 4 from a reachable session) and 11c. Judged against the committed summaries:
+  criteria 1-3 are closed by phases 1/2/3, 4 by 4c, 5 by 5, 6 by 6-6f (clean 16/16 full refresh),
+  7 by 7/7b, 8 by 9f's re-measured `08-parity.json` (`silver_actor_naming` `dbx_only` 520 -> 0),
+  8-the-equivalence-criterion by 9a/9b/9c/9e/9f's re-measured `09b-equivalence.json`, 9 by phase
+  10's findings handoff, spec updates and docs-site page, and 10 by every phase's green
+  `verify-phase.sh`. **Criterion 11 is not met**: the bundle, the self-driving loader and the
+  Volume resource are committed and gated per-PR (11a, 11b), but the three *scheduled* runs were
+  never observed — `databricks bundle deploy` created both job resources and then failed with
+  `User does not have CREATE VOLUME on Schema 'workspace.smelt_dogfood' (403 PERMISSION_DENIED)`.
+
+  **What a human must decide/do**, in order: (1) apply the missing grant as the identity that
+  owns `workspace.smelt_dogfood` — either re-run `bash scripts/dbx-provision.sh` (already
+  amended this phase to include `CREATE VOLUME`, idempotent) or hand-issue ``GRANT CREATE VOLUME
+  ON SCHEMA workspace.smelt_dogfood TO `<oauth-m2m client id>`;``; (2) confirm a schema-level
+  grant is actually sufficient for a bundle to create a **managed** Volume on Free Edition — if
+  it is not, decide between pre-creating the Volume by hand plus `databricks bundle deployment
+  bind`, or dropping to a workspace-files state path, either of which is new scope for the row
+  that resumes; (3) raise `gpg-agent`'s `default-cache-ttl`/`max-cache-ttl` (the 4b(b) follow-up,
+  still open) so the ~40-minute three-run wait survives the ~1-hour OAuth token TTL without a
+  manual remint. Once (1) and (2) are settled, row 11c resumes from task 5 of `phases/11c-plan.md`
+  with nothing else to redo — tasks 1-4 are committed and green.
