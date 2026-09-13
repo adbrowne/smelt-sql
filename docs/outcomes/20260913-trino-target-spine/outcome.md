@@ -136,13 +136,13 @@ not an answer — every cell is still established by execution.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: the `trino` target shape and capability column in `multi_backend.md` + `smelt_yml.md`, the foreign-key refusal diagnostics, the connection-security rule, and the Known Divergence naming the implicit-`Native` emission hole this outcome does not close | done |
-| 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | pending |
+| 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | planned |
 | 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | pending |
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | pending |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
-| 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, `BackendCapabilities::trino_iceberg()` and the spec table written together, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
+| 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` and the spec table written together, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
 | 9 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
 | 10 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
 
@@ -173,5 +173,31 @@ not an answer — every cell is still established by execution.
   backend. Trino follows that precedent rather than inventing a second channel; the criterion's
   substance (refused, named, never silently ignored, fixture-proved) is met. Reopening this would
   mean specifying config-load diagnostics for all five backends, which is out of scope here.
+
+- **2026-09-13 — reshape: phase 8 also measures the two `SqlDialect` language properties.**
+  `supports_aggregate_filter_clause` and `supports_interval_range_frame` are dialect-language
+  facts declared on `SqlDialect`, not `BackendCapabilities` flags, so they sat outside every
+  row's intent while still being claims about Trino's SQL surface — exactly what criterion 5
+  forbids going unmeasured. Phase 2 lands both `false` (conservative: a `false` makes smelt
+  refuse the construct rather than emit SQL Trino may reject) and phase 8's row now owns
+  turning them into measured values. Not deferred out; no new row needed.
+
+- **2026-09-13 — phase 2 does not add a `MaintenanceDialect::Trino` variant; it makes
+  `maintenance_dialect` fallible instead.** Surveyed the blast radius: adding the variant breaks
+  ~150 match arms across ten emitters in `smelt-logical/src/maintenance/emit/`, each needing a
+  Trino SQL spelling that `20260913-trino-incremental` owns. The fail-loud alternative already
+  has a precedent in this codebase — `smelt_state::UnsupportedLedgerDialect` — so
+  `maintenance_dialect` returns `Result` and its ~20 callers (all in `Result` contexts) refuse
+  Trino by name. T4 narrows the error away by adding the variant; it never silently aliases
+  Trino onto Spark's spellings, which share Iceberg's atomicity shape but not its SQL.
+
+- **2026-09-13 — the compiler does not find every arm; `type_cast_sql` proves it.**
+  `smelt-dialect/src/type_conformance.rs` ends its `(dt, dialect)` match with `_ =>
+  dt.to_backend_sql()`, so `SqlDialect::Trino` would have compiled clean while silently emitting
+  `FLOAT` and `BLOB` in the output cast wrap — neither of which is a Trino type (`REAL`,
+  `VARBINARY`). Criterion 2's "no wildcard match arm anywhere absorbing them" is therefore an
+  explicit audit task in phase 2, not a by-product of `cargo check`. The one wildcard left
+  standing is `Signature::engine_native`'s implicit `Native`, already recorded as a Known
+  Divergence owned by `20260913-trino-emission`.
 
 ## Blocked
