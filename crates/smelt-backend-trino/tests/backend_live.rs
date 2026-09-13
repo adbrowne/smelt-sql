@@ -11,7 +11,13 @@
 //!   cargo test -p smelt-backend-trino --test backend_live
 //!   bash scripts/trino-down.sh
 
-use arrow::array::{Array, Int32Array};
+use std::sync::Arc;
+
+use arrow::array::{
+    Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
+    RecordBatch, StringArray, TimestampMicrosecondArray,
+};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use smelt_backend::{Backend, BackendError, Materialization};
 use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
 
@@ -300,6 +306,298 @@ async fn drop_table_if_exists_on_a_missing_table_is_ok() {
         .drop_table_if_exists(&env.schema, "smelt_w6p6_never_existed")
         .await
         .expect("dropping a table that never existed must be Ok, not an error");
+
+    drop_schema(&env).await;
+}
+
+/// The whole seed type set of `seeds.md` §"Type inference", every column
+/// nullable — matches the schema `rows_to_record_batch` always reads back
+/// with (`Field::new(&c.name, dt.clone(), true)`), so a round trip through
+/// `load_table` + `execute_sql` can assert field-for-field schema equality.
+fn seed_type_set_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("c_bool", DataType::Boolean, true),
+        Field::new("c_i32", DataType::Int32, true),
+        Field::new("c_i64", DataType::Int64, true),
+        Field::new("c_decimal", DataType::Decimal128(18, 4), true),
+        Field::new("c_double", DataType::Float64, true),
+        Field::new("c_date", DataType::Date32, true),
+        Field::new(
+            "c_timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new("c_string", DataType::Utf8, true),
+    ]))
+}
+
+/// Three rows over [`seed_type_set_schema`]: row 1 (index 1) is NULL in
+/// every column, rows 0 and 2 carry values — one NULL row per column, as
+/// phase 7's test list specifies.
+fn seed_type_set_batch(schema: SchemaRef) -> RecordBatch {
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)])) as _,
+            Arc::new(Int32Array::from(vec![Some(1), None, Some(3)])) as _,
+            Arc::new(Int64Array::from(vec![
+                Some(10_000_000_000_i64),
+                None,
+                Some(3),
+            ])) as _,
+            Arc::new(
+                Decimal128Array::from(vec![Some(12_345_600_i128), None, Some(-500_i128)])
+                    .with_precision_and_scale(18, 4)
+                    .unwrap(),
+            ) as _,
+            Arc::new(Float64Array::from(vec![Some(1.5), None, Some(-2.25)])) as _,
+            // 2024-01-15 and 2024-06-01, days since Unix epoch.
+            Arc::new(Date32Array::from(vec![Some(19737), None, Some(19875)])) as _,
+            Arc::new(TimestampMicrosecondArray::from(vec![
+                Some(1_705_318_861_123_456_i64),
+                None,
+                Some(1_717_200_000_000_000_i64),
+            ])) as _,
+            Arc::new(StringArray::from(vec![
+                Some("hello"),
+                None,
+                Some("it's ok"),
+            ])) as _,
+        ],
+    )
+    .expect("seed_type_set_batch: schema/data mismatch")
+}
+
+#[tokio::test]
+async fn load_table_round_trips_the_whole_seed_type_set() {
+    let Some(env) = live_env_or_skip("load_table_round_trips_the_whole_seed_type_set").await else {
+        return;
+    };
+
+    let schema = seed_type_set_schema();
+    let batch = seed_type_set_batch(schema.clone());
+    env.backend
+        .load_table(
+            &env.schema,
+            "smelt_w7p7_roundtrip",
+            schema.clone(),
+            vec![batch],
+        )
+        .await
+        .expect("load_table must succeed over the whole seed type set");
+
+    let table = qualified(&env.catalog, &env.schema, "smelt_w7p7_roundtrip");
+    let batches = env
+        .backend
+        .execute_sql(&format!("SELECT * FROM {table} ORDER BY c_i32 NULLS FIRST"))
+        .await
+        .expect("reading the loaded table back must succeed");
+
+    assert_eq!(batches.len(), 1, "expected the whole result in one page");
+    let out = &batches[0];
+    assert_eq!(
+        out.schema().as_ref(),
+        schema.as_ref(),
+        "round-tripped schema must be field-for-field equal to the input schema"
+    );
+    assert_eq!(out.num_rows(), 3);
+
+    // Row order: NULL sorts first, so index 0 is the all-NULL row, then the
+    // two value rows in ascending c_i32 order (1, 3).
+    let bools = out
+        .column(0)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    assert!(bools.is_null(0));
+    assert!(bools.value(1));
+    assert!(!bools.value(2));
+
+    let i32s = out.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
+    assert!(i32s.is_null(0));
+    assert_eq!(i32s.value(1), 1);
+    assert_eq!(i32s.value(2), 3);
+
+    let i64s = out.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+    assert!(i64s.is_null(0));
+    assert_eq!(i64s.value(1), 10_000_000_000_i64);
+    assert_eq!(i64s.value(2), 3_i64);
+
+    let decimals = out
+        .column(3)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(decimals.is_null(0));
+    assert_eq!(decimals.value(1), 12_345_600_i128);
+    assert_eq!(decimals.value(2), -500_i128);
+
+    let doubles = out
+        .column(4)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!(doubles.is_null(0));
+    assert_eq!(doubles.value(1), 1.5);
+    assert_eq!(doubles.value(2), -2.25);
+
+    let dates = out
+        .column(5)
+        .as_any()
+        .downcast_ref::<Date32Array>()
+        .unwrap();
+    assert!(dates.is_null(0));
+    assert_eq!(dates.value(1), 19737);
+    assert_eq!(dates.value(2), 19875);
+
+    let timestamps = out
+        .column(6)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    assert!(timestamps.is_null(0));
+    assert_eq!(timestamps.value(1), 1_705_318_861_123_456_i64);
+    assert_eq!(timestamps.value(2), 1_717_200_000_000_000_i64);
+
+    let strings = out
+        .column(7)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(strings.is_null(0));
+    assert_eq!(strings.value(1), "hello");
+    assert_eq!(strings.value(2), "it's ok");
+
+    drop_schema(&env).await;
+}
+
+#[tokio::test]
+async fn load_table_replaces_an_existing_table() {
+    let Some(env) = live_env_or_skip("load_table_replaces_an_existing_table").await else {
+        return;
+    };
+
+    let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, true)]));
+    let first_batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int32Array::from(vec![1, 2, 3])) as _],
+    )
+    .unwrap();
+    env.backend
+        .load_table(
+            &env.schema,
+            "smelt_w7p7_replace",
+            schema.clone(),
+            vec![first_batch],
+        )
+        .await
+        .expect("first load_table must succeed");
+    assert_eq!(
+        env.backend
+            .get_row_count(&env.schema, "smelt_w7p7_replace")
+            .await
+            .unwrap(),
+        3
+    );
+
+    let second_batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int32Array::from(vec![10, 20])) as _],
+    )
+    .unwrap();
+    env.backend
+        .load_table(
+            &env.schema,
+            "smelt_w7p7_replace",
+            schema,
+            vec![second_batch],
+        )
+        .await
+        .expect("second load_table must succeed and replace the first");
+
+    // Only the second load's rows survive (the trait's drop-then-create
+    // contract), not 3 + 2 = 5.
+    assert_eq!(
+        env.backend
+            .get_row_count(&env.schema, "smelt_w7p7_replace")
+            .await
+            .unwrap(),
+        2
+    );
+
+    drop_schema(&env).await;
+}
+
+#[tokio::test]
+async fn load_table_rejects_null_in_non_nullable_against_the_live_tier() {
+    let Some(env) =
+        live_env_or_skip("load_table_rejects_null_in_non_nullable_against_the_live_tier").await
+    else {
+        return;
+    };
+
+    let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, false)]));
+    let batch = RecordBatch::try_new(
+        // The batch's own field stays nullable so it can carry the NULL that
+        // violates the stricter `schema` passed to `load_table` below.
+        Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, true)])),
+        vec![Arc::new(Int32Array::from(vec![Some(1), None])) as _],
+    )
+    .unwrap();
+
+    let err = env
+        .backend
+        .load_table(&env.schema, "smelt_w7p7_null_reject", schema, vec![batch])
+        .await
+        .expect_err("a NULL in a non-nullable column must be refused");
+    assert!(matches!(err, BackendError::NullInNonNullableColumn { .. }));
+
+    assert!(
+        !env.backend
+            .table_exists(&env.schema, "smelt_w7p7_null_reject")
+            .await
+            .unwrap(),
+        "no table must be left behind after a rejected load"
+    );
+
+    drop_schema(&env).await;
+}
+
+#[tokio::test]
+async fn load_table_loads_a_multi_chunk_batch() {
+    let Some(env) = live_env_or_skip("load_table_loads_a_multi_chunk_batch").await else {
+        return;
+    };
+
+    // Above the 1000-row chunk bound `INSERT_CHUNK_SIZE` sets, so this also
+    // measures multi-statement bulk-load timing (recorded in the phase 7
+    // summary and the outcome's decision log).
+    let row_count = 12_000_i32;
+    let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, true)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int32Array::from((0..row_count).collect::<Vec<_>>())) as _],
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    env.backend
+        .load_table(&env.schema, "smelt_w7p7_multichunk", schema, vec![batch])
+        .await
+        .expect("multi-chunk load_table must succeed");
+    let elapsed = start.elapsed();
+    eprintln!(
+        "load_table_loads_a_multi_chunk_batch: {row_count} rows in {:?} ({:.1} rows/sec)",
+        elapsed,
+        row_count as f64 / elapsed.as_secs_f64()
+    );
+
+    let count = env
+        .backend
+        .get_row_count(&env.schema, "smelt_w7p7_multichunk")
+        .await
+        .expect("get_row_count must succeed");
+    assert_eq!(count, row_count as usize);
 
     drop_schema(&env).await;
 }

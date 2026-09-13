@@ -1,14 +1,17 @@
 //! Trino type signature -> Arrow `DataType`, and JSON result rows -> Arrow
-//! `RecordBatch`.
+//! `RecordBatch`. Also the write direction: Arrow `DataType` -> Trino DDL
+//! type, and Arrow scalar value -> a typed SQL literal, for `load_table`.
 
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanBuilder, Date32Builder, Decimal128Builder, Float32Builder, Float64Builder,
-    Int32Builder, Int64Builder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
+    Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Date32Builder, Decimal128Array,
+    Decimal128Builder, Float32Builder, Float64Array, Float64Builder, Int32Array, Int32Builder,
+    Int64Array, Int64Builder, RecordBatch, StringArray, StringBuilder, TimestampMicrosecondArray,
+    TimestampMicrosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime};
 use smelt_backend::BackendError;
 
 use crate::protocol::Column;
@@ -69,6 +72,163 @@ pub fn trino_type_to_arrow(type_str: &str) -> Result<DataType, BackendError> {
         _ => Err(BackendError::execution_failed(
             "trino",
             format!("unrecognised Trino type signature: {type_str}"),
+        )),
+    }
+}
+
+/// Map an Arrow `DataType` to the Trino DDL type `load_table` creates the
+/// column as. Covers exactly the seed type set of `seeds.md` §"Type
+/// inference" (matching `Backend::load_table`'s doc comment); anything else
+/// is a typed error naming the offending type, never a silent `varchar`
+/// fallback (fail-loud discipline, `CLAUDE.md` §"Fail-loud discipline").
+///
+/// `Timestamp(Microsecond, None)` maps to `timestamp(6)`, not bare
+/// `timestamp` — Trino's bare `timestamp` defaults to second precision, which
+/// would silently truncate the sub-second component on read-back.
+pub fn arrow_type_to_trino_type(data_type: &DataType) -> Result<String, BackendError> {
+    match data_type {
+        DataType::Boolean => Ok("boolean".to_string()),
+        DataType::Int32 => Ok("integer".to_string()),
+        DataType::Int64 => Ok("bigint".to_string()),
+        DataType::Float64 => Ok("double".to_string()),
+        DataType::Date32 => Ok("date".to_string()),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => Ok("timestamp(6)".to_string()),
+        DataType::Utf8 => Ok("varchar".to_string()),
+        DataType::Decimal128(precision, scale) => Ok(format!("decimal({precision},{scale})")),
+        other => Err(BackendError::unsupported(
+            "trino",
+            format!("load_table: no Trino DDL type for Arrow type {other:?}"),
+        )),
+    }
+}
+
+/// `NaiveDate::from_ymd_opt(1970, 1, 1)`'s day count in chrono's proleptic
+/// Gregorian numbering (days since `0000-01-01`) — the write-direction
+/// counterpart of [`trino_date_to_days_since_epoch`], reusing the same
+/// constant as `trino_type_to_arrow`'s read direction.
+fn days_since_epoch_to_date_string(days: i32) -> Result<String, BackendError> {
+    let ce_days = days + UNIX_EPOCH_DAYS_FROM_CE;
+    let date = NaiveDate::from_num_days_from_ce_opt(ce_days).ok_or_else(|| {
+        BackendError::execution_failed("trino", format!("day count out of range: {days}"))
+    })?;
+    Ok(date.format("%Y-%m-%d").to_string())
+}
+
+/// Render the micros-since-epoch value of a `Timestamp(Microsecond, None)`
+/// cell as a `YYYY-MM-DD HH:MM:SS.ffffff` string — always 6 fractional
+/// digits, so the value round-trips through Trino's `timestamp(6)` exactly.
+fn micros_to_timestamp_string(micros: i64) -> Result<String, BackendError> {
+    let dt = DateTime::from_timestamp_micros(micros).ok_or_else(|| {
+        BackendError::execution_failed(
+            "trino",
+            format!("microsecond timestamp out of range: {micros}"),
+        )
+    })?;
+    Ok(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+}
+
+/// Render an unscaled `Decimal128` value as a plain numeric literal string
+/// (e.g. `-3.5000` for `value = -35000, scale = 4`), unquoted — Trino parses
+/// a decimal literal directly, with no surrounding type keyword needed
+/// because the enclosing `CAST` supplies precision and scale.
+fn decimal128_to_literal_string(value: i128, scale: i8) -> String {
+    let negative = value < 0;
+    let magnitude = value.unsigned_abs();
+    let scale = scale as usize;
+    let digits = magnitude.to_string();
+    let padded = if digits.len() <= scale {
+        format!("{}{digits}", "0".repeat(scale - digits.len() + 1))
+    } else {
+        digits
+    };
+    let split_at = padded.len() - scale;
+    let (int_part, frac_part) = padded.split_at(split_at);
+    let sign = if negative { "-" } else { "" };
+    if scale == 0 {
+        format!("{sign}{int_part}")
+    } else {
+        format!("{sign}{int_part}.{frac_part}")
+    }
+}
+
+/// Escape a single-quoted SQL string literal value — doubling an embedded
+/// `'` is standard SQL escaping, which Trino follows.
+fn escape_string_value(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Render one cell of `array` at `row` as a SQL literal Trino types
+/// unambiguously: `NULL` for a null cell (typed by the enclosing `CAST` in
+/// the `INSERT` statement `load_table` builds), `DATE '…'` /
+/// `TIMESTAMP '…'` for temporal values, a bare decimal/integer/boolean
+/// literal, or a quoted, `''`-escaped string.
+///
+/// `data_type` must match `array`'s actual Arrow type — `load_table` always
+/// calls this with the type it just downcast the array to, so a mismatch
+/// here is an internal error, not a possible runtime input; it is still
+/// reported as a typed `BackendError` rather than a panic (fail-loud
+/// discipline, `CLAUDE.md` §"Fail-loud discipline").
+pub fn render_trino_literal(
+    array: &dyn Array,
+    row: usize,
+    data_type: &DataType,
+) -> Result<String, BackendError> {
+    /// Downcast or fail loud — every arm below calls this with a type that
+    /// must already match `data_type`, so a failure here means the caller
+    /// passed a mismatched `(array, data_type)` pair.
+    fn downcast<'a, T: 'static>(
+        array: &'a dyn Array,
+        data_type: &DataType,
+    ) -> Result<&'a T, BackendError> {
+        array.as_any().downcast_ref::<T>().ok_or_else(|| {
+            BackendError::execution_failed(
+                "trino",
+                format!("render_trino_literal: array does not match declared type {data_type:?}"),
+            )
+        })
+    }
+
+    if array.is_null(row) {
+        return Ok("NULL".to_string());
+    }
+    match data_type {
+        DataType::Boolean => {
+            let a = downcast::<BooleanArray>(array, data_type)?;
+            Ok(if a.value(row) { "TRUE" } else { "FALSE" }.to_string())
+        }
+        DataType::Int32 => {
+            let a = downcast::<Int32Array>(array, data_type)?;
+            Ok(a.value(row).to_string())
+        }
+        DataType::Int64 => {
+            let a = downcast::<Int64Array>(array, data_type)?;
+            Ok(a.value(row).to_string())
+        }
+        DataType::Float64 => {
+            let a = downcast::<Float64Array>(array, data_type)?;
+            Ok(a.value(row).to_string())
+        }
+        DataType::Date32 => {
+            let a = downcast::<Date32Array>(array, data_type)?;
+            let date_str = days_since_epoch_to_date_string(a.value(row))?;
+            Ok(format!("DATE '{date_str}'"))
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, None) => {
+            let a = downcast::<TimestampMicrosecondArray>(array, data_type)?;
+            let ts_str = micros_to_timestamp_string(a.value(row))?;
+            Ok(format!("TIMESTAMP '{ts_str}'"))
+        }
+        DataType::Utf8 => {
+            let a = downcast::<StringArray>(array, data_type)?;
+            Ok(format!("'{}'", escape_string_value(a.value(row))))
+        }
+        DataType::Decimal128(_, scale) => {
+            let a = downcast::<Decimal128Array>(array, data_type)?;
+            Ok(decimal128_to_literal_string(a.value(row), *scale))
+        }
+        other => Err(BackendError::unsupported(
+            "trino",
+            format!("load_table: no literal renderer for Arrow type {other:?}"),
         )),
     }
 }
@@ -331,5 +491,132 @@ mod tests {
             .unwrap();
         assert_eq!(names.value(0), "alice");
         assert!(names.is_null(1));
+    }
+
+    #[test]
+    fn arrow_type_to_trino_type_covers_the_seed_type_set() {
+        assert_eq!(
+            arrow_type_to_trino_type(&DataType::Boolean).unwrap(),
+            "boolean"
+        );
+        assert_eq!(
+            arrow_type_to_trino_type(&DataType::Int32).unwrap(),
+            "integer"
+        );
+        assert_eq!(
+            arrow_type_to_trino_type(&DataType::Int64).unwrap(),
+            "bigint"
+        );
+        assert_eq!(
+            arrow_type_to_trino_type(&DataType::Float64).unwrap(),
+            "double"
+        );
+        assert_eq!(arrow_type_to_trino_type(&DataType::Date32).unwrap(), "date");
+        // Not bare `timestamp` — Trino's default precision is seconds, which
+        // would silently truncate the sub-second component on read-back.
+        assert_eq!(
+            arrow_type_to_trino_type(&DataType::Timestamp(TimeUnit::Microsecond, None)).unwrap(),
+            "timestamp(6)"
+        );
+        assert_eq!(
+            arrow_type_to_trino_type(&DataType::Utf8).unwrap(),
+            "varchar"
+        );
+        assert_eq!(
+            arrow_type_to_trino_type(&DataType::Decimal128(18, 4)).unwrap(),
+            "decimal(18,4)"
+        );
+    }
+
+    #[test]
+    fn arrow_type_to_trino_type_refuses_an_unsupported_type() {
+        let err = arrow_type_to_trino_type(&DataType::Float32).unwrap_err();
+        assert!(matches!(err, BackendError::UnsupportedFeature { .. }));
+
+        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let err = arrow_type_to_trino_type(&list_type).unwrap_err();
+        assert!(matches!(err, BackendError::UnsupportedFeature { .. }));
+    }
+
+    #[test]
+    fn renders_typed_literals_for_every_seed_type() {
+        let bools: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), Some(false)]));
+        assert_eq!(
+            render_trino_literal(bools.as_ref(), 0, &DataType::Boolean).unwrap(),
+            "TRUE"
+        );
+        assert_eq!(
+            render_trino_literal(bools.as_ref(), 1, &DataType::Boolean).unwrap(),
+            "FALSE"
+        );
+
+        let ints: ArrayRef = Arc::new(Int32Array::from(vec![42]));
+        assert_eq!(
+            render_trino_literal(ints.as_ref(), 0, &DataType::Int32).unwrap(),
+            "42"
+        );
+
+        let bigints: ArrayRef = Arc::new(Int64Array::from(vec![9_000_000_000_i64]));
+        assert_eq!(
+            render_trino_literal(bigints.as_ref(), 0, &DataType::Int64).unwrap(),
+            "9000000000"
+        );
+
+        let doubles: ArrayRef = Arc::new(Float64Array::from(vec![3.5]));
+        assert_eq!(
+            render_trino_literal(doubles.as_ref(), 0, &DataType::Float64).unwrap(),
+            "3.5"
+        );
+
+        // 2024-01-15 is 19737 days since the Unix epoch.
+        let dates: ArrayRef = Arc::new(Date32Array::from(vec![19737]));
+        assert_eq!(
+            render_trino_literal(dates.as_ref(), 0, &DataType::Date32).unwrap(),
+            "DATE '2024-01-15'"
+        );
+
+        let timestamps: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![
+            1_705_318_861_123_456_i64,
+        ]));
+        assert_eq!(
+            render_trino_literal(
+                timestamps.as_ref(),
+                0,
+                &DataType::Timestamp(TimeUnit::Microsecond, None)
+            )
+            .unwrap(),
+            "TIMESTAMP '2024-01-15 11:41:01.123456'"
+        );
+
+        let strings: ArrayRef = Arc::new(StringArray::from(vec!["hello"]));
+        assert_eq!(
+            render_trino_literal(strings.as_ref(), 0, &DataType::Utf8).unwrap(),
+            "'hello'"
+        );
+
+        let decimals: ArrayRef = Arc::new(
+            Decimal128Array::from(vec![-35000_i128])
+                .with_precision_and_scale(18, 4)
+                .unwrap(),
+        );
+        assert_eq!(
+            render_trino_literal(decimals.as_ref(), 0, &DataType::Decimal128(18, 4)).unwrap(),
+            "-3.5000"
+        );
+
+        let nullable_ints: ArrayRef = Arc::new(Int32Array::from(vec![None]));
+        assert_eq!(
+            render_trino_literal(nullable_ints.as_ref(), 0, &DataType::Int32).unwrap(),
+            "NULL"
+        );
+    }
+
+    #[test]
+    fn escapes_a_string_literal_containing_a_quote() {
+        let strings: ArrayRef = Arc::new(StringArray::from(vec!["it's a test"]));
+        assert_eq!(
+            render_trino_literal(strings.as_ref(), 0, &DataType::Utf8).unwrap(),
+            "'it''s a test'"
+        );
     }
 }

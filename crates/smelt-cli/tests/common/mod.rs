@@ -601,3 +601,125 @@ pub fn assert_table_parity(actual: &[Vec<String>], expected: &[Vec<String>], lab
         "{label}: table rows mismatch.\n  expected: {exp:#?}\n  actual:   {act:#?}"
     );
 }
+
+// ─── W7·P7: Trino seed-parity helpers ───────────────────────────────────────
+//
+// Trino is deliberately NOT a `TargetKind` variant and never appears in
+// `targets_to_run()`: `dialect_and_capabilities` still refuses `type: trino`
+// until phase 8 lands `BackendCapabilities::trino_iceberg()`
+// (`docs/outcomes/20260913-trino-target-spine`), so wiring it into the
+// helper every W1+ suite shares would turn those currently-green suites red
+// for a reason unrelated to seeding. `smelt seed` never constructs a
+// `SqlCompiler` (`commands/seed.rs` reaches only `create_backend`), so the
+// Trino leg below is reachable today as a standalone path.
+
+/// The live Trino environment a suite runs against, or `None` when the leg
+/// should skip. Mirrors `crates/smelt-backend-trino/tests/backend_live.rs`'s
+/// own env gate (`SMELT_TRINO_URL`, `SMELT_TRINO_USER`, `SMELT_TRINO_CATALOG`).
+pub struct TrinoEnv {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub catalog: String,
+    pub tls: bool,
+}
+
+/// Reads `SMELT_TRINO_URL` (`scheme://host[:port]`) plus the optional
+/// `SMELT_TRINO_USER`/`SMELT_TRINO_CATALOG` overrides. `None` when
+/// `SMELT_TRINO_URL` is unset, meaning the caller should skip.
+pub fn trino_env() -> Option<TrinoEnv> {
+    let url = std::env::var("SMELT_TRINO_URL").ok()?;
+    let user = std::env::var("SMELT_TRINO_USER").unwrap_or_else(|_| "smelt".to_string());
+    let catalog = std::env::var("SMELT_TRINO_CATALOG").unwrap_or_else(|_| "iceberg".to_string());
+    let tls = url.starts_with("https://");
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(&url);
+    let (host, port_str) = rest
+        .split_once(':')
+        .unwrap_or((rest, if tls { "443" } else { "8080" }));
+    let port: u16 = port_str
+        .parse()
+        .unwrap_or_else(|e| panic!("SMELT_TRINO_URL has an unparseable port '{port_str}': {e}"));
+    Some(TrinoEnv {
+        host: host.to_string(),
+        port,
+        user,
+        catalog,
+        tls,
+    })
+}
+
+/// A schema name unique to this run, so two worktrees — or a developer
+/// beside an autonomy loop — never collide. `label` scopes two suites in
+/// the same binary apart.
+pub fn trino_schema(label: &str) -> String {
+    format!("smelt_seed_{label}_{}", std::process::id())
+}
+
+/// The whole `trino:` target block (2-space indented, ready to concatenate
+/// under `targets:` in a hand-written `smelt.yml`), or empty when
+/// `SMELT_TRINO_URL` is unset.
+pub fn trino_target_block(schema: &str) -> String {
+    let Some(env) = trino_env() else {
+        return String::new();
+    };
+    format!(
+        "  trino:\n    type: trino\n    host: {}\n    port: {}\n    user: {}\n    \
+         catalog: {}\n    schema: {schema}\n    tls: {}\n",
+        env.host, env.port, env.user, env.catalog, env.tls
+    )
+}
+
+/// Connects a `TrinoBackend` to `schema` from the ambient test environment.
+/// Panics if `SMELT_TRINO_URL` is unset — callers gate on [`trino_env`]
+/// first.
+pub fn trino_backend(schema: &str) -> smelt_backend_trino::TrinoBackend {
+    let env = trino_env().expect("SMELT_TRINO_URL must be set to connect to Trino");
+    let scheme = if env.tls { "https" } else { "http" };
+    smelt_backend_trino::TrinoBackend::new(smelt_backend_trino::TrinoClientConfig {
+        base_url: format!("{scheme}://{}:{}", env.host, env.port),
+        user: env.user,
+        catalog: env.catalog,
+        schema: schema.to_string(),
+        password: None,
+    })
+}
+
+/// Fetch all rows from `schema.table` on the live Trino tier, normalized and
+/// sorted the same way [`fetch_rows`] does for the other backends.
+///
+/// A `block_on`-based bridge: the Trino client is async top to bottom, but
+/// this helper (like `execute_sql_on`) is a plain sync function so
+/// `seed_parity.rs` can call it the same way it calls the other targets'
+/// read-back.
+pub fn fetch_trino_rows(schema: &str, table: &str) -> Vec<Vec<String>> {
+    use smelt_backend::Backend;
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime for fetch_trino_rows");
+    let backend = trino_backend(schema);
+    let batches = rt.block_on(async {
+        backend
+            .execute_sql(&format!("SELECT * FROM {schema}.{table}"))
+            .await
+            .unwrap_or_else(|e| panic!("Trino execute_sql failed: {e}"))
+    });
+    batches_to_sorted_rows(&batches)
+}
+
+/// Drops the suite's Trino schema. Best-effort — a failure here should not
+/// fail a test whose assertions already ran.
+pub fn drop_trino_schema(schema: &str) {
+    use smelt_backend::Backend;
+    let Some(env) = trino_env() else { return };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime for drop_trino_schema");
+    let backend = trino_backend(schema);
+    rt.block_on(async {
+        let _ = backend
+            .execute_sql(&format!(
+                "DROP SCHEMA IF EXISTS \"{}\".\"{schema}\" CASCADE",
+                env.catalog
+            ))
+            .await;
+    });
+}

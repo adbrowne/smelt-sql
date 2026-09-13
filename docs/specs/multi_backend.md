@@ -944,10 +944,27 @@ from Arrow, exactly as Spark Connect's does; smelt assumes neither a DBFS root n
 mount is available to write through.
 
 A `trino` target's client protocol is HTTP (`/v1/statement`), with no host-filesystem
-assumption of its own; which bulk-loading path smelt takes over that protocol (row-by-row
-`INSERT`, a staged file the Iceberg connector reads, or another mechanism) is measured rather
-than assumed, and named here once phase 7 of `docs/outcomes/20260913-trino-target-spine`
-measures it.
+assumption of its own. The measured bulk path is `INSERT INTO … SELECT CAST(…) FROM (VALUES
+…)`: a staged-Parquet-into-object-storage path was considered and rejected, because a `trino`
+target carries no object-store credential of its own (`host`/`port`/`user`/`catalog`/`schema`/
+`tls`/`password` only) — writing a Parquet file into the Iceberg connector's backing MinIO
+bucket would need a target-shape change wider than loading. Each `INSERT` casts every value
+column from an untyped `(VALUES …)` row so a NULL cell and a narrow integer literal both carry
+the same type the surrounding `CREATE TABLE` gave the column, rather than an ambiguous type
+Trino would otherwise infer from the literal alone. Rows are chunked at 1,000 per statement,
+a bound picked from measurement against the live tier (a 12,000-row batch loaded across 12
+statements at roughly 6,000 rows/second) rather than from taste — it keeps each statement's
+HTTP body and Trino's own parse time bounded regardless of how large the seed batch is.
+
+Reading a value back through this client requires one more header than the write path: without
+`X-Trino-Client-Capabilities: PARAMETRIC_DATETIME` on every request, the coordinator drops
+`timestamp(p)` (and every other parametric date/time type) to its unparameterized base type for
+legacy client compatibility — measured against a live tier, this is not merely a type-name
+cosmetic: a `timestamp(6)` value written as `...123456` reads back as `...123`, silently
+truncated to millisecond precision, even though the underlying stored value retains full
+microsecond precision (confirmed via `to_unixtime`). The client sends this header on every
+request, so every backend method that reads a *value* — not only `load_table`'s round trip —
+gets full parametric precision.
 
 ### Cross-engine data exchange
 When a model on backend A references a model pinned to backend B (a cross-backend edge, found

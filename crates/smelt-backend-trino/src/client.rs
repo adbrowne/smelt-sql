@@ -73,7 +73,16 @@ impl TrinoClient {
         let mut builder = builder
             .header("X-Trino-User", &self.config.user)
             .header("X-Trino-Catalog", &self.config.catalog)
-            .header("X-Trino-Schema", &self.config.schema);
+            .header("X-Trino-Schema", &self.config.schema)
+            // Without this, the coordinator drops every parametric
+            // date/time type to its unparameterized base type for legacy
+            // client compatibility — a `timestamp(6)` column's *type* still
+            // reports `timestamp`, but its *value* is also formatted at
+            // millisecond precision (measured against a live tier: writing
+            // `.123456` and reading back `.123` — not just a type-name
+            // cosmetic). `PARAMETRIC_DATETIME` opts into full-precision
+            // typing and formatting for the types `arrow_convert` decodes.
+            .header("X-Trino-Client-Capabilities", "PARAMETRIC_DATETIME");
         if let Some(password) = &self.config.password {
             builder = builder.basic_auth(&self.config.user, Some(password));
         }

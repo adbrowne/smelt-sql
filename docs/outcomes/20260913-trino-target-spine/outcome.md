@@ -141,7 +141,7 @@ not an answer — every cell is still established by execution.
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | done |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | done |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | done |
-| 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | planned |
+| 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | done |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
 | 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | pending |
 | 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
@@ -350,5 +350,41 @@ not an answer — every cell is still established by execution.
   to that helper would turn currently-green suites red for a reason unrelated to seeding.
   `smelt seed` itself never constructs a `SqlCompiler` (verified: `commands/seed.rs` reaches only
   `create_backend`), so the CLI seed leg is genuinely reachable now and is not deferred.
+
+- **2026-09-14 — phase 7 measured a genuine Trino protocol divergence: without
+  `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`, a written `timestamp(6)` value silently
+  truncates to millisecond precision on read-back.** The round-trip test
+  (`load_table_round_trips_the_whole_seed_type_set`) initially failed with `1705318861123000 !=
+  1705318861123456` even though the write path (a `CAST(... AS timestamp(6))`) was correct.
+  Probed directly against the live coordinator: `to_unixtime(t)` on the stored value returned
+  the full `1705318861.123456`, proving the *storage* is not the problem — only the REST
+  protocol's default value formatting is, a legacy-client-compatibility behavior Trino's own
+  client-capabilities negotiation exists to opt out of. Fixed by adding the capability header to
+  every request in `TrinoClient::send`, not by loosening the test's precision assertion — the
+  header is a client-protocol correctness fix affecting every read through this client, not a
+  `load_table`-specific workaround. Recorded in `multi_backend.md` §"Loading data into a
+  backend" so any future reader of the read path (`execute_sql`, `get_preview`, …) knows why the
+  header exists.
+- **2026-09-14 — the bulk path is a chunked `INSERT INTO … SELECT CAST(…) FROM (VALUES …)`,
+  measured at ~6,000 rows/second, 1,000 rows per statement.** No Parquet-staging alternative was
+  reachable to measure against: the `trino` target shape phase 3 landed has no object-store
+  credential, so smelt cannot write a file into the Iceberg connector's backing MinIO bucket
+  without a `smelt_yml.md` target-shape change wider than this outcome (recorded as an
+  escalation, not absorbed here). A live 12,000-row load
+  (`load_table_loads_a_multi_chunk_batch`) completed in ~1.8–2.1s across 12 chunked `INSERT`
+  statements — adequate at seed scale; a future need for faster bulk loads is the trigger to
+  revisit Parquet staging, not a default assumed now.
+- **2026-09-14 — `build_load_plan` is a pure, table-driving function separate from
+  `TrinoBackend::load_table`.** Nullability validation, DDL-type mapping, and chunked-`INSERT`
+  construction are all testable without a live server or an HTTP stub — `load_table` itself
+  becomes a thin wrapper that executes the plan's statements over `TrinoClient`. This let phase
+  7's unit tests (nullability rejection "before any statement is built", exact chunk-boundary
+  row counts) assert directly against the plan's structure rather than needing a stub coordinator
+  to capture request bodies.
+- **2026-09-14 — `smelt-backend-trino` is a dev-dependency of `smelt-cli`, unconditional (no
+  feature flag), matching the outcome's 2026-09-14 ruling that the crate itself is non-optional.**
+  The `seed_loads_into_trino` CLI-parity test constructs `TrinoBackend` directly for read-back
+  (`common::trino_backend`/`fetch_trino_rows`), the same way the Spark and BigQuery legs
+  construct their own backend types directly rather than going through `smelt-backends`' factory.
 
 ## Blocked

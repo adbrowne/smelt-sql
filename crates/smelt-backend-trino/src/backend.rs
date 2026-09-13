@@ -1,13 +1,12 @@
 //! The `Backend` trait implementation over the live Trino/Iceberg tier.
 //!
-//! Two required trait methods are answered provisionally, per the outcome's
+//! [`Backend::capabilities`] is answered provisionally, per the outcome's
 //! decision log (`docs/outcomes/20260913-trino-target-spine/outcome.md`,
 //! 2026-09-13 "the spec's Trino capability column enters as `?`, not as a
-//! documentation-read guess"): [`Backend::capabilities`] returns an
-//! all-`false` profile until phase 8 measures the real one by execution, and
-//! [`Backend::load_table`] refuses by name until phase 7 implements the
-//! Arrow load path. `create_materialized_view_as` inherits the trait's
-//! erroring default — Trino has no native IVM to override it with.
+//! documentation-read guess"): it returns an all-`false` profile until phase
+//! 8 measures the real one by execution. `create_materialized_view_as`
+//! inherits the trait's erroring default — Trino has no native IVM to
+//! override it with.
 //!
 //! `delete_partitions`, `insert_into_from_query` and `insert_overwrite` also
 //! refuse by name: this outcome's Out of scope section reserves "the
@@ -24,8 +23,15 @@ use async_trait::async_trait;
 use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
 use smelt_dialect::NullSafeEqualitySpelling;
 
+use crate::arrow_convert::{arrow_type_to_trino_type, render_trino_literal};
 use crate::client::TrinoClient;
 use crate::config::TrinoClientConfig;
+
+/// The row bound per `INSERT` statement `load_table` issues, measured in
+/// phase 7 (`docs/outcomes/20260913-trino-target-spine/phases/07-summary.md`)
+/// against the live tier: it keeps each statement's HTTP body and Trino's own
+/// parse time bounded regardless of how large the seed batch is.
+const INSERT_CHUNK_SIZE: usize = 1000;
 
 /// A `Backend` over Trino's `/v1/statement` HTTP protocol and an Iceberg
 /// REST catalog. Holds one [`TrinoClient`] shared across every call.
@@ -70,6 +76,116 @@ fn quote_identifier(ident: &str) -> String {
 /// predicate — never used for an identifier, only a filter value.
 fn escape_string_literal(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// The statements `load_table` executes once nullability has passed and
+/// every literal is rendered: one `CREATE TABLE` and a bounded sequence of
+/// `INSERT` statements. Kept as data so the plan is testable without a
+/// server — `TrinoBackend::load_table` is the only caller that turns it into
+/// HTTP requests.
+#[derive(Debug)]
+struct LoadPlan {
+    create_table_sql: String,
+    insert_sqls: Vec<String>,
+}
+
+/// Build the whole `load_table` plan for `qualified_table` from `arrow_schema`
+/// and `batches` — nullability validation, the seed-type-set DDL mapping, and
+/// chunked `INSERT INTO … SELECT CAST(…) FROM (VALUES …)` statements.
+///
+/// Nullability is checked **before any SQL is built**: a violation returns
+/// immediately, so a caller never sees a partially-built plan.
+fn build_load_plan(
+    qualified_table: &str,
+    arrow_schema: &SchemaRef,
+    batches: &[RecordBatch],
+    schema: &str,
+    name: &str,
+) -> Result<LoadPlan, BackendError> {
+    for batch in batches {
+        for (col_idx, field) in arrow_schema.fields().iter().enumerate() {
+            if !field.is_nullable() {
+                let array = batch.column(col_idx);
+                if array.null_count() > 0 {
+                    let row = (0..array.len()).find(|&i| array.is_null(i)).unwrap_or(0);
+                    return Err(BackendError::null_in_non_nullable_column(
+                        schema,
+                        name,
+                        field.name().as_str(),
+                        row,
+                    ));
+                }
+            }
+        }
+    }
+
+    let ddl_types = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| arrow_type_to_trino_type(f.data_type()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let column_defs: Vec<String> = arrow_schema
+        .fields()
+        .iter()
+        .zip(&ddl_types)
+        .map(|(field, ddl_type)| {
+            let nullability = if field.is_nullable() { "" } else { " NOT NULL" };
+            format!("{} {ddl_type}{nullability}", field.name())
+        })
+        .collect();
+    let create_table_sql = format!(
+        "CREATE TABLE {qualified_table} ({})",
+        column_defs.join(", ")
+    );
+
+    let column_names: Vec<&str> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    let cols_list = column_names.join(", ");
+    let value_col_names: Vec<String> = (0..column_names.len()).map(|i| format!("c{i}")).collect();
+    let value_col_list = value_col_names.join(", ");
+    let cast_list: Vec<String> = ddl_types
+        .iter()
+        .enumerate()
+        .map(|(i, ddl_type)| format!("CAST(v.c{i} AS {ddl_type})"))
+        .collect();
+    let cast_list = cast_list.join(", ");
+
+    let data_types: Vec<_> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.data_type().clone())
+        .collect();
+
+    let mut insert_sqls = Vec::new();
+    for batch in batches {
+        let mut row_idx = 0;
+        while row_idx < batch.num_rows() {
+            let chunk_end = (row_idx + INSERT_CHUNK_SIZE).min(batch.num_rows());
+            let mut value_rows = Vec::with_capacity(chunk_end - row_idx);
+            for row in row_idx..chunk_end {
+                let mut cells = Vec::with_capacity(batch.num_columns());
+                for (col_idx, data_type) in data_types.iter().enumerate() {
+                    cells.push(render_trino_literal(batch.column(col_idx), row, data_type)?);
+                }
+                value_rows.push(format!("({})", cells.join(", ")));
+            }
+            insert_sqls.push(format!(
+                "INSERT INTO {qualified_table} ({cols_list}) \
+                 SELECT {cast_list} FROM (VALUES {}) AS v({value_col_list})",
+                value_rows.join(", ")
+            ));
+            row_idx = chunk_end;
+        }
+    }
+
+    Ok(LoadPlan {
+        create_table_sql,
+        insert_sqls,
+    })
 }
 
 /// Decode a single-row, single-column `bigint` result (a `count(*)`) into a
@@ -249,16 +365,24 @@ impl Backend for TrinoBackend {
         &self,
         schema: &str,
         name: &str,
-        _arrow_schema: SchemaRef,
-        _batches: Vec<RecordBatch>,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
     ) -> Result<(), BackendError> {
-        Err(BackendError::unsupported(
-            self.dialect().name(),
-            format!(
-                "load_table for '{schema}.{name}' — Trino's Arrow load path lands in \
-                 docs/outcomes/20260913-trino-target-spine phase 7"
-            ),
-        ))
+        let table = self.qualified_name(schema, name);
+        let plan = build_load_plan(&table, &arrow_schema, &batches, schema, name)?;
+
+        self.client
+            .execute(&format!("DROP TABLE IF EXISTS {table}"))
+            .await?;
+        self.client
+            .execute(&format!("DROP VIEW IF EXISTS {table}"))
+            .await?;
+        self.client.execute(&plan.create_table_sql).await?;
+        for insert_sql in &plan.insert_sqls {
+            self.client.execute(insert_sql).await?;
+        }
+
+        Ok(())
     }
 
     async fn delete_partitions(
@@ -372,16 +496,74 @@ mod tests {
         assert!(!caps.supports_fingerprint_sidecar);
     }
 
-    #[tokio::test]
-    async fn load_table_refuses_until_phase_seven() {
-        let schema = arrow::datatypes::Schema::empty();
-        let err = backend()
-            .load_table("sch", "tbl", std::sync::Arc::new(schema), Vec::new())
-            .await
-            .expect_err("load_table must refuse before phase 7");
-        assert!(matches!(err, BackendError::UnsupportedFeature { .. }));
-        let message = err.to_string();
-        assert!(message.contains("load_table"));
+    fn int_schema(nullable: bool) -> SchemaRef {
+        std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int32, nullable),
+        ]))
+    }
+
+    #[test]
+    fn rejects_null_in_a_non_nullable_column_before_any_statement() {
+        // The batch's own schema stays nullable (the way seed loading builds
+        // record batches); `arrow_schema` is the authoritative, possibly
+        // stricter, declaration `load_table` validates against.
+        let batch_schema = int_schema(true);
+        let arrow_schema = int_schema(false);
+        let batch = RecordBatch::try_new(
+            batch_schema,
+            vec![std::sync::Arc::new(arrow::array::Int32Array::from(vec![
+                Some(1),
+                None,
+            ]))],
+        )
+        .unwrap();
+
+        let err = build_load_plan(
+            "\"cat\".\"sch\".\"tbl\"",
+            &arrow_schema,
+            &[batch],
+            "sch",
+            "tbl",
+        )
+        .expect_err("a NULL in a non-nullable column must be refused");
+        match err {
+            BackendError::NullInNonNullableColumn {
+                schema, table, row, ..
+            } => {
+                assert_eq!(schema, "sch");
+                assert_eq!(table, "tbl");
+                assert_eq!(row, 1);
+            }
+            other => panic!("expected NullInNonNullableColumn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunks_rows_into_bounded_insert_statements() {
+        let schema = int_schema(true);
+        let row_count = INSERT_CHUNK_SIZE * 2 + 5;
+        let values: Vec<Option<i32>> = (0..row_count as i32).map(Some).collect();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![std::sync::Arc::new(arrow::array::Int32Array::from(values))],
+        )
+        .unwrap();
+
+        let plan = build_load_plan("\"cat\".\"sch\".\"tbl\"", &schema, &[batch], "sch", "tbl")
+            .expect("plan must build");
+        assert_eq!(plan.insert_sqls.len(), 3);
+        // Every statement's row count is at the bound — count value tuples in
+        // each statement's `VALUES (...), (...), ...` clause.
+        for (i, sql) in plan.insert_sqls.iter().enumerate() {
+            let values_clause = sql.split("VALUES ").nth(1).expect("VALUES clause present");
+            let values_clause = values_clause
+                .split(") AS v(")
+                .next()
+                .expect("closing AS v(");
+            let tuple_count = values_clause.matches("), (").count() + 1;
+            let expected = if i < 2 { INSERT_CHUNK_SIZE } else { 5 };
+            assert_eq!(tuple_count, expected, "statement {i} row count");
+        }
     }
 
     #[tokio::test]

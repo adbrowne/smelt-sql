@@ -4192,6 +4192,7 @@ dependencies = [
  "smelt-backend-bigquery",
  "smelt-backend-duckdb",
  "smelt-backend-spark",
+ "smelt-backend-trino",
  "smelt-backends",
  "smelt-core",
  "smelt-db",

@@ -11,8 +11,9 @@
 
 mod common;
 use common::{
-    assert_table_parity, bq_target_block, drop_bq_dataset, fetch_rows, spark_connect_url,
-    targets_to_run, TargetKind,
+    assert_table_parity, bq_target_block, drop_bq_dataset, drop_trino_schema, fetch_rows,
+    fetch_trino_rows, spark_connect_url, targets_to_run, trino_env, trino_schema,
+    trino_target_block, TargetKind,
 };
 use std::process::Command;
 use tempfile::TempDir;
@@ -116,4 +117,52 @@ fn seed_loads_into_both_backends() {
         drop_bq_dataset(&kind);
         assert_table_parity(&actual, &expected_rows(), target_name);
     }
+}
+
+/// Prove a CSV seed loads into Trino through the real CLI path
+/// (`smelt seed --target trino`).
+///
+/// Deliberately **not** part of `seed_loads_into_both_backends`: Trino is not
+/// a `TargetKind` member (`dialect_and_capabilities` still refuses `type:
+/// trino` until `docs/outcomes/20260913-trino-target-spine` phase 8 lands
+/// `BackendCapabilities::trino_iceberg()`), so folding it into
+/// `targets_to_run()` would turn that green suite red for a reason unrelated
+/// to seeding. `smelt seed` itself never constructs a `SqlCompiler`
+/// (`commands/seed.rs` reaches only `create_backend`), so this leg is
+/// reachable today. Skips green when `SMELT_TRINO_URL` is unset.
+#[test]
+fn seed_loads_into_trino() {
+    let Some(_) = trino_env() else {
+        eprintln!("Skipping seed_loads_into_trino — set SMELT_TRINO_URL");
+        return;
+    };
+    let schema = trino_schema("seed_p1");
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("trino_seed_proj");
+    std::fs::create_dir_all(root.join("seeds")).unwrap();
+    std::fs::create_dir_all(root.join("target")).unwrap();
+
+    let yml = format!(
+        "name: trino_seed_parity_proj\nversion: 1\npaths:\n  - seeds\ntargets:\n{}default_materialization: table\n",
+        trino_target_block(&schema)
+    );
+    std::fs::write(root.join("smelt.yml"), yml).unwrap();
+    std::fs::write(
+        root.join("seeds").join("p1_users.csv"),
+        "id,name,region\n1,Alice,US\n2,Bob,GB\n3,Carol,AU\n",
+    )
+    .unwrap();
+
+    let out = run_smelt_seed(&root, "trino");
+    assert!(
+        out.status.success(),
+        "trino: `smelt seed` failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let actual = fetch_trino_rows(&schema, "p1_users");
+    drop_trino_schema(&schema);
+    assert_table_parity(&actual, &expected_rows(), "trino");
 }
