@@ -51,7 +51,6 @@ crates/smelt-db/src/type_inference/multi_model.rs 1297
 crates/smelt-db/src/type_inference/pipe.rs 1080
 crates/smelt-db/src/type_inference/record.rs 1137
 crates/smelt-db/src/type_inference/tests.rs 7305
-crates/smelt-db/tests/dialect_audit/main.rs 1356
 crates/smelt-db/tests/integration/tableexpr_body_check.rs 1107
 crates/smelt-db/tests/nullability_property_tests.rs 1684
 crates/smelt-db/tests/prop_helpers/generators.rs 3194

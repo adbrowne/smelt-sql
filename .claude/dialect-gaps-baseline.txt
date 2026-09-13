@@ -14,7 +14,7 @@
 #   - The count may only go DOWN as lowerings land.
 #   - Raising it requires editing this file with a reviewer-visible
 #     justification and a new ledger entry — never a silent skip.
-# `gap_count_ratchet` in tests/dialect_audit/main.rs enforces an exact match
+# `gap_count_ratchet` in tests/dialect_audit/ledger_gates.rs enforces an exact match
 # (a decrease is a "stale baseline" failure prompting you to tighten here).
 #
 # 2026-09-06 (#181, docs/outcomes/20260904-dialect-emission-vocabulary phase 1,
