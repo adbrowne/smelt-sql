@@ -124,11 +124,11 @@ including its null-safe join spelling.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | done |
-| 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | pending |
+| 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | planned |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | pending |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | pending |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | pending |
-| 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue | pending |
+| 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | pending |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | pending |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | pending |
@@ -156,5 +156,18 @@ including its null-safe join spelling.
   reuse verbatim. Flagged for phase 4: the §Surface capability matrix's `supports_pivot` row
   still shows Trino as `✓`, contradicting the measured `false` — left uncorrected here since the
   PIVOT lowering-vs-refusal call is phase 4's, not phase 1's.
+
+- **2026-09-14 — phase 2 planned; no phase-table reshape beyond one clarification.** Phase 1's
+  summary surfaced no work needing a new row (the `supports_pivot` matrix cell it flagged is
+  already phase 4's). One mechanism decision the outcome could not have anticipated: the spec
+  says an `unverified` pair is a *failure*, but phase 2 lands the gate before any Trino verdict
+  exists, so every pair is unverified and a plain failure would leave `verify-phase.sh` red for
+  four phases and stall the loop. Resolved the way this repo already resolves it elsewhere — a
+  two-sided, shrink-only census file (`.claude/trino-emission-census.txt`) naming every
+  outstanding pair, modelled on `.claude/dialect-gaps-baseline.txt`: a pair *not* in the census
+  fails immediately, which is exactly criterion 1's structural claim (a newly-added built-in
+  cannot silently acquire a Trino claim), and the census is deleted at zero rather than
+  grandfathered. Phase 2 carries the one-paragraph spec delta stating this; phase 6's row is
+  amended to own the deletion.
 
 ## Blocked
