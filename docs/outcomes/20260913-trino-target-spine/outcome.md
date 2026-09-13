@@ -138,7 +138,7 @@ not an answer — every cell is still established by execution.
 | 1 | Spec delta: the `trino` target shape and capability column in `multi_backend.md` + `smelt_yml.md`, the foreign-key refusal diagnostics, the connection-security rule, and the Known Divergence naming the implicit-`Native` emission hole this outcome does not close | done |
 | 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | done |
 | 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | done |
-| 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | pending |
+| 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | planned |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
@@ -251,5 +251,15 @@ not an answer — every cell is still established by execution.
   `Result`-returning constructor plumbing) rather than incidental bloat; no
   file crossed a cohesion boundary that would justify a split as part of this
   phase.
+
+- **2026-09-14 — phase 4's tier uses named volumes, not host bind mounts, for writable state.**
+  Criterion 3 names the exact failure `scripts/spark-up.sh` hit: a `chmod` on a root-owned
+  leftover aborting under `set -e` *before* `docker run`, after which every test failed with no
+  hint the server never started. That hazard exists only because Spark's warehouse and Ivy cache
+  are host-owned bind mounts. A compose tier has a structural way out — Docker-managed named
+  volumes removed by `down -v`, with only the read-only `scripts/trino-catalog/` bind-mounted —
+  so phase 4 takes it rather than re-implementing `ensure_container_writable`. No reshape of the
+  remaining rows: the phase 3 summary surfaced nothing out of scope, and phases 4 and 5 are
+  independently unblocked.
 
 ## Blocked
