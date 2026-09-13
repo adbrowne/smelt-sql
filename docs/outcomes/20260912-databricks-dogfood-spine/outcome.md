@@ -1,16 +1,16 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** active
-**Blocked summary (historical — see the 2026-09-14 unblock entry at the top of `## Blocked`
-for the resolution):** every phase row is `done` or `blocked`. Criteria 1-10 are met and
+**Status:** blocked
+**Blocked summary:** every phase row is `done` or `blocked`. Criteria 1-10 are met and
 evidenced by the committed phase summaries; criterion 11 is not: no scheduled run has completed.
-11j's seed bootstrap worked (11k confirmed `--auto` now derives a real window), but surfaced a
-new, unreviewed design question one layer deeper: external-step invocation has no
-frontier/freshness awareness at all, so `sources.raw.github_loader` (the DuckDB-CLI dev-target
-loader) is unconditionally re-invoked and cannot run against Databricks. A human must choose a
-direction before any further phase is plannable — see the 2026-09-14 outcome-level entries at the
-top of `## Blocked`, and `docs/outcomes/20260912-databricks-dogfood-spine/phases/11k-summary.md`.
+The design question that blocked 11k was resolved by a human on 2026-09-14 and landed as phase
+11l (`--skip-external-steps`), so nothing is design-blocked — but the live phase that consumes
+it (11m) cannot run: the dogfood Databricks credential has expired and re-minting it requires a
+human-supplied gpg passphrase that a headless session cannot answer. A human must refresh the
+credential (`bash scripts/dbx-auth.sh`, then `source scripts/dbx-dogfood-env.sh`, then
+`bash scripts/dbx-verify.sh` green) before 11m is workable. See the 2026-09-14 entries at the
+top of `## Blocked`, and `phases/11m-summary.md`.
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -200,6 +200,36 @@ of the models or the tooling.
 | 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 
 ## Blocked
+
+- **2026-09-14 — outcome-level (terminal judgement, re-affirmed after 11l/11m): criteria 1-10
+  met, criterion 11 open, and the only remaining gap is a human-held credential.** No phase row
+  is `pending` or `planned` (29 `done`, 7 `blocked`), so there was nothing to plan. The evidence
+  for criteria 1-10 is unchanged and carried by the committed summaries (1-3 by phases 1/2/3;
+  4 by 4c; 5 by 5; 6 by 6-6f's clean 16/16 full refresh; 7 by 7/7b and 9f's re-measured windows;
+  8 by 9f's `08-parity.json` and `09b-equivalence.json`; 9 by phase 10's findings handoff, spec
+  updates and docs-site page; 10 by every phase's green `verify-phase.sh`). **Criterion 11
+  remains open only because no scheduled run has completed yet.** Unlike every previous block on
+  this criterion, this one carries no open design question: the external-step-invocation
+  question was decided by Andrew on 2026-09-14 and shipped as phase 11l
+  (`ExecuteRequest::assume_external_steps_fresh` + `smelt run --skip-external-steps`, spec'd in
+  `docs/specs/sources.md` §Semantics 12, wired into the job's `smelt_run` task). Phase 11m —
+  the live leg that redeploys, smoke-runs and drives three scheduled runs under that flag — is
+  fully planned and needs no revision.
+
+  **What a human must do** (not decide — do): refresh the expired dogfood credential. Phase
+  11m's implement step found `bash scripts/dbx-verify.sh` failing every schema check with
+  `PERMISSION_DENIED: Invalid Token`, and `bash scripts/dbx-auth.sh` drops into an interactive
+  `gpg --decrypt` passphrase prompt no headless session can answer. Once a human runs
+  `bash scripts/dbx-auth.sh`, `source scripts/dbx-dogfood-env.sh`, and confirms
+  `bash scripts/dbx-verify.sh` is green, row 11m flips back to `pending` and the loop resumes it
+  at plan task 2 with no plan changes.
+
+  **State left clean.** Nothing live was touched this pass or by 11m: the bundle is deployed at
+  the committed daily cadence (`0 0 6 * * ?`, UNPAUSED), never compressed, so nothing needs
+  restoring; the Volume holds the seeded `databricks_job` intervals and both current wheels.
+  Status set to the bare word `blocked` so `outcome-loop.sh`'s `outcome_dir()` case-match
+  recognises it and advances to the queued Trino programme rather than re-picking this outcome.
+  The follow-on `databricks-correctness` outcome is unaffected: criterion 9's handoff is banked.
 
 - **2026-09-14 — phase 11m blocked at its own documented prerequisite: the dogfood credential is
   expired and re-minting needs a human-supplied gpg passphrase.** An implement step re-attempted
