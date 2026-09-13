@@ -23,6 +23,15 @@
 # is the one profile, because the connector — not Trino — decides the write
 # surface. MERGE / UPDATE / DELETE / CREATE OR REPLACE TABLE exist on Iceberg and
 # do not exist on Hive, so T3 and T4 depend on that choice.
+#
+# Ruling of 2026-09-13, recorded in T3's and T4's decision logs: Trino's
+# transaction support is taken as EQUIVALENT TO SPARK'S, and some incremental
+# features are accepted as unsupported on Trino for now. Iceberg has Delta's
+# atomicity shape (per-table commits, no cross-table transaction), so T3 starts
+# from Spark's state-residency column — all five correctness structures a
+# permanent, reasoned `no` — and T4 therefore runs FULLY DEGRADED, following
+# maintenance_conformance_spark rather than the DuckDB leg. A phase that discovers
+# genuine cross-table atomicity on Iceberg must escalate it, not absorb it.
 docs/outcomes/20260913-trino-target-spine
 docs/outcomes/20260913-trino-emission
 docs/outcomes/20260913-trino-ledger

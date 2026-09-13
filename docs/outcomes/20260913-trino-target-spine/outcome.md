@@ -40,6 +40,14 @@ first backend in the matrix with **no `PIVOT`**, no `QUALIFY`, no `::` cast, no 
 literal, no `INSERT OVERWRITE`, no transactional DDL and **no temporary tables**; each of those
 is confirmed by execution here and its consequence handed to the sibling outcome that owns it.
 
+The useful prior is that **Trino sits near Spark (Delta)**, not near DuckDB. Iceberg and Delta
+have the same atomicity shape — per-table commits, no cross-table transaction — which is why
+`20260913-trino-ledger` starts from Spark's state-residency column rather than treating residency
+as an open question (ruling of 2026-09-13). That prior tells this outcome where to look hardest:
+the cells where Iceberg is expected to be *more* capable than Delta, and the handful where
+Trino's SQL surface is poorer than Spark's despite the shared storage semantics. It is a prior,
+not an answer — every cell is still established by execution.
+
 ## Success criteria (checkable)
 
 1. **The target is specified before it is built.** `docs/specs/multi_backend.md` §Surface and
