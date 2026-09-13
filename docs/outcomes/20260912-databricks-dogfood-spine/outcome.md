@@ -176,9 +176,30 @@ of the models or the tooling.
 | 9e | Land the ledger-free succession full rebuild 9c's dispatch fix needs: `rebuild_succession_state` stops refusing when the cell is `state_downgraded`, emitting the presented arm alone (no tombstone DDL, no ledger delete/insert, no clock-tie probe) through one new single-owned emitter in `smelt-logical`, gated by a test that *executes* the downgraded path against a real DuckDB backend rather than only asserting the dispatch decision | done |
 | 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | done |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
-| 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
+| 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | planned |
+| 11b | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume state path seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing, their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 11 plan): **reshaped — row 11 split into 11a (offline) and 11b (live);
+  nothing left the outcome.** Row 11 as written bundles four separable deliverables (CLI
+  pinning, the committed bundle + per-PR `validate` gate, the live deploy, and three
+  *scheduled* runs judged against the oracle) behind a live gate, which would have made the
+  whole of criterion 11's checkable configuration un-grindable whenever the workspace is
+  unreachable — and the scheduled-run leg is wall-clock bound (a daily schedule needs three
+  calendar days), so pinning it to the same row as the config work would idle the loop for
+  days. 11a is everything provable with no workspace; 11b is the deploy and the three
+  scheduled runs. Two readings recorded while planning 11a: (a) the **ambient-credential spec
+  delta criterion 11 names is already landed** — `docs/specs/smelt_yml.md` §"Target shape"
+  specifies `token` absent as the in-workspace ambient form and
+  `python/smelt/databricks_adapter.py` implements it — so 11a's remaining spec work is only
+  the *deployment form* note (ambient token + job-supplied host) in
+  `docs/specs/multi_backend.md` §"Connection security"; (b) `.smelt/` is project-root-relative
+  with no configurable state directory (`smelt-state/src/file_store.rs`), so "state on a
+  Volume" is achieved by the job running the project *from* a Unity Catalog Volume path rather
+  than by a new smelt flag — no spec change, and whether the Volume's FUSE layer supports
+  `.smelt/lock` advisory locking and rename-atomic writes is a live question for 11b to
+  measure and record. Nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 10 plan): **no reshape — row 10 stands as written; recorded one placement
   reading.** 9f's summary closed criteria 7 and 8 on post-fix live numbers and surfaced nothing
