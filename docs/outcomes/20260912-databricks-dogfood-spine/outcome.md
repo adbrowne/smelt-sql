@@ -173,10 +173,28 @@ of the models or the tooling.
 | 9b | **[live]** Trust the numbers: three consecutive incremental windows (`2026-08-13/14/15`), each followed by a full refresh into `smelt_dogfood_oracle` and compared against the incrementally-maintained state; report committed and its shape tests flipped to hard gates | blocked |
 | 9c | Close both blockers offline, no workspace: register `gold_events_enriched`'s understood `UnorderedColumnDivergence` in the oracle suite's own `EQUIVALENCE_DIVERGENCE_REGISTRY` and land 9b's deferred report gates (criterion 8 closed); then root-cause `silver_actor_naming`'s Databricks duplication from the **maintenance-plan and statement differential** `smelt explain` derives with no connection (`dev` vs `databricks`), and land the resolution one of `## Blocked`'s routes calls for, with an offline gate | done |
 | 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | blocked |
+| 9e | Land the ledger-free succession full rebuild 9c's dispatch fix needs: `rebuild_succession_state` stops refusing when the cell is `state_downgraded`, emitting the presented arm alone (no tombstone DDL, no ledger delete/insert, no clock-tie probe) through one new single-owned emitter in `smelt-logical`, gated by a test that *executes* the downgraded path against a real DuckDB backend rather than only asserting the dispatch decision | planned |
+| 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | pending |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 9e plan): **Split 9d's residue into an offline fix row (9e) and a live
+  replay row (9f); 9d stays blocked as the record of the finding.** 9d's summary root-caused the
+  blocker precisely — `rebuild_succession_state` carries the same unconditional
+  `realises_tombstone_ledger` refusal 9c's dispatch fix routes *into* — and that fix is pure Rust
+  plus an emitter, provable with no workspace, so it is loop-grindable work serving criteria 6, 7
+  and 8 and gets its own row rather than waiting on a live session. The live re-measure is
+  everything 9d's tasks 4 onward already specify, unchanged, so 9f inherits that scope verbatim
+  instead of being re-planned. Both rows sit before row 10, because row 10 harvests the findings
+  the live replay produces. Of the three candidate routes `## Blocked` records, 9e takes route 1's
+  *behaviour* (no ledger read or write at all) via route 2's *structure* (a distinct emitter in
+  `smelt-logical`, per `CLAUDE.md` §"Maintenance-plan purity"), and adopts route 3's lesson as a
+  hard requirement on the test list — the branch is keyed on `cell.state_downgraded`, not on the
+  dialect, which makes the downgraded path executable against a real DuckDB backend offline and
+  removes the need for a synthetic no-ledger dialect. Nothing left the outcome; nothing added to
+  `## Out of scope`.
 
 - 2026-09-13 (phase 9d plan): **9d widened from "re-run the parity sweep" to "reset, replay and
   re-measure BOTH sweeps".** 9c's summary established that the fix changes the execution shape of
