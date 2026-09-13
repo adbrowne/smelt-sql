@@ -19,11 +19,16 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
     // silent-divergence case issue #171 was filed about.
     for op in ["%", "^", "**"] {
         let emission: &'static [(DialectId, Position, Emission)] = match op {
-            "%" => &[(
-                DialectId::BigQuery,
-                Position::Any,
-                Emission::Template("MOD({0}, {1})"),
-            )],
+            "%" => &[
+                (
+                    DialectId::BigQuery,
+                    Position::Any,
+                    Emission::Template("MOD({0}, {1})"),
+                ),
+                // Trino, unlike GoogleSQL, has an infix `%` operator — no
+                // lowering applies.
+                (DialectId::Trino, Position::Any, Emission::Native),
+            ],
             "^" | "**" => &[
                 (
                     DialectId::SparkSql,
@@ -32,6 +37,14 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
                 ),
                 (
                     DialectId::BigQuery,
+                    Position::Any,
+                    Emission::Template("POWER({0}, {1})"),
+                ),
+                // Trino has no infix `^` operator at all (syntax error, not a
+                // differently-meaning one), so it joins GoogleSQL and Spark in
+                // lowering to POWER(a, b).
+                (
+                    DialectId::Trino,
                     Position::Any,
                     Emission::Template("POWER({0}, {1})"),
                 ),
@@ -101,6 +114,20 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
                     reason: "GoogleSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
                 },
             ),
+            // Trino has no infix `//` and no `DIV` function, but its `/`
+            // operator is already class-sensitive in the same direction
+            // DuckDB's `//` is: truncation toward zero over integer operands
+            // (measured live 2026-09-14: `7/2 = 3`, `-7/2 = -3`), plain
+            // division over floating/decimal ones (`7.5/2.0 = 3.750000`).
+            // The whole operand axis therefore collapses to one
+            // unconditional template — no per-class arms, no
+            // unresolved-operand refusal, because there is no operand class
+            // for which Trino's spelling differs.
+            (
+                DialectId::Trino,
+                Position::Any,
+                Emission::Template("{0} / {1}"),
+            ),
         ]),
     );
     insert(
@@ -110,6 +137,12 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
             vec![concrete(DataType::Text), concrete(DataType::Text)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
-        .with_syntax_form(SyntaxForm::Infix),
+        .with_syntax_form(SyntaxForm::Infix)
+        .with_emission(&[
+            // Trino has infix `||` for string concatenation — same as every
+            // other dialect. Stated explicitly so `||` carries a Trino
+            // verdict rather than relying on the implicit `Native` default.
+            (DialectId::Trino, Position::Any, Emission::Native),
+        ]),
     );
 }

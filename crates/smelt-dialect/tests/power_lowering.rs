@@ -120,6 +120,49 @@ fn spark_lowers_infix_caret_to_power_call() {
     );
 }
 
+/// Trino has no infix `^` operator at all — a syntax error, not a
+/// differently-meaning one — so it joins GoogleSQL and Spark in lowering
+/// `^`/`**` to `POWER(a, b)` (`docs/outcomes/20260913-trino-emission`).
+#[test]
+fn trino_lowers_caret_and_double_star_to_power() {
+    let (dialect, caps) = (SqlDialect::Trino, BackendCapabilities::trino_iceberg());
+    for sql in ["SELECT val ^ 2 FROM t", "SELECT val ** 2 FROM t"] {
+        let out = print_with(sql, &dialect, &caps);
+        assert!(!out.contains('^'), "`^` must not survive to Trino: {out}");
+        assert!(!out.contains("**"), "`**` must not survive to Trino: {out}");
+        assert!(
+            out.contains("POWER(val, 2)"),
+            "must lower to a POWER(...) call: {out}"
+        );
+    }
+}
+
+/// Trino's `/` already truncates toward zero over integer operands and
+/// divides plainly over floating/decimal ones — the same class-sensitivity
+/// DuckDB's `//` has — and Trino has no `DIV` function at all. So the whole
+/// operand axis collapses to one unconditional `Template("{0} / {1}")`;
+/// `//` prints as plain `/` regardless of operand class (measured live
+/// 2026-09-14: `7/2 = 3`, `-7/2 = -3`, `7.5/2.0 = 3.750000`, `DIV(7,2)` is
+/// `FUNCTION_NOT_FOUND`).
+#[test]
+fn trino_lowers_floor_divide_to_plain_division() {
+    let (dialect, caps) = (SqlDialect::Trino, BackendCapabilities::trino_iceberg());
+    for sql in [
+        "SELECT a // b FROM t",
+        "SELECT 7 // 2 FROM t",
+        "SELECT 7.5 // 2.0 FROM t",
+    ] {
+        let out = print_with(sql, &dialect, &caps);
+        assert!(!out.contains("//"), "`//` must not survive to Trino: {out}");
+        assert!(!out.contains("DIV("), "Trino has no DIV function: {out}");
+    }
+    let out = print_with("SELECT a // b FROM t", &dialect, &caps);
+    assert!(
+        out.contains("a / b"),
+        "`//` must lower to plain `/` on Trino: {out}"
+    );
+}
+
 /// `//` (floor divide) is declared `Unsupported` in the registry for Spark and
 /// BigQuery. The printer still emits `//` verbatim; the compile
 /// path owns the refusal (`UnsupportedOnBackend`). The unsupported verdict is

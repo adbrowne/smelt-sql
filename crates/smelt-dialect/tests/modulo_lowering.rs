@@ -83,3 +83,16 @@ fn other_dialects_keep_infix_modulo_verbatim() {
         assert_eq!(out, sql, "{} must print `%` unchanged", dialect.name());
     }
 }
+
+/// Trino, unlike GoogleSQL, has an infix `%` operator — no lowering applies.
+#[test]
+fn trino_keeps_infix_modulo_native() {
+    let (dialect, caps) = (SqlDialect::Trino, BackendCapabilities::trino_iceberg());
+    let sql = "SELECT * FROM events WHERE id % 2 = 0";
+    let out = print_with(sql, &dialect, &caps);
+    assert_eq!(out, sql, "Trino must print `%` unchanged");
+    assert!(
+        !out.contains("MOD("),
+        "Trino must not lower `%` to MOD(...): {out}"
+    );
+}

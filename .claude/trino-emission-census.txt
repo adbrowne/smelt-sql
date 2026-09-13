@@ -13,9 +13,6 @@
 # reverts to a plain failure for Trino.
 #
 # Format: <NAME> <position>
-% scalar
-** scalar
-// scalar
 ABS scalar
 ACOS scalar
 AGE scalar
@@ -233,5 +230,3 @@ VAR_SAMP agg
 VAR_SAMP run
 VAR_SAMP win
 YEAR scalar
-^ scalar
-|| scalar

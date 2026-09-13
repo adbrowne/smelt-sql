@@ -55,6 +55,22 @@ fn caret_is_rewritten_wherever_infix_caret_means_xor() {
 }
 
 #[test]
+fn every_infix_operator_states_a_trino_verdict() {
+    // Every infix operator smelt registers must carry an explicit Trino
+    // verdict — `stated_emission_at`, not the implicit `Native` default
+    // `emission_at` would otherwise silently supply
+    // (`docs/outcomes/20260913-trino-emission`).
+    for op in ["%", "^", "**", "//", "||"] {
+        let sig = BuiltinRegistry::resolve(op).expect(op);
+        assert!(
+            sig.stated_emission_at(DialectId::Trino, Position::Scalar)
+                .is_some(),
+            "{op} has no explicit Trino verdict"
+        );
+    }
+}
+
+#[test]
 fn floor_divide_is_unsupported_everywhere_it_has_no_safe_lowering() {
     let sig = BuiltinRegistry::resolve("//").expect("//");
     assert_eq!(

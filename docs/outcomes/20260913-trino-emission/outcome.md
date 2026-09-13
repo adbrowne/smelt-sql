@@ -125,7 +125,7 @@ including its null-safe join spelling.
 |---|-------|--------|
 | 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | done |
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | done |
-| 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | planned |
+| 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | done |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | pending |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | pending |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
@@ -193,5 +193,23 @@ including its null-safe join spelling.
   brought up, phase 3 states the verdict and hands the four unverified answers to phase 6's value
   leg rather than blocking — the never-skip-green discipline binds the audit legs (phases 5–6),
   not this offline registry phase.
+- **2026-09-14 — phase 3 done.** Live tier settled before writing anything: `bash
+  scripts/trino-up.sh` + `source scripts/trino-env.sh`, then `SELECT 7/2` (`3`), `SELECT -7/2`
+  (`-3`), `SELECT 7.5/2.0` (`3.750000`), `SELECT DIV(7,2)` (`FUNCTION_NOT_FOUND: Function 'div'
+  not registered`) — confirms the plan's analysis exactly, so `//` on Trino is one unconditional
+  `Template("{0} / {1}")`, not a `Conditional`; `docs/specs/multi_backend.md` §"Operator lowering"
+  corrected accordingly. Registry rows landed for all five infix operators (`%` → `Native`, `^`/
+  `**` → `Template("POWER({0}, {1})")`, `//` → `Template("{0} / {1}")`, `||` → `Native`), no
+  printer change needed (`emission_ownership` stays green). The four clause divergences (`QUALIFY`,
+  `::`, trailing commas, `[a,b]`) needed no registry or printer work either — `trino_iceberg()`'s
+  capability flags already drive the existing generic dispatch; `trino_clause_lowering.rs`'s four
+  tests only prove it. Census regenerated: 237 → 232 rows, exactly the five operators. Unrelated
+  finding: `verify-phase.sh`'s workspace test leg was red on `large_file_ratchet` for six files
+  (`resume.rs`, `link_c_harness.rs`, `execute/project/mod.rs`, `contract_deferral_skip_e2e.rs`,
+  `key_addressed_model_edge_lowering.rs`, `repair_lowering.rs`) already 1 line over baseline at
+  HEAD, from commits before this phase touched anything (`.claude/large-file-baseline.txt` last
+  regenerated at `a642eb91a`, itself unrelated to this outcome). Resynced via
+  `large-file-check.sh --update` rather than blocking phase 3 on unrelated pre-existing drift —
+  flagged for the next planner in case it recurs and warrants investigation.
 
 ## Blocked

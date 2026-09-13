@@ -322,9 +322,13 @@ integral operands lower to the target's integer-division form (`DIV(a, b)` on Go
 SQL), floating-point operands lower to plain `/`, and an operand whose class cannot be resolved is
 refused with `UnsupportedOnBackend` — here a wrong guess would be a silently wrong number, so the
 unresolved arm must refuse. Each arm is verified by the audit's value leg against DuckDB's own `//`
-before it is claimed. Trino has no infix `//` either; its integral arm lowers to the same
-`DIV(a, b)` template as GoogleSQL and Spark, and its floating-point and unresolved arms follow the
-same rule.
+before it is claimed. Trino has no infix `//` either, but it needs no per-class arms at all: Trino
+has no `DIV` function, and its `/` operator is already class-sensitive in the same direction as
+DuckDB's `//` — `7/2 = 3` and `-7/2 = -3` (truncation toward zero) over integer operands,
+`7.5/2.0 = 3.750000` (plain division) over floating/decimal ones (measured live against the
+coordinator). So the whole operand axis collapses to a single unconditional
+`Template("{0} / {1}")`, with no `Conditional` arms and no unresolved-operand refusal, because
+there is no operand class for which Trino's spelling differs.
 
 `::` (the cast operator) has no Trino spelling at all, joining GoogleSQL and Spark SQL as dialects
 where `supports_double_colon_cast = false`: `CAST(x AS t)` is the only form Trino's grammar
