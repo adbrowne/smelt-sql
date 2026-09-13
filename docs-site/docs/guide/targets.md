@@ -292,6 +292,37 @@ quotas that bound a project targeting it:
   window-forward patch route — correct, but O(source) per window rather than O(window). See
   `docs/specs/state.md` §"The degradation contract".
 
+#### Deployment: Databricks Asset Bundle
+
+A `databricks` target can also run unattended, entirely on the platform, deployed as a
+[Databricks Asset Bundle](https://docs.databricks.com/en/dev-tools/bundles/index.html). The
+bundle declares one job with a daily schedule, a serverless environment for every task, and two
+tasks in order: a loader task that lands the next day's data, then a `smelt run` task that
+processes it as a genuine incremental window. `scripts/dbx-bundle.sh` is the only caller of
+`databricks bundle validate`, `databricks bundle deploy` and `databricks bundle run`:
+
+```bash
+mise run setup-databricks               # pins and installs the Databricks CLI
+bash scripts/dbx-bundle.sh validate     # databricks bundle validate — schema-checks the
+                                         # bundle against a local stub; needs no workspace
+bash scripts/dbx-bundle.sh deploy       # databricks bundle deploy — uploads the bundle and
+                                         # the locally-built wheel
+bash scripts/dbx-bundle.sh run github_activity_daily   # databricks bundle run
+```
+
+smelt reaches the job as a wheel declared in the bundle's `artifacts:` block — the same
+`bindings = "bin"` maturin build the PyPI release uses (root `pyproject.toml`) — which `bundle
+deploy` builds locally and uploads to workspace files itself, so no Volume and no hand-written
+fetch step are needed for the binary itself. This is a placeholder for a PyPI dependency: once a
+release tracks the CLI's `dev` branch, the `artifacts:` block is dropped in favour of a pinned
+`smelt-sql==<version>` in the job environment's dependencies.
+
+The job's own `databricks` target authenticates with the **ambient** session — no `token` key at
+all, and `host` supplied by the job's own runtime environment rather than a developer's config
+(see "Credentials" above). The project itself, including its `.smelt/` run state, lives on a
+Unity Catalog Volume rather than the job's own ephemeral workspace-files checkout, so each
+scheduled run is a genuine incremental window over the previous one rather than a fresh start.
+
 ## Switching targets
 
 Use the `--target` flag on any command:

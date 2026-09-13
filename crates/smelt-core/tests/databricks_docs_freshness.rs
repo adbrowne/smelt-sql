@@ -112,3 +112,25 @@ fn docs_site_states_the_databricks_host_rule() {
          the bare-hostname rule (no scheme, no trailing slash)"
     );
 }
+
+/// Criterion 11's Asset Bundle deployment form (docs/outcomes/
+/// 20260912-databricks-dogfood-spine/outcome.md, phases/11a-plan.md): the
+/// docs-site guide must name the actual deploy path and the Volume state
+/// location, so the guide cannot drift from what's committed at
+/// `examples/github_activity/databricks.yml`.
+#[test]
+fn docs_site_names_the_bundle_deploy_path_and_volume_state_location() {
+    let doc = targets_doc();
+    let section = databricks_section(&doc);
+
+    assert!(
+        section.contains("bundle deploy") && section.contains("bundle run"),
+        "docs-site/docs/guide/targets.md's Databricks section does not name the `databricks \
+         bundle deploy`/`bundle run` deployment path"
+    );
+    assert!(
+        section.contains("Volume"),
+        "docs-site/docs/guide/targets.md's Databricks section does not describe the \
+         Volume-resident project/state path"
+    );
+}

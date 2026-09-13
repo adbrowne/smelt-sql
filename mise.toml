@@ -40,11 +40,24 @@ CARGO_BUILD_JOBS = "12"
 # out to `gcloud` BY NAME: an absolute path to `bq` alone fails.
 # `_.path` is mise's mechanism for this; a bare `PATH =` key is silently
 # ignored (measured — gcloud stayed unresolvable under `mise exec`).
-_.path = "{{ exec(command='bash scripts/mise-gcloud-bin-dir.sh') }}"
+#
+# The Databricks CLI bin directory rides the same mechanism, for the same
+# reason: `databricks bundle validate`/`deploy`/`run` (scripts/dbx-bundle.sh)
+# is invoked by name. `_.path` accepts an array (verified against a scratch
+# mise.toml), so the two resolvers coexist without concatenating strings by
+# hand.
+_.path = [
+  "{{ exec(command='bash scripts/mise-gcloud-bin-dir.sh') }}",
+  "{{ exec(command='bash scripts/mise-databricks-bin-dir.sh') }}",
+]
 
 [tasks.setup-gcloud]
 description = "Install the Google Cloud SDK (gcloud, bq) into ~/.local if not already present"
 run = "bash scripts/mise-setup-gcloud.sh"
+
+[tasks.setup-databricks]
+description = "Install the Databricks CLI into ~/.local if not already present"
+run = "bash scripts/mise-setup-databricks.sh"
 
 [tasks.setup-duckdb]
 description = "Install the DuckDB shared library (v1.5.4) into ~/.local/lib/duckdb if not already present"

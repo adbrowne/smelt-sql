@@ -50,15 +50,17 @@ use crate::support::plan_result_for;
 #[test]
 fn silver_actor_naming_succession_cell_downgrades_on_databricks_but_not_dev() {
     // `smelt.yml`'s `databricks`/`databricks_oracle` targets reference
-    // `${SMELT_DBX_HOSTNAME}`/`${SMELT_DBX_TOKEN}` — `Config::load` refuses
-    // an unresolved reference fail-loud even though this test never
-    // connects (it only reads `type: databricks` to pick a dialect), so
-    // stub both with a value that is never dereferenced.
+    // `${SMELT_DBX_HOSTNAME}`/`${SMELT_DBX_TOKEN}`, and `databricks_job`
+    // (criterion 11's deployment-form target) references `${DATABRICKS_HOST}`
+    // — `Config::load` refuses an unresolved reference fail-loud even though
+    // this test never connects (it only reads `type: databricks` to pick a
+    // dialect), so stub all three with a value that is never dereferenced.
     // SAFETY: test-only process env mutation, read back only by this same
     // process's `Config::load` calls, never passed to any live connection.
     unsafe {
         std::env::set_var("SMELT_DBX_HOSTNAME", "unused.invalid");
         std::env::set_var("SMELT_DBX_TOKEN", "unused");
+        std::env::set_var("DATABRICKS_HOST", "unused.invalid");
     }
 
     let mut dev_result =

@@ -27,7 +27,9 @@
       "Bash(bash scripts/dbx-dogfood-parity.sh*)",
       "Bash(./scripts/dbx-dogfood-parity.sh*)",
       "Bash(bash scripts/dbx-dogfood-oracle.sh*)",
-      "Bash(./scripts/dbx-dogfood-oracle.sh*)"
+      "Bash(./scripts/dbx-dogfood-oracle.sh*)",
+      "Bash(bash scripts/dbx-bundle.sh*)",
+      "Bash(./scripts/dbx-bundle.sh*)"
     ]
   },
   "hooks": {

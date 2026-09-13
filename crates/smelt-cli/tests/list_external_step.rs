@@ -38,6 +38,7 @@ fn run(project_dir: &Path, args: &[&str]) -> Output {
         // or needed for any test that spawns against `dev`.
         .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt {args:?}`: {e}"))

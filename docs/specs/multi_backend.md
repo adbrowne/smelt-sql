@@ -887,6 +887,16 @@ token came from `${ENV}` interpolation or the ambient-credential fallback (`toke
 is never written to a log line, a run report, a diagnostic, or an error message: every
 rendering path for a `databricks` target config redacts the field.
 
+A `databricks` target has a second, credential-free form: `token` absent **and** the target
+running from inside the workspace it targets, such as a Databricks Job task. There, `host`
+still names an `${ENV}` reference rather than a literal — but the value is not a secret, since a
+Databricks job automatically exports its own workspace hostname (`DATABRICKS_HOST`) into the
+task's runtime environment, so no developer config supplies it. The session authenticates with
+whatever ambient Databricks credentials that environment provides. This form carries no secret
+for a log line to leak in the first place, so the redaction rule above is vacuous here rather
+than relied upon — the same code path applies unconditionally regardless of which form produced
+the config.
+
 ### Loading data into a backend
 Loading external rows into a backend (seeds, test fixtures, an Arrow batch) must not assume the
 backend's process shares the host filesystem. The transfer is performed through the backend's

@@ -44,6 +44,7 @@ fn smelt_run_expect_failure(workspace: &Path, start: &str, end: &str) -> String 
         // config-load time regardless of the selected target.
         .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt run: {e}"));
@@ -219,6 +220,7 @@ fn smelt_explain(workspace: &Path, model: &str) -> String {
         .env("RUST_LOG", "warn")
         .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt explain: {e}"));
@@ -456,6 +458,7 @@ fn smelt_explain_json(workspace: &Path, model: &str) -> serde_json::Value {
         .env("RUST_LOG", "warn")
         .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt explain --json: {e}"));

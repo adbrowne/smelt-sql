@@ -176,10 +176,35 @@ of the models or the tooling.
 | 9e | Land the ledger-free succession full rebuild 9c's dispatch fix needs: `rebuild_succession_state` stops refusing when the cell is `state_downgraded`, emitting the presented arm alone (no tombstone DDL, no ledger delete/insert, no clock-tie probe) through one new single-owned emitter in `smelt-logical`, gated by a test that *executes* the downgraded path against a real DuckDB backend rather than only asserting the dispatch decision | done |
 | 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | done |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
-| 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | planned |
+| 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume state path seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing, their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 11a implement): **row 11a done — the Asset Bundle, CLI pinning and offline
+  `validate` gate all landed and are green.** Two of the plan's own assumptions turned out wrong
+  under real tooling, both recorded in `phases/11a-summary.md` Decisions: (a) `databricks bundle
+  validate` is not actually workspace-free — CLI v1.16.1 unconditionally calls SCIM `Me` plus
+  `workspace/get-status`/`mkdirs` regardless of what the bundle config references, so the
+  per-PR gate needed a genuine (if minimal) local stub
+  (`scripts/dbx_bundle_validate_stub.py`), not merely an absent credential; (b)
+  `workspace.host` cannot be templated at all (the CLI hard-refuses interpolation on
+  authentication fields), so the host comes from `DATABRICKS_HOST` at invocation time rather
+  than a bundle variable — no real hostname is ever committed either way, which preserves the
+  criterion's actual intent ("a second workspace is an entry, not a fork") even though the
+  literal test wording changed. Also found and fixed: `databricks_job`'s `${DATABRICKS_HOST}`
+  reference broke `Config::load` in six existing test call sites, because
+  `docs/specs/smelt_yml.md`'s interpolation pass is whole-file — every `${VAR}` in the committed
+  `smelt.yml` must resolve regardless of which target is selected. All six now stub
+  `DATABRICKS_HOST` alongside their existing `SMELT_DBX_HOSTNAME`/`SMELT_DBX_TOKEN` stubs. Found
+  by running `cargo test --workspace --no-fail-fast` rather than trusting `verify-phase.sh`'s
+  fail-fast report of the first failure alone. Two open questions carried to 11b, not resolved
+  here (out of 11a's scope): the Volume this outcome's job targets is never provisioned or
+  seeded by anything yet, and the daily schedule's `{{job.trigger.time.iso_date}}` will ask the
+  loader for real-calendar dates the fixture does not have until the loader (or the
+  schedule/date mapping) changes. `bash .claude/scripts/verify-phase.sh` ALL GREEN; 426/426 test
+  binaries pass under `cargo test --workspace --no-fail-fast`. See `phases/11a-summary.md`.
+  Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 11 plan): **reshaped — row 11 split into 11a (offline) and 11b (live);
   nothing left the outcome.** Row 11 as written bundles four separable deliverables (CLI

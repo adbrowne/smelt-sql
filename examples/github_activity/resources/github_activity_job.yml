@@ -1,0 +1,48 @@
+resources:
+  jobs:
+    github_activity_daily:
+      name: "github_activity daily dogfood run"
+
+      # Fires once a day. Free Edition has no fixed session-idle SLA
+      # (docs-site/docs/guide/targets.md §"Free Edition constraints"), so a
+      # once-a-day cadence keeps each run's serverless session short-lived by
+      # construction.
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: "UTC"
+
+      tasks:
+        - task_key: load_next_day
+          environment_key: loader_env
+          spark_python_task:
+            python_file: ../dbx_job/load_next_day.py
+            parameters:
+              - "{{job.trigger.time.iso_date}}"
+
+        - task_key: smelt_run
+          depends_on:
+            - task_key: load_next_day
+          environment_key: smelt_env
+          spark_python_task:
+            python_file: ../dbx_job/run_smelt.py
+            parameters:
+              - "/Volumes/${var.catalog}/${var.schema}/${var.volume_name}/project"
+
+      # One serverless environment per task: the loader needs the pinned
+      # Databricks Connect client stack (scripts/dbx-dogfood-requirements.txt
+      # mirrors this pin); `smelt run` needs only the freshly-built wheel.
+      # Neither task names any classic-compute shape — Free Edition is
+      # serverless-only, so a paid-tier cluster cannot creep in here.
+      environments:
+        - environment_key: loader_env
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-connect==15.4.5
+              - pyarrow
+
+        - environment_key: smelt_env
+          spec:
+            client: "1"
+            dependencies:
+              - ../../../dist/*.whl

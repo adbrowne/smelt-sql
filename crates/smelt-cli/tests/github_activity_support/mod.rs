@@ -145,6 +145,7 @@ pub fn smelt_run(workspace: &Path, start: &str, end: &str, extra_args: &[&str]) 
         // `--target dev` run here needs dummy values present, not real ones.
         .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt run: {e}"));

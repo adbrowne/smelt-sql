@@ -1,0 +1,75 @@
+# Asset Bundle for the github_activity Databricks dogfood spine (criterion 11,
+# docs/outcomes/20260912-databricks-dogfood-spine/outcome.md). Declares one
+# daily-scheduled serverless job: a loader task that lands the next fixture
+# day, then a `smelt run` task that processes it as a genuine incremental
+# window. `databricks bundle validate` runs per-PR with no real workspace —
+# scripts/dbx-bundle.sh points it at a local loopback stub instead (see
+# crates/smelt-cli/tests/databricks_bundle.rs); `bundle deploy`/`bundle run`
+# against the real dogfood workspace are 11b's live steps.
+bundle:
+  name: github_activity_dogfood
+
+variables:
+  catalog:
+    description: "Unity Catalog catalog holding the dogfood schema."
+    default: workspace
+  schema:
+    description: "Unity Catalog schema the dogfood pipeline reads/writes."
+    default: smelt_dogfood
+  volume_name:
+    description: >-
+      Unity Catalog Volume holding a copy of the project (smelt.yml, models/)
+      and its `.smelt/` run state, so each scheduled run is a genuine
+      incremental window over the previous one rather than a fresh checkout.
+    default: smelt_project
+
+artifacts:
+  smelt_wheel:
+    type: whl
+    # Placeholder for a PyPI dependency: dev is ahead of the last PyPI
+    # release, so the job installs this freshly-built local wheel rather than
+    # a published version. `bundle deploy` builds it and uploads it to
+    # workspace files itself — no Volume and no hand-written fetch step are
+    # needed for the binary. Once a release tracks dev, drop this block and
+    # add a pinned `smelt-sql==<version>` to resources/github_activity_job.yml's
+    # `smelt_env` dependencies instead.
+    path: ../..
+    build: maturin build --release --out dist
+
+include:
+  - resources/*.yml
+
+# The loader's job-native wrapper (dbx_job/load_next_day.py) shells out to
+# the repo's existing scripts/dbx-dogfood-loader.py and imports
+# python/smelt/databricks_adapter.py, so both directories are synced
+# alongside the bundle root even though neither lives under it — the same
+# pattern databricks/bundle-examples' share_files_across_bundles uses for
+# code outside the bundle root.
+sync:
+  paths:
+    - .
+    - ../../scripts
+    - ../../python
+
+targets:
+  dogfood:
+    default: true
+    # The long-lived Databricks Free Edition dogfood workspace
+    # (docs/outcomes/20260912-databricks-dogfood-spine/outcome.md). The CLI
+    # refuses variable interpolation on `workspace.host` (an authentication
+    # field), so the host is never templated or committed here at all — it
+    # comes from the `DATABRICKS_HOST` environment variable
+    # scripts/dbx-bundle.sh exports from scripts/dbx-dogfood-env.sh, the same
+    # way every other dbx-*.sh wrapper resolves the workspace. A second
+    # workspace is therefore a different `DATABRICKS_HOST` at invocation
+    # time, not a forked copy of this file.
+    #
+    # `root_path` is left at its default (a current-user-derived
+    # `/Workspace/Users/<user>/.bundle/<name>/<target>`) deliberately: the
+    # CLI's `PopulateCurrentUser` mutator resolves the caller's identity on
+    # every bundle command regardless of whether config references it, so
+    # `bundle validate` needs a reachable `DATABRICKS_HOST`/token pair no
+    # matter what `root_path` says — pinning it to a literal buys nothing
+    # and (measured) trades the default's scoped-to-caller path for one
+    # under `/Shared`, which the CLI itself warns is writable by every
+    # workspace user.

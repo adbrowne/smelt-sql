@@ -179,6 +179,7 @@ fn databricks_target_host_is_bare() {
         .env_remove("RUST_LOG")
         .env("SMELT_DBX_HOST", "https://dbc-test.cloud.databricks.com")
         .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "dbc-test.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt explain`: {e}"));
@@ -200,6 +201,7 @@ fn databricks_target_host_is_bare() {
             "https://dbc-test.cloud.databricks.com",
         )
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
+        .env("DATABRICKS_HOST", "dbc-test.cloud.databricks.com")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt explain`: {e}"));
     assert!(
@@ -230,6 +232,7 @@ fn actor_sessions_compiles_without_bare_varchar() {
         .args(["--project-dir", example_dir().to_str().unwrap()])
         .env_remove("RUST_LOG")
         .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "dbc-test.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt run --dry-run`: {e}"));
@@ -259,6 +262,7 @@ fn actor_sessions_compiles_without_epoch_us() {
         .args(["--project-dir", example_dir().to_str().unwrap()])
         .env_remove("RUST_LOG")
         .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "dbc-test.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt run --dry-run`: {e}"));
@@ -290,6 +294,7 @@ fn actor_sessions_compiles_without_window_frame() {
         .args(["--project-dir", example_dir().to_str().unwrap()])
         .env_remove("RUST_LOG")
         .env("SMELT_DBX_HOSTNAME", "dbc-test.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "dbc-test.cloud.databricks.com")
         .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt run --dry-run`: {e}"));
