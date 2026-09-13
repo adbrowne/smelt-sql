@@ -123,7 +123,7 @@ including its null-safe join spelling.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | planned |
+| 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | done |
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | pending |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | pending |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | pending |
@@ -150,5 +150,11 @@ including its null-safe join spelling.
   rather than a lowering). Phase 1 additionally owns reconciling the §Surface `SMELT_TRINO_URL`
   *skip* sentence with this outcome's never-skip-green discipline for the audit legs — the two
   statements would otherwise contradict each other in the same spec.
+- **2026-09-14 — phase 1 done.** `multi_backend.md` now states Trino's emission surface in all
+  six places the plan named. The `unverified`/`passing`/`gap` three-way rule (§"Cross-engine
+  emission audit") is written as a general rule over every dialect, which phase 2's gate should
+  reuse verbatim. Flagged for phase 4: the §Surface capability matrix's `supports_pivot` row
+  still shows Trino as `✓`, contradicting the measured `false` — left uncorrected here since the
+  PIVOT lowering-vs-refusal call is phase 4's, not phase 1's.
 
 ## Blocked

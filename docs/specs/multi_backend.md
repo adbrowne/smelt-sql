@@ -129,7 +129,10 @@ owners: [andrew]
   tests **skip** (not fail), exactly as Spark's and BigQuery's do.
 - **`SMELT_TRINO_URL`.** Trino integration tests connect to the coordinator this variable
   names. When it is unset, Trino-targeted tests **skip** (not fail), exactly as Spark's,
-  BigQuery's and Databricks' do.
+  BigQuery's and Databricks' do. This skip applies to the backend's own integration and parity
+  tests, run by a developer with no Docker tier up; it does not apply to the cross-engine
+  emission audit's live Trino legs, which follow the never-skip-green rule stated in §"CI
+  tiering" and §"Cross-engine emission audit" instead.
 
 ## Semantics
 
@@ -161,6 +164,16 @@ engine-owned `MATERIALIZED VIEW` and not a substituted table, and that an inelig
 refused with the engine's own reason. On the three backends without native IVM the mode
 hard-errors, which is asserted offline. Databricks-specific behaviour
 beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
+
+Trino is a fourth target for the surface parity legs covers today: full-refresh table and view
+materializations and ephemeral (CTE-inlined) models, plus expression- and clause-level emission
+correctness (§"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission
+audit"). It does not yet cover the maintenance legs — `maintenance_dialect` returns `Err` for
+`SqlDialect::Trino`, so no `batched`/`keyed`/`versioned` incremental family runs on a `trino`
+target, and a full refresh is the only route. The reason is the Iceberg connector's per-table-commit
+shape: Iceberg has no cross-table transaction, so the maintenance techniques that depend on one
+are not yet reachable on this target (`docs/outcomes/20260913-trino-target-spine` ruling,
+2026-09-13).
 
 **Generative equivalence coverage.** The equivalence invariant
 (`incremental_models.md` §"The equivalence invariant") is verified generatively — not just by
@@ -214,6 +227,22 @@ respectively, against their own GCP project and a freshly minted token
 short-lived credential window a BigQuery session runs under, out of CI entirely — but it means a
 BigQuery regression does not surface on `main` on any schedule the way a Spark one does. See
 §Known Divergences for the credential-window constraint this bounds.
+
+Trino needs no cloud credential — the coordinator, Iceberg REST catalog and MinIO all run in
+Docker — so it gets a real per-PR/nightly tier like Spark's rather than BigQuery's manual-sweep
+treatment. The `trino-integration` job (`.github/workflows/compat.yml`) runs per-PR when the PR's
+changed paths touch Trino-relevant code (the `smelt-backend-trino` crate, Trino parity tests, the
+signature registry, or the dialect printer), and unconditionally on a nightly schedule or the
+`run-docker-tests` PR label, exactly as `spark-parity` does. What distinguishes Trino's discipline
+from every other gated backend: a live Trino leg that cannot reach the coordinator **fails the
+job**, it does not skip green. A skipped audit leg is indistinguishable from a passing one, which
+is the precise hole this outcome exists to close, so the job greps its own test output for a
+skip and errors out if it finds one rather than letting a green run hide a leg that never executed.
+This rule governs the audit's live legs specifically; it does not change the unrelated §Surface
+statement that a Trino-targeted *integration* test skips when `SMELT_TRINO_URL` is altogether
+unset outside this job (a developer running the suite locally with no Docker tier up) — inside the
+`trino-integration` job the tier is always up, so a skip there is a bug, not an expected local
+fallback.
 
 ### Inline row-set construction
 Every production path that splices a small literal row set into generated SQL — an ephemeral
@@ -271,7 +300,10 @@ dispatches on it; no name-matched dialect arm lives in `printer.rs`.
 `^` is the critical case. In smelt's grammar, and in DuckDB, `^` means power —
 a synonym for `**`. But **both GoogleSQL and Spark SQL** define infix `^` as **bitwise XOR**, so
 emitting `^` verbatim against either backend silently returns a different number from what smelt's
-semantics say. Both GoogleSQL and Spark therefore lower `^` (and `**`) to `POWER(a, b)`.
+semantics say. Both GoogleSQL and Spark therefore lower `^` (and `**`) to `POWER(a, b)`. Trino has
+no infix `^` operator at all — it is a syntax error, not a differently-meaning operator — making
+Trino the third dialect (after GoogleSQL and Spark) that lowers `^`/`**` to `POWER(a, b)` rather
+than emitting it verbatim.
 
 `%` (modulo) has no infix form in GoogleSQL at all, so an unlowered `a % b` is a syntax error
 there. Its lowering is **operand-conditional** (§"Operand-conditional verdicts"): GoogleSQL's `MOD`
@@ -280,6 +312,8 @@ and to a truncated-remainder template for floating-point ones (DuckDB's float `%
 the dividend, so the template is the truncating form, not a floor-based one). An operand whose type
 inference cannot resolve takes the `MOD` arm, which is admissible because a misclassified
 floating-point operand fails loudly at the warehouse rather than returning a different number.
+Trino, unlike GoogleSQL, **does** have an infix `%` operator, so no lowering applies there — it
+takes the `Native` verdict.
 
 `//` (floor division) is the sharper case of the same axis. DuckDB's `//` truncates toward zero when
 both operands are integral but degrades to plain division the moment either is floating point, so
@@ -288,7 +322,14 @@ integral operands lower to the target's integer-division form (`DIV(a, b)` on Go
 SQL), floating-point operands lower to plain `/`, and an operand whose class cannot be resolved is
 refused with `UnsupportedOnBackend` — here a wrong guess would be a silently wrong number, so the
 unresolved arm must refuse. Each arm is verified by the audit's value leg against DuckDB's own `//`
-before it is claimed.
+before it is claimed. Trino has no infix `//` either; its integral arm lowers to the same
+`DIV(a, b)` template as GoogleSQL and Spark, and its floating-point and unresolved arms follow the
+same rule.
+
+`::` (the cast operator) has no Trino spelling at all, joining GoogleSQL and Spark SQL as dialects
+where `supports_double_colon_cast = false`: `CAST(x AS t)` is the only form Trino's grammar
+accepts, per the existing `supports_double_colon_cast = false` lowering rule (§"Output-schema type
+conformance").
 
 The `POWER` lowerings are exact: DuckDB's power operator returns a double for every operand type,
 negative base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They
@@ -327,6 +368,21 @@ would be unsound or unreachable rather than merely unwritten:
   to do that in. The author's own numeric rewrite is accepted meanwhile, and because bound
   derivation reads the **source** CST before any lowering, a later print-time lowering would not
   disturb `max_lookback` derivation.
+
+Trino's own absences, measured directly against a live coordinator
+(`docs/outcomes/20260913-trino-target-spine`): no `QUALIFY` clause, no trailing commas in a
+select list, and no `PIVOT` clause. `QUALIFY` and trailing commas are refused at compile time the
+same way as the two constructs above — `SqlDialect::supports_qualify` and
+`SqlDialect::supports_trailing_commas` already cover any dialect with the flag `false`, Trino
+included, since neither requires a Trino-specific rewrite: `QUALIFY` lowers to the existing
+wrap-in-subquery rewrite and a trailing comma is simply never emitted. `PIVOT` is a sharper case:
+it makes Trino the first backend the capability matrix records with `supports_pivot: false`, and
+unlike `QUALIFY` there is no existing generic lowering to fall back on, so whether `PIVOT` gets a
+lowering that reproduces the same rows or a compile-time `UnsupportedOnBackend` refusal is a
+decision this outcome settles and records here once made (`docs/outcomes/20260913-trino-emission`
+phase 4). Measured positively, not negatively: `[a, b]` array literal syntax **does** work on
+Trino — unlike Spark, which needs `ARRAY(a, b, c)` — so Trino's `supports_array_literal` verdict
+is an explicit `Native`, stated rather than inherited by omission.
 
 ### Refusal covers function bodies
 A `smelt.define` function call is opaque in the calling model's own CST — the body is inlined at
@@ -654,14 +710,31 @@ unchanged and the backend's own refusal, if any, fires there rather than being s
 Two complementary legs verify what the registry declares:
 
 - **Schema leg** — for each `(entry, dialect)` pair, the probe is compiled and sent to the
-  dialect's oracle (DuckDB prepare, Spark `DESCRIBE QUERY`, BigQuery dry run). The oracle returns
+  dialect's oracle (DuckDB prepare, Spark `DESCRIBE QUERY`, BigQuery dry run, Trino `/v1/statement`
+  execution). The oracle returns
   the output schema; the leg asserts acceptance and compares smelt's inferred type against the
   oracle's report using the existing `compare_types`/`divergences` machinery. Acceptance alone
-  catches every missing lowering and every `Unsupported` entry.
+  catches every missing lowering and every `Unsupported` entry. Trino has no dry-run mode, so its
+  schema leg is a real execution against the live coordinator rather than a prepare/describe call
+  — the same fixture, just run instead of only planned.
 - **Value leg** — the same probe is executed on the target dialect and on DuckDB (the reference);
   rows are compared using a typed comparator (exact for integers, strings, booleans; relative
   tolerance for floats; scale-normalised for decimals; NULL equals NULL; deterministic `ORDER BY`).
-  This is the leg that catches the `^` class of silent semantic divergence.
+  This is the leg that catches the `^` class of silent semantic divergence. Trino's value leg
+  compares against DuckDB as reference, exactly like every other dialect.
+
+**The implicit-`Native` hole is closed by rule, not by diligence.** `Signature::emission_at`
+returns `Native` for any `(dialect, position)` pair carrying no registered entry, which means a
+new dialect can silently claim every built-in is natively spelled the moment its `DialectId`
+exists — a claim no probe has tested. The coverage-totality gate distinguishes three outcomes
+per `(entry, dialect)`, not two: **passing** (an explicit verdict exists, or a `Native` claim has
+been executed by the audit and observed correct), **gap** (a registered `Gap { issue }` row, which
+does not fail but ratchets down only), and **unverified** (no explicit verdict and no audit
+observation backing an implicit `Native` claim) — and `unverified` is a **failure**, named by
+entry, distinct from both `passing` and `gap`. This is a general rule over every dialect the
+registry supports, not a Trino special case; Trino is simply the dialect whose addition forced it
+to be written down, because it is the first dialect added *after* the registry's default already
+existed.
 
 **Probes are derived from registry data, not authored by hand.** `SyntaxForm` determines the
 spelling (`a % b` versus `MOD(a, b)`); `kind` determines which positions apply. A small override
@@ -717,9 +790,12 @@ diverges from the checked-in file.
 | Printer/registry consistency — no name-matched dialect arms remain in `printer.rs` | no | per-PR |
 | Schema + value legs, DuckDB | no (in-memory) | per-PR |
 | Schema + value legs, Spark | Spark Connect | labeled PR + nightly |
+| Schema + value legs, Trino | live Trino/Iceberg (Docker, no credential) | per-PR on Trino-relevant path changes, else labeled PR + nightly (`trino-integration` job, §"CI tiering") |
 | Schema + value legs, BigQuery | live BigQuery | manual sweep, `scripts/bigquery-dialect-audit.sh`, gated on `SMELT_BQ_PROJECT` |
 
 BigQuery remains manual, consistent with §"BigQuery has no CI tier, by decision, not by omission".
+Trino does not: unlike BigQuery, it needs no cloud credential, so its audit legs run in CI on the
+same discipline as Spark's, subject to the never-skip-green rule stated in §"CI tiering".
 
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
@@ -1217,7 +1293,8 @@ resolves nested widening to a table rewrite.
 - **No `dialect_audit` Trino leg.** The cross-engine emission audit's `AUDITED_DIALECTS` is a
   three-member test-local const that does not include Trino, so Trino has no fixture, probe,
   ledger row or baseline metric, and `docs/reference/dialect-coverage.md` has no Trino column.
-  Owner: `docs/outcomes/20260913-trino-emission/`.
+  Owner: `docs/outcomes/20260913-trino-emission/` phases 5 (schema leg) and 6 (value leg, ledger,
+  ratchet metric).
 
 - **`supports_transactional_ddl = false` measures smelt's client, not Trino's grammar.** The
   measured `Client does not support transactions` error comes from smelt's stateless
@@ -1424,8 +1501,9 @@ resolves nested widening to a table rewrite.
 - **Every built-in is implicitly `Native` on Trino.** `Signature::emission_at` returns `Native`
   for any `(dialect, position)` pair with no registered entry, so `DialectId::Trino` enters the
   function registry claiming every built-in is spelled natively on Trino — a claim no probe has
-  tested. `docs/outcomes/20260913-trino-emission/` owns closing this hole; until it does, a
-  model may compile to SQL Trino rejects.
+  tested. `docs/outcomes/20260913-trino-emission/` phases 2 (the coverage gate, red) through 6
+  (the live audit legs that turn `unverified` claims into `passing` or `gap`) own closing this
+  hole; until it does, a model may compile to SQL Trino rejects.
 
 ## References
 
