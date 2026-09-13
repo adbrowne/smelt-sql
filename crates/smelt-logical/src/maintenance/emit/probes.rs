@@ -3,6 +3,7 @@
 //! append-only baseline snapshot and source-mutation fingerprint.
 
 use super::fingerprint::row_fingerprint_expr;
+use super::hash::hash_hex_expr;
 use super::partition_bucket::{partition_bucket_expr, PartitionBucket};
 use super::types::*;
 
@@ -718,20 +719,18 @@ pub fn emit_append_only_baseline_snapshot(
     );
     let cast_type = probe_dialect_string_type(dialect);
     let row_hash = row_fingerprint_expr(digest_columns, dialect);
-    let agg_fingerprint = match dialect {
-        MaintenanceDialect::DuckDb => {
-            format!("sha256(STRING_AGG({row_hash}, '' ORDER BY {row_hash}))")
+    let agg_body = match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery => {
+            format!("STRING_AGG({row_hash}, '' ORDER BY {row_hash})")
         }
         MaintenanceDialect::Spark => {
-            format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
-        }
-        // GoogleSQL's SHA256 returns BYTES rather than a hex string, so the
-        // digest is wrapped in TO_HEX to keep the fingerprint a STRING the way
-        // every other dialect's is. Confirmed live (scripts/bigquery-probe3.sh).
-        MaintenanceDialect::BigQuery => {
-            format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
+            format!("CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash})))")
         }
     };
+    // GoogleSQL's SHA256 returns BYTES rather than a hex string, so
+    // `hash_hex_expr` wraps it in TO_HEX to keep the fingerprint a STRING the
+    // way every other dialect's is. Confirmed live (scripts/bigquery-probe3.sh).
+    let agg_fingerprint = hash_hex_expr(&agg_body, dialect);
     // The grid, not the raw column: a TIMESTAMP partition column under
     // `granularity: day` holds one value per second, and grouping it raw
     // would record one "partition" per instant
@@ -785,17 +784,15 @@ pub fn emit_source_mutation_fingerprint(
          {source_table}"
     );
     let row_hash = row_fingerprint_expr(digest_columns, dialect);
-    let agg_fingerprint = match dialect {
-        MaintenanceDialect::DuckDb => {
-            format!("sha256(STRING_AGG({row_hash}, '' ORDER BY {row_hash}))")
+    let agg_body = match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery => {
+            format!("STRING_AGG({row_hash}, '' ORDER BY {row_hash})")
         }
         MaintenanceDialect::Spark => {
-            format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
-        }
-        MaintenanceDialect::BigQuery => {
-            format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
+            format!("CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash})))")
         }
     };
+    let agg_fingerprint = hash_hex_expr(&agg_body, dialect);
     let sql = format!(
         "SELECT COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
          FROM {source_table}"

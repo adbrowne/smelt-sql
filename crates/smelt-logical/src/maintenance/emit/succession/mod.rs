@@ -496,47 +496,47 @@ pub fn emit_succession_patch(
 /// separate jobs. The rebuild stays *correct* — it is a pure function of the
 /// whole retained source, so a re-run re-derives both tables from scratch —
 /// but it is not atomic there, and `docs/specs/state.md` records that.
+/// The presented arm both the ledger-bearing and ledgerless full rebuilds
+/// share: fold the model's raw compiled output on `(key_cols, clock_col)` —
+/// the same addressing the patch loop's `MERGE ... ON` clause uses
+/// (`docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
+/// state)" — "Lifecycle") — rather than presenting one row per physically
+/// duplicated tie. This picks one WHOLE physical row per group, never a
+/// per-column aggregate: `LEAD`/`LAG` are computed over the model's own
+/// physically-duplicated rows, so two tied rows can carry genuinely
+/// different derived-column values (one row's `LEAD` sees the other tied
+/// row as its own "next", a same-`t` artifact of ordering two identical
+/// events; the other row correctly sees the true next event, or `NULL`).
+/// A per-column `MAX`/`MIN` mixes these into a value no physical row ever
+/// held — worse, a `NULL` (the correct "no true successor" case) loses to
+/// any non-`NULL` artifact under either aggregate. Picking one row avoids
+/// manufacturing new combinations. The tie-break prefers a row whose own
+/// raw-passthrough (`{lead}`/`{lag}`, not further transformed) derived
+/// columns do NOT equal the group's own clock value — the exact shape of
+/// the same-`t` artifact above — falling back to an arbitrary stable pick
+/// when a model has no such raw-passthrough column to signal by (any
+/// genuine content disagreement within a tie is refused before this
+/// statement runs by the clock-tie probe the caller runs over the same
+/// scope, so an arbitrary pick among truly identical rows is safe on a
+/// ledger-bearing dialect; on a ledgerless one there is no probe to have
+/// run it, so the fold's own tie-break is the *only* resolution of a `(k,
+/// t)` tie — the second cost `docs/specs/state.md` §"The degradation
+/// contract" records). Every non-key/clock column is projected in the
+/// model's own column position, not moved ahead of the key/clock columns.
+/// Both callers pass an already dialect-checked `dialect` — this helper
+/// makes no refusal of its own.
 #[allow(clippy::too_many_arguments)]
-pub fn emit_succession_full_rebuild(
+fn presented_arm_statement(
     presented_table: &str,
     model_select_sql: &str,
-    source_table: &str,
     key_cols: &[String],
     clock_col: &str,
     output_columns: &[String],
     lead_derived: &[DerivedColumn],
     lag_derived: &[DerivedColumn],
-    pre_filter: Option<&str>,
-    delete_flag_expr: &str,
     dialect: MaintenanceDialect,
-) -> Result<StatementGroup, UnsupportedSuccessionDialect> {
-    check_succession_dialect(dialect)?;
-    let tombstone_table = tombstone_table_name(presented_table);
+) -> MaintenanceStatement {
     let keys = key_col_list(key_cols);
-
-    // Fold the model's raw compiled output on `(key_cols, clock_col)` — the
-    // same addressing the patch loop's `MERGE ... ON` clause uses
-    // (`docs/specs/incremental_shapes.md` §"The tombstone ledger (hidden
-    // state)" — "Lifecycle") — rather than presenting one row per physically
-    // duplicated tie. This picks one WHOLE physical row per group, never a
-    // per-column aggregate: `LEAD`/`LAG` are computed over the model's own
-    // physically-duplicated rows, so two tied rows can carry genuinely
-    // different derived-column values (one row's `LEAD` sees the other tied
-    // row as its own "next", a same-`t` artifact of ordering two identical
-    // events; the other row correctly sees the true next event, or `NULL`).
-    // A per-column `MAX`/`MIN` mixes these into a value no physical row ever
-    // held — worse, a `NULL` (the correct "no true successor" case) loses to
-    // any non-`NULL` artifact under either aggregate. Picking one row avoids
-    // manufacturing new combinations. The tie-break prefers a row whose own
-    // raw-passthrough (`{lead}`/`{lag}`, not further transformed) derived
-    // columns do NOT equal the group's own clock value — the exact shape of
-    // the same-`t` artifact above — falling back to an arbitrary stable pick
-    // when a model has no such raw-passthrough column to signal by (any
-    // genuine content disagreement within a tie is refused before this
-    // statement runs by the clock-tie probe the caller runs over the same
-    // scope, so an arbitrary pick among truly identical rows is safe). Every
-    // non-key/clock column is projected in the model's own column position,
-    // not moved ahead of the key/clock columns.
     let artifact_terms: Vec<String> = lead_derived
         .iter()
         .chain(lag_derived.iter())
@@ -556,6 +556,45 @@ pub fn emit_succession_full_rebuild(
     );
 
     let presented_create = super::emit_create_table_as(presented_table, &folded_select, dialect);
+    // `emit_create_table_as` always returns exactly one statement (its own
+    // doc comment); matching rather than `.expect`-ing keeps this crate's
+    // hardening-budget ratchet (`CLAUDE.md` §"Fail-loud discipline") from
+    // counting a site that can never actually fail.
+    match presented_create.statements.into_iter().next() {
+        Some(stmt) => stmt,
+        None => unreachable!("emit_create_table_as always returns exactly one statement"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_succession_full_rebuild(
+    presented_table: &str,
+    model_select_sql: &str,
+    source_table: &str,
+    key_cols: &[String],
+    clock_col: &str,
+    output_columns: &[String],
+    lead_derived: &[DerivedColumn],
+    lag_derived: &[DerivedColumn],
+    pre_filter: Option<&str>,
+    delete_flag_expr: &str,
+    dialect: MaintenanceDialect,
+) -> Result<StatementGroup, UnsupportedSuccessionDialect> {
+    check_succession_dialect(dialect)?;
+    let tombstone_table = tombstone_table_name(presented_table);
+    let keys = key_col_list(key_cols);
+
+    let presented_stmt = presented_arm_statement(
+        presented_table,
+        model_select_sql,
+        key_cols,
+        clock_col,
+        output_columns,
+        lead_derived,
+        lag_derived,
+        dialect,
+    );
+
     // GoogleSQL rejects a `DELETE` with no `WHERE` ("DELETE must have a WHERE
     // clause"); `WHERE TRUE` is its documented spelling for "every row".
     // DuckDB accepts both, and keeps the bare form so its emitted text is
@@ -579,19 +618,54 @@ pub fn emit_succession_full_rebuild(
         ledger_rebuild_select.sql
     ));
 
-    // `emit_create_table_as` always returns exactly one statement (its own
-    // doc comment); matching rather than `.expect`-ing keeps this crate's
-    // hardening-budget ratchet (`CLAUDE.md` §"Fail-loud discipline") from
-    // counting a site that can never actually fail.
-    let presented_stmt = match presented_create.statements.into_iter().next() {
-        Some(stmt) => stmt,
-        None => unreachable!("emit_create_table_as always returns exactly one statement"),
-    };
-
     Ok(StatementGroup {
         statements: vec![presented_stmt, ledger_delete, ledger_insert],
         transactional: true,
     })
+}
+
+/// The state-downgraded full rebuild's single owner (`docs/specs/state.md`
+/// §"The degradation contract"): the same presented-arm fold
+/// [`emit_succession_full_rebuild`] writes, and nothing else. A backend
+/// with no tombstone-ledger realisation has no relation to delete from or
+/// insert into, so this emitter touches none — no tombstone DDL, no ledger
+/// `DELETE`/`INSERT` — and runs the clock-tie probe's job nowhere either:
+/// a `(k, t)` tie is resolved by [`presented_arm_statement`]'s own
+/// deterministic tie-break instead of being caught ahead of time, which is
+/// the second cost the contract trades for correctness on such a backend.
+///
+/// Infallible and dialect-blind by design — every dialect (including a
+/// ledger-bearing one, though a real caller never routes a non-downgraded
+/// cell here) gets a group, because "does this backend realise the
+/// tombstone ledger" is not a question this emitter answers or needs
+/// answered: the branch a caller makes is on `cell.state_downgraded`, a
+/// plan-derived fact, never on dialect
+/// (`crates/smelt-runtime/src/maintenance_driver/succession/execute.rs`).
+#[allow(clippy::too_many_arguments)]
+pub fn emit_succession_full_rebuild_ledgerless(
+    presented_table: &str,
+    model_select_sql: &str,
+    key_cols: &[String],
+    clock_col: &str,
+    output_columns: &[String],
+    lead_derived: &[DerivedColumn],
+    lag_derived: &[DerivedColumn],
+    dialect: MaintenanceDialect,
+) -> StatementGroup {
+    let presented_stmt = presented_arm_statement(
+        presented_table,
+        model_select_sql,
+        key_cols,
+        clock_col,
+        output_columns,
+        lead_derived,
+        lag_derived,
+        dialect,
+    );
+    StatementGroup {
+        statements: vec![presented_stmt],
+        transactional: false,
+    }
 }
 
 /// The clock-tie probe (`incremental_shapes.md` §"Run shape and late

@@ -619,6 +619,7 @@ fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabil
         BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
         BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
+        BackendType::Databricks => (SqlDialect::SparkSQL, BackendCapabilities::databricks()),
     }
 }
 
@@ -2721,6 +2722,8 @@ mod tests {
             project: None,
             dataset: None,
             location: None,
+            host: None,
+            token: None,
         }
     }
 
@@ -2750,6 +2753,8 @@ mod tests {
                 project: None,
                 dataset: None,
                 location: None,
+                host: None,
+                token: None,
             },
         );
 
@@ -3423,6 +3428,8 @@ WHERE event_type = 'click'
             project: None,
             dataset: None,
             location: None,
+            host: None,
+            token: None,
         };
         let compiled = SqlCompiler::new(make_test_config(), &target)
             .compile_with_sql(&model, "main", sql)
@@ -3558,6 +3565,8 @@ WHERE event_type = 'click'
             project: Some("p".to_string()),
             dataset: Some("main".to_string()),
             location: Some("US".to_string()),
+            host: None,
+            token: None,
         };
         let compiled = SqlCompiler::new(make_test_config(), &target)
             .compile(&model, "main")

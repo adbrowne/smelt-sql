@@ -9,6 +9,7 @@ mod support;
 
 mod clamps_and_headline;
 mod contract_points;
+mod databricks_succession_differential;
 mod degenerate_and_cli;
 mod delta_types;
 mod docs_and_technique;

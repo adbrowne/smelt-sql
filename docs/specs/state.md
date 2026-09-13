@@ -371,10 +371,40 @@ Statefulness is an **admission input resolved late**. Plan derivation proceeds i
    actually realisable for this project: the backend has a builder for the structure, the
    project has not declared `state.warehouse_tables: none` (which makes every engine-resident
    structure unavailable), and — for observability structures only — the posture includes it.
-   A cell whose technique
+   The required structure is a function of the **cell**, not of its technique alone: a
+   `PerGroupRecompute` cell addressed by a key-addressed model edge (`incremental_models.md`
+   §"Upstream model edges") requires the **fingerprint sidecar**, because its affected-key
+   discovery is a group-grain sidecar diff — a plain, clamp-bounded `PerGroupRecompute` cell
+   requires nothing. A cell whose technique
    requires an unavailable structure is **downgraded to the cheapest member of the recompute
    family that preserves the equivalence invariant** (typically per-region or per-key-group
-   recompute), and the downgrade is recorded on the cell (`MaintenanceStateDowngraded`).
+   recompute), and the downgrade is recorded on the cell (`MaintenanceStateDowngraded`). For the
+   key-addressed cell this means the whole per-group route is what the missing sidecar denies,
+   so the cell downgrades to `DeleteInsert` (full-region recompute), never a no-op "downgrade"
+   back to the same `PerGroupRecompute` technique it already carries. No consumer re-derives
+   this requirement at run time — it is resolved once, here, and any run-time check for the
+   same fact is a defensive guard against inconsistent inputs, not a second source of truth.
+   The recompute-family fallback a `key_scope`-carrying cell downgrades to also depends on the
+   key scope's own discovery route: `UpstreamKeyed` and `DownstreamGrainOverUpstream` both
+   address a real `PerGroupRecompute` cell the key-addressed driver dispatches, but
+   `EnrichmentKeyed` (the value-enrichment join shape) addresses only a `ColumnScopedMerge`
+   cell — no execution route dispatches an `EnrichmentKeyed` `PerGroupRecompute` cell, so a
+   `ColumnScopedMerge` cell of this shape whose merge ledger is unavailable downgrades straight
+   to `DeleteInsert`, never through an unexecutable `PerGroupRecompute` intermediate. For a
+   **succession-grain** cell (`incremental_shapes.md` §"The succession grain"), the technique
+   this downgrade replaces is `SuccessionPatch`, whose `StateStructure::TombstoneLedger`
+   requirement a backend either realises or does not; on a backend with no realisable
+   `TombstoneLedger`, the `DeleteInsert` region is the whole presented table, so every run
+   rebuilds the model in full from the whole source seen so far rather than patching forward
+   from the last window — the cost the contract trades for correctness, since a window-forward
+   patch route has no way to retract a delete event it never saw a tombstone for. What that
+   full rebuild writes and skips is exact: it writes the presented table alone — the same fold
+   the ledger-bearing rebuild's own presented arm produces, so the two engines' presented
+   tables stay row- and column-identical — and touches no tombstone relation at all, forgoing
+   the clock-tie probe whose domain CTE reads a ledger this backend has none of. A `(k, t)` tie
+   is therefore resolved by the rebuild fold's own deterministic tie-break rather than being
+   caught ahead of time by the probe — the second cost the contract trades for correctness on
+   such a backend.
 
 The downgrade is sound by construction: every recompute-family technique satisfies the same
 equivalence invariant (`incremental_models.md` §"The equivalence invariant"), so availability
@@ -513,6 +543,30 @@ this spec describes normatively above.
   downgrade (`MaintenanceStateDowngraded`) mid-schedule and asserts the equivalence oracle
   still holds across the switch — the state-deletion leg (§References → Tests) proves ledger
   residency; this residual proves the recompute-family fallback itself.
+- **Detected-inconsistency healing as an alternative to cross-table atomicity.** Some
+  backends will permanently lack a cross-table transaction — Delta's per-table atomicity
+  (§"Which dialects realise which structure") is one instance of a property no per-backend
+  ledger builder (the extension above) can ever change, and a future backend may share it.
+  For those backends the standing degradation is the recompute-family downgrade, chosen for
+  safety over throughput. A narrower alternative is possible in principle: keep the
+  technique's incremental write, drop its atomicity guarantee, and replace it with detection
+  — order the data write before the correctness-structure record, so an interrupted pair
+  fails in the safe direction (an unrecorded write costs a redundant re-run, the same
+  direction BigQuery's create-table degradation already accepts above, rather than a record
+  claiming a write that never landed) — then periodically verify the two agree and heal a
+  mismatch with a one-time full recompute of the divergent window, recorded on the plan as a
+  downgrade exactly like any other. Verification need not be a bespoke probe against smelt's
+  own ledger: a table format that keeps its own commit history (Delta's transaction log, in
+  particular) already records independently whether a given write landed, which is a second
+  source of truth free of an extra write smelt would otherwise have to make and maintain.
+  Open: which structures this is even safe for (the safe-direction ordering above does not
+  by itself cover the tombstone ledger, whose danger is a tombstone record with no matching
+  delete — the presented `MERGE` and the tombstone insert are two writes with no natural
+  data-first ordering between them); where the periodic verification runs (it is a run-time
+  healing step, not a planning-time one — a standing plan-time resolver reading backend state
+  would violate maintenance-plan purity); and whether a backend's transaction-log metadata is
+  a durable enough interface to build on, or only an engine-specific escape hatch. Not
+  decided; no plan targets it.
 
 ## References
 

@@ -43,7 +43,7 @@
 //!
 //! Both sides are BigQuery relations, exported to typed NDJSON by
 //! `scripts/bq-dogfood-parity.sh` and landed into DuckDB by the **same**
-//! primitive the dual-target sweep uses (`bq_parity_support`), typed from the
+//! primitive the dual-target sweep uses (`parity_support`), typed from the
 //! same DuckDB reference database, then differenced whole-row with `EXCEPT ALL`
 //! in both directions. One comparator, two claims.
 //!
@@ -66,11 +66,12 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-#[path = "bq_parity_support/mod.rs"]
-mod bq_parity_support;
-use bq_parity_support::{
-    check_agreement_against, compare_databases, load_bigquery_snapshot, repo_root,
-    RegisteredDivergence, RelationDiff, SideLabels, EXCLUDED_MODELS,
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{
+    check_agreement_against, compare_databases, load_exported_snapshot, repo_root, synth_db,
+    violating_pair, EquivalenceManifest, RegisteredDivergence, RelationDiff, SideLabels,
+    BIGQUERY_EXCLUDED_MODELS,
 };
 
 /// The two sides of *this* sweep: BigQuery's incrementally-maintained state,
@@ -212,7 +213,7 @@ fn adding_the_oracle_target_does_not_move_the_default() {
 /// `docs/specs/incremental_models.md` §"The equivalence invariant" makes. An
 /// entry must name the maintenance technique, the model, and the mechanism by
 /// which the incremental plan legitimately lags — the shape
-/// [`bq_parity_support::DivergenceBound::MonotoneDivergence`] encodes. Anything
+/// [`parity_support::DivergenceBound::MonotoneDivergence`] encodes. Anything
 /// that cannot be stated in those terms is a defect for
 /// `20260906-bigquery-correctness`, recorded as a finding, never registered
 /// away.
@@ -353,7 +354,7 @@ fn diff_ignoring_columns(
     relation: &str,
     ignored: &[&str],
 ) -> (i64, i64) {
-    let conn = bq_parity_support::attached_conn(left_db, right_db);
+    let conn = parity_support::attached_conn(left_db, right_db);
     let mut stmt = conn
         .prepare(
             "SELECT column_name FROM information_schema.columns \
@@ -390,8 +391,8 @@ fn diff_ignoring_columns(
         "SELECT {p} FROM right_db.main.{relation} EXCEPT ALL SELECT {p} FROM left_db.main.{relation}"
     );
     (
-        bq_parity_support::scalar_on(&conn, &format!("SELECT count(*) FROM ({left_only})")),
-        bq_parity_support::scalar_on(&conn, &format!("SELECT count(*) FROM ({right_only})")),
+        parity_support::scalar_on(&conn, &format!("SELECT count(*) FROM ({left_only})")),
+        parity_support::scalar_on(&conn, &format!("SELECT count(*) FROM ({right_only})")),
     )
 }
 
@@ -419,32 +420,6 @@ fn check_equivalence(
 // ---------------------------------------------------------------------------
 // Offline negative controls — synthetic pairs, no cloud, no credential
 // ---------------------------------------------------------------------------
-
-fn synth_db(path: &std::path::Path, sql: &str) {
-    let conn = duckdb::Connection::open(path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
-    conn.execute_batch(sql)
-        .unwrap_or_else(|e| panic!("exec failed: {e}\nSQL:\n{sql}"));
-}
-
-/// A synthetic pair whose incremental side carries one row the oracle does not,
-/// and one differing value — the two shapes an equivalence violation takes.
-fn violating_pair(tmp: &std::path::Path) -> (PathBuf, PathBuf) {
-    let incr = tmp.join("incr.duckdb");
-    let oracle = tmp.join("oracle.duckdb");
-    synth_db(
-        &incr,
-        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
-           (1, 'a/one', 10), (2, 'a/two_stale', 20)) \
-           AS t(repo_id, current_repo_name, event_count);",
-    );
-    synth_db(
-        &oracle,
-        "CREATE TABLE main.gold_repo_dim AS SELECT * FROM (VALUES \
-           (1, 'a/one', 10), (2, 'a/two', 20)) \
-           AS t(repo_id, current_repo_name, event_count);",
-    );
-    (incr, oracle)
-}
 
 /// A real difference between incremental state and its oracle fails the sweep,
 /// naming the relation and both counts under *this* suite's side labels.
@@ -590,7 +565,7 @@ fn the_equivalence_report_covers_every_model_at_every_checkpoint() {
         }
     }
 
-    for excluded in EXCLUDED_MODELS {
+    for excluded in BIGQUERY_EXCLUDED_MODELS {
         let table = excluded.replace('.', "_");
         assert!(
             !first.contains(&table),
@@ -807,26 +782,14 @@ fn the_unbounded_refresh_set_is_exactly_what_the_report_shows() {
 // The live sweep
 // ---------------------------------------------------------------------------
 
-/// One compared checkpoint. `types_db_path` is the DuckDB leg's database at
-/// that window — the **type reference** for landing both BigQuery sides, not a
-/// comparison side: typing both sides identically is what makes the two landed
-/// snapshots byte-comparable. Produced by
-/// `scripts/bq-dogfood-parity.sh oracle-manifest`.
-#[derive(serde::Deserialize)]
-struct Checkpoint {
-    label: String,
-    window: i64,
-    day: String,
-    types_db_path: PathBuf,
-    incr_ndjson_dir: PathBuf,
-    oracle_ndjson_dir: PathBuf,
-}
-
-#[derive(serde::Deserialize)]
-struct EquivalenceManifest {
-    checkpoints: Vec<Checkpoint>,
-}
-
+/// The manifest's checkpoint shape is [`parity_support::EquivalenceCheckpoint`]
+/// — shared with `github_activity_dbx_oracle.rs` rather than restated here.
+/// `types_db_path` is the DuckDB leg's database at that window — the **type
+/// reference** for landing both BigQuery sides, not a comparison side: typing
+/// both sides identically is what makes the two landed snapshots
+/// byte-comparable. Produced by `scripts/bq-dogfood-parity.sh
+/// oracle-manifest`.
+///
 /// The whole sweep over the live snapshots, and the writer of the committed
 /// equivalence report.
 ///
@@ -878,7 +841,7 @@ fn bigquery_incremental_matches_its_oracle_at_every_window() {
         .find(|c| c.window == final_window)
         .expect("the final checkpoint");
     let final_oracle = scratch.path().join("final-oracle.duckdb");
-    load_bigquery_snapshot(
+    load_exported_snapshot(
         &final_cp.types_db_path,
         &final_cp.oracle_ndjson_dir,
         &final_oracle,
@@ -899,8 +862,8 @@ fn bigquery_incremental_matches_its_oracle_at_every_window() {
 
         let incr = scratch.path().join(format!("{}-incr.duckdb", cp.label));
         let oracle = scratch.path().join(format!("{}-oracle.duckdb", cp.label));
-        load_bigquery_snapshot(&cp.types_db_path, &cp.incr_ndjson_dir, &incr);
-        load_bigquery_snapshot(&cp.types_db_path, &cp.oracle_ndjson_dir, &oracle);
+        load_exported_snapshot(&cp.types_db_path, &cp.incr_ndjson_dir, &incr);
+        load_exported_snapshot(&cp.types_db_path, &cp.oracle_ndjson_dir, &oracle);
 
         // Every relation's raw numbers, recorded whatever the verdict, so the
         // report names what differed rather than merely that something did.
@@ -932,8 +895,8 @@ fn bigquery_incremental_matches_its_oracle_at_every_window() {
             for u in UNBOUNDED_REFRESH_RELATIONS {
                 let (held, detail) = match &u.proof {
                     ExemptionProof::OracleIsTheFinalState => {
-                        let conn = bq_parity_support::attached_conn(&oracle, &final_oracle);
-                        let d = bq_parity_support::relation_diff(&conn, u.relation);
+                        let conn = parity_support::attached_conn(&oracle, &final_oracle);
+                        let d = parity_support::relation_diff(&conn, u.relation);
                         (
                             d.left_only == 0 && d.right_only == 0,
                             format!(
@@ -1018,7 +981,7 @@ fn bigquery_incremental_matches_its_oracle_at_every_window() {
             "days": 30,
             "checkpoints": manifest.checkpoints.iter().map(|c| c.window).collect::<Vec<_>>(),
         },
-        "excluded_models": EXCLUDED_MODELS,
+        "excluded_models": BIGQUERY_EXCLUDED_MODELS,
         "checkpoints": checkpoints_json,
     });
     let out = std::env::var("EQUIVALENCE_REPORT_OUT")

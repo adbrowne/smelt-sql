@@ -322,6 +322,8 @@ mod tests {
                 project: None,
                 dataset: None,
                 location: None,
+                host: None,
+                token: None,
             },
         );
 

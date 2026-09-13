@@ -2,6 +2,7 @@
 //! key digest expressions, the digest `SELECT`s built over them, and the
 //! sidecar diff / affected-key selects that consume them.
 
+use super::hash::{hash_digest_expr, hash_hex_expr};
 use super::probes::probe_dialect_string_type;
 use super::types::*;
 
@@ -49,10 +50,11 @@ const VALUE_TAG: &str = "V";
 /// join multiple columns' fingerprints with no separator at all — see its
 /// own doc comment for why fixed-length concatenation removes the
 /// separator-collision hazard structurally rather than by convention.
-fn column_fingerprint_expr(column: &str, cast_type: &str) -> String {
-    format!(
-        "sha256(CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS {cast_type})) END)"
-    )
+fn column_fingerprint_expr(column: &str, cast_type: &str, dialect: MaintenanceDialect) -> String {
+    let pre_image = format!(
+        "CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS {cast_type})) END"
+    );
+    hash_digest_expr(&pre_image, dialect)
 }
 
 /// A row-content fingerprint over one or more DIGEST columns: always the
@@ -81,10 +83,14 @@ fn column_fingerprint_expr(column: &str, cast_type: &str) -> String {
 /// for why. Parameterized over the unsized string-cast type name via
 /// [`probe_dialect_string_type`] — DuckDB's `VARCHAR`, Spark/BigQuery's
 /// `STRING`.
-fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
+fn concat_varchar_expr_typed(
+    columns: &[String],
+    cast_type: &str,
+    dialect: MaintenanceDialect,
+) -> String {
     let per_column = columns
         .iter()
-        .map(|c| column_fingerprint_expr(c, cast_type))
+        .map(|c| column_fingerprint_expr(c, cast_type, dialect))
         .collect::<Vec<_>>()
         .join(", ");
     if columns.len() == 1 {
@@ -105,13 +111,9 @@ fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
 /// `VARCHAR`, Spark/BigQuery's `STRING` — so the fingerprint is well-formed
 /// under any of the three.
 pub(crate) fn row_fingerprint_expr(columns: &[String], dialect: MaintenanceDialect) -> String {
-    let concatenated = concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect));
-    match dialect {
-        // GoogleSQL's SHA256 returns BYTES; the row hash is fed straight into a
-        // STRING_AGG, so it has to be hex-encoded to stay a STRING.
-        MaintenanceDialect::BigQuery => format!("TO_HEX(SHA256({concatenated}))"),
-        _ => format!("sha256({concatenated})"),
-    }
+    let concatenated =
+        concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect), dialect);
+    hash_hex_expr(&concatenated, dialect)
 }
 
 /// The NULL-key sentinel: a KEY column that is truly NULL is coalesced to
@@ -167,7 +169,7 @@ pub fn key_expr_for_columns(columns: &[String], dialect: MaintenanceDialect) -> 
             columns[0]
         )
     } else {
-        concat_varchar_expr_typed(columns, cast_type)
+        concat_varchar_expr_typed(columns, cast_type, dialect)
     }
 }
 
@@ -379,9 +381,14 @@ pub fn emit_repair_group_digest_select(
     let cast_type = probe_dialect_string_type(dialect);
     let key_expr = key_expr_for_columns(group_key, dialect);
     let group_by_list = group_key.join(", ");
-    let row_digest_expr = concat_varchar_expr_typed(digest_columns, cast_type);
+    let row_digest_expr = concat_varchar_expr_typed(digest_columns, cast_type, dialect);
     let combined = match dialect {
-        MaintenanceDialect::DuckDb => format!("bit_xor(hash(sha256({row_digest_expr})))"),
+        MaintenanceDialect::DuckDb => {
+            format!(
+                "bit_xor(hash({}))",
+                hash_digest_expr(&row_digest_expr, dialect)
+            )
+        }
         MaintenanceDialect::BigQuery => format!("BIT_XOR(FARM_FINGERPRINT({row_digest_expr}))"),
         MaintenanceDialect::Spark => format!("bit_xor(xxhash64({row_digest_expr}))"),
     };
@@ -622,7 +629,8 @@ mod fingerprint_sidecar_tests {
             &["name".to_string()],
             MaintenanceDialect::Spark,
         );
-        assert!(sql.contains("sha256("));
+        assert!(sql.contains("sha2("));
+        assert!(!sql.contains("sha256("));
         assert!(sql.contains("CAST(name AS STRING)"));
     }
 

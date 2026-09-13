@@ -1,0 +1,18 @@
+# Pinned client environment for the Databricks dogfood spine
+# (docs/outcomes/20260912-databricks-dogfood-spine/phases/03-plan.md).
+#
+# databricks-connect==15.4.5 is the resolved version as of this pin: the
+# earliest LTS-tracked release with a documented `.serverless(True)` builder
+# method, which Free Edition (serverless-only) requires. It vendors its own
+# Spark-compatible runtime and conflicts with a plain `pyspark` install in
+# the same environment (they both provide `pyspark.sql`), so this venv must
+# stay separate from `.smelt-spark-venv` (scripts/spark-env.sh) — never
+# co-install `pyspark` here.
+databricks-connect==15.4.5
+pyarrow
+
+# The loader's own DuckDB access (scripts/dbx-dogfood-loader.py) prefers this
+# module over shelling out to a `duckdb` CLI binary — a serverless Databricks
+# Python environment has no CLI on PATH, only whatever this environment's
+# dependencies: list installs.
+duckdb

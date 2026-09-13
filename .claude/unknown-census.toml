@@ -359,7 +359,7 @@ classification = "legitimate"
 reason = "Ifnull: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call/legacy.rs:430"]
+["crates/smelt-db/src/type_inference/function_call/legacy.rs:435"]
 classification = "legitimate"
 reason = "Greatest/Least: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 discriminant = "dynamic"

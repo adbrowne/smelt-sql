@@ -122,4 +122,30 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
             Emission::Template("make_interval(0, 0, 0, 0, 0, 0, {0})"),
         )]),
     );
+    insert(
+        Signature::new(
+            "EPOCH_US",
+            vec![],
+            vec![concrete(DataType::Timestamp {
+                with_timezone: false,
+            })],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        // DuckDB keeps the registry's default (native `epoch_us` name).
+        // Spark/Databricks has no `epoch_us`; `unix_micros` is Spark's own
+        // microsecond-epoch equivalent. Verified against the outcome's live
+        // full-refresh blocker (2026-09-12, phase 6e).
+        .with_emission(&[
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Template("unix_micros({0})"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Template("UNIX_MICROS({0})"),
+            ),
+        ]),
+    );
 }

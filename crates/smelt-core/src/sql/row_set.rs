@@ -63,7 +63,7 @@ pub fn row_set_body(dialect: BackendType, columns: &[&str], rows: &[Vec<String>]
         "row_set_body requires at least one row; callers own the empty-row-set case"
     );
     match dialect {
-        BackendType::DuckDB | BackendType::Spark => {
+        BackendType::DuckDB | BackendType::Spark | BackendType::Databricks => {
             let rows_sql: Vec<String> =
                 rows.iter().map(|r| format!("({})", r.join(", "))).collect();
             format!("VALUES {}", rows_sql.join(", "))
@@ -109,7 +109,7 @@ pub fn build_row_set_table(
     rows: &[Vec<String>],
 ) -> String {
     match dialect {
-        BackendType::DuckDB | BackendType::Spark => {
+        BackendType::DuckDB | BackendType::Spark | BackendType::Databricks => {
             format!(
                 "({}) AS {alias}({})",
                 row_set_body(dialect, columns, rows),

@@ -48,6 +48,8 @@ fn duckdb_target(schema: &str) -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 

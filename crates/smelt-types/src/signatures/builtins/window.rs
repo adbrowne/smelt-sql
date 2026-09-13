@@ -3,9 +3,9 @@
 //! Data only — every row is handed to the single `BuiltinRegistry` table
 //! constructed in [`super`].
 
-use super::super::{ExprKind, Signature, TypeConstraint, TypeExpr};
+use super::super::{Emission, ExprKind, Position, RewriteId, Signature, TypeConstraint, TypeExpr};
 use super::{tp, var};
-use crate::DataType;
+use crate::{DataType, DialectId};
 
 pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
     // ─── Window-only built-ins (Phase 14, §16 #24).
@@ -43,6 +43,25 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
         )
         .with_kind(ExprKind::Window),
     );
+    // `LAG`/`LEAD` are offset functions the SQL standard defines to ignore
+    // their window frame; Spark refuses any frame on them outright,
+    // regardless of whether the frame happens to cover the whole partition
+    // or is a running one — so both window positions carry the same verdict
+    // (the coverage-totality gate requires either both or neither). The
+    // frame is dropped only for SparkSQL — see `docs/specs/multi_backend.md`
+    // §"Frame elision on offset functions".
+    const LAG_LEAD_EMISSION: &[(DialectId, Position, Emission)] = &[
+        (
+            DialectId::SparkSql,
+            Position::Window,
+            Emission::Rewrite(RewriteId::ElideWindowFrame),
+        ),
+        (
+            DialectId::SparkSql,
+            Position::WholePartitionWindow,
+            Emission::Rewrite(RewriteId::ElideWindowFrame),
+        ),
+    ];
     insert(
         Signature::new(
             "LAG",
@@ -50,7 +69,8 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
             vec![var("T")],
             TypeExpr::Var("T".into()),
         )
-        .with_kind(ExprKind::Window),
+        .with_kind(ExprKind::Window)
+        .with_emission(LAG_LEAD_EMISSION),
     );
     insert(
         Signature::new(
@@ -59,6 +79,7 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
             vec![var("T")],
             TypeExpr::Var("T".into()),
         )
-        .with_kind(ExprKind::Window),
+        .with_kind(ExprKind::Window)
+        .with_emission(LAG_LEAD_EMISSION),
     );
 }

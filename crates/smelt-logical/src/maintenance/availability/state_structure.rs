@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use smelt_dialect::SqlDialect;
 
-use crate::maintenance::Technique;
+use crate::maintenance::{KeyDiscovery, PlanCell, Technique};
 
 /// The [`StateStructure`]s `dialect` has a builder for, independent of
 /// `state.warehouse_tables`. Exhaustive over [`SqlDialect`]: a new dialect
@@ -115,17 +115,49 @@ impl StateStructure {
     }
 }
 
-/// The state structure a technique needs to be correct, or `None` for the
-/// recompute family (`DeleteInsert`/`PerGroupRecompute`), which needs no
-/// bookkeeping to be correct. Exhaustive over [`Technique`]: a new variant is
-/// a compile error here, not a silently-unclassified technique.
-pub fn required_state_structure(technique: Technique) -> Option<StateStructure> {
-    match technique {
+/// The state structure `cell` needs to be correct, or `None` for a cell
+/// needing no bookkeeping. The requirement is a function of the **cell**, not
+/// of its technique alone (`docs/specs/state.md` §"The degradation
+/// contract" step 2): every technique other than the recompute family
+/// (`DeleteInsert`/`PerGroupRecompute`) requires its own structure
+/// unconditionally, but a `PerGroupRecompute` cell requires the
+/// **fingerprint sidecar** exactly when it is addressed by a key-addressed
+/// model edge — its affected-key discovery is a group-grain sidecar diff
+/// (`crate::maintenance::repair::admit_key_addressed_recompute`,
+/// `incremental_models.md` §"Upstream model edges"). A `PerGroupRecompute`
+/// cell with no `key_scope` (a plain clamp-bounded repair) needs nothing.
+///
+/// The two `KeyDiscovery` routes that admit a `PerGroupRecompute` cell
+/// (`UpstreamKeyed`, `DownstreamGrainOverUpstream`) both need the sidecar;
+/// `EnrichmentKeyed` never reaches this arm, since it only ever addresses a
+/// `ColumnScopedMerge` cell (already covered by the merge-ledger arm below).
+/// Exhaustive over both [`Technique`] and, for the `PerGroupRecompute` arm,
+/// [`KeyDiscovery`] — a new technique or discovery route is a compile error
+/// here, not a silently-unclassified one.
+///
+/// This is the single source of truth for the requirement:
+/// [`realisable_state_structures`] and
+/// `BackendCapabilities::supports_fingerprint_sidecar` are the two
+/// realisation-side facts it must agree with, and no consumer may
+/// re-derive the requirement at run time (`maintenance-plan purity`) — a
+/// run-time check for the same fact is a defensive guard against
+/// inconsistent inputs, never a second source of truth.
+pub fn required_state_structure(cell: &PlanCell) -> Option<StateStructure> {
+    match cell.technique {
         Technique::KeyedFold => Some(StateStructure::ReconciliationLedger),
         Technique::ColumnScopedMerge | Technique::InPlaceUpdate => {
             Some(StateStructure::MergeLedger)
         }
         Technique::SuccessionPatch => Some(StateStructure::TombstoneLedger),
-        Technique::DeleteInsert | Technique::PerGroupRecompute => None,
+        Technique::DeleteInsert => None,
+        Technique::PerGroupRecompute => match &cell.key_scope {
+            None => None,
+            Some(key_scope) => match key_scope.discovery {
+                KeyDiscovery::UpstreamKeyed | KeyDiscovery::DownstreamGrainOverUpstream => {
+                    Some(StateStructure::FingerprintSidecar)
+                }
+                KeyDiscovery::EnrichmentKeyed => None,
+            },
+        },
     }
 }

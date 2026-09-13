@@ -27,6 +27,19 @@ fn run(project_dir: &Path, args: &[&str]) -> Output {
         .args(args)
         .args(["--project-dir", project_dir.to_str().unwrap()])
         .env_remove("RUST_LOG")
+        // `examples/github_activity/smelt.yml` declares a `databricks` target
+        // whose `host`/`token` are `${SMELT_DBX_HOSTNAME}`/`${SMELT_DBX_TOKEN}`
+        // (`docs/outcomes/20260912-databricks-dogfood-spine/phases/
+        // 06-plan.md`). Config-load interpolation resolves every `${VAR}` in
+        // the file regardless of which target is selected
+        // (`docs/specs/smelt_yml.md` §Semantics item 8), so a `--target dev`
+        // invocation with neither var set would fail before doing anything
+        // target-related. These are dummy values — no live credential is used
+        // or needed for any test that spawns against `dev`.
+        .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt {args:?}`: {e}"))
 }

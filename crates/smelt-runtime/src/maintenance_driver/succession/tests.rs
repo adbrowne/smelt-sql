@@ -116,6 +116,7 @@ fn cell(recipe: SuccessionRecipe) -> SuccessionCell {
         source_table: "main.raw_customer_changes".to_string(),
         partition_column: "arrival_date".to_string(),
         granularity: Granularity::Day,
+        state_downgraded: false,
     }
 }
 
@@ -870,13 +871,17 @@ const SUCCESSION_SQL: &str = "SELECT \
      LEAD(changed_at) OVER (PARTITION BY customer_id ORDER BY changed_at) AS next_changed_at \
      FROM smelt.sources.customer_changes";
 
-/// Test 9: `state_downgraded_cell_is_not_dispatched` —
-/// `StateAvailability::none()` resolves `None` (the cell downgrades to
-/// `Technique::DeleteInsert`, no longer `SuccessionPatch`), while
-/// `StateAvailability::all()` resolves `Some` for the SAME model — proving
-/// the `None` above is the downgrade, not a resolver bug.
+/// Test 9: `state_downgraded_cell_still_dispatches_marked_for_full_rebuild`
+/// (`docs/outcomes/20260912-databricks-dogfood-spine/phases/09c-plan.md`) —
+/// `StateAvailability::none()` resolves `Some` with `state_downgraded: true`
+/// (the cell's ideal `SuccessionPatch` technique downgraded to
+/// `DeleteInsert` for want of a realisable `TombstoneLedger`, but the
+/// dispatch site still routes it through the succession-aware full-rebuild
+/// path rather than falling through to the generic, fold-blind
+/// `DeleteInsert` driver), while `StateAvailability::all()` resolves `Some`
+/// with `state_downgraded: false` for the SAME model.
 #[test]
-fn state_downgraded_cell_is_not_dispatched() {
+fn state_downgraded_cell_still_dispatches_marked_for_full_rebuild() {
     let metadata = succession_metadata();
     let source_refs = vec![(
         "customer_changes".to_string(),
@@ -896,11 +901,16 @@ fn state_downgraded_cell_is_not_dispatched() {
         "dev",
         &source_infos,
     )
-    .expect("resolver does not error");
-    assert!(
-        downgraded.is_none(),
-        "a state-downgraded cell (technique becomes DeleteInsert) must not dispatch"
+    .expect("resolver does not error")
+    .expect(
+        "a state-downgraded cell (technique becomes DeleteInsert) must still dispatch, marked \
+         for full rebuild",
     );
+    assert!(
+        downgraded.state_downgraded,
+        "a cell resolved under StateAvailability::none() must be marked state_downgraded"
+    );
+    assert_eq!(downgraded.recipe.key_cols, vec!["customer_id".to_string()]);
 
     let live = resolve_live_succession_cell(
         SUCCESSION_SQL,
@@ -916,6 +926,10 @@ fn state_downgraded_cell_is_not_dispatched() {
     )
     .expect("resolver does not error")
     .expect("full availability must resolve a live succession cell");
+    assert!(
+        !live.state_downgraded,
+        "a cell resolved under StateAvailability::all() must not be marked state_downgraded"
+    );
     assert_eq!(live.recipe.key_cols, vec!["customer_id".to_string()]);
     assert_eq!(live.recipe.clock_col, "changed_at");
     assert_eq!(live.source_table, "main.sources_customer_changes");

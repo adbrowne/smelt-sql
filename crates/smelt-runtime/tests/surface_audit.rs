@@ -54,6 +54,8 @@ fn test_no_compiler_internals_exposed() {
             project: None,
             dataset: None,
             location: None,
+            host: None,
+            token: None,
         },
     );
     let config = Config {

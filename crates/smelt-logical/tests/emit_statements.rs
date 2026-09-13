@@ -8,13 +8,14 @@
 use smelt_core::config::{Granularity, TimeseriesConfig};
 use smelt_logical::analysis::decomposed_state::StateColumn;
 use smelt_logical::maintenance::emit::{
-    emit_append_only_posture_probe, emit_bounded_domain_probe, emit_column_scoped_merge,
-    emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
-    emit_functional_dependency_probe, emit_in_place_update, emit_keyed_fold,
-    emit_monotonicity_probe, emit_recurrence_bound_probe, emit_source_mutation_fingerprint,
-    emit_staged_candidate_conditional, emit_staged_candidate_conditional_recompute,
-    presentation_projection, state_augmented_projection, AppendOnlyBaselinePartition,
-    MaintenanceDialect, PartitionBucket, PresentationRefusal, Region, StateAugmentRefusal,
+    emit_append_only_baseline_snapshot, emit_append_only_posture_probe, emit_bounded_domain_probe,
+    emit_column_scoped_merge, emit_count_preservation_probe_from_body, emit_create_table_as,
+    emit_delete_insert, emit_fingerprint_digest_select, emit_functional_dependency_probe,
+    emit_in_place_update, emit_keyed_fold, emit_monotonicity_probe, emit_recurrence_bound_probe,
+    emit_source_mutation_fingerprint, emit_staged_candidate_conditional,
+    emit_staged_candidate_conditional_recompute, presentation_projection,
+    state_augmented_projection, AppendOnlyBaselinePartition, MaintenanceDialect, PartitionBucket,
+    PresentationRefusal, Region, StateAugmentRefusal,
 };
 use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
 use std::collections::{BTreeMap, HashMap};
@@ -1665,7 +1666,8 @@ fn source_mutation_fingerprint_spark_shape() {
     );
     assert!(stmt
         .sql
-        .contains("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST("));
+        .contains("sha2(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST("));
+    assert!(!stmt.sql.contains("sha256("));
     assert!(!stmt.sql.contains("GROUP BY"));
 }
 
@@ -1727,4 +1729,79 @@ fn region_for_axis_renders_per_axis() {
     assert_eq!(integer.end, "2");
 
     assert!(Region::for_axis(PartitionAxis::Integer, "1", "not-a-number").is_err());
+}
+
+/// Spark/Databricks has no `sha256` function, only `sha2(expr, bits)`
+/// (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md` phase 6's
+/// finding: the first live full refresh failed every model reaching this
+/// spelling). The append-only baseline snapshot's per-partition aggregate
+/// fingerprint must dispatch to `sha2(..., 256)` on Spark, never `sha256(`.
+#[test]
+fn spark_baseline_snapshot_uses_sha2_not_sha256() {
+    let stmt = emit_append_only_baseline_snapshot(
+        "main.raw_events",
+        "event_date",
+        &PartitionBucket::Exact,
+        &["event_id".to_string(), "payload".to_string()],
+        MaintenanceDialect::Spark,
+    );
+    assert!(
+        stmt.sql.contains("sha2("),
+        "expected sha2( in Spark baseline snapshot: {}",
+        stmt.sql
+    );
+    assert!(
+        !stmt.sql.contains("sha256("),
+        "Spark has no sha256 function: {}",
+        stmt.sql
+    );
+}
+
+/// Same rule as [`spark_baseline_snapshot_uses_sha2_not_sha256`], for the
+/// per-column and whole-row fingerprint expressions the fingerprint sidecar
+/// digest select builds (`emit_fingerprint_digest_select`'s `delta_digest`
+/// column composes both).
+#[test]
+fn spark_row_fingerprint_uses_sha2_not_sha256() {
+    let sql = emit_fingerprint_digest_select(
+        "raw.dim_users",
+        &["user_id".to_string()],
+        &["name".to_string(), "tier".to_string()],
+        MaintenanceDialect::Spark,
+    );
+    assert!(sql.contains("sha2("), "expected sha2( in: {sql}");
+    assert!(!sql.contains("sha256("), "expected no sha256( in: {sql}");
+}
+
+/// Pins the exact existing DuckDB and BigQuery hash shapes byte-for-byte, so
+/// the Spark `sha2` dispatch this phase adds cannot silently move either
+/// engine already proven live (BigQuery: `docs/outcomes/
+/// 20260906-bigquery-dogfood-spine`; DuckDB: every prior outcome).
+#[test]
+fn duckdb_and_bigquery_hash_spellings_are_unchanged() {
+    let duckdb_sql = emit_fingerprint_digest_select(
+        "raw.dim_users",
+        &["user_id".to_string()],
+        &["name".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        duckdb_sql,
+        "SELECT COALESCE(CAST(user_id AS VARCHAR), '\u{2}NULL\u{2}') AS delta_key, \
+         sha256(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+         VARCHAR)) END)) AS delta_digest FROM raw.dim_users"
+    );
+
+    let bigquery_sql = emit_fingerprint_digest_select(
+        "raw.dim_users",
+        &["user_id".to_string()],
+        &["name".to_string()],
+        MaintenanceDialect::BigQuery,
+    );
+    assert_eq!(
+        bigquery_sql,
+        "SELECT COALESCE(CAST(user_id AS STRING), '\u{2}NULL\u{2}') AS delta_key, \
+         TO_HEX(SHA256(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+         STRING)) END))) AS delta_digest FROM raw.dim_users"
+    );
 }

@@ -16,6 +16,8 @@ pub(crate) fn duckdb_target() -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 
@@ -32,6 +34,8 @@ pub(crate) fn bigquery_target() -> Target {
         project: Some("p".to_string()),
         dataset: Some("main".to_string()),
         location: Some("US".to_string()),
+        host: None,
+        token: None,
     }
 }
 
@@ -48,6 +52,8 @@ pub(crate) fn spark_target() -> Target {
         project: None,
         dataset: None,
         location: None,
+        host: None,
+        token: None,
     }
 }
 

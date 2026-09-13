@@ -138,6 +138,8 @@ async fn test_materialized_view_hard_errors_on_duckdb() {
             project: None,
             dataset: None,
             location: None,
+            host: None,
+            token: None,
         },
     );
 

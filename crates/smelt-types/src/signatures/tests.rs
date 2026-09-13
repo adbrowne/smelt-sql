@@ -396,6 +396,23 @@ fn registry_lookup_by_name() {
 }
 
 #[test]
+fn epoch_us_is_registry_backed() {
+    let epoch_us = BuiltinRegistry::resolve("EPOCH_US").expect("EPOCH_US present");
+    assert_eq!(
+        epoch_us.params,
+        vec![SigParam::Concrete(TypeConstraint::Concrete(
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        ))]
+    );
+    assert_eq!(
+        epoch_us.return_type,
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt))
+    );
+}
+
+#[test]
 fn registry_lookup_case_insensitive() {
     let canonical = BuiltinRegistry::resolve("LOWER").expect("LOWER present");
     let lowercase = BuiltinRegistry::resolve("lower").expect("lower present");

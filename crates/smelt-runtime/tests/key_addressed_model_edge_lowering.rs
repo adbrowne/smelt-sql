@@ -257,6 +257,17 @@ fn missing_key_scope_column_on_the_upstream_fails_loud() {
 }
 
 // ── 3 ────────────────────────────────────────────────────────────────────
+/// This bail is now a defensive guard for **inconsistent inputs**, not the
+/// primary degradation route: availability resolution
+/// (`smelt_logical::maintenance::availability::required_state_structure`,
+/// phase 7b) already downgrades a sidecar-less key-addressed cell away from
+/// `PerGroupRecompute` before this function ever sees it. This test still
+/// passes `StateAvailability::all()` alongside a `false` capability flag —
+/// the two disagreeing with each other — which is exactly the inconsistent
+/// case the fail-loud bail still exists for. See
+/// `key_addressed_edge_returns_none_under_honest_spark_availability` below
+/// for the honest (agreeing) case, which now resolves to `Ok(None)` instead
+/// of erroring.
 #[test]
 fn key_addressed_edge_refuses_without_the_sidecar_capability() {
     let text = format!("{DOWNSTREAM_MODEL_FILE}{DOWNSTREAM_MODEL_SQL}\n");
@@ -304,6 +315,48 @@ fn key_addressed_edge_admits_when_the_capability_is_declared() {
     .expect("resolution must not error")
     .expect("a non-DuckDB dialect declaring the capability must still resolve the cell");
     assert_eq!(resolved.0, "agg");
+}
+
+// ── 6 ────────────────────────────────────────────────────────────────────
+/// Phase 7b: under **honest** Spark availability (the target's own
+/// `realisable_state_structures` — Spark has no fingerprint sidecar builder
+/// — combined with `warehouse_tables: Allowed`), the key-addressed cell is
+/// downgraded away from `PerGroupRecompute` at plan derivation, so this
+/// function's own loop never finds a matching cell and returns `Ok(None)`
+/// rather than erroring, in contrast to
+/// `key_addressed_edge_refuses_without_the_sidecar_capability` above (which
+/// deliberately passes the *inconsistent* combination of `StateAvailability::
+/// all()` with a `false` capability flag).
+#[test]
+fn key_addressed_edge_returns_none_under_honest_spark_availability() {
+    let text = format!("{DOWNSTREAM_MODEL_FILE}{DOWNSTREAM_MODEL_SQL}\n");
+    let (metadata, sql) = metadata_and_sql(&text);
+    let edges = vec![keyed_edge("agg", &["user_id"])];
+
+    let availability = smelt_logical::maintenance::availability::StateAvailability::resolve(
+        smelt_core::config::WarehouseTables::Allowed,
+        &smelt_logical::maintenance::availability::realisable_state_structures(
+            SqlDialect::SparkSQL,
+        ),
+    );
+
+    let resolved = resolve_live_key_addressed_model_edge_cell(
+        &sql,
+        "downstream",
+        &metadata,
+        &[],
+        &HashSet::new(),
+        &edges,
+        SqlDialect::SparkSQL,
+        smelt_dialect::BackendCapabilities::spark_delta().supports_fingerprint_sidecar,
+        &availability,
+    )
+    .expect("the cell must be downgraded away, not error");
+    assert!(
+        resolved.is_none(),
+        "a sidecar-less key-addressed cell must be downgraded to DeleteInsert at plan \
+         derivation, so this driver never sees a matching PerGroupRecompute cell"
+    );
 }
 
 // ── 4 ────────────────────────────────────────────────────────────────────

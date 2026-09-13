@@ -914,6 +914,7 @@ fn backend_type_to_sql_dialect(
         smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
         smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
         smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
+        smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
     }
 }
 

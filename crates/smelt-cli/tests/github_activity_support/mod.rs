@@ -136,6 +136,17 @@ pub fn smelt_run(workspace: &Path, start: &str, end: &str, extra_args: &[&str]) 
         .args(extra_args)
         .current_dir(workspace)
         .env("RUST_LOG", "warn")
+        // The staged `smelt.yml` declares a `databricks` target whose
+        // `host`/`token` are `${SMELT_DBX_HOSTNAME}`/`${SMELT_DBX_TOKEN}`
+        // (`docs/outcomes/20260912-databricks-dogfood-spine/phases/
+        // 06-plan.md`). Config-load interpolation resolves every `${VAR}` in
+        // the file regardless of which target is selected
+        // (`docs/specs/smelt_yml.md` §Semantics item 8), so the default
+        // `--target dev` run here needs dummy values present, not real ones.
+        .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt run: {e}"));
     if !out.status.success() {

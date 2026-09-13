@@ -66,3 +66,7 @@ smelt_sql.data/
 # container's uid 185, so the host loop's auto-stash/clean cannot remove them —
 # gitignore it to avoid "Permission denied" warnings on every iteration).
 .smelt-spark-ivy/
+
+# The provisioning wizard library's default ENV_FILE (scripts/*-provision.sh,
+# scripts/*-setup.sh) — captured credentials/config values, never committed.
+.env

@@ -107,8 +107,34 @@ fn every_declared_rewrite_id_is_reachable_from_some_entry() {
     seen.dedup();
     assert_eq!(
         seen,
-        vec![RewriteId::BigQueryMedian, RewriteId::WithinGroupToAnalytic],
+        vec![
+            RewriteId::BigQueryMedian,
+            RewriteId::WithinGroupToAnalytic,
+            RewriteId::ElideWindowFrame,
+        ],
     );
+}
+
+#[test]
+fn lag_and_lead_elide_frame_on_sparksql() {
+    for name in ["LAG", "LEAD"] {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        for position in [Position::Window, Position::WholePartitionWindow] {
+            assert_eq!(
+                sig.emission_at(DialectId::SparkSql, position),
+                Emission::Rewrite(RewriteId::ElideWindowFrame),
+                "{name} at {position:?} on SparkSQL"
+            );
+            for dialect in [DialectId::DuckDb, DialectId::BigQuery] {
+                assert_eq!(
+                    sig.emission_at(dialect, position),
+                    Emission::Native,
+                    "{name} at {position:?} on {}",
+                    dialect.slug()
+                );
+            }
+        }
+    }
 }
 
 #[test]

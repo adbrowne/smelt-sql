@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
-use smelt_core::config::Config;
+use smelt_core::config::{BackendType, Config};
 use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
@@ -46,6 +46,39 @@ use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::TimeRange;
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::{build_fn_body_map, EphemeralResolver, UpstreamSchemas};
+
+/// Refuse a cross-backend edge whose producer or consumer target is
+/// `databricks`, naming both targets, instead of letting it fall through to
+/// the `read_parquet()` substitution below (which silently drops the ref
+/// once `materialized_path()` returns `None`).
+///
+/// A `databricks` target has no `warehouse` key at all (`smelt_yml.md`
+/// §"Target shape") and serverless compute exposes no host-visible file
+/// layout for a DuckDB process to read back, so the substitution's
+/// precondition can never hold (`docs/specs/multi_backend.md` §"Cross-engine
+/// data exchange").
+fn refuse_databricks_cross_edges(
+    cross_edges: &[(String, String, String, String)],
+    config: &Config,
+) -> Result<()> {
+    for (_consumer_model, _dep_name, consumer_target, producer_target) in cross_edges {
+        for target_name in [consumer_target, producer_target] {
+            let is_databricks = config
+                .targets
+                .get(target_name)
+                .is_some_and(|t| matches!(t.backend_type(), Ok(BackendType::Databricks)));
+            if is_databricks {
+                anyhow::bail!(
+                    "cross-engine edge between target `{consumer_target}` and target \
+                     `{producer_target}` is refused: `{target_name}` is a `databricks` target, \
+                     which has no host-visible warehouse path for the read_parquet() \
+                     substitution (docs/specs/multi_backend.md §\"Cross-engine data exchange\")"
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Run the project end-to-end.
 ///
@@ -103,6 +136,7 @@ pub async fn execute_project(
     let target_assignments = selection.target_assignments;
     let cross_edges = selection.cross_engine_edges;
     let required_steps = selection.required_steps;
+    refuse_databricks_cross_edges(&cross_edges, &config)?;
 
     // ── External-step invocation ─────────────────────────────────────────
     // Runs before `build_model_plans` so both the dry-run branch and the
@@ -2521,7 +2555,11 @@ pub async fn execute_project(
                 // transaction — never the window-forward patch loop, which
                 // would leave a full refresh touching neither relation.
                 let (succession_result, strategy, time_range) =
-                    if request.full_refresh || force_full_refresh || request.rebuild {
+                    if request.full_refresh
+                        || force_full_refresh
+                        || request.rebuild
+                        || cell.state_downgraded
+                    {
                         let compiler = compilers.get(model_target);
                         let resolver = &ephemeral_resolvers[model_target];
                         let compiled = compiler.compile_with_sql_and_ephemerals(
@@ -4864,4 +4902,101 @@ pub async fn execute_project(
         total_rows_overall,
         check_results,
     ))
+}
+
+#[cfg(test)]
+mod databricks_cross_edge_tests {
+    use super::refuse_databricks_cross_edges;
+    use smelt_core::config::{Config, Target};
+
+    fn target(target_type: &str) -> Target {
+        Target {
+            target_type: target_type.to_string(),
+            database: Some("db.duckdb".to_string()),
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: None,
+            dataset: None,
+            location: None,
+            host: if target_type == "databricks" {
+                Some("h.cloud.databricks.com".to_string())
+            } else {
+                None
+            },
+            token: None,
+        }
+    }
+
+    fn config_with(targets: &[(&str, &str)]) -> Config {
+        let mut config = Config::parse_with_warnings("name: test_project\n")
+            .expect("minimal config must parse")
+            .0;
+        for (name, backend_type) in targets {
+            config
+                .targets
+                .insert(name.to_string(), target(backend_type));
+        }
+        config
+    }
+
+    /// A cross-backend edge whose producer is a `databricks` target is
+    /// refused, naming both the producer and consumer target.
+    #[test]
+    fn cross_backend_edge_to_databricks_is_refused() {
+        let config = config_with(&[("dev", "duckdb"), ("dbx", "databricks")]);
+        let cross_edges = vec![(
+            "consumer_model".to_string(),
+            "producer_dep".to_string(),
+            "dev".to_string(),
+            "dbx".to_string(),
+        )];
+        let err = refuse_databricks_cross_edges(&cross_edges, &config)
+            .expect_err("edge touching a databricks target must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("dev"),
+            "must name consumer target: {message}"
+        );
+        assert!(
+            message.contains("dbx"),
+            "must name producer target: {message}"
+        );
+        assert!(
+            message.contains("databricks"),
+            "must name the backend: {message}"
+        );
+    }
+
+    /// A cross-backend edge whose consumer is a `databricks` target is
+    /// refused too — the check is symmetric.
+    #[test]
+    fn cross_backend_edge_from_databricks_consumer_is_refused() {
+        let config = config_with(&[("dbx", "databricks"), ("dev", "duckdb")]);
+        let cross_edges = vec![(
+            "consumer_model".to_string(),
+            "producer_dep".to_string(),
+            "dbx".to_string(),
+            "dev".to_string(),
+        )];
+        refuse_databricks_cross_edges(&cross_edges, &config)
+            .expect_err("edge touching a databricks target must be refused");
+    }
+
+    /// A cross-backend edge between two non-Databricks targets is untouched.
+    #[test]
+    fn cross_backend_edge_between_non_databricks_targets_is_allowed() {
+        let config = config_with(&[("dev", "duckdb"), ("spark_prod", "spark")]);
+        let cross_edges = vec![(
+            "consumer_model".to_string(),
+            "producer_dep".to_string(),
+            "dev".to_string(),
+            "spark_prod".to_string(),
+        )];
+        refuse_databricks_cross_edges(&cross_edges, &config)
+            .expect("non-databricks cross edge must not be refused by this check");
+    }
 }

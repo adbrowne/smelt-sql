@@ -250,7 +250,7 @@ fn double_colon_varchar_rewrite_spark() {
         &BackendCapabilities::spark(),
         "main",
     );
-    insta::assert_snapshot!(result, @"SELECT CAST(name AS VARCHAR) FROM t");
+    insta::assert_snapshot!(result, @"SELECT CAST(name AS STRING) FROM t");
 }
 
 #[test]

@@ -29,6 +29,57 @@ targets:
     dataset: smelt_dogfood
     location: US
     schema: smelt_dogfood
+  databricks:
+    # The long-lived Databricks Free Edition dogfood schema
+    # (`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`), landed
+    # out-of-band by `scripts/dbx-dogfood-loader.sh` (phase 5). This target's
+    # job is to compile+run the model set against it, not to load it. See
+    # `scripts/dbx-dogfood-env.sh` for the credentials this target needs at
+    # runtime. The oracle target (criterion 9) is deliberately NOT declared
+    # here — that is phase 9's, with its own source-name entry.
+    type: databricks
+    host: ${SMELT_DBX_HOSTNAME}
+    token: ${SMELT_DBX_TOKEN}
+    catalog: workspace
+    schema: smelt_dogfood
+  databricks_oracle:
+    # The full-refresh oracle's own schema for criterion 8 (`docs/outcomes/
+    # 20260912-databricks-dogfood-spine/outcome.md`). Same shape as
+    # `bigquery_oracle` below: refreshes every model from scratch over the
+    # inputs seen so far and writes them to `smelt_dogfood_oracle`, which the
+    # equivalence sweep (`github_activity_dbx_oracle.rs`) compares against the
+    # `databricks` target's incrementally-maintained state in `smelt_dogfood`.
+    # It reads the SAME physical source tables (see the `databricks_oracle:`
+    # entries in `models/sources/raw/github_events.yml` and
+    # `github_events_arrival.yml`); only the outputs are separate.
+    #
+    # Selected only via `--target databricks_oracle`; `target: dev` above
+    # keeps it off the no-`--target` default, which it would otherwise take by
+    # sorting ahead of `dev`.
+    type: databricks
+    host: ${SMELT_DBX_HOSTNAME}
+    token: ${SMELT_DBX_TOKEN}
+    catalog: workspace
+    schema: smelt_dogfood_oracle
+  databricks_job:
+    # The deployment form of the `databricks` target (criterion 11,
+    # docs/outcomes/20260912-databricks-dogfood-spine/outcome.md): the
+    # Asset Bundle's scheduled job (examples/github_activity/databricks.yml,
+    # resources/github_activity_job.yml) runs ON the platform, so it carries
+    # no `token:` at all — the job's own environment supplies Databricks
+    # credentials (the *ambient* form `docs/specs/smelt_yml.md` §"Target
+    # shape" already specifies for `token` absent). `host` still names an
+    # `${ENV}` reference rather than a literal, but it is not a secret: a
+    # Databricks job automatically exports `DATABRICKS_HOST` into its own
+    # runtime environment, so no developer config supplies it
+    # (`docs/specs/multi_backend.md` §"Connection security"). Selected only
+    # via `--target databricks_job` (examples/github_activity/dbx_job/
+    # run_smelt.py); `target: dev` above keeps it off the no-`--target`
+    # default.
+    type: databricks
+    host: ${DATABRICKS_HOST}
+    catalog: workspace
+    schema: smelt_dogfood
   bigquery_oracle:
     # The full-refresh oracle's own dataset. The equivalence invariant
     # (`docs/specs/incremental_models.md` §"The equivalence invariant") is

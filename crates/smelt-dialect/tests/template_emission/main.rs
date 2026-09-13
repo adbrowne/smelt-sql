@@ -11,6 +11,7 @@
 //! template rows.
 
 mod date_functions;
+mod epoch_us;
 mod pinned_output;
 
 use std::collections::{HashMap, HashSet};

@@ -152,6 +152,47 @@ pub async fn create_backend(
                 ))
             }
         }
+        BackendType::Databricks => {
+            #[cfg(feature = "databricks")]
+            {
+                use smelt_backend_spark::SparkBackend;
+
+                let host = target_config
+                    .host
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Databricks target requires 'host' field"))?;
+
+                let default_catalog = "workspace".to_string();
+                let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
+
+                tracing::info!("Backend [{}]: Databricks", target_name);
+                tracing::info!("Host: {}", host);
+                tracing::info!("Catalog: {}", catalog);
+
+                // `token` is never logged — connection-security rule
+                // (`multi_backend.md` §"Connection security"). Absent means
+                // the session authenticates with the client's ambient
+                // Databricks credentials.
+                Ok(Box::new(
+                    SparkBackend::new_databricks(
+                        host,
+                        target_config.token.as_deref(),
+                        catalog,
+                        &target_config.schema,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to connect to Databricks workspace {}: {}", host, e)
+                    })?,
+                ))
+            }
+            #[cfg(not(feature = "databricks"))]
+            {
+                Err(anyhow::anyhow!(
+                    "Databricks backend not available. Rebuild with --features databricks"
+                ))
+            }
+        }
     }
 }
 

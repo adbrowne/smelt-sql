@@ -20,6 +20,7 @@ pub(crate) fn maintenance_dialect_for_target(
             smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
+            smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
         })
         .map(smelt_backend::maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
@@ -39,6 +40,7 @@ pub(crate) fn sql_dialect_for_target(config: &Config, target: &str) -> smelt_bac
             smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
+            smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
         })
         .unwrap_or(smelt_backend::SqlDialect::DuckDB)
 }

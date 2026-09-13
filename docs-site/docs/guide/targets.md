@@ -215,6 +215,128 @@ smelt run --target bigquery_prod
 
 Prefer a service account scoped to the datasets it needs over a user credential.
 
+### Databricks
+
+A `databricks` target reaches a Databricks workspace through Databricks Connect — a serverless
+compute session, not a SQL warehouse or a plain Spark Connect URL. It is specified against
+Databricks **Free Edition**'s constraints: serverless-only compute and mandatory Unity Catalog,
+so a target names a `catalog` and `schema` (Unity Catalog's addressing) rather than Spark's
+`connect_url`/`warehouse`/`format`.
+
+```yaml
+targets:
+  databricks_prod:
+    type: databricks
+    host: my-workspace.cloud.databricks.com
+    token: ${SMELT_DBX_TOKEN}
+    catalog: workspace
+    schema: analytics
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | Yes | Must be `databricks`. |
+| `host` | Yes | Workspace hostname. Must be a **bare hostname** — no scheme, no trailing slash (e.g. `my-workspace.cloud.databricks.com`, not `https://my-workspace.cloud.databricks.com/`). |
+| `token` | No | A `${ENV}` reference to a service-principal secret or personal access token. **Must** be a `${VAR}` reference — a literal token value is a hard configuration error, never a warning, because the value is a whole-workspace credential that would otherwise sit in a checked-in file. When absent, the session authenticates with the client's ambient Databricks credentials instead. |
+| `catalog` | No | Unity Catalog catalog name. Defaults to `workspace`. |
+| `schema` | Yes | Unity Catalog schema holding created tables and views. |
+
+A `databricks` target hard-errors, naming both the offending key and the backend, on any key
+belonging to another backend's shape: `connect_url`, `warehouse`, `format`, `database`,
+`settings`, `project`, `dataset`, and `location`. These are never silently ignored — Free
+Edition's serverless compute has no host-visible warehouse directory and no format choice, so a
+silently-dropped `warehouse:` would lose a user's intent rather than reject it.
+
+smelt compiles the same logical models against Databricks using the SparkSQL dialect, with
+Databricks-specific spellings layered on top where Unity Catalog diverges from vanilla Spark
+(e.g. its own `DROP_COMMAND_TYPE_MISMATCH` error text on a self-referential bootstrap model).
+Loading data into a `databricks` target goes through the backend's own Arrow load path — never a
+host-path file the serverless session cannot see, since there is no persistent local filesystem
+to hand it one.
+
+There is no cross-engine data exchange into or out of a `databricks` target today — the
+Parquet-glob substitution other backend pairs use has no Volumes-based equivalent yet.
+
+Databricks is verified against a live Free Edition workspace: a full refresh, eleven consecutive
+incremental windows, a dual-target parity sweep against DuckDB, and a full-refresh-oracle
+equivalence check all ran against `examples/github_activity`'s 16-model pipeline. See
+[`docs/handoffs/2026-09-13-databricks-findings.md`](https://github.com/adbrowne/smelt-sql/blob/main/docs/handoffs/2026-09-13-databricks-findings.md)
+for the full findings, including the registered divergences and what remains open.
+
+#### Credentials
+
+The Databricks backend authenticates with a `${ENV}`-supplied token (service-principal OAuth
+machine-to-machine or a personal access token) or, when `token` is omitted, the client's ambient
+Databricks credentials — never a literal value in `smelt.yml`.
+
+```bash
+export SMELT_DBX_TOKEN="$(cat /path/to/minted/token)"
+smelt run --target databricks_prod
+```
+
+#### Free Edition constraints
+
+Databricks Free Edition carries no bill, so in place of a budget cap these are the measured
+quotas that bound a project targeting it:
+
+- **Serverless-only, Unity-Catalog-mandatory.** No SQL warehouse path, no format choice — this
+  is why `warehouse` and `format` are refused keys rather than tolerated-but-ignored ones.
+- **Max 5 concurrent job tasks per account**, one SQL warehouse capped at `2X-Small`.
+- **No fixed storage GB cap** — governed by an account-wide fair-usage policy instead; exceeding
+  it suspends compute rather than deleting data.
+- **No published session idle timeout.** A serverless session can be torn down server-side on
+  the order of single-digit seconds after the last statement — harmless (a `UserWarning`, not a
+  failure) but worth expecting if you see `INVALID_HANDLE.SESSION_CLOSED` in logs.
+- **A succession-grain incremental model rebuilds from the whole source on every window**, not
+  just the window, because Databricks/Delta has no realisable tombstone ledger for the
+  window-forward patch route — correct, but O(source) per window rather than O(window). See
+  `docs/specs/state.md` §"The degradation contract".
+
+#### Deployment: Databricks Asset Bundle
+
+A `databricks` target can also run unattended, entirely on the platform, deployed as a
+[Databricks Asset Bundle](https://docs.databricks.com/en/dev-tools/bundles/index.html). The
+bundle declares one job with a daily schedule, a serverless environment for every task, and two
+tasks in order: a loader task that lands the next day's data, then a `smelt run` task that
+processes it as a genuine incremental window. `scripts/dbx-bundle.sh` is the only caller of
+`databricks bundle validate`, `databricks bundle deploy` and `databricks bundle run`:
+
+```bash
+mise run setup-databricks               # pins and installs the Databricks CLI
+bash scripts/dbx-bundle.sh validate     # databricks bundle validate — schema-checks the
+                                         # bundle against a local stub; needs no workspace
+bash scripts/dbx-bundle.sh deploy       # databricks bundle deploy — uploads the bundle and
+                                         # the locally-built wheel
+bash scripts/dbx-bundle.sh seed         # copies smelt.yml and models/ onto the Volume —
+                                         # never .smelt/, so it cannot reset run state
+bash scripts/dbx-bundle.sh run github_activity_daily   # databricks bundle run
+```
+
+smelt reaches the job as a wheel declared in the bundle's `artifacts:` block — the same
+`bindings = "bin"` maturin build the PyPI release uses (root `pyproject.toml`) — which `bundle
+deploy` builds locally and uploads to workspace files itself, so no Volume and no hand-written
+fetch step are needed for the binary itself. This is a placeholder for a PyPI dependency: once a
+release tracks the CLI's `dev` branch, the `artifacts:` block is dropped in favour of a pinned
+`smelt-sql==<version>` in the job environment's dependencies.
+
+The job's own `databricks` target authenticates with the **ambient** session — no `token` key at
+all, and `host` supplied by the job's own runtime environment rather than a developer's config
+(see "Credentials" above). The project itself, including its `.smelt/` run state, lives on a
+Unity Catalog Volume — declared as a bundle resource (`resources/volume.yml`) rather than assumed
+pre-existing — instead of the job's own ephemeral workspace-files checkout, so each scheduled run
+is a genuine incremental window over the previous one rather than a fresh start. `bundle deploy`
+creates the Volume; `scripts/dbx-bundle.sh seed` then copies `smelt.yml` and `models/` onto it.
+Re-running `seed` is safe to repeat — it never touches `.smelt/`, the run-state ledger that makes
+incremental windows possible, so a re-seed cannot silently reset a deployed project's state.
+
+The loader task passes `--next-day` rather than a literal date: the fixture the dogfood pipeline
+replays holds a fixed historical range with no relationship to the job trigger's real calendar
+date, so a scheduled run advances the fixture by its own ledger (the live `_loader_days` table)
+instead of trusting wall-clock time, and exits cleanly (not as a job failure) once the fixture is
+exhausted. The loader's own DuckDB access prefers the `duckdb` Python module over shelling out to
+a CLI binary, since a serverless Databricks Python environment installs packages but has no CLI
+on `PATH`.
+
 ## Switching targets
 
 Use the `--target` flag on any command:

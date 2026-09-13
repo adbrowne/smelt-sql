@@ -39,6 +39,13 @@ fn smelt_run_expect_failure(workspace: &Path, start: &str, end: &str) -> String 
         .args(["run", "--event-time-start", start, "--event-time-end", end])
         .current_dir(workspace)
         .env("RUST_LOG", "warn")
+        // See `smelt_run`'s comment in `github_activity_support`: the staged
+        // `smelt.yml`'s `databricks` target needs these resolvable at
+        // config-load time regardless of the selected target.
+        .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt run: {e}"));
     assert!(
@@ -211,6 +218,10 @@ fn smelt_explain(workspace: &Path, model: &str) -> String {
         .args(["explain", model, "--project-dir"])
         .arg(workspace)
         .env("RUST_LOG", "warn")
+        .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt explain: {e}"));
     assert!(
@@ -445,6 +456,10 @@ fn smelt_explain_json(workspace: &Path, model: &str) -> serde_json::Value {
         .args(["explain", model, "--json", "--project-dir"])
         .arg(workspace)
         .env("RUST_LOG", "warn")
+        .env("SMELT_DBX_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_HOSTNAME", "unused-in-tests.cloud.databricks.com")
+        .env("DATABRICKS_HOST", "unused-in-tests.cloud.databricks.com")
+        .env("SMELT_DBX_TOKEN", "unused-in-tests")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn smelt explain --json: {e}"));
     assert!(

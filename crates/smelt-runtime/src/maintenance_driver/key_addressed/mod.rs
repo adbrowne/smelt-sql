@@ -48,9 +48,16 @@ pub type LiveKeyAddressedModelEdgeCell = (
 ///
 /// Two fail-loud legs run BEFORE any backend call
 /// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`):
-/// - a target that does not declare `supports_fingerprint_sidecar` — the
-///   group-grain sidecar diff this cell's execution needs requires the
-///   capability, matching every other sidecar consumer in this module;
+/// - a target that does not declare `supports_fingerprint_sidecar` — this is
+///   now a **defensive guard against inconsistent inputs**, not the primary
+///   route: availability resolution (`smelt_logical::maintenance::
+///   availability::required_state_structure`) already downgrades a
+///   sidecar-less key-addressed cell away from `PerGroupRecompute` before
+///   this function ever sees it (`docs/specs/state.md` §"The degradation
+///   contract" step 2, `docs/outcomes/20260912-databricks-dogfood-spine/
+///   outcome.md` phase 7b), so this bail only fires when the caller's own
+///   `availability` and `supports_fingerprint_sidecar` arguments disagree
+///   with each other — a caller bug, not a normal degradation path;
 /// - a `key_scope.keys` column the upstream relation does not actually
 ///   carry — checked against the upstream edge's own declared
 ///   `ModelEdge::unique_key` (the upstream's real output-table column

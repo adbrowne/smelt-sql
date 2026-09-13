@@ -38,6 +38,7 @@ use self::restructure_emit::active_substitution_for;
 use self::rewrites::print_array_rewrite;
 use self::rewrites::print_cast_rewrite;
 use self::rewrites::print_children;
+use self::rewrites::print_type_spec;
 use self::smelt_path::expand_smelt_path_call_star;
 
 use self::pipe::print_pipe_rewrite;
@@ -344,6 +345,17 @@ pub(crate) fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String
         }
         SyntaxKind::CAST_EXPR if !ctx.capabilities.supports_double_colon_cast => {
             print_cast_rewrite(node, ctx, out);
+        }
+        SyntaxKind::TYPE_SPEC => {
+            print_type_spec(node, ctx, out);
+        }
+        // A window frame the registry declares elided for this dialect
+        // (`docs/specs/multi_backend.md` §"Frame elision on offset
+        // functions") prints nothing of its own — only its own trailing
+        // trivia, so a comment or the closing `)` right after it does not
+        // end up glued to the preceding clause.
+        SyntaxKind::WINDOW_FRAME if crate::frame_elision::should_elide(node, ctx.dialect) => {
+            registry_emit::push_trailing_trivia(node, out);
         }
         // Top-level smelt DSL declarations that are not SQL: suppress them so
         // they never reach the backend engine.  `SMELT_DEFINE` and

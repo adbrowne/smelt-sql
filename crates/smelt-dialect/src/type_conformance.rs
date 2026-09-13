@@ -64,6 +64,23 @@ pub fn wrap_with_type_casts(
     )
 }
 
+/// The single owner of per-dialect cast-target spelling for a **source-written**
+/// cast target (`CAST(x AS VARCHAR)`, `x::VARCHAR`), shared with the cast-wrap's
+/// own [`type_cast_sql`]. Parses `type_text` (as it appears in the model's own
+/// SQL) and re-derives the dialect spelling; returns `Some(spelling)` only when
+/// it differs from the canonical spelling the source text already stands for,
+/// so an already-correct source cast is never rewritten. Returns `None` on a
+/// type name `parse_type` does not recognise, rather than guessing.
+pub fn source_cast_type_sql(type_text: &str, dialect: SqlDialect) -> Option<String> {
+    let dt = smelt_types::parse_type(type_text).ok()?;
+    let spelling = type_cast_sql(&dt, dialect);
+    if spelling == dt.to_backend_sql() {
+        None
+    } else {
+        Some(spelling)
+    }
+}
+
 /// Returns the SQL type string to use in a CAST expression for the given dialect.
 ///
 /// Spark 4+ requires `VARCHAR` to carry a length; use `STRING` for bare string casts.
@@ -204,6 +221,64 @@ mod tests {
         let sql = "SELECT * FROM t";
         let result = wrap_with_type_casts(sql, &[], &[], SqlDialect::DuckDB);
         assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn source_cast_spelling_spark_bare_varchar_is_string() {
+        assert_eq!(
+            source_cast_type_sql("VARCHAR", SqlDialect::SparkSQL),
+            Some("STRING".to_string())
+        );
+        assert_eq!(
+            source_cast_type_sql("TEXT", SqlDialect::SparkSQL),
+            Some("STRING".to_string())
+        );
+    }
+
+    #[test]
+    fn source_cast_spelling_keeps_length_qualified_varchar() {
+        assert_eq!(
+            source_cast_type_sql("VARCHAR(10)", SqlDialect::SparkSQL),
+            None
+        );
+    }
+
+    #[test]
+    fn source_cast_spelling_duckdb_never_rewrites() {
+        for type_name in [
+            "VARCHAR",
+            "TEXT",
+            "VARCHAR(10)",
+            "INTEGER",
+            "DOUBLE",
+            "DECIMAL(10,2)",
+        ] {
+            assert_eq!(
+                source_cast_type_sql(type_name, SqlDialect::DuckDB),
+                None,
+                "{type_name} should not be rewritten on DuckDB"
+            );
+        }
+    }
+
+    #[test]
+    fn source_cast_spelling_unparseable_type_passes_through() {
+        assert_eq!(
+            source_cast_type_sql("NOT_A_REAL_TYPE", SqlDialect::SparkSQL),
+            None
+        );
+    }
+
+    #[test]
+    fn source_cast_spelling_bigquery_rejected_families() {
+        assert_eq!(
+            source_cast_type_sql("VARCHAR", SqlDialect::BigQuery),
+            Some("STRING".to_string())
+        );
+        assert_eq!(
+            source_cast_type_sql("DOUBLE", SqlDialect::BigQuery),
+            Some("FLOAT64".to_string())
+        );
     }
 
     #[test]

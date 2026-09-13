@@ -200,9 +200,31 @@ Framing, decision surface, and proposed sequence: [`docs/research/20260905-self-
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap. The `PostgreSQL` *emission* dialect (`SqlDialect`/`DialectId` variant, capabilities, coverage column) is being retired by [`20260904-dialect-emission-vocabulary`](outcomes/20260904-dialect-emission-vocabulary/outcome.md) phase 1 (#181, closed 2026-09-04): with no backend and no oracle its verdicts were unverifiable claims. The pg_query grammar anchor in `smelt-parser-compat` is unaffected. When this backend is built, the cross-engine audit derives its column from probes; nothing authored beforehand would survive that.
 
-### 11. Databricks Support + Metrics-View Compatibility (low priority)
+### 11. Databricks Metrics-View Compatibility + Remaining Databricks Gaps (low priority)
 
-Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
+Databricks is now a distinct, live-verified backend, not merely reached through the Spark /
+Databricks-Connect path: a first-class `type: databricks` target, its own
+`BackendCapabilities` profile, and a full dogfood pipeline (16 models, a full refresh, eleven
+consecutive incremental windows, dual-target parity against DuckDB, and full-refresh-oracle
+equivalence) all measured against a live Databricks Free Edition workspace. See
+[`docs/handoffs/2026-09-13-databricks-findings.md`](../handoffs/2026-09-13-databricks-findings.md)
+and [`docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`](outcomes/20260912-databricks-dogfood-spine/outcome.md)
+for what was measured, what was fixed, and what remains open (a `databricks-correctness`
+follow-on outcome's punch-list).
+
+What remains under this item, treated as low priority:
+
+- **The Metrics DSL** (`smelt.metric()`, long-deferred). Databricks now ships first-class
+  **metrics views**, so the concrete, testable goal is that smelt metric definitions are
+  compatible with — and can target — Databricks metrics views. That compatibility test is the
+  forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL
+  stays low priority.
+- **Native incremental-view maintenance (Enzyme).** `supports_native_ivm` is `false` for
+  `databricks()` today — smelt emits no Enzyme statements, so `refresh: materialized_view`
+  hard-errors exactly as on DuckDB and both Spark profiles.
+- **Paid-tier compute shapes.** The `databricks` target is specified against Free Edition's
+  serverless-only, Unity-Catalog-mandatory shape. Classic clusters, instance profiles, and
+  private networking on a paid workspace are unmodelled until a concrete need arises.
 
 ---
 

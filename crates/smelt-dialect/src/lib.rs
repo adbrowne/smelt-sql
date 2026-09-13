@@ -6,6 +6,7 @@
 mod dialect;
 mod emission_check;
 pub mod emission_settle;
+pub(crate) mod frame_elision;
 pub mod position;
 mod printer;
 pub mod restructure;

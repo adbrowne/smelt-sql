@@ -1,0 +1,131 @@
+{
+  "checkpoints": [
+    {
+      "day": "2026-08-15",
+      "label": "w11",
+      "relations": [
+        {
+          "dbx_only": 0,
+          "dbx_rows": 37395,
+          "duck_only": 0,
+          "duck_rows": 37395,
+          "relation": "bronze_events"
+        },
+        {
+          "dbx_only": 9,
+          "dbx_rows": 36762,
+          "duck_only": 9,
+          "duck_rows": 36762,
+          "relation": "gold_events_enriched"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 5964,
+          "duck_only": 0,
+          "duck_rows": 5964,
+          "relation": "gold_repo_activity_daily"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 3349,
+          "duck_only": 0,
+          "duck_rows": 3349,
+          "relation": "gold_repo_dim"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 11,
+          "duck_only": 0,
+          "duck_rows": 11,
+          "relation": "marts_daily_active_contributors"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 27,
+          "duck_only": 0,
+          "duck_rows": 27,
+          "relation": "marts_naming_history"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 3349,
+          "duck_only": 0,
+          "duck_rows": 3349,
+          "relation": "marts_repo_leaderboard"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 7,
+          "duck_only": 0,
+          "duck_rows": 7,
+          "relation": "marts_star_growth"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 36650,
+          "duck_only": 0,
+          "duck_rows": 36650,
+          "relation": "silver_actor_naming"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 7276,
+          "duck_only": 0,
+          "duck_rows": 7276,
+          "relation": "silver_actor_sessions"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 36762,
+          "duck_only": 0,
+          "duck_rows": 36762,
+          "relation": "silver_events_deduped"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 48,
+          "duck_only": 0,
+          "duck_rows": 48,
+          "relation": "silver_issue_events"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 144,
+          "duck_only": 0,
+          "duck_rows": 144,
+          "relation": "silver_pr_events"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 34553,
+          "duck_only": 0,
+          "duck_rows": 34553,
+          "relation": "silver_push_events"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 36654,
+          "duck_only": 0,
+          "duck_rows": 36654,
+          "relation": "silver_repo_naming"
+        },
+        {
+          "dbx_only": 0,
+          "dbx_rows": 18,
+          "duck_only": 0,
+          "duck_rows": 18,
+          "relation": "silver_star_events"
+        }
+      ],
+      "window": 11
+    }
+  ],
+  "excluded_models": [],
+  "schedule": {
+    "checkpoints": [
+      11
+    ],
+    "days": 11,
+    "start_date": "2026-08-15"
+  }
+}

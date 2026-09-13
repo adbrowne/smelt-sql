@@ -1,0 +1,70 @@
+resources:
+  jobs:
+    github_activity_daily:
+      name: "github_activity daily dogfood run"
+
+      # Fires once a day. Free Edition has no fixed session-idle SLA
+      # (docs-site/docs/guide/targets.md §"Free Edition constraints"), so a
+      # once-a-day cadence keeps each run's serverless session short-lived by
+      # construction.
+      schedule:
+        quartz_cron_expression: ${var.schedule_cron}
+        timezone_id: "UTC"
+        pause_status: UNPAUSED
+
+      tasks:
+        - task_key: load_next_day
+          environment_key: loader_env
+          spark_python_task:
+            python_file: ../dbx_job/load_next_day.py
+            parameters:
+              - "--next-day"
+
+        - task_key: smelt_run
+          depends_on:
+            - task_key: load_next_day
+          environment_key: smelt_env
+          spark_python_task:
+            python_file: ../dbx_job/run_smelt.py
+            parameters:
+              - "/Volumes/${var.catalog}/${var.schema}/${var.volume_name}/project"
+
+      # One serverless environment per task: the loader needs the pinned
+      # Databricks Connect client stack (scripts/dbx-dogfood-requirements.txt
+      # mirrors this pin); `smelt run` needs only the freshly-built wheel.
+      # Neither task names any classic-compute shape — Free Edition is
+      # serverless-only, so a paid-tier cluster cannot creep in here.
+      environments:
+        - environment_key: loader_env
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-connect==15.4.5
+              - pyarrow
+              - duckdb
+
+        - environment_key: smelt_env
+          spec:
+            client: "1"
+            dependencies:
+              - ../../../dist/*.whl
+
+    # A one-off job, run manually (`scripts/dbx-bundle.sh run volume_probe`),
+    # never scheduled — it measures the deployed Volume's FUSE-layer
+    # filesystem guarantees (phases/11c-plan.md) rather than doing pipeline
+    # work. Kept as a separate job resource, not a task on the daily job, so
+    # a probe run never counts as one of the three scheduled proof runs.
+    github_activity_volume_probe:
+      name: "github_activity Volume FUSE probe"
+      tasks:
+        - task_key: volume_probe
+          environment_key: probe_env
+          spark_python_task:
+            python_file: ../dbx_job/volume_probe.py
+            parameters:
+              - "/Volumes/${var.catalog}/${var.schema}/${var.volume_name}/project"
+      environments:
+        - environment_key: probe_env
+          spec:
+            client: "1"
+            dependencies: []

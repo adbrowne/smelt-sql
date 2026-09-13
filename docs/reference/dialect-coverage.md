@@ -96,6 +96,7 @@ the exact reverse.
 | `DAY` | call | native | native | native (gap #179) |
 | `DAYOFWEEK` | call | native | template:DAYOFWEEK({0}) - 1 | native (gap #179) |
 | `DENSE_RANK` | call | native | native | native |
+| `EPOCH_US` | call | native | template:unix_micros({0}) | template:UNIX_MICROS({0}) |
 | `EVERY` | call | rename:BOOL_AND | native | rename:LOGICAL_AND |
 | `EXISTS` | special | native | native | native |
 | `EXP` | call | native | native | native |
@@ -120,10 +121,10 @@ the exact reverse.
 | `JSON_EXTRACT_TEXT` | call | rename:JSON_EXTRACT_STRING | rename:GET_JSON_OBJECT | rename:JSON_VALUE |
 | `JSON_OBJECT` | call | native | unsupported | native |
 | `JSON_OBJECT_KEYS` | call | rename:JSON_KEYS | native (gap divergent) | native (gap #179) |
-| `LAG` | call | native | native | native |
+| `LAG` | call | native | rewrite:ElideWindowFrame | native |
 | `LAST` | call | native (gap #175) | native (gap #175) | native (gap #179) |
 | `LAST_VALUE` | call | native | native | native |
-| `LEAD` | call | native | native | native |
+| `LEAD` | call | native | rewrite:ElideWindowFrame | native |
 | `LEAST` | call | native | native | native (gap divergent) |
 | `LEFT` | call | native | native | native |
 | `LENGTH` | call | native | native | native |
