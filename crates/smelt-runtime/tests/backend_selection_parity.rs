@@ -27,6 +27,10 @@ fn duckdb_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -45,6 +49,10 @@ fn spark_target_with_url(url: &str) -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 

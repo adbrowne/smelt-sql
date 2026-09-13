@@ -614,12 +614,30 @@ fn output_column_names(projection: &Projection) -> Vec<String> {
     names
 }
 
-fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabilities) {
+/// A `trino` target has no [`BackendCapabilities`] constructor yet: the
+/// profile is established **by execution** against the live coordinator
+/// (`multi_backend.md` §Surface), which is
+/// `20260913-trino-target-spine` phase 8's job, not this one's. Returning
+/// this rather than a placeholder constructor — or aliasing Trino onto
+/// `BackendCapabilities::spark()` — keeps `capability_conformance.rs` and the
+/// spec's `?`-cells gate meaningful: nothing claims a Trino capability that
+/// was never measured.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the trino backend has no measured BackendCapabilities profile yet — \
+     see docs/outcomes/20260913-trino-target-spine phase 8"
+)]
+pub struct TrinoCapabilitiesUnmeasured;
+
+fn dialect_and_capabilities(
+    backend_type: BackendType,
+) -> Result<(SqlDialect, BackendCapabilities), TrinoCapabilitiesUnmeasured> {
     match backend_type {
-        BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
-        BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
-        BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
-        BackendType::Databricks => (SqlDialect::SparkSQL, BackendCapabilities::databricks()),
+        BackendType::DuckDB => Ok((SqlDialect::DuckDB, BackendCapabilities::duckdb())),
+        BackendType::Spark => Ok((SqlDialect::SparkSQL, BackendCapabilities::spark())),
+        BackendType::BigQuery => Ok((SqlDialect::BigQuery, BackendCapabilities::bigquery())),
+        BackendType::Databricks => Ok((SqlDialect::SparkSQL, BackendCapabilities::databricks())),
+        BackendType::Trino => Err(TrinoCapabilitiesUnmeasured),
     }
 }
 
@@ -1304,12 +1322,12 @@ impl UpstreamSchemas {
 }
 
 impl SqlCompiler {
-    pub(crate) fn new(config: Config, target: &Target) -> Self {
+    pub(crate) fn new(config: Config, target: &Target) -> anyhow::Result<Self> {
         let (dialect, capabilities) = match target.backend_type() {
-            Ok(bt) => dialect_for_backend(bt),
+            Ok(bt) => dialect_and_capabilities(bt)?,
             Err(_) => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         };
-        Self {
+        Ok(Self {
             config,
             dialect,
             capabilities,
@@ -1318,7 +1336,7 @@ impl SqlCompiler {
             upstream_schemas: Arc::new(UpstreamSchemas::default()),
             fn_bodies: None,
             state_bearing_models: std::collections::BTreeSet::new(),
-        }
+        })
     }
 
     /// Set the active target name so per-target `name:` overrides in source
@@ -2637,14 +2655,14 @@ pub struct CompilerRegistry {
 
 impl CompilerRegistry {
     /// Create compilers for all targets in the set.
-    pub fn new(config: &Config, targets: &HashMap<String, Target>) -> Self {
+    pub fn new(config: &Config, targets: &HashMap<String, Target>) -> anyhow::Result<Self> {
         let mut compilers = HashMap::new();
         for (name, target) in targets {
-            let mut compiler = SqlCompiler::new(config.clone(), target);
+            let mut compiler = SqlCompiler::new(config.clone(), target)?;
             compiler.set_target_name(name);
             compilers.insert(name.clone(), compiler);
         }
-        Self { compilers }
+        Ok(Self { compilers })
     }
 
     /// Get the compiler for a target name.
@@ -2720,7 +2738,32 @@ mod tests {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         }
+    }
+
+    /// A `trino` target errors by name rather than borrowing another
+    /// backend's `BackendCapabilities` profile — the capability profile is
+    /// established by execution (`20260913-trino-target-spine` phase 8), not
+    /// aliased onto Spark's.
+    #[test]
+    fn dialect_and_capabilities_refuses_trino_until_measured() {
+        let mut target = make_test_target();
+        target.target_type = "trino".to_string();
+        target.host = Some("localhost".to_string());
+        target.catalog = Some("iceberg".to_string());
+        target.user = Some("smelt".to_string());
+
+        let err = SqlCompiler::new(make_test_config(), &target)
+            .err()
+            .expect("a trino target must be refused until capabilities are measured");
+        assert!(
+            err.to_string().contains("trino"),
+            "error must name trino: {err}"
+        );
     }
 
     /// Helper function to parse SQL and extract refs with real TextRange values
@@ -2751,6 +2794,10 @@ mod tests {
                 location: None,
                 host: None,
                 token: None,
+                port: None,
+                user: None,
+                tls: None,
+                password: None,
             },
         );
 
@@ -2793,7 +2840,7 @@ GROUP BY user_id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -2821,7 +2868,7 @@ GROUP BY user_id
         };
 
         let config = make_test_config();
-        let mut compiler = SqlCompiler::new(config, &make_test_target());
+        let mut compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let mut models = HashMap::new();
         models.insert(
@@ -2878,8 +2925,8 @@ GROUP BY user_id
         };
 
         let config = make_test_config();
-        let compiler_baseline = SqlCompiler::new(config.clone(), &make_test_target());
-        let compiler_empty_state = SqlCompiler::new(config, &make_test_target());
+        let compiler_baseline = SqlCompiler::new(config.clone(), &make_test_target()).unwrap();
+        let compiler_empty_state = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let baseline = compiler_baseline.compile(&model, "main").unwrap();
         let empty_state = compiler_empty_state.compile(&model, "main").unwrap();
@@ -2910,7 +2957,7 @@ JOIN smelt.model_b b ON a.id = b.id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -2949,7 +2996,7 @@ JOIN smelt.model_b b ON a.id = b.id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         // Must succeed — the compiler no longer rejects has_named_params=true.
         let result = compiler.compile(&model, "main");
@@ -2984,7 +3031,7 @@ JOIN smelt.model_b b ON a.id = b.id
 
         let config = make_test_config();
         // make_test_target() is `duckdb`, which sets `supports_native_ivm = false`.
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let err = compiler
             .compile(&model, "main")
@@ -3035,7 +3082,7 @@ JOIN smelt.model_b b ON a.id = b.id
             },
         );
 
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
         let compiled = compiler.compile(&model, "main").unwrap();
 
         assert!(matches!(compiled.materialization, Materialization::Table));
@@ -3060,7 +3107,7 @@ JOIN smelt.model_b b ON a.id = b.id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3088,7 +3135,7 @@ JOIN smelt.model_b b ON a.id = b.id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3118,7 +3165,7 @@ JOIN smelt.model_a b ON a.parent_id = b.id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3151,7 +3198,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3185,7 +3232,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let caps = BackendCapabilities::duckdb();
         let resolver = EphemeralResolver::new(
@@ -3228,7 +3275,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let caps = BackendCapabilities::duckdb();
         let resolver = EphemeralResolver::new(
@@ -3276,7 +3323,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let caps = BackendCapabilities::duckdb();
         let resolver = EphemeralResolver::new(
@@ -3317,7 +3364,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let caps = BackendCapabilities::duckdb();
         let resolver = EphemeralResolver::new(
@@ -3426,8 +3473,13 @@ WHERE event_type = 'click'
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         };
         let compiled = SqlCompiler::new(make_test_config(), &target)
+            .unwrap()
             .compile_with_sql(&model, "main", sql)
             .unwrap();
 
@@ -3466,7 +3518,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3508,7 +3560,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3563,8 +3615,13 @@ WHERE event_type = 'click'
             location: Some("US".to_string()),
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         };
         let compiled = SqlCompiler::new(make_test_config(), &target)
+            .unwrap()
             .compile(&model, "main")
             .unwrap();
 
@@ -3647,7 +3704,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3684,7 +3741,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -3731,7 +3788,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config, &make_test_target());
+        let compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
         let caps = BackendCapabilities::duckdb();
         let resolver = EphemeralResolver::new(
             &[("staging_users".to_string(), ephemeral_sql.to_string())],
@@ -4106,7 +4163,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             assert_eq!(dialect.id().slug(), dialect_name_of(dialect));
 
             let config = make_test_config();
-            let mut compiler = SqlCompiler::new(config, &make_test_target());
+            let mut compiler = SqlCompiler::new(config, &make_test_target()).unwrap();
             compiler.dialect = dialect;
             compiler.set_upstream_schemas(schemas.clone());
 

@@ -38,6 +38,10 @@ fn duckdb_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -57,7 +61,7 @@ fn registry() -> CompilerRegistry {
         maintenance: None,
         probes: Default::default(),
     };
-    CompilerRegistry::new(&config, &targets)
+    CompilerRegistry::new(&config, &targets).unwrap()
 }
 
 fn make_model(name: &str, sql: &str) -> ModelFile {

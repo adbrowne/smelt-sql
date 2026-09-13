@@ -134,7 +134,7 @@ struct CompileFixture {
 }
 
 fn compile_fixture(config: &Config) -> CompileFixture {
-    let registry = CompilerRegistry::new(config, &config.targets);
+    let registry = CompilerRegistry::new(config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")

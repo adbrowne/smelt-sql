@@ -61,6 +61,10 @@ fn duckdb_target(schema: &str) -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -179,7 +183,7 @@ name: warehouse.users_v2
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), duckdb_target("main"));
     let config = config_with_targets(targets.clone());
-    let mut compilers = CompilerRegistry::new(&config, &targets);
+    let mut compilers = CompilerRegistry::new(&config, &targets).unwrap();
 
     let upstream_schemas = UpstreamSchemas::from_database(&db, &project_dir, &models)
         .expect("from_database should succeed — no aggregate sources.yml present");
@@ -255,7 +259,7 @@ columns:
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), duckdb_target("main"));
     let config = config_with_targets(targets.clone());
-    let mut compilers = CompilerRegistry::new(&config, &targets);
+    let mut compilers = CompilerRegistry::new(&config, &targets).unwrap();
 
     let upstream_schemas = UpstreamSchemas::from_database(&db, &project_dir, &models)
         .expect("from_database should succeed — no aggregate sources.yml present");
@@ -327,7 +331,7 @@ name:
     targets.insert("dev".to_string(), duckdb_target("main_dev"));
     targets.insert("prod".to_string(), duckdb_target("main_prod"));
     let config = config_with_targets(targets.clone());
-    let mut compilers = CompilerRegistry::new(&config, &targets);
+    let mut compilers = CompilerRegistry::new(&config, &targets).unwrap();
 
     let upstream_schemas = UpstreamSchemas::from_database(&db, &project_dir, &models)
         .expect("from_database should succeed");
@@ -407,7 +411,7 @@ name:
     let mut targets = HashMap::new();
     targets.insert("staging".to_string(), duckdb_target("main_staging"));
     let config = config_with_targets(targets.clone());
-    let mut compilers = CompilerRegistry::new(&config, &targets);
+    let mut compilers = CompilerRegistry::new(&config, &targets).unwrap();
 
     let upstream_schemas = UpstreamSchemas::from_database(&db, &project_dir, &models)
         .expect("from_database should succeed");

@@ -111,6 +111,10 @@ fn state_from_project(project_root: PathBuf) -> Arc<AppState> {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
     let mut config = config;
@@ -268,11 +272,12 @@ fn assemble_diagnostics_independently(
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
             smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
+            smelt_core::config::BackendType::Trino => smelt_backend::SqlDialect::Trino,
         })
         .map(|d| smelt_backend::maintenance_dialect(d).unwrap())
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
 
-    let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
+    let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets).unwrap();
     let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
     registry.set_function_bodies_all(fn_bodies);
     if let Ok(upstream_schemas) =

@@ -140,6 +140,10 @@ async fn test_materialized_view_hard_errors_on_duckdb() {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
 

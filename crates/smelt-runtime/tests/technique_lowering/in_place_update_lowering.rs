@@ -37,6 +37,10 @@ fn test_config() -> smelt_core::config::Config {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
     smelt_core::config::Config {
@@ -113,7 +117,7 @@ fn in_place_update_lowered_from_pure_backfill_cell() {
     };
 
     let config = test_config();
-    let registry = CompilerRegistry::new(&config, &config.targets);
+    let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")

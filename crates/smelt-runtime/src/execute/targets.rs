@@ -10,9 +10,8 @@ use smelt_core::config::Config;
 /// statements"). Falls back to DuckDb for an unrecognised target; propagates
 /// [`smelt_backend::UnsupportedMaintenanceDialect`] for a target whose
 /// resolved [`smelt_backend::SqlDialect`] has no `MaintenanceDialect` mapping
-/// yet (e.g. `SqlDialect::Trino` — `BackendType` itself has no `Trino` arm as
-/// of this phase, so this path is unreachable today, but the signature is
-/// fallible now so it is not a silent default the moment one lands).
+/// yet — `SqlDialect::Trino` today (`smelt_backend::maintenance_dialect`
+/// refuses it by name; `20260913-trino-incremental` narrows the error away).
 pub(crate) fn maintenance_dialect_for_target(
     config: &Config,
     target: &str,
@@ -29,6 +28,7 @@ pub(crate) fn maintenance_dialect_for_target(
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
             smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
+            smelt_core::config::BackendType::Trino => smelt_backend::SqlDialect::Trino,
         })
     else {
         return Ok(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
@@ -51,6 +51,7 @@ pub(crate) fn sql_dialect_for_target(config: &Config, target: &str) -> smelt_bac
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
             smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
+            smelt_core::config::BackendType::Trino => smelt_backend::SqlDialect::Trino,
         })
         .unwrap_or(smelt_backend::SqlDialect::DuckDB)
 }

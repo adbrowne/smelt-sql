@@ -254,7 +254,7 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
     // 6. Build CompilerRegistry (sanctioned run-pipeline-parity path).
     let mut targets_map: HashMap<String, smelt_core::config::Target> = HashMap::new();
     targets_map.insert(target.clone(), target_config.clone());
-    let mut compilers = CompilerRegistry::new(&config, &targets_map);
+    let mut compilers = CompilerRegistry::new(&config, &targets_map)?;
 
     // Wire in function bodies so `smelt.functions.*` calls inside checks expand.
     let fn_files = discovery.discover_function_files().unwrap_or_default();

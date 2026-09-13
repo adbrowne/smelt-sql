@@ -109,7 +109,7 @@ fn column_scoped_merge_preview_renders_the_suppressed_matched_arm() {
     );
     let column_groups = merge_probe_column_groups();
     let config = load_fixture().2;
-    let registry = CompilerRegistry::new(&config, &config.targets);
+    let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")
@@ -158,7 +158,7 @@ fn first_build_cell_preview_keeps_the_unconditional_matched_arm() {
     let cell = merge_probe_cell(Trigger::Backfill, false);
     let column_groups = merge_probe_column_groups();
     let config = load_fixture().2;
-    let registry = CompilerRegistry::new(&config, &config.targets);
+    let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")
@@ -210,7 +210,7 @@ fn incomparable_group_preview_keeps_the_unconditional_matched_arm() {
     );
     let column_groups = merge_probe_column_groups();
     let config = load_fixture().2;
-    let registry = CompilerRegistry::new(&config, &config.targets);
+    let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")
@@ -275,7 +275,7 @@ fn suppress_pin_over_a_refused_proof_yields_no_preview_statements() {
     );
     let column_groups = merge_probe_column_groups();
     let config = load_fixture().2;
-    let registry = CompilerRegistry::new(&config, &config.targets);
+    let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")
@@ -394,7 +394,7 @@ fn keyed_fold_preview_renders_the_suppressed_matched_arm() {
     );
 
     let config = load_fixture().2;
-    let registry = CompilerRegistry::new(&config, &config.targets);
+    let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")
@@ -521,7 +521,7 @@ fn explain_show_sql_keyed_fold_honours_the_pin() {
     );
 
     let config = load_fixture().2;
-    let registry = CompilerRegistry::new(&config, &config.targets);
+    let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")

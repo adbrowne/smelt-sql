@@ -56,6 +56,10 @@ fn test_no_compiler_internals_exposed() {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
     let config = Config {
@@ -73,7 +77,7 @@ fn test_no_compiler_internals_exposed() {
     };
 
     // Only the registry-level entry point is accessible from outside the crate.
-    let registry = CompilerRegistry::new(&config, &targets);
+    let registry = CompilerRegistry::new(&config, &targets).unwrap();
     let compiler = registry.get("dev");
 
     // `build_ephemeral_resolver` is accessible (needed by rebuild).

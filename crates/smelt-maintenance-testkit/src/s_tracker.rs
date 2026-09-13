@@ -548,6 +548,14 @@ fn print_body_for_dialect(sql: &str, backend_type: BackendType) -> String {
         BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
         BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
         BackendType::Databricks => (SqlDialect::SparkSQL, BackendCapabilities::databricks()),
+        // No measured `BackendCapabilities::trino_iceberg()` exists yet
+        // (`20260913-trino-target-spine` phase 8); this testkit has no
+        // S-restricted-oracle recipe exercising Trino, so refuse loudly
+        // rather than fabricate a profile.
+        BackendType::Trino => unimplemented!(
+            "Trino capability profile not measured yet — see \
+             docs/outcomes/20260913-trino-target-spine phase 8"
+        ),
     };
     let parsed = smelt_parser::parse(sql);
     let ctx = PrintContext {

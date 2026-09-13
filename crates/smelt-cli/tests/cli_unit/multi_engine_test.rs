@@ -34,6 +34,10 @@ fn make_duckdb_target(schema: &str) -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -52,6 +56,10 @@ fn make_spark_target(schema: &str, warehouse: &str) -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -191,7 +199,7 @@ fn test_compiler_cross_engine_ref_emits_read_parquet() {
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
     let config = make_config_with_targets(targets.clone());
 
-    let mut registry = CompilerRegistry::new(&config, &targets);
+    let mut registry = CompilerRegistry::new(&config, &targets).unwrap();
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "spark_model".to_string(),
@@ -235,7 +243,7 @@ JOIN smelt.spark_model b ON a.id = b.id
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
     let config = make_config_with_targets(targets.clone());
 
-    let mut registry = CompilerRegistry::new(&config, &targets);
+    let mut registry = CompilerRegistry::new(&config, &targets).unwrap();
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "spark_model".to_string(),
@@ -380,7 +388,7 @@ FROM smelt.visitor_daily"#;
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
     let config = make_config_with_targets(targets.clone());
 
-    let mut registry = CompilerRegistry::new(&config, &targets);
+    let mut registry = CompilerRegistry::new(&config, &targets).unwrap();
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "visitor_daily".to_string(),

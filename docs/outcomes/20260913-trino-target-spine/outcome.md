@@ -137,7 +137,7 @@ not an answer — every cell is still established by execution.
 |---|-------|--------|
 | 1 | Spec delta: the `trino` target shape and capability column in `multi_backend.md` + `smelt_yml.md`, the foreign-key refusal diagnostics, the connection-security rule, and the Known Divergence naming the implicit-`Native` emission hole this outcome does not close | done |
 | 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | done |
-| 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | planned |
+| 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | done |
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | pending |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
@@ -219,5 +219,37 @@ not an answer — every cell is still established by execution.
   outcome insists is a prior and not an answer. So the function returns `Result` and refuses
   Trino by name — the same fail-loud shape phase 2 gave `maintenance_dialect` and
   `ddl_backend_for_dialect`. Phase 8 narrows the error away.
+
+- **2026-09-14 — `SqlCompiler::new`/`CompilerRegistry::new` become fallible
+  to thread `dialect_and_capabilities`'s Trino refusal.** Both constructors
+  were infallible before this phase. Making the dialect/capabilities lookup
+  fail for Trino (per the 2026-09-14 ruling above) forced `SqlCompiler::new`
+  and `CompilerRegistry::new` to return `anyhow::Result<Self>`; every
+  production call site (`execute_project`, `smelt-cli`'s `check`/`explain`,
+  `smelt-ui`'s `build.rs`, `smelt-runtime`'s `profile.rs`) now propagates
+  with `?`, and `profile.rs` gained a new `ProfileWorkspaceError::
+  CompilerRegistryFailed` arm. ~35 test call sites across the workspace
+  needed a mechanical `.unwrap()` added; none changed behavior since every
+  one constructs a non-Trino target.
+- **2026-09-14 — `smelt-maintenance-testkit::print_body_for_dialect` refuses
+  Trino with `unimplemented!` rather than a placeholder capability profile.**
+  This testkit crate is dev-dependency-only everywhere (no crate depends on
+  it normally, it produces no binary), so it is exempt from the
+  `unwrap`/`expect` hardening ratchet; no S-restricted-oracle recipe
+  exercises Trino today, so a loud panic is preferable to fabricating an
+  unmeasured `BackendCapabilities`.
+- **2026-09-14 — `check_literal_secrets` and the databricks
+  `token`/foreign-key checks were generalised to a `(backend, key)` table
+  (`LITERAL_SECRET_KEYS`) rather than duplicated for `trino`.** `trino`'s
+  `password` follows exactly the same pre-interpolation literal-value rule
+  as `databricks`' `token`; a second hand-copied function would have let the
+  two drift silently.
+- **2026-09-14 — `.claude/large-file-baseline.txt` updated for `config.rs`,
+  `compile.rs`, `graph.rs`, `s_tracker.rs`, `execute/project/mod.rs`, and
+  `smelt-cli/tests/resume.rs`.** Each grew from real Trino-shaped content
+  (new `Target` fields threaded through every literal, new tests, the
+  `Result`-returning constructor plumbing) rather than incidental bloat; no
+  file crossed a cohesion boundary that would justify a split as part of this
+  phase.
 
 ## Blocked

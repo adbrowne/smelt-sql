@@ -69,6 +69,10 @@ fn duckdb_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -120,7 +124,7 @@ fn compile_event_time_sql(expr_sql: &str) -> String {
 
     let config = test_config();
     let targets = config.targets.clone();
-    let registry = CompilerRegistry::new(&config, &targets);
+    let registry = CompilerRegistry::new(&config, &targets).unwrap();
     let compiler = registry.get("default");
     let resolver = EphemeralResolver::empty();
     let compiled = compiler

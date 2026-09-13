@@ -77,6 +77,8 @@ pub enum ProfileWorkspaceError {
     WorkspaceInitFailed,
     #[error("failed to build the dependency graph: {0}")]
     GraphBuildFailed(String),
+    #[error("failed to build the compiler registry: {0}")]
+    CompilerRegistryFailed(String),
 }
 
 /// The result of deriving profiles for every model in a workspace: the
@@ -115,7 +117,8 @@ pub fn profiles_for_workspace(
 
     let source_infos = discover_source_infos(&loaded.project_root, &loaded.config.paths);
 
-    let mut registry = CompilerRegistry::new(&loaded.config, &loaded.config.targets);
+    let mut registry = CompilerRegistry::new(&loaded.config, &loaded.config.targets)
+        .map_err(|e| ProfileWorkspaceError::CompilerRegistryFailed(e.to_string()))?;
     let fn_bodies = crate::fn_bodies::build_fn_body_map(&db, ws);
     registry.set_function_bodies_all(fn_bodies);
 

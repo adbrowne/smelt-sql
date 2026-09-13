@@ -119,7 +119,7 @@ pub(super) async fn build_dry_run_outcome(
                 .filter_map(|t| config.targets.get(t).map(|c| (t.clone(), c.clone())))
                 .collect();
 
-        let mut compilers_dry = CompilerRegistry::new(config, &needed_target_configs_dry);
+        let mut compilers_dry = CompilerRegistry::new(config, &needed_target_configs_dry)?;
 
         let all_models_dry: Vec<smelt_core::ModelFile> =
             graph_lock.iter_models().map(|(_, m)| m.clone()).collect();

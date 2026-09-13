@@ -459,6 +459,34 @@ pub struct Target {
         serialize_with = "redact_token"
     )]
     pub token: Option<String>,
+    // Trino fields
+    /// Coordinator port (Trino only, optional). Defaults to `8080` when
+    /// `tls: false` and `443` when `tls: true` — see
+    /// [`Target::effective_trino_port`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Trino's session user, sent as the `X-Trino-User` header (Trino only,
+    /// required).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Selects `https` and the `tls: true` default port (Trino only,
+    /// optional). Defaults to `false` (plain `http`, the unauthenticated
+    /// local tier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<bool>,
+    /// A `${ENV}` reference to the Trino session password (Trino only,
+    /// optional). A literal value is rejected before interpolation by
+    /// [`check_literal_secrets`], the same rule as `databricks`' `token`.
+    /// Absent means no `Authorization` header at all (the unauthenticated
+    /// local tier).
+    ///
+    /// `serialize_with` redacts a present value, mirroring `token`
+    /// (`multi_backend.md` §"Connection security").
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "redact_token"
+    )]
+    pub password: Option<String>,
 }
 
 fn redact_token<S>(token: &Option<String>, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -489,6 +517,10 @@ impl std::fmt::Debug for Target {
             .field("location", &self.location)
             .field("host", &self.host)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("tls", &self.tls)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -505,6 +537,7 @@ impl Target {
             "spark" => Ok(BackendType::Spark),
             "bigquery" => Ok(BackendType::BigQuery),
             "databricks" => Ok(BackendType::Databricks),
+            "trino" => Ok(BackendType::Trino),
             other => Err(anyhow::anyhow!("unknown backend type `{other}`")),
         }
     }
@@ -517,15 +550,26 @@ impl Target {
     /// format is needed).
     pub fn table_format(&self) -> Option<TableFormat> {
         match self.backend_type() {
-            // Table format is a Spark concept; DuckDB, BigQuery, and Databricks
-            // (Free Edition serverless has no format choice) each own their
+            // Table format is a Spark concept; DuckDB, BigQuery, Databricks
+            // (Free Edition serverless has no format choice) and Trino (the
+            // Iceberg connector decides it, not smelt) each own their
             // storage and expose no choice.
             Ok(BackendType::DuckDB)
             | Ok(BackendType::BigQuery)
             | Ok(BackendType::Databricks)
+            | Ok(BackendType::Trino)
             | Err(_) => None,
             Ok(BackendType::Spark) => Some(self.format.unwrap_or_default()),
         }
+    }
+
+    /// The Trino coordinator port an explicit `port` overrides: `8080` on
+    /// plain `http` (`tls: false`, the default), `443` once `tls: true`
+    /// selects `https` (`smelt_yml.md` §"Target shape"). The single owner of
+    /// this default so the HTTP client reads it rather than restating it.
+    pub fn effective_trino_port(&self) -> u16 {
+        self.port
+            .unwrap_or(if self.tls.unwrap_or(false) { 443 } else { 8080 })
     }
 }
 
@@ -535,6 +579,7 @@ pub enum BackendType {
     Spark,
     BigQuery,
     Databricks,
+    Trino,
 }
 
 /// Table format for Spark targets.
@@ -1511,12 +1556,35 @@ const DATABRICKS_FOREIGN_KEYS: &[ForeignKeyCheck] = &[
     ("location", |t| t.location.is_some()),
 ];
 
-/// Pure pre-interpolation pass: a `databricks` target's `token` must be
-/// exactly a `${VAR}` reference, never a literal value (`smelt_yml.md`
-/// §"Target shape") — the value is a whole-workspace credential, and a
+/// The keys `trino` hard-errors on, each belonging to another backend's
+/// shape (`smelt_yml.md` §"Target shape"). `token` is included: it is
+/// `databricks`' credential key, and a `trino` target authenticates with
+/// `password` instead, so a Databricks-shaped credential left over from a
+/// copy-paste must not be silently ignored.
+const TRINO_FOREIGN_KEYS: &[ForeignKeyCheck] = &[
+    ("connect_url", |t| t.connect_url.is_some()),
+    ("warehouse", |t| t.warehouse.is_some()),
+    ("format", |t| t.format.is_some()),
+    ("database", |t| t.database.is_some()),
+    ("settings", |t| t.settings.is_some()),
+    ("project", |t| t.project.is_some()),
+    ("dataset", |t| t.dataset.is_some()),
+    ("location", |t| t.location.is_some()),
+    ("token", |t| t.token.is_some()),
+];
+
+/// The backend/secret-key pairs whose value must be exactly a `${VAR}`
+/// reference, never a literal (`smelt_yml.md` §"Target shape"): a
+/// `databricks` target's `token` and a `trino` target's `password`. Each key
+/// *is* the secret, so no literal could be an intentional non-secret value.
+const LITERAL_SECRET_KEYS: &[(&str, &str)] = &[("databricks", "token"), ("trino", "password")];
+
+/// Pure pre-interpolation pass over [`LITERAL_SECRET_KEYS`]: the named key on
+/// a target of the named backend must be exactly a `${VAR}` reference, never
+/// a literal value — the value is a whole-workspace credential, and a
 /// literal would sit in a checked-in file. Runs over the **raw** YAML text
 /// because `interpolate_env_vars` is lossy about a value's origin: once
-/// resolved, a literal token and an interpolated one look identical.
+/// resolved, a literal secret and an interpolated one look identical.
 /// Malformed YAML is not reported here — the downstream `Config` parse
 /// produces that diagnostic.
 fn check_literal_secrets(text: &str) -> Vec<String> {
@@ -1531,27 +1599,33 @@ fn check_literal_secrets(text: &str) -> Vec<String> {
         let Some(target_map) = target.as_mapping() else {
             continue;
         };
-        let is_databricks = target_map
+        let Some(backend) = target_map
             .get(serde_yaml::Value::String("type".to_string()))
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s.eq_ignore_ascii_case("databricks"));
-        if !is_databricks {
-            continue;
-        }
-        let Some(token) = target_map
-            .get(serde_yaml::Value::String("token".to_string()))
             .and_then(|v| v.as_str())
         else {
             continue;
         };
-        let is_env_ref =
-            token.starts_with("${") && token.ends_with('}') && token.matches("${").count() == 1;
-        if !is_env_ref {
-            let name = name.as_str().unwrap_or("?");
-            errors.push(format!(
-                "targets.{name}.token: a literal Databricks token is a hard configuration \
-                 error — use `${{ENV_VAR}}` instead, never a checked-in secret"
-            ));
+        for (secret_backend, secret_key) in LITERAL_SECRET_KEYS {
+            if !backend.eq_ignore_ascii_case(secret_backend) {
+                continue;
+            }
+            let Some(secret) = target_map
+                .get(serde_yaml::Value::String(secret_key.to_string()))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let is_env_ref = secret.starts_with("${")
+                && secret.ends_with('}')
+                && secret.matches("${").count() == 1;
+            if !is_env_ref {
+                let name = name.as_str().unwrap_or("?");
+                errors.push(format!(
+                    "targets.{name}.{secret_key}: a literal {secret_backend} \
+                     {secret_key} is a hard configuration error — use \
+                     `${{ENV_VAR}}` instead, never a checked-in secret"
+                ));
+            }
         }
     }
     errors
@@ -1615,43 +1689,84 @@ impl Config {
         Ok(config)
     }
 
-    /// Per-target key-placement validation (`smelt_yml.md` §"Target shape").
-    /// Today this is enforced for `databricks` targets only: `host` is
-    /// required unless the target is in **ambient form** (`token` also
-    /// absent — the workload's own workspace context supplies both), a
-    /// present `host` must be a bare hostname, and each of the eight keys
-    /// belonging to another backend's shape is a hard error naming both the
-    /// key and the backend — Free Edition's serverless compute has no
-    /// warehouse path or format choice, so a silently-dropped `warehouse:`
-    /// would lose the user's intent rather than reject it. `token` present
-    /// with `host` absent is refused: a token carries no workspace address.
+    /// Per-target key-placement validation (`smelt_yml.md` §"Target shape"),
+    /// enforced for `databricks` and `trino` targets. A `databricks` target
+    /// requires `host` unless the target is in **ambient form** (`token`
+    /// also absent — the workload's own workspace context supplies both);
+    /// `token` present with `host` absent is refused, since a token carries
+    /// no workspace address. A `trino` target requires `catalog`, `host`
+    /// and `user` unconditionally — Trino has no ambient form, and the
+    /// catalog is the connector choice, not a smelt guess. Both backends
+    /// reject a `host` carrying a scheme or trailing slash, and each of
+    /// their foreign keys (belonging to another backend's shape) is a hard
+    /// error naming both the key and the backend, so nothing is silently
+    /// dropped. Every violation across every target is accumulated, not
+    /// just the first.
     pub fn validate_targets(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         for (name, target) in &self.targets {
-            if !matches!(target.backend_type(), Ok(BackendType::Databricks)) {
-                continue;
-            }
-            match &target.host {
-                None if target.token.is_some() => errors.push(format!(
-                    "targets.{name}: `token` requires `host` (workspace hostname, e.g. \
-                     `my-workspace.cloud.databricks.com`) — a token carries no workspace address"
-                )),
-                None => {}
-                Some(host) if host.contains("://") || host.ends_with('/') => {
-                    errors.push(format!(
-                        "targets.{name}: `host` must be a bare hostname with no scheme and no \
-                         trailing slash, got `{host}`"
-                    ));
+            match target.backend_type() {
+                Ok(BackendType::Databricks) => {
+                    match &target.host {
+                        None if target.token.is_some() => errors.push(format!(
+                            "targets.{name}: `token` requires `host` (workspace hostname, e.g. \
+                             `my-workspace.cloud.databricks.com`) — a token carries no \
+                             workspace address"
+                        )),
+                        None => {}
+                        Some(host) if host.contains("://") || host.ends_with('/') => {
+                            errors.push(format!(
+                                "targets.{name}: `host` must be a bare hostname with no scheme \
+                                 and no trailing slash, got `{host}`"
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                    for (key, present) in DATABRICKS_FOREIGN_KEYS {
+                        if present(target) {
+                            errors.push(format!(
+                                "targets.{name}: `{key}` is not a valid key on a `databricks` \
+                                 target (databricks backend)"
+                            ));
+                        }
+                    }
                 }
-                Some(_) => {}
-            }
-            for (key, present) in DATABRICKS_FOREIGN_KEYS {
-                if present(target) {
-                    errors.push(format!(
-                        "targets.{name}: `{key}` is not a valid key on a `databricks` target \
-                         (databricks backend)"
-                    ));
+                Ok(BackendType::Trino) => {
+                    if target.catalog.is_none() {
+                        errors.push(format!(
+                            "targets.{name}: `catalog` is required on a `trino` target — the \
+                             Iceberg catalog, which decides the write surface, is never guessed"
+                        ));
+                    }
+                    if target.user.is_none() {
+                        errors.push(format!(
+                            "targets.{name}: `user` is required on a `trino` target (sent as \
+                             the `X-Trino-User` header)"
+                        ));
+                    }
+                    match &target.host {
+                        None => errors.push(format!(
+                            "targets.{name}: `host` is required on a `trino` target (the \
+                             coordinator hostname)"
+                        )),
+                        Some(host) if host.contains("://") || host.ends_with('/') => {
+                            errors.push(format!(
+                                "targets.{name}: `host` must be a bare hostname with no scheme \
+                                 and no trailing slash, got `{host}`"
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                    for (key, present) in TRINO_FOREIGN_KEYS {
+                        if present(target) {
+                            errors.push(format!(
+                                "targets.{name}: `{key}` is not a valid key on a `trino` target \
+                                 (trino backend)"
+                            ));
+                        }
+                    }
                 }
+                _ => {}
             }
         }
         if errors.is_empty() {
@@ -2136,6 +2251,10 @@ targets:
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         };
         assert_eq!(target.table_format(), None);
     }
@@ -2174,6 +2293,10 @@ targets:
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         };
         unknown
             .backend_type()
@@ -2399,6 +2522,10 @@ targets:
             location: None,
             host: Some("my-workspace.cloud.databricks.com".to_string()),
             token: Some("super-secret-token-value".to_string()),
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         };
         let debug_output = format!("{:?}", target);
         assert!(
@@ -2410,6 +2537,286 @@ targets:
             !serialized.contains("super-secret-token-value"),
             "serialized output must not contain the raw token: {serialized}"
         );
+    }
+
+    fn make_trino_target() -> Target {
+        Target {
+            target_type: "trino".to_string(),
+            database: None,
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: Some("iceberg".to_string()),
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: None,
+            dataset: None,
+            location: None,
+            host: Some("localhost".to_string()),
+            token: None,
+            port: None,
+            user: Some("smelt".to_string()),
+            tls: None,
+            password: None,
+        }
+    }
+
+    /// `type: trino` resolves to `BackendType::Trino`; table format is
+    /// `None` (the Iceberg connector decides it, not smelt).
+    #[test]
+    fn backend_type_resolves_trino() {
+        let yaml = r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+    host: localhost
+    catalog: iceberg
+    user: smelt
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("trino target must parse");
+        let target = &config.targets["tr"];
+        assert!(matches!(
+            target.backend_type().expect("trino is a known type"),
+            BackendType::Trino
+        ));
+    }
+
+    /// A `trino` target has no table format — the Iceberg connector decides
+    /// the write surface, not smelt.
+    #[test]
+    fn trino_target_has_no_table_format() {
+        let target = make_trino_target();
+        assert_eq!(target.table_format(), None);
+    }
+
+    /// `host`/`port`/`user`/`catalog`/`schema`/`tls` round-trip.
+    #[test]
+    fn trino_target_parses_its_own_keys() {
+        let yaml = r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+    host: trino.example.com
+    port: 8443
+    user: smelt
+    catalog: iceberg
+    schema: analytics
+    tls: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("trino target must parse");
+        let target = &config.targets["tr"];
+        assert_eq!(target.host.as_deref(), Some("trino.example.com"));
+        assert_eq!(target.port, Some(8443));
+        assert_eq!(target.user.as_deref(), Some("smelt"));
+        assert_eq!(target.catalog.as_deref(), Some("iceberg"));
+        assert_eq!(target.schema, "analytics");
+        assert_eq!(target.tls, Some(true));
+    }
+
+    /// Each of `catalog`/`host`/`user` absent is its own named error, and a
+    /// target missing all three reports all three — not just the first.
+    #[test]
+    fn trino_target_requires_catalog_host_and_user() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path())
+            .expect_err("a trino target missing catalog/host/user must be refused");
+        let message = err.to_string();
+        for key in ["catalog", "host", "user"] {
+            assert!(message.contains(key), "error must name `{key}`: {message}");
+        }
+    }
+
+    /// A `host` carrying a scheme or trailing slash is refused, naming the
+    /// value.
+    #[test]
+    fn trino_host_must_be_bare_hostname() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+    host: https://trino.example.com/
+    catalog: iceberg
+    user: smelt
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path()).expect_err("scheme + trailing slash must be rejected");
+        assert!(
+            err.to_string().contains("host"),
+            "error must name `host`: {err}"
+        );
+    }
+
+    /// Each of the nine keys belonging to another backend's shape is a hard
+    /// error on a `trino` target, naming both the offending key and the
+    /// backend.
+    #[test]
+    fn trino_target_refuses_every_foreign_key() {
+        let foreign_keys = [
+            ("connect_url", "connect_url: sc://h:443"),
+            ("warehouse", "warehouse: /tmp/wh"),
+            ("format", "format: delta"),
+            ("database", "database: db.duckdb"),
+            ("settings", "settings:\n      memory_limit: 4GB"),
+            ("project", "project: my-gcp-project"),
+            ("dataset", "dataset: analytics"),
+            ("location", "location: US"),
+            ("token", "token: some-literal-value"),
+        ];
+        for (key, yaml_line) in foreign_keys {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::fs::write(
+                dir.path().join("smelt.yml"),
+                format!(
+                    r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+    host: localhost
+    catalog: iceberg
+    user: smelt
+    {yaml_line}
+"#
+                ),
+            )
+            .unwrap();
+            let err = Config::load(dir.path())
+                .expect_err(&format!("`{key}` must be refused on a trino target"));
+            let message = err.to_string();
+            assert!(
+                message.contains(key),
+                "error must name the offending key `{key}`: {message}"
+            );
+            assert!(
+                message.contains("trino"),
+                "error must name the backend: {message}"
+            );
+        }
+    }
+
+    /// A target carrying three foreign keys at once yields three errors, not
+    /// just the first.
+    #[test]
+    fn trino_target_names_every_foreign_key_at_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+    host: localhost
+    catalog: iceberg
+    user: smelt
+    warehouse: /tmp/wh
+    project: my-gcp-project
+    dataset: analytics
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path()).expect_err("all three foreign keys must be refused");
+        let message = err.to_string();
+        for key in ["warehouse", "project", "dataset"] {
+            assert!(message.contains(key), "error must name `{key}`: {message}");
+        }
+    }
+
+    /// A literal (non-`${VAR}`) `password` is a hard error;
+    /// `${ENV_VAR}` loads.
+    #[test]
+    fn trino_literal_password_is_refused_pre_interpolation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+    host: localhost
+    catalog: iceberg
+    user: smelt
+    password: hunter2
+"#,
+        )
+        .unwrap();
+        let err = Config::load(dir.path()).expect_err("literal password must be a hard error");
+        assert!(
+            err.to_string().contains("password"),
+            "error must name `password`: {err}"
+        );
+
+        std::env::set_var("SMELT_TEST_TRINO_PASSWORD", "secret-value");
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            r#"
+name: test_project
+targets:
+  tr:
+    type: trino
+    host: localhost
+    catalog: iceberg
+    user: smelt
+    password: ${SMELT_TEST_TRINO_PASSWORD}
+"#,
+        )
+        .unwrap();
+        let config = Config::load(dir.path()).expect("${VAR} password must load");
+        assert_eq!(
+            config.targets["tr"].password.as_deref(),
+            Some("secret-value")
+        );
+        std::env::remove_var("SMELT_TEST_TRINO_PASSWORD");
+    }
+
+    /// `password` prints `<redacted>` through both `Debug` and serde
+    /// Serialize, mirroring `token`.
+    #[test]
+    fn trino_password_is_redacted() {
+        let mut target = make_trino_target();
+        target.password = Some("super-secret-password-value".to_string());
+        let debug_output = format!("{:?}", target);
+        assert!(
+            !debug_output.contains("super-secret-password-value"),
+            "Debug output must redact the password: {debug_output}"
+        );
+        let serialized = serde_yaml::to_string(&target).expect("target must serialize");
+        assert!(
+            !serialized.contains("super-secret-password-value"),
+            "serialized output must not contain the raw password: {serialized}"
+        );
+    }
+
+    /// Absent `port` is `8080` when `tls: false`, `443` when `tls: true`; an
+    /// explicit `port` wins.
+    #[test]
+    fn trino_effective_port_follows_tls() {
+        let mut target = make_trino_target();
+        assert_eq!(target.effective_trino_port(), 8080);
+
+        target.tls = Some(true);
+        assert_eq!(target.effective_trino_port(), 443);
+
+        target.port = Some(9999);
+        assert_eq!(target.effective_trino_port(), 9999);
     }
 
     /// `${VAR}` in a target field resolves against a set (injected) variable.

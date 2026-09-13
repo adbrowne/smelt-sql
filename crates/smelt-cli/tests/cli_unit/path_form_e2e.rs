@@ -47,6 +47,10 @@ fn duckdb_target(schema: &str) -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -98,7 +102,7 @@ fn compile_and_plan_path_workspace() {
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), duckdb_target("main"));
     let config = config_with_targets(targets.clone());
-    let compilers = CompilerRegistry::new(&config, &targets);
+    let compilers = CompilerRegistry::new(&config, &targets).unwrap();
 
     let derived = models
         .iter()

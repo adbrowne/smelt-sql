@@ -251,6 +251,10 @@ async fn test_cli_ui_manifest_parity() {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
     let mut models_config = HashMap::new();
@@ -367,6 +371,10 @@ async fn test_cli_ui_manifest_parity() {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
 

@@ -197,6 +197,13 @@ pub async fn create_backend(
                 ))
             }
         }
+        // `smelt-backend-trino` (the HTTP statement client) does not exist
+        // yet — `20260913-trino-target-spine` phase 5 adds it. Refuse by
+        // name rather than aliasing Trino onto another backend's crate.
+        BackendType::Trino => Err(anyhow::anyhow!(
+            "Trino backend not implemented yet (smelt-backend-trino lands in \
+             docs/outcomes/20260913-trino-target-spine phase 5)"
+        )),
     }
 }
 

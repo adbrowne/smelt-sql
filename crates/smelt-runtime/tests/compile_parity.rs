@@ -38,6 +38,10 @@ fn duckdb_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -86,7 +90,7 @@ fn test_compile_with_function_call() {
 
     let config = test_config();
     let targets = config.targets.clone();
-    let mut registry = CompilerRegistry::new(&config, &targets);
+    let mut registry = CompilerRegistry::new(&config, &targets).unwrap();
 
     // Wire a function body. `safe_div(num, den)` → `(CASE WHEN den = 0 THEN NULL ELSE num/den END)`.
     let mut fn_bodies: FnBodyMap = HashMap::new();
@@ -130,7 +134,7 @@ fn test_expand_function_calls_reveals_inner_range_bound() {
 
     let config = test_config();
     let targets = config.targets.clone();
-    let mut registry = CompilerRegistry::new(&config, &targets);
+    let mut registry = CompilerRegistry::new(&config, &targets).unwrap();
     let mut fn_bodies: FnBodyMap = HashMap::new();
     fn_bodies.insert(
         "windowed".to_string(),
@@ -200,7 +204,7 @@ fn test_compile_with_ephemeral_dep() {
 
     let config = test_config();
     let targets = config.targets.clone();
-    let registry = CompilerRegistry::new(&config, &targets);
+    let registry = CompilerRegistry::new(&config, &targets).unwrap();
     let compiler = registry.get("default");
 
     let ephemerals = vec![(
@@ -240,7 +244,7 @@ fn test_compile_applies_type_casts() {
 
     let config = test_config();
     let targets = config.targets.clone();
-    let mut registry = CompilerRegistry::new(&config, &targets);
+    let mut registry = CompilerRegistry::new(&config, &targets).unwrap();
 
     let upstream = UpstreamSchemas {
         models: {
@@ -292,7 +296,7 @@ fn test_compile_with_time_filter_injection() {
 
     let config = test_config();
     let targets = config.targets.clone();
-    let registry = CompilerRegistry::new(&config, &targets);
+    let registry = CompilerRegistry::new(&config, &targets).unwrap();
     let compiler = registry.get("default");
     let resolver = EphemeralResolver::empty();
     let compiled = compiler
@@ -319,7 +323,7 @@ fn test_compile_path_ref_resolution() {
 
     let config = test_config();
     let targets = config.targets.clone();
-    let registry = CompilerRegistry::new(&config, &targets);
+    let registry = CompilerRegistry::new(&config, &targets).unwrap();
     let compiler = registry.get("default");
     let resolver = EphemeralResolver::empty();
     let compiled = compiler

@@ -2275,6 +2275,10 @@ mod tests {
                 location: None,
                 host: None,
                 token: None,
+                port: None,
+                user: None,
+                tls: None,
+                password: None,
             },
         );
 

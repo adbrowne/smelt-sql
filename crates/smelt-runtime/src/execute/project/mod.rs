@@ -390,7 +390,7 @@ pub async fn execute_project(
         .iter()
         .filter_map(|t| config.targets.get(t).map(|c| (t.clone(), c.clone())))
         .collect();
-    let mut compilers = CompilerRegistry::new(config.as_ref(), &needed_target_configs);
+    let mut compilers = CompilerRegistry::new(config.as_ref(), &needed_target_configs)?;
 
     let upstream_schemas = {
         let db_guard = db.lock().await;
@@ -4943,6 +4943,10 @@ mod databricks_cross_edge_tests {
                 None
             },
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         }
     }
 

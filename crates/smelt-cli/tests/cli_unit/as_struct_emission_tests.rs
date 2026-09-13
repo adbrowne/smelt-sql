@@ -45,6 +45,10 @@ fn duckdb_config_and_target() -> (Config, Target) {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     };
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), target.clone());
@@ -68,7 +72,7 @@ fn duckdb_config_and_target() -> (Config, Target) {
 fn duckdb_registry() -> CompilerRegistry {
     let (config, _) = duckdb_config_and_target();
     let targets = config.targets.clone();
-    CompilerRegistry::new(&config, &targets)
+    CompilerRegistry::new(&config, &targets).unwrap()
 }
 
 /// Build upstream schemas with known columns for a model name.

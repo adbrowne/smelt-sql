@@ -804,6 +804,10 @@ mod tests {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         }
     }
 
@@ -874,7 +878,7 @@ mod tests {
         };
 
         let config = test_config();
-        let mut registry = CompilerRegistry::new(&config, &config.targets);
+        let mut registry = CompilerRegistry::new(&config, &config.targets).unwrap();
         let mut fn_bodies: crate::fn_bodies::FnBodyMap = HashMap::new();
         fn_bodies.insert(
             "windowed".to_string(),

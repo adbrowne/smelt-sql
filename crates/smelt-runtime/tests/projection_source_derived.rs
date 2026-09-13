@@ -32,6 +32,10 @@ fn duckdb_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -50,6 +54,10 @@ fn spark_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -68,6 +76,10 @@ fn bigquery_target() -> Target {
         location: Some("US".to_string()),
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -113,7 +125,7 @@ fn make_model(name: &str, sql: &str) -> ModelFile {
 fn registry() -> CompilerRegistry {
     let config = test_config();
     let targets = config.targets.clone();
-    CompilerRegistry::new(&config, &targets)
+    CompilerRegistry::new(&config, &targets).unwrap()
 }
 
 const MEDIAN_MODEL_SQL: &str = "SELECT d, MEDIAN(val) AS med_val FROM events GROUP BY d";

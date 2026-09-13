@@ -18,6 +18,10 @@ pub(crate) fn duckdb_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -36,6 +40,10 @@ pub(crate) fn bigquery_target() -> Target {
         location: Some("US".to_string()),
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -54,6 +62,10 @@ pub(crate) fn spark_target() -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -75,7 +87,7 @@ pub(crate) fn registry() -> CompilerRegistry {
         maintenance: None,
         probes: Default::default(),
     };
-    CompilerRegistry::new(&config, &targets)
+    CompilerRegistry::new(&config, &targets).unwrap()
 }
 
 pub(crate) fn make_model(name: &str, sql: &str) -> ModelFile {

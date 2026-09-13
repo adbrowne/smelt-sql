@@ -82,7 +82,7 @@ mod ephemeral_seed_cte_injection {
 
         // Compile region_report with ephemeral injection via the registry.
         let target_name = config.targets.keys().next().unwrap().clone();
-        let registry = CompilerRegistry::new(&config, &config.targets);
+        let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
         let compiler = registry.get(&target_name);
         let compiled = compiler
             .compile_with_ephemerals(region_report, "main", &resolver)
@@ -166,7 +166,7 @@ mod ephemeral_seed_cte_injection {
 
         let resolver = build_seed_resolver(&project_dir, &config);
         let target_name = config.targets.keys().next().unwrap().clone();
-        let registry = CompilerRegistry::new(&config, &config.targets);
+        let registry = CompilerRegistry::new(&config, &config.targets).unwrap();
         let compiler = registry.get(&target_name);
         let compiled = compiler
             .compile_with_ephemerals(region_report, "main", &resolver)

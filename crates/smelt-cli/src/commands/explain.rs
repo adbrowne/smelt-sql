@@ -678,7 +678,7 @@ async fn explain_maintenance_plan(
     // executes (`docs/specs/incremental_models.md` §"Statement emission
     // (single owner)"). Never connects to a backend: `CompilerRegistry`
     // only needs `smelt.yml` target metadata, not a live connection.
-    let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
+    let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets)?;
     let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
     // Kept for the `--period` output-window derivation below (`expand_function_calls`
     // needs its own copy); `set_function_bodies_all` takes the registry's copy by value.
@@ -915,6 +915,7 @@ fn backend_type_to_sql_dialect(
         smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
         smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
         smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
+        smelt_core::config::BackendType::Trino => smelt_backend::SqlDialect::Trino,
     }
 }
 

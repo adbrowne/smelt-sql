@@ -87,6 +87,10 @@ fn state_from_project(project_root: PathBuf) -> Arc<AppState> {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
 

@@ -115,6 +115,10 @@ fn make_config(db_path: &Path) -> Arc<Config> {
             location: None,
             host: None,
             token: None,
+            port: None,
+            user: None,
+            tls: None,
+            password: None,
         },
     );
     Arc::new(Config {

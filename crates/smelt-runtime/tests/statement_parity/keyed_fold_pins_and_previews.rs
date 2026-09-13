@@ -329,7 +329,7 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
         .find(|c| c.technique == smelt_logical::maintenance::Technique::KeyedFold)
         .expect("device_avg_amount must admit a KeyedFold cell");
 
-    let registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
+    let registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets).unwrap();
     let resolver = registry
         .get("dev")
         .build_ephemeral_resolver(&[], "main")

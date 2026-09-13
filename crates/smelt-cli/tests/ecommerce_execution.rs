@@ -137,7 +137,7 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
 
     // Compile and execute each model in dependency order
     let target_map = config.targets.clone();
-    let registry = CompilerRegistry::new(&config, &target_map);
+    let registry = CompilerRegistry::new(&config, &target_map).unwrap();
     let compiler = registry.get(default_target);
 
     let mut errors = Vec::new();

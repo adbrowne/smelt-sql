@@ -63,7 +63,13 @@ pub fn row_set_body(dialect: BackendType, columns: &[&str], rows: &[Vec<String>]
         "row_set_body requires at least one row; callers own the empty-row-set case"
     );
     match dialect {
-        BackendType::DuckDB | BackendType::Spark | BackendType::Databricks => {
+        // Trino is standard-SQL here like DuckDB/Spark — ANSI SQL's `VALUES`
+        // table-value constructor is part of Trino's documented grammar, not
+        // GoogleSQL's `UNNEST` array workaround. Flagged for confirmation by
+        // execution against the live tier in
+        // `20260913-trino-target-spine` phase 6, per this outcome's rule
+        // that a backend's SQL surface is established by execution.
+        BackendType::DuckDB | BackendType::Spark | BackendType::Databricks | BackendType::Trino => {
             let rows_sql: Vec<String> =
                 rows.iter().map(|r| format!("({})", r.join(", "))).collect();
             format!("VALUES {}", rows_sql.join(", "))
@@ -109,7 +115,7 @@ pub fn build_row_set_table(
     rows: &[Vec<String>],
 ) -> String {
     match dialect {
-        BackendType::DuckDB | BackendType::Spark | BackendType::Databricks => {
+        BackendType::DuckDB | BackendType::Spark | BackendType::Databricks | BackendType::Trino => {
             format!(
                 "({}) AS {alias}({})",
                 row_set_body(dialect, columns, rows),
@@ -174,6 +180,16 @@ mod tests {
         let spark = build_row_set_table(BackendType::Spark, "t", &["id", "name"], &rows());
         assert_eq!(duckdb, spark);
         assert_eq!(duckdb, "(VALUES (1, 'North'), (2, 'South')) AS t(id, name)");
+    }
+
+    /// Trino renders `VALUES …` like DuckDB/Spark, not BigQuery's `UNION
+    /// ALL`/`UNNEST` shape.
+    #[test]
+    fn row_set_body_trino_uses_values() {
+        let trino = row_set_body(BackendType::Trino, &["id", "name"], &rows());
+        let duckdb = row_set_body(BackendType::DuckDB, &["id", "name"], &rows());
+        assert_eq!(trino, duckdb);
+        assert_eq!(trino, "VALUES (1, 'North'), (2, 'South')");
     }
 
     #[test]

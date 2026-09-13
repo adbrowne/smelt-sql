@@ -1,0 +1,19 @@
+name: trino_broken_foreign_keys
+version: 1
+
+paths:
+  - models
+
+default_materialization: view
+
+targets:
+  dev:
+    type: trino
+    host: localhost
+    catalog: iceberg
+    user: smelt
+    # Foreign keys: each belongs to another backend's shape and must be
+    # refused by name, not silently ignored (`smelt_yml.md` §"Target shape").
+    warehouse: /tmp/spark-warehouse
+    project: my-gcp-project
+    dataset: analytics

@@ -50,6 +50,10 @@ fn duckdb_target(schema: &str) -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -105,7 +109,7 @@ fn compiles_path_form_workspace_to_duckdb() {
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), duckdb_target("main"));
     let config = config_with_targets(targets.clone());
-    let compilers = CompilerRegistry::new(&config, &targets);
+    let compilers = CompilerRegistry::new(&config, &targets).unwrap();
 
     let downstream = models
         .iter()
@@ -161,7 +165,7 @@ fn compiles_path_form_seed_ref_to_duckdb() {
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), duckdb_target("main"));
     let config = config_with_targets(targets.clone());
-    let compilers = CompilerRegistry::new(&config, &targets);
+    let compilers = CompilerRegistry::new(&config, &targets).unwrap();
 
     let uses_seed = models
         .iter()

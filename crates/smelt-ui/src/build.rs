@@ -310,6 +310,7 @@ fn backend_type_to_maintenance_dialect(
         smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
         smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
         smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
+        smelt_core::config::BackendType::Trino => smelt_backend::SqlDialect::Trino,
     };
     smelt_backend::maintenance_dialect(dialect)
 }
@@ -381,7 +382,7 @@ pub fn build_model_diagnostics_response(
         None => smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     };
 
-    let mut registry = smelt_runtime::CompilerRegistry::new(config, &config.targets);
+    let mut registry = smelt_runtime::CompilerRegistry::new(config, &config.targets)?;
     if let Some(ws) = ws {
         let fn_bodies = smelt_runtime::build_fn_body_map(db, ws);
         registry.set_function_bodies_all(fn_bodies);
@@ -780,6 +781,10 @@ mod tests {
                 location: None,
                 host: None,
                 token: None,
+                port: None,
+                user: None,
+                tls: None,
+                password: None,
             },
         );
 

@@ -56,6 +56,10 @@ fn duckdb_target(schema: &str) -> Target {
         location: None,
         host: None,
         token: None,
+        port: None,
+        user: None,
+        tls: None,
+        password: None,
     }
 }
 
@@ -142,7 +146,7 @@ fn smelt_fn_call_expanded_via_registry_wiring() {
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), duckdb_target("main"));
     let config = config_with_targets(targets.clone());
-    let mut compilers = CompilerRegistry::new(&config, &targets);
+    let mut compilers = CompilerRegistry::new(&config, &targets).unwrap();
     compilers.set_function_bodies_all(fn_bodies);
 
     let model = models
@@ -194,7 +198,7 @@ fn compiler_registry_set_function_bodies_propagates_to_all_targets() {
     targets.insert("prod".to_string(), duckdb_target("prod_schema"));
 
     let config = config_with_targets(targets.clone());
-    let mut compilers = CompilerRegistry::new(&config, &targets);
+    let mut compilers = CompilerRegistry::new(&config, &targets).unwrap();
     compilers.set_function_bodies_all(fn_bodies);
 
     let model = models.iter().find(|m| m.name == "uses").unwrap();
@@ -303,7 +307,7 @@ fn legacy_project_without_functions_directory_compiles_unchanged() {
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), duckdb_target("main"));
     let config = config_with_targets(targets.clone());
-    let mut compilers_wired = CompilerRegistry::new(&config, &targets);
+    let mut compilers_wired = CompilerRegistry::new(&config, &targets).unwrap();
     if !fn_bodies.is_empty() {
         compilers_wired.set_function_bodies_all(fn_bodies);
     }
@@ -319,7 +323,7 @@ fn legacy_project_without_functions_directory_compiles_unchanged() {
     let mut plain_targets = HashMap::new();
     plain_targets.insert("default".to_string(), duckdb_target("main"));
     let plain_config = config_with_targets(plain_targets.clone());
-    let plain_registry = CompilerRegistry::new(&plain_config, &plain_targets);
+    let plain_registry = CompilerRegistry::new(&plain_config, &plain_targets).unwrap();
     let plain_sql = plain_registry
         .get("default")
         .compile(model, "main")
