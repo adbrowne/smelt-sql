@@ -125,7 +125,7 @@ including its null-safe join spelling.
 |---|-------|--------|
 | 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | done |
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | done |
-| 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | pending |
+| 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | planned |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | pending |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | pending |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
@@ -179,5 +179,19 @@ including its null-safe join spelling.
   (generated via `SMELT_REGEN_TRINO_CENSUS=1`); phases 3–6 drive that count to zero and delete
   the file. `report::applicable_positions`/`position_label` were widened to `pub(crate)` so the
   census module reuses the coverage table's own position axis rather than re-deriving it.
+
+- **2026-09-14 — phase 3 planned; no phase-table reshape.** Phase 2's summary named no work
+  requiring a new row: the census is the ratchet phases 3–6 already own, and its regeneration
+  step is folded into each of their task lists rather than becoming a phase. One spec correction
+  surfaced while reading the code phase 3 touches, and it is phase 3's own spec delta rather than
+  a new row: §"Operator lowering" (written by phase 1) claims Trino's `//` integral arm lowers to
+  `DIV(a, b)` "as GoogleSQL and Spark SQL" do, but Trino has no `DIV` function and its `/` already
+  truncates toward zero on integral operands and divides plainly on floating/decimal ones — the
+  same class-sensitivity DuckDB's `//` has. So Trino's `//` is a single unconditional
+  `Template("{0} / {1}")`, not a `Conditional`, and the spec sentence is corrected in phase 3's
+  commit. The claim is to be settled against a live coordinator first; if the tier cannot be
+  brought up, phase 3 states the verdict and hands the four unverified answers to phase 6's value
+  leg rather than blocking — the never-skip-green discipline binds the audit legs (phases 5–6),
+  not this offline registry phase.
 
 ## Blocked
