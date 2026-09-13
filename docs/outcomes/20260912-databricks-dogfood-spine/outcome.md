@@ -180,9 +180,23 @@ of the models or the tooling.
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
 | 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
 | 11d | Ambient form, offline: a `databricks` target whose `host` **and** `token` are both absent builds its session from the workload's own ambient workspace context (no `.host(...)` call at all), replacing the spec's measured-false claim that a job exports `DATABRICKS_HOST`; `host` present with `token` absent and `host` absent with `token` present both keep their current meanings (the latter refused with a diagnostic). Threaded through the config validator, `SessionArgs::Databricks`, `SparkBackend::new_databricks`, `DatabricksAdapter`, the `databricks_job` target and the dogfood loader's three duplicated host-resolution sites — all gated with no workspace | done |
-| 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | pending |
+| 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | planned |
 
 ## Decision log
+
+- 2026-09-13 (phase 11e plan): **no reshape — 11e stays one row, with a manual smoke run
+  inserted ahead of the compressed cadence.** 11e is the outcome's last row and already carries
+  every remaining criterion-11 leg; splitting it would only move the wall-clock wait, not remove
+  it. Two readings settled in the plan: (a) 11d changed the Rust/Python session path, the loader
+  and `smelt.yml`, so the deployed wheel and the seeded Volume project are both stale — the row
+  re-deploys and re-seeds before anything else rather than trusting 11c's deploy; (b) one
+  *manual* `bundle run` goes first, before the cadence is compressed, so an ambient-path defect
+  costs one run instead of one 20-minute cron cycle per discovery. Criterion 11's substance is
+  untouched: the three runs it counts are still `trigger: PERIODIC` with no manual run
+  interleaved (test 1 asserts exactly that), and the smoke run's full refresh makes all three of
+  them genuine incremental windows. 11c's tests 4–6 were never written (no
+  `github_activity_dbx_scheduled.rs` exists) and are this row's TDD list. Nothing left the
+  outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 11d implement): **row 11d done — the ambient form (no explicit host) lands
   entirely offline.** `Config::validate_targets` now refuses `token` present with `host` absent
