@@ -12,6 +12,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, default-features = false }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
 smelt-backend-bigquery = { path = "../smelt-backend-bigquery", optional = true }
+smelt-backend-trino = { path = "../smelt-backend-trino" }
 anyhow.workspace = true
 tracing.workspace = true
 tokio.workspace = true

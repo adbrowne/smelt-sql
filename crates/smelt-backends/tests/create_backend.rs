@@ -72,6 +72,50 @@ async fn creates_duckdb_backend_from_duckdb_target() {
     );
 }
 
+fn trino_target(host: Option<&str>, password: Option<&str>) -> Target {
+    Target {
+        target_type: "trino".to_string(),
+        database: None,
+        schema: "smelt_dev".to_string(),
+        connect_url: None,
+        catalog: Some("iceberg".to_string()),
+        warehouse: None,
+        format: None,
+        settings: None,
+        project: None,
+        dataset: None,
+        location: None,
+        host: host.map(|h| h.to_string()),
+        token: None,
+        port: None,
+        user: Some("smelt".to_string()),
+        tls: None,
+        password: password.map(|p| p.to_string()),
+    }
+}
+
+/// Constructing a `TrinoBackend` makes no network call, so this runs
+/// unconditionally — no `SMELT_TRINO_URL` gate needed.
+#[tokio::test]
+async fn factory_constructs_a_trino_backend_from_a_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = trino_target(Some("localhost"), None);
+    let backend = create_backend("trino_test", &target, dir.path(), None)
+        .await
+        .expect("Trino backend construction must not need a live coordinator");
+    assert_eq!(backend.dialect(), smelt_backend::SqlDialect::Trino);
+}
+
+#[tokio::test]
+async fn factory_error_never_contains_the_password() {
+    let dir = tempfile::tempdir().unwrap();
+    // No `host` — construction fails before the password is ever touched.
+    let target = trino_target(None, Some("hunter2"));
+    let result = create_backend("trino_test", &target, dir.path(), None).await;
+    let err = result.err().expect("missing host must be refused");
+    assert!(!err.to_string().contains("hunter2"));
+}
+
 #[tokio::test]
 #[cfg(feature = "spark")]
 async fn creates_spark_backend_from_spark_target() {

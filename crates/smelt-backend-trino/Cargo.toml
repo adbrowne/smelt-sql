@@ -11,6 +11,10 @@ description = "Trino backend implementation for smelt via the /v1/statement HTTP
 # Backend trait / BackendError
 smelt-backend = { path = "../smelt-backend" }
 
+# NullSafeEqualitySpelling for the provisional BackendCapabilities literal
+# (phase 8 replaces this with a `trino_iceberg()` constructor there).
+smelt-dialect = { path = "../smelt-dialect" }
+
 # Arrow record batches
 arrow = { workspace = true }
 

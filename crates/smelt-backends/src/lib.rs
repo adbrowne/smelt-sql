@@ -197,13 +197,47 @@ pub async fn create_backend(
                 ))
             }
         }
-        // `smelt-backend-trino` (the HTTP statement client) does not exist
-        // yet — `20260913-trino-target-spine` phase 5 adds it. Refuse by
-        // name rather than aliasing Trino onto another backend's crate.
-        BackendType::Trino => Err(anyhow::anyhow!(
-            "Trino backend not implemented yet (smelt-backend-trino lands in \
-             docs/outcomes/20260913-trino-target-spine phase 5)"
-        )),
+        BackendType::Trino => {
+            use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
+
+            // `Config::validate_targets` already requires these on a `trino`
+            // target, but `create_backend` is reachable with a hand-built
+            // `Target` too (e.g. in tests), so this checks again rather than
+            // trusting the caller.
+            let host = target_config
+                .host
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Trino target requires 'host' field"))?;
+            let user = target_config
+                .user
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Trino target requires 'user' field"))?;
+            let catalog = target_config
+                .catalog
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Trino target requires 'catalog' field"))?;
+
+            let scheme = if target_config.tls.unwrap_or(false) {
+                "https"
+            } else {
+                "http"
+            };
+            let base_url = format!("{scheme}://{host}:{}", target_config.effective_trino_port());
+
+            tracing::info!("Backend [{}]: Trino", target_name);
+            tracing::info!("Coordinator: {} catalog={}", base_url, catalog);
+
+            // `password` is never logged — connection-security rule
+            // (`multi_backend.md` §"Connection security"). Absent means no
+            // `Authorization` header at all (the unauthenticated local tier).
+            Ok(Box::new(TrinoBackend::new(TrinoClientConfig {
+                base_url,
+                user: user.clone(),
+                catalog: catalog.clone(),
+                schema: target_config.schema.clone(),
+                password: target_config.password.clone(),
+            })))
+        }
     }
 }
 

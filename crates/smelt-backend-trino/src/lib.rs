@@ -1,15 +1,18 @@
-//! A pure-Rust HTTP client for Trino's `/v1/statement` protocol.
+//! A pure-Rust HTTP client and `Backend` implementation for Trino's
+//! `/v1/statement` protocol over an Iceberg REST catalog.
 //!
-//! This crate is the client half of the Trino backend (phase 5 of
-//! `docs/outcomes/20260913-trino-target-spine/`): request submission,
-//! `nextUri` paging, result-page decoding to Arrow, and typed error
-//! mapping. It has no `Backend` trait implementation — that is phase 6.
+//! `client`/`arrow_convert`/`config`/`error`/`protocol` are the HTTP client
+//! (phase 5 of `docs/outcomes/20260913-trino-target-spine/`); `backend` is
+//! the `Backend` trait implementation (phase 6) driving that client against
+//! DDL, existence, row count, preview and `execute_model`.
 
 pub mod arrow_convert;
+pub mod backend;
 pub mod client;
 pub mod config;
 pub mod error;
 pub mod protocol;
 
+pub use backend::TrinoBackend;
 pub use client::TrinoClient;
 pub use config::TrinoClientConfig;

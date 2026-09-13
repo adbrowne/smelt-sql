@@ -140,7 +140,7 @@ not an answer — every cell is still established by execution.
 | 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | done |
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | done |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | done |
-| 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | planned |
+| 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | done |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | pending |
 | 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | pending |
@@ -318,5 +318,20 @@ not an answer — every cell is still established by execution.
   `clippy-gate.sh`'s two feature sets — exactly the "an audit leg that skips is
   indistinguishable from one that passes" hole this outcome's driver note warns about. The live
   legs self-gate on `SMELT_TRINO_URL` instead; compilation is never gated.
+
+- **2026-09-14 — phase 6 refuses `delete_partitions`/`insert_into_from_query`/`insert_overwrite`
+  by name rather than porting DuckDB's DELETE+INSERT emulation.** These three `Backend` trait
+  methods are required (no provided default), but the plan's task list never named them — an
+  omission this phase's `cargo check` surfaced. All three belong to the incremental/maintenance
+  family this outcome's Out of scope section reserves for `20260913-trino-incremental`; DuckDB's
+  own emulation for them assumes transactional semantics and a partition-literal axis rendering
+  neither measured against Iceberg, so copying it would be a guess T4 would have to re-decide
+  anyway. Each refuses with `BackendError::UnsupportedFeature` naming the method and the outcome
+  that owns it — the same shape as `load_table`'s phase-7 refusal.
+- **2026-09-14 — live legs measured a real divergence: `VALUES (1, 'x')` types its integer
+  column as Trino `integer` (Arrow `Int32`), not `bigint`.** Only `count(*)` is reliably
+  `bigint`. `create_view_as_then_read_back_and_drop` initially asserted `Int64Array` and failed
+  against the live tier; fixed to `Int32Array` with a comment recording the distinction, since a
+  wrong assumption here would have silently under-tested `arrow_convert`'s type mapping.
 
 ## Blocked
