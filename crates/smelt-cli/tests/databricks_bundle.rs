@@ -148,8 +148,8 @@ fn bundle_smelt_comes_from_the_locally_built_wheel() {
         .as_str()
         .expect("artifacts.smelt_wheel.build is a string");
     assert!(
-        build.contains("maturin build"),
-        "wheel artifact must be built by maturin: {build}"
+        build.contains("dbx-wheel-build.sh"),
+        "wheel artifact must be built by scripts/dbx-wheel-build.sh (which itself calls maturin): {build}"
     );
 
     let job_text = read(&bundle_dir().join("resources/github_activity_job.yml"));
@@ -548,6 +548,111 @@ fn runs_subcommand_is_read_only() {
         assert!(
             !runs_block.contains(forbidden),
             "runs branch must not contain the mutating verb `{forbidden}`"
+        );
+    }
+}
+
+/// Phase 11f test 1: `dbx-wheel-build.sh verify` rejects a wheel tagged
+/// above the declared manylinux_2_28 floor, naming both the tag and the
+/// floor in its error.
+#[test]
+fn wheel_verify_rejects_a_too_new_manylinux_tag() {
+    let output = Command::new("bash")
+        .arg(repo_root().join("scripts/dbx-wheel-build.sh"))
+        .arg("verify")
+        .arg("smelt_sql-0.3.2-cp312-cp312-manylinux_2_39_x86_64.whl")
+        .output()
+        .expect("run dbx-wheel-build.sh verify");
+
+    assert!(
+        !output.status.success(),
+        "verify must reject a manylinux_2_39 wheel"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("manylinux_2_39"),
+        "error must name the wheel's own tag: {stderr}"
+    );
+    assert!(
+        stderr.contains("manylinux_2_28"),
+        "error must name the declared floor: {stderr}"
+    );
+}
+
+/// Phase 11f test 2: `verify` accepts the declared floor and anything below
+/// it, including the legacy numbered tags.
+#[test]
+fn wheel_verify_accepts_the_declared_floor_and_below() {
+    for wheel in [
+        "smelt_sql-0.3.2-cp312-cp312-manylinux_2_28_x86_64.whl",
+        "smelt_sql-0.3.2-cp312-cp312-manylinux_2_17_x86_64.whl",
+        "smelt_sql-0.3.2-cp312-cp312-manylinux2014_x86_64.whl",
+    ] {
+        let status = Command::new("bash")
+            .arg(repo_root().join("scripts/dbx-wheel-build.sh"))
+            .arg("verify")
+            .arg(wheel)
+            .status()
+            .expect("run dbx-wheel-build.sh verify");
+        assert!(status.success(), "verify must accept {wheel}");
+    }
+}
+
+/// Phase 11f test 3: `verify` rejects a plain (unrepaired) `linux_x86_64`
+/// wheel — auditwheel repair never ran, so the vendored libduckdb is missing.
+#[test]
+fn wheel_verify_rejects_an_unrepaired_linux_tag() {
+    let output = Command::new("bash")
+        .arg(repo_root().join("scripts/dbx-wheel-build.sh"))
+        .arg("verify")
+        .arg("smelt_sql-0.3.2-cp312-cp312-linux_x86_64.whl")
+        .output()
+        .expect("run dbx-wheel-build.sh verify");
+    assert!(
+        !output.status.success(),
+        "verify must reject an unrepaired linux_x86_64 wheel"
+    );
+}
+
+/// Phase 11f test 4: the `smelt_wheel` artifact's `build:` must invoke the
+/// single-owner script rather than a bare `maturin build`, so a second
+/// spelling of the build (and its manylinux floor) cannot drift back in.
+#[test]
+fn smelt_wheel_build_uses_the_manylinux_build_script() {
+    let bundle = databricks_yml();
+    let build = bundle["artifacts"]["smelt_wheel"]["build"]
+        .as_str()
+        .expect("artifacts.smelt_wheel.build is a string");
+    assert!(
+        build.contains("dbx-wheel-build.sh"),
+        "smelt_wheel build must invoke scripts/dbx-wheel-build.sh: {build}"
+    );
+    assert!(
+        !build.contains("maturin build"),
+        "smelt_wheel build must not contain a bare 'maturin build' — that belongs solely to \
+         dbx-wheel-build.sh: {build}"
+    );
+}
+
+/// Phase 11f test 5: the manylinux floor literal is stated exactly once, in
+/// the build script — `databricks.yml` and the job resource must not restate
+/// it, so the floor cannot drift out of sync between the two.
+#[test]
+fn smelt_wheel_floor_is_stated_once() {
+    let script = read(&repo_root().join("scripts/dbx-wheel-build.sh"));
+    assert!(
+        script.contains("manylinux_2_28"),
+        "dbx-wheel-build.sh must declare the manylinux_2_28 floor"
+    );
+
+    for path in [
+        bundle_dir().join("databricks.yml"),
+        bundle_dir().join("resources/github_activity_job.yml"),
+    ] {
+        let text = read(&path);
+        assert!(
+            !text.contains("manylinux"),
+            "{path:?} must not restate the manylinux floor — that is dbx-wheel-build.sh's alone"
         );
     }
 }

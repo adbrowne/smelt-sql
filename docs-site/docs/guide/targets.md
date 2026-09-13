@@ -319,6 +319,12 @@ fetch step are needed for the binary itself. This is a placeholder for a PyPI de
 release tracks the CLI's `dev` branch, the `artifacts:` block is dropped in favour of a pinned
 `smelt-sql==<version>` in the job environment's dependencies.
 
+The wheel is built by `scripts/dbx-wheel-build.sh`, not a bare `maturin build`: a bare build
+links against whatever glibc the build host ships, which Databricks serverless compute's
+installer refuses if it is newer than the platform provides. The script builds against a
+declared manylinux compatibility floor instead, and refuses to leave a wheel tagged above that
+floor — or an unrepaired non-manylinux wheel — on disk for `bundle deploy` to upload.
+
 The job's own `databricks` target authenticates with the **ambient** session — neither `host`
 nor `token` is a key on it at all:
 
