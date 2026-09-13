@@ -188,6 +188,33 @@ of the models or the tooling.
 
 ## Blocked
 
+- 2026-09-13 (phase 11i implement, second attempt): **still no `phases/11i-plan.md`; and a
+  second, independent blocker was confirmed on this pass — the cached Databricks credential is
+  currently rejected by the live workspace.** Row stays `planned`, unchanged from the entry
+  immediately below.
+  - Confirmed the Databricks CLI is present (`mise run setup-databricks` reports `databricks CLI
+    1.16.1 already on PATH`, resolved via `mise exec --`) and general network egress works
+    (`curl` to an external host returns `200`).
+  - `source scripts/dbx-dogfood-env.sh` succeeds and reports `SMELT_DBX_TOKEN=SET` — it reads the
+    already-decrypted `$SMELT_DBX_CONFIG_DIR/token`, it does not mint a fresh one. Exercising that
+    token against the live workspace fails two ways: a raw `curl` to
+    `/api/2.0/clusters/spark-versions` with the bearer token returns `403`, and
+    `databricks current-user me` returns `Error: Invalid Token`. So the cached token itself is
+    stale/expired, not a decryption or network problem.
+  - Attempting to mint a fresh one via `bash scripts/dbx-auth.sh` fails in this headless session
+    for an unrelated reason: it shells out to `gpg --quiet --yes --decrypt`, which needs an
+    interactive passphrase prompt (`pinentry`) this session has no terminal for —
+    `gpg: problem with the agent: Inappropriate ioctl for device` /
+    `gpg: decryption failed: Bad session key`. Re-minting the credential is therefore a **human**
+    task (run `bash scripts/dbx-auth.sh` interactively, enter the passphrase, then
+    `source scripts/dbx-dogfood-env.sh`), not something a headless implement pass can self-serve.
+  - Net effect for whoever plans 11i next: even once `phases/11i-plan.md` exists, its live legs
+    (task 1 onward — redeploy, seed, smoke run, scheduled runs) will block immediately on this
+    same `Invalid Token` until a human refreshes the credential first. Worth doing that refresh
+    before or alongside writing the plan, so the plan step's own dry-run checks (if any) don't
+    trip on it too.
+  - No code, config, or credential files were touched this pass — read-only diagnosis only.
+
 - 2026-09-13 (phase 11i implement): **no `phases/11i-plan.md` exists.** The outcome table
   carries row 11i as `planned`, but no plan step has written its detailed plan yet — only
   11a–11h have `*-plan.md` files (11h's implement pass wrote `11h-plan.md` itself when
