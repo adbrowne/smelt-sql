@@ -184,9 +184,20 @@ of the models or the tooling.
 | 11f | Make the deployed wheel installable on Databricks serverless compute, offline: a single-owner `scripts/dbx-wheel-build.sh` builds smelt's `bindings = "bin"` wheel against a declared **manylinux_2_28** floor (`maturin --zig` first, a manylinux Docker container as the documented fallback) and refuses to emit a wheel tagged above that floor or left unrepaired; `databricks.yml`'s `smelt_wheel` artifact calls it instead of a bare `maturin build`; gated by the script's own `verify` mode under test plus a structural bundle test, and proved by building a real compliant wheel with no workspace | done |
 | 11g | **[live]** Resume 11e from its task 3 under the 11f wheel: redeploy (wheel + Volume seed), one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
 | 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | done |
-| 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | planned |
+| 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
 
 ## Blocked
+
+- 2026-09-13 (phase 11i implement, fifth attempt): **credential confirmed live, plan still
+  missing.** `bash scripts/dbx-verify.sh` now passes clean end-to-end (reachability on both
+  `workspace.smelt_dogfood` and `workspace.smelt_dogfood_oracle`, out-of-scope-write refusal) —
+  the human unblock logged just above this entry holds. The sole remaining blocker is unchanged
+  across five consecutive implement passes: no `phases/11i-plan.md` exists (only
+  `phases/11i-summary.md`, itself a blocked-attempt record, not a plan). The implement step
+  executes an already-planned phase; it does not author one. No code or doc changes made other
+  than this log entry and flipping row 11i to `blocked`. This has now recurred five times with
+  the plan-authorship gap as the constant factor — worth a human or a planner pass writing
+  `phases/11i-plan.md` directly rather than dispatching another implement pass at this row.
 
 - 2026-09-13 — human unblock: **credential refreshed.** Root cause of the four-attempt "Invalid
   Token" streak: a bad passphrase had gotten cached in `gpg-agent` (around the same time its
