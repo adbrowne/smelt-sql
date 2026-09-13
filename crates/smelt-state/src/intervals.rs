@@ -1,7 +1,11 @@
+use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use tracing::warn;
+
+use crate::file_store::FileStore;
 
 /// Interval tracking for a single model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +249,46 @@ pub fn compute_model_hash(sql: &str) -> String {
     format!("sha256:{:x}", hash)
 }
 
+/// Bootstrap tool: write `[start, end)` into `model_name`'s interval history
+/// for `target`, using the permissive `FileStore::new` posture (a bootstrap
+/// write is gated by the same `Intervals` artifact check a real run's write
+/// would be — `save_intervals` applies it regardless of which constructor
+/// built the store).
+///
+/// For a target with no local run history (e.g. a Volume-resident scheduled
+/// job store), this unblocks `--auto`'s frontier detection
+/// (`compute_auto_time_range`) from data already known to be ingested,
+/// without waiting for a first real run to record it
+/// (`docs/outcomes/20260912-databricks-dogfood-spine/phases/11j-plan.md`).
+///
+/// `model_hash` need not be exactly the model's current compiled hash — only
+/// the *next* successful write compares hashes, and a mismatch simply
+/// re-bases from that write's own hash (see the plan's "Decided here" note).
+/// Refuses if `start >= end`.
+pub fn seed_interval(
+    project_dir: &Path,
+    target: &str,
+    model_name: &str,
+    model_hash: &str,
+    start: &str,
+    end: &str,
+) -> Result<()> {
+    let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .with_context(|| format!("invalid start date '{start}'"))?;
+    let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .with_context(|| format!("invalid end date '{end}'"))?;
+    if start_date >= end_date {
+        bail!("seed_interval: start '{start}' must be before end '{end}'");
+    }
+
+    let file_store = FileStore::new(project_dir, target);
+    let mut store = file_store.load_intervals()?;
+    store
+        .get_or_create(model_name, model_hash)
+        .record_interval(start, end);
+    file_store.save_intervals(&store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +414,138 @@ mod tests {
         assert_eq!(
             mi.latest_date(),
             Some(NaiveDate::from_ymd_opt(2026, 3, 10).unwrap())
+        );
+    }
+
+    /// Mirrors `smelt_cli::commands::run_setup::compute_auto_time_range`'s
+    /// own frontier computation (min `latest_date()` over the models in the
+    /// graph that have any recorded coverage) — reimplemented here rather
+    /// than called directly, since that function is `pub(super)` in a crate
+    /// this one must not depend on (`smelt-cli` depends on `smelt-state`,
+    /// not the reverse).
+    fn auto_frontier(store: &IntervalStore, models: &[&str]) -> Option<NaiveDate> {
+        let mut latest: Option<NaiveDate> = None;
+        for model_name in models {
+            if let Some(intervals) = store.get(model_name) {
+                if let Some(date) = intervals.latest_date() {
+                    latest = Some(match latest {
+                        Some(prev) => prev.min(date),
+                        None => date,
+                    });
+                }
+            }
+        }
+        latest
+    }
+
+    #[test]
+    fn seed_interval_bootstraps_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let model_hash = compute_model_hash("SELECT 1");
+        seed_interval(
+            dir.path(),
+            "databricks_job",
+            "gold.events",
+            &model_hash,
+            "2026-08-01",
+            "2026-08-16",
+        )
+        .unwrap();
+
+        let file_store = crate::file_store::FileStore::new(dir.path(), "databricks_job");
+        let store = file_store.load_intervals().unwrap();
+
+        assert_eq!(
+            auto_frontier(&store, &["gold.events"]),
+            Some(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap()),
+            "seeding must give --auto's frontier computation a non-empty starting point"
+        );
+    }
+
+    #[test]
+    fn seed_interval_uses_the_models_real_current_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let sql = "SELECT * FROM raw.events";
+        let model_hash = compute_model_hash(sql);
+        seed_interval(
+            dir.path(),
+            "databricks_job",
+            "gold.events",
+            &model_hash,
+            "2026-08-01",
+            "2026-08-16",
+        )
+        .unwrap();
+
+        let file_store = crate::file_store::FileStore::new(dir.path(), "databricks_job");
+        let store = file_store.load_intervals().unwrap();
+        assert_eq!(
+            store.get("gold.events").unwrap().model_hash,
+            compute_model_hash(sql)
+        );
+    }
+
+    #[test]
+    fn seed_interval_is_additive_across_models() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_interval(
+            dir.path(),
+            "databricks_job",
+            "gold.a",
+            "hash_a",
+            "2026-08-01",
+            "2026-08-10",
+        )
+        .unwrap();
+        seed_interval(
+            dir.path(),
+            "databricks_job",
+            "gold.b",
+            "hash_b",
+            "2026-08-05",
+            "2026-08-16",
+        )
+        .unwrap();
+
+        let file_store = crate::file_store::FileStore::new(dir.path(), "databricks_job");
+        let store = file_store.load_intervals().unwrap();
+        assert!(
+            store.get("gold.a").is_some(),
+            "seeding gold.b must not clobber gold.a"
+        );
+        assert!(store.get("gold.b").is_some());
+        assert_eq!(
+            store.get("gold.a").unwrap().latest_date(),
+            Some(NaiveDate::from_ymd_opt(2026, 8, 10).unwrap())
+        );
+        assert_eq!(
+            store.get("gold.b").unwrap().latest_date(),
+            Some(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap())
+        );
+    }
+
+    #[test]
+    fn seed_interval_refuses_a_start_after_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = seed_interval(
+            dir.path(),
+            "databricks_job",
+            "gold.events",
+            "hash_a",
+            "2026-08-16",
+            "2026-08-01",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("start"),
+            "error should name the offending bound: {err}"
+        );
+
+        let file_store = crate::file_store::FileStore::new(dir.path(), "databricks_job");
+        let store = file_store.load_intervals().unwrap();
+        assert!(
+            store.get("gold.events").is_none(),
+            "a refused seed must not partially write the store"
         );
     }
 }

@@ -15,6 +15,7 @@ pub mod rebuild;
 pub mod run;
 mod run_setup;
 pub mod seed;
+pub mod state;
 pub mod status;
 pub mod table;
 pub mod test;

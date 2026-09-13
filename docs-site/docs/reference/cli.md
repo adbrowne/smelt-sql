@@ -1135,6 +1135,42 @@ smelt status silver.sessions --since 2026-01-01 --until 2026-03-01
 
 ---
 
+## smelt state
+
+Bootstrap or inspect run-state artifacts directly, offline (no backend connection). Currently one subcommand:
+
+### smelt state seed-interval
+
+Seed one model's interval history for a target that has no local run history to inherit — e.g. a Volume-resident scheduled-job store whose `.smelt/targets/<target>/intervals.json` has never been written by a real run. This gives `smelt run --auto` a frontier to start from instead of refusing on empty history. Seeding is a one-time bootstrap: once seeded, the target's real run pipeline is the sole writer going forward.
+
+**Usage:**
+
+```
+smelt state seed-interval [OPTIONS] --target <TARGET> --model <MODEL> --start <START> --end <END>
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | (required) | Target environment from `smelt.yml` whose interval store is seeded |
+| `--model` | string | (required) | Model to seed (canonical dotted path, e.g. `gold.events_enriched`) |
+| `--start` | string | (required) | Start of the seeded interval (ISO 8601: YYYY-MM-DD) |
+| `--end` | string | (required) | End of the seeded interval (ISO 8601: YYYY-MM-DD) |
+
+The model's current compiled SQL hash is computed and stored alongside the interval — the next real run's write compares against it, and re-bases the history from that write's own hash on a mismatch, rather than failing. Refuses if `--model` does not name a model in the project, or if `--start` is not before `--end`.
+
+**Examples:**
+
+```bash
+# Seed one model's interval so a job target with no local history can start
+smelt state seed-interval --target databricks_job --model gold.events_enriched \
+  --start 2026-08-01 --end 2026-08-16
+```
+
+---
+
 ## smelt history
 
 Show run history for the project. Displays past execution records including timestamps, durations, and which models were run.

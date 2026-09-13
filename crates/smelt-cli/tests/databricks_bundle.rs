@@ -817,3 +817,94 @@ fn databricks_bundle_validate_is_clean() {
         "databricks bundle validate failed: {status:?}"
     );
 }
+
+// --- Phase 11j: `smelt state seed-interval` bootstrap tool -----------------
+//
+// `docs/outcomes/20260912-databricks-dogfood-spine/phases/11j-plan.md` test 5.
+// Fully offline: a scaffolded temp project with a `duckdb`-typed target (the
+// target *type* is irrelevant to this command — it never connects to a
+// backend — only the target *name* used to key `.smelt/targets/<name>/`).
+
+fn stage_seed_interval_project(dir: &Path) {
+    fs::create_dir_all(dir.join("models")).unwrap();
+    fs::write(
+        dir.join("smelt.yml"),
+        "name: seed_interval_test\nversion: 1\npaths:\n  - models\ntargets:\n  databricks_job:\n    type: duckdb\n    database: db.duckdb\n    schema: main\ndefault_materialization: table\n",
+    )
+    .unwrap();
+    fs::write(dir.join("models/m.sql"), "SELECT 1 AS x\n").unwrap();
+}
+
+#[test]
+fn seed_intervals_subcommand_prints_the_written_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let project_dir = tmp.path().join("proj");
+    stage_seed_interval_project(&project_dir);
+
+    let smelt_bin = PathBuf::from(env!("CARGO_BIN_EXE_smelt"));
+    let out = Command::new(smelt_bin)
+        .arg("state")
+        .arg("seed-interval")
+        .args(["--project-dir", project_dir.to_str().unwrap()])
+        .args(["--target", "databricks_job"])
+        .args(["--model", "m"])
+        .args(["--start", "2026-08-01"])
+        .args(["--end", "2026-08-16"])
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt state seed-interval`: {e}"));
+
+    assert!(
+        out.status.success(),
+        "seed-interval should exit 0.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let intervals_path = project_dir
+        .join(".smelt")
+        .join("targets")
+        .join("databricks_job")
+        .join("intervals.json");
+    assert!(
+        intervals_path.is_file(),
+        "expected {intervals_path:?} to be written"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&intervals_path.display().to_string()),
+        "stdout should print the written path: {stdout}"
+    );
+
+    let contents = fs::read_to_string(&intervals_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&contents).unwrap();
+    let entry = &json["m"];
+    assert_eq!(entry["covered_intervals"][0]["start"], "2026-08-01");
+    assert_eq!(entry["covered_intervals"][0]["end"], "2026-08-16");
+}
+
+#[test]
+fn seed_intervals_subcommand_refuses_an_unknown_model() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let project_dir = tmp.path().join("proj");
+    stage_seed_interval_project(&project_dir);
+
+    let smelt_bin = PathBuf::from(env!("CARGO_BIN_EXE_smelt"));
+    let out = Command::new(smelt_bin)
+        .arg("state")
+        .arg("seed-interval")
+        .args(["--project-dir", project_dir.to_str().unwrap()])
+        .args(["--target", "databricks_job"])
+        .args(["--model", "does_not_exist"])
+        .args(["--start", "2026-08-01"])
+        .args(["--end", "2026-08-16"])
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt state seed-interval`: {e}"));
+
+    assert!(
+        !out.status.success(),
+        "seed-interval must refuse a model that isn't in the project"
+    );
+}

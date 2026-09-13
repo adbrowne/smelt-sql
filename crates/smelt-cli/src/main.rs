@@ -79,6 +79,41 @@ enum Commands {
         #[command(subcommand)]
         command: DocsCommands,
     },
+    /// Bootstrap / inspect run-state artifacts directly, offline
+    State {
+        #[command(subcommand)]
+        command: StateCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum StateCommands {
+    /// Seed one model's interval history for a target with no local run
+    /// history, so `smelt run --auto` has a frontier to start from
+    SeedInterval(SeedIntervalArgs),
+}
+
+#[derive(Parser)]
+struct SeedIntervalArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Target environment from smelt.yml whose interval store is seeded
+    #[arg(long)]
+    target: String,
+
+    /// Model to seed (canonical dotted path, e.g. `gold.events_enriched`)
+    #[arg(long)]
+    model: String,
+
+    /// Start of the seeded interval (ISO 8601: YYYY-MM-DD)
+    #[arg(long)]
+    start: String,
+
+    /// End of the seeded interval (ISO 8601: YYYY-MM-DD)
+    #[arg(long)]
+    end: String,
 }
 
 #[derive(Subcommand)]
@@ -820,6 +855,9 @@ async fn main() -> std::process::ExitCode {
         Commands::Check(args) => commands::check::run_checks(args).await,
         Commands::List(args) => commands::list::list(args, scope).await,
         Commands::Clean(args) => commands::clean::clean(args).await,
+        Commands::State { command } => match command {
+            StateCommands::SeedInterval(args) => commands::state::seed_interval_cmd(args).await,
+        },
         Commands::Docs { command } => match command {
             DocsCommands::Generate(args) => commands::docs::generate(args).await,
             DocsCommands::List => commands::docs::list(),

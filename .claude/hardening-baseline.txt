@@ -1,5 +1,5 @@
 # Production code debt baseline
-# Updated: 2026-09-08
+# Updated: 2026-09-14
 # Format: <crate> <pattern> <count>
 # Patterns: unwrap  expect  println
 # Regenerate with: .claude/scripts/hardening-budget.sh --update
@@ -26,6 +26,12 @@
 #   `.expect(` calls are the same `Workspace::try_get`/`project_input`
 #   infallible-after-`init_db` pattern already used by
 #   `explain_maintenance_plan` in the same file.
+# 2026-09-14 andrew: smelt-cli println 188 -> 189
+#   (docs/outcomes/20260912-databricks-dogfood-spine/ phase 11j). The one new
+#   println! is `commands/state.rs`'s `smelt state seed-interval` success
+#   message printing the written `.smelt/targets/<target>/intervals.json`
+#   path, matching the existing single-line confirmation style other
+#   offline CLI tools use (e.g. `smelt init`).
 #
 smelt-backend-bigquery expect 0
 smelt-backend-bigquery println 0
@@ -49,7 +55,7 @@ smelt-bench expect 3
 smelt-bench println 27
 smelt-bench unwrap 8
 smelt-cli expect 44
-smelt-cli println 188
+smelt-cli println 189
 smelt-cli unwrap 0
 smelt-core expect 6
 smelt-core println 0
