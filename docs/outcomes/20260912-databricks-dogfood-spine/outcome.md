@@ -175,10 +175,21 @@ of the models or the tooling.
 | 9d | **[live]** Re-measure both Databricks sweeps under 9c's succession fix: reset and replay the dogfood state from scratch (days 1-8 loaded, full refresh, then windows 9/10/11 each with its oracle refresh), re-run `dbx-dogfood-parity.sh`'s snapshot/manifest/live-test sequence AND the equivalence sweep, commit refreshed `08-parity.json` and `09b-equivalence.json`, restore `dbx_registry_entries_are_all_live`; closes criterion 7 and re-closes criterion 8 on post-fix numbers (rows 8 and 9b come off `## Blocked`) | done |
 | 9e | Land the ledger-free succession full rebuild 9c's dispatch fix needs: `rebuild_succession_state` stops refusing when the cell is `state_downgraded`, emitting the presented arm alone (no tombstone DDL, no ledger delete/insert, no clock-tie probe) through one new single-owned emitter in `smelt-logical`, gated by a test that *executes* the downgraded path against a real DuckDB backend rather than only asserting the dispatch decision | done |
 | 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | done |
-| 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | pending |
+| 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | planned |
 | 11 | **[live]** Package the pipeline as a daily Databricks Job deployed from a committed Asset Bundle (`databricks.yml`, per-PR `bundle validate`, CLI pinned via mise) on serverless compute — smelt installed via a locally-built `bindings = "bin"` wheel in the bundle's `artifacts:` block (swap to a pinned PyPI `smelt-sql` release later), ambient-session `databricks` target (spec delta), loader task then `smelt run` task, `.smelt/` state on a Unity Catalog Volume — and prove three consecutive scheduled runs against the oracle | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 10 plan): **no reshape — row 10 stands as written; recorded one placement
+  reading.** 9f's summary closed criteria 7 and 8 on post-fix live numbers and surfaced nothing
+  that needs a new row: the only outstanding difference is the already-registered
+  `gold_events_enriched` `UnorderedColumnDivergence`, which row 10 banks rather than fixes (fixes
+  are `## Out of scope`, deferred to the follow-on `databricks-correctness` outcome). Criterion
+  9's "docs-site gains a Databricks target page" is planned as a `### Databricks` **section of
+  `docs-site/docs/guide/targets.md`**, not a new file, because that page is where DuckDB, Spark
+  and BigQuery are each documented and it is already registered with the `smelt docs` front door;
+  a separate page would need a nav entry and would split the backend comparison across two
+  documents for no reader benefit. Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 9f implement): **row 9f done — criteria 7 and 8 closed on post-fix live
   numbers; rows 8, 9b and 9d come off `## Blocked`.** Resumed 9d's staged state (8 fixture days,
