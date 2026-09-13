@@ -188,6 +188,18 @@ of the models or the tooling.
 
 ## Blocked
 
+- 2026-09-13 (phase 11i implement, third attempt): **unchanged from the second attempt.** Still
+  no `phases/11i-plan.md` (the implement step executes an already-planned phase; it does not
+  author the plan), and the cached Databricks credential is still rejected: `source
+  scripts/dbx-dogfood-env.sh` reports `SMELT_DBX_TOKEN=SET`, but `databricks current-user me`
+  against the live workspace (`https://dbc-466c2133-56f4.cloud.databricks.com`) still returns
+  `Error: Invalid Token`. No code or doc changes made other than this log entry; row 11i stays
+  `planned`. Both prerequisites from the prior entry are still open — write
+  `phases/11i-plan.md` from the outcome-table one-liner, and get a human to refresh the
+  credential via `bash scripts/dbx-auth.sh` (interactive `gpg` passphrase, not headless-capable)
+  followed by `source scripts/dbx-dogfood-env.sh` — before the next implement pass can do live
+  work here.
+
 - 2026-09-13 (phase 11i implement, second attempt): **still no `phases/11i-plan.md`; and a
   second, independent blocker was confirmed on this pass — the cached Databricks credential is
   currently rejected by the live workspace.** Row stays `planned`, unchanged from the entry
