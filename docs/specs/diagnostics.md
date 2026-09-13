@@ -26,6 +26,11 @@ Every diagnostic carries:
   cross-references).
 - **Range** — a `rowan::TextRange` (byte offsets into the source file).
 
+`smelt.yml` target-shape key-placement violations and literal-secret violations (`smelt_yml.md`
+§"Target shape") are hard configuration errors raised at config load, with no `DiagnosticCode`
+of their own — deliberately: config load precedes the diagnostic pipeline, so a target-shape
+violation cannot yet be anchored to a `rowan::TextRange` the way a parsed-model diagnostic can.
+
 ### Fail-loud invariants
 
 The diagnostic system enforces a *fail-loud* discipline:

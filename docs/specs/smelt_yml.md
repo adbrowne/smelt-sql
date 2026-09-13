@@ -58,27 +58,40 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `type` | string | yes | Backend type — `duckdb`, `spark`, `bigquery`, or `databricks`. |
-| `schema` | string | no | Schema name used for materialised tables/views and target-schema seeds. Defaults to `main` when omitted (matches `architecture.md` §"Default materialization name mapping"). On a `databricks` target this is the Unity Catalog schema, catalog-qualified in emitted SQL by `catalog`. |
+| `type` | string | yes | Backend type — `duckdb`, `spark`, `bigquery`, `databricks`, or `trino`. |
+| `schema` | string | no | Schema name used for materialised tables/views and target-schema seeds. Defaults to `main` when omitted (matches `architecture.md` §"Default materialization name mapping"). On a `databricks` target this is the Unity Catalog schema, catalog-qualified in emitted SQL by `catalog`. On a `trino` target it is the schema inside `catalog`. |
 | `database` | string | DuckDB only | Path to the `.duckdb` file (relative to project root). |
 | `connect_url` | string | Spark only | Spark Connect URL (e.g. `sc://localhost:15002`). |
-| `catalog` | string | Spark and Databricks | Optional Spark catalog name. On a `databricks` target it names the Unity Catalog catalog and defaults to `workspace` when omitted. |
+| `catalog` | string | Spark, Databricks and Trino | Optional Spark catalog name. On a `databricks` target it names the Unity Catalog catalog and defaults to `workspace` when omitted. On a `trino` target it names the Iceberg catalog and is **required** — the connector, not smelt, decides the write surface, so guessing a catalog would guess the write surface. |
 | `warehouse` | string | Spark only | Base directory for file-based output (Parquet warehouse). |
 | `format` | string | Spark only | `delta` (default) or `parquet`. Affects schema-evolution capabilities. |
 | `project` | string | BigQuery only | GCP project the jobs are billed to and resolved against. |
 | `dataset` | string | BigQuery only | Dataset holding the target's tables — BigQuery's analogue of a schema. Defaults to `schema` when omitted. |
 | `location` | string | BigQuery only | Dataset location (e.g. `US`, `europe-west2`). Must match at query time; a dataset created in one location cannot be queried alongside tables in another. |
 | `settings` | map of string → string | DuckDB only | Connection-time settings applied as `SET key = value` on open. Unknown keys are rejected with an error. Common keys: `memory_limit`, `threads`, `temp_directory`. When `memory_limit` and/or `temp_directory` are absent, smelt supplies conservative defaults (see Semantics §8); any key the user sets is applied verbatim and never overridden. |
-| `host` | string | Databricks only, required unless `token` is also absent | Workspace hostname — no scheme, no trailing slash (e.g. `my-workspace.cloud.databricks.com`). Absent **together with** `token` is the ambient form: the session is built with no explicit host at all, honouring whatever workspace context the runtime already established. `host` absent while `token` is present is a hard configuration error naming both keys — a token carries no workspace address. |
+| `host` | string | Databricks and Trino | Databricks: workspace hostname — no scheme, no trailing slash (e.g. `my-workspace.cloud.databricks.com`); required unless `token` is also absent. Absent **together with** `token` is the ambient form: the session is built with no explicit host at all, honouring whatever workspace context the runtime already established. `host` absent while `token` is present is a hard configuration error naming both keys — a token carries no workspace address. Trino: the coordinator hostname, bare (no scheme, no trailing slash), always required. |
 | `token` | string | Databricks only, optional | A `${ENV}` reference to a Databricks personal access token or service-principal secret. A literal (non-`${VAR}`) value is a hard configuration error, not a warning: the value is a whole-workspace credential, and a literal would sit in a checked-in file. When `token` is absent (with `host` present), the session authenticates with the client's **ambient** Databricks credentials. When both `token` and `host` are absent, the session additionally carries no explicit host — the form a workload running inside the workspace itself (e.g. a Databricks Job task) takes; no secret and no address in the config at all. |
+| `port` | integer | Trino only, optional | Coordinator port. Defaults to `8080` when `tls: false` and `443` when `tls: true`. |
+| `user` | string | Trino only, required | Trino's session user, sent as the `X-Trino-User` header. |
+| `tls` | boolean | Trino only, optional | Selects `https` and the `tls: true` default port. Defaults to `false` (plain `http`, the unauthenticated local tier). |
+| `password` | string | Trino only, optional | A `${ENV}` reference to the Trino session password **only** — a literal value is a hard configuration error, not a warning, for the same reason as `databricks`' `token`: the key *is* the secret, so no literal could be an intentional non-secret. Absent means no `Authorization` header at all (the unauthenticated local tier). |
 
 A `databricks` target hard-errors, naming both the offending key and the backend, on
 `connect_url`, `warehouse`, `format`, `database`, `settings`, `project`, `dataset`, and
 `location` — these keys are never silently ignored. Free Edition serverless compute has no
 host-visible warehouse directory and no format choice, so a silently-dropped `warehouse:`
-would mean a user's file-layout intention was lost rather than rejected. This per-target
-key-placement check is specified for `databricks` only; other target types still tolerate a
-misplaced key from another backend's shape (see §Known Divergences).
+would mean a user's file-layout intention was lost rather than rejected.
+
+A `trino` target hard-errors, naming both the offending key and the backend, on
+`connect_url`, `warehouse`, `format`, `database`, `settings`, `project`, `dataset`, `location`,
+and `token` — these keys are never silently ignored. Trino has no Spark Connect URL, no
+host-visible warehouse, no table-format choice (the Iceberg connector decides it), no DuckDB
+file and no BigQuery addressing; `token` is refused specifically so a Databricks-shaped
+credential is not silently ignored on a target that reads `password` instead.
+
+This per-target key-placement check is specified for `databricks` and `trino` only; other
+target types still tolerate a misplaced key from another backend's shape (see §Known
+Divergences).
 
 ### Model-config shape (per `models.<name>`)
 
@@ -153,12 +166,12 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 
 ## Known Divergences / Open Questions
 
-- **Per-target key-placement checking is Databricks-only.** A `databricks` target hard-errors
-  on a key belonging to another backend's shape (`warehouse`, `format`, `connect_url`,
-  `database`, `settings`, `project`, `dataset`, `location`); no other target type performs
-  this check today, so (say) a `project:` key left over from copy-pasting a BigQuery target
-  into a `spark` block is silently ignored rather than rejected. Extending the check to every
-  target type is open. Tracked by `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`.
+- **Per-target key-placement checking is Databricks- and Trino-only.** A `databricks` or
+  `trino` target hard-errors on a key belonging to another backend's shape; no other target
+  type performs this check today, so (say) a `project:` key left over from copy-pasting a
+  BigQuery target into a `spark` block is silently ignored rather than rejected. Extending the
+  check to every target type is open. Tracked by
+  `docs/outcomes/20260912-databricks-dogfood-spine/outcome.md`.
 - **Per-declaration probe cadence override is open.** `probes:` sets one project-wide cadence; overriding cadence per declaration (e.g. a cheap functional-dependency probe every run, an expensive bounded-domain probe periodic) is not specified today. Tracked by `docs/outcomes/20260809-probe-backed-facts/outcome.md`.
 - **Fuzzy typo hints.** Unknown top-level keys (including typos of known keys) are warned by name. A future "did you mean …" hint that fuzzy-matches the offending key against the known-key set is open; not implemented today.
 - **Per-key reference drift.** The user-facing reference (`docs-site/docs/reference/smelt-yml.md`) currently documents some fields this spec does not yet cover (`schema_evolution`, `columns`). The reference is ahead of the spec on those keys; when the corresponding feature specs land they will absorb those fields.

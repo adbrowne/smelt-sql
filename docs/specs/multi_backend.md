@@ -26,48 +26,51 @@ owners: [andrew]
 ## Surface
 
 - **Backends.** A target's `type:` selects a backend (`duckdb` | `spark` | `bigquery` |
-  `databricks`; see `smelt_yml.md` §"Target shape"). Each backend declares a `SqlDialect`
-  (`DuckDB` | `SparkSQL` | `BigQuery`) and a `BackendCapabilities` value. A `bigquery` target
-  names a `project`, `dataset`, and `location` in place of DuckDB's `database` or Spark's
-  `connect_url`. A `databricks` target declares `SqlDialect::SparkSQL` and
-  `BackendCapabilities::databricks()`, and names `host`, `catalog`, and `schema` in place of
-  Spark's `connect_url`/`warehouse` — it shares Spark's dialect (both compile to Spark SQL)
+  `databricks` | `trino`; see `smelt_yml.md` §"Target shape"). Each backend declares a
+  `SqlDialect` (`DuckDB` | `SparkSQL` | `BigQuery` | `Trino`) and a `BackendCapabilities`
+  value. A `bigquery` target names a `project`, `dataset`, and `location` in place of DuckDB's
+  `database` or Spark's `connect_url`. A `databricks` target declares `SqlDialect::SparkSQL`
+  and `BackendCapabilities::databricks()`, and names `host`, `catalog`, and `schema` in place
+  of Spark's `connect_url`/`warehouse` — it shares Spark's dialect (both compile to Spark SQL)
   while carrying its own capability profile and connection shape (§"Why Databricks is a
-  distinct target type").
+  distinct target type"). A `trino` target declares `SqlDialect::Trino` and
+  `BackendCapabilities::trino_iceberg()`, naming `host`/`port`/`user`/`catalog`/`schema` in
+  place of Spark's `connect_url` — it is the first backend whose dialect is not shared with
+  another target type.
 - **Capability matrix.** `BackendCapabilities` is the single declared description of what a
   backend's SQL surface supports. Backends differ **only** in (a) their capability flags and
   (b) the dialect-specific physical SQL the printer emits; they do **not** differ in which
   smelt models a user may write. The flags are:
 
-  | Flag | DuckDB | Spark (Delta) | Spark (Parquet) | BigQuery | Databricks |
-  |------|:------:|:-------------:|:---------------:|:--------:|:----------:|
-  | `supports_qualify` | ✓ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ | ✓ | ✓ |
-  | `supports_merge` | ✓ | ✓ | ✗ | ✓ | ✓ |
-  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ | ✓ |
-  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ | ✓ | ✓ |
-  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ | ✓ | ✓ |
-  | `supports_pivot` | ✓ | ✓ | ✓ | ✓ | ✓ |
-  | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ | ✓ |
-  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_transactional_ddl` | ✓ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ | ✗ |
-  | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) | ✓ |
-  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_retraction` | ✗ | ✗ | ✗ | ✗ | ✗ |
-  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ |
-  | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ | ✗ |
-  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ |
-  | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ | ✓ |
-  | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ | ✓ |
-  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ | ✗ |
-  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ | ✗ |
-  | `supports_fingerprint_sidecar` (delta-restriction admission over an external `mutable_snapshot` source's synthesized fingerprint diff) | ✓ | ✗ | ✗ | ✗ | ✗ |
-  | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ | ✓ |
-  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` | `<=>` |
+  | Flag | DuckDB | Spark (Delta) | Spark (Parquet) | BigQuery | Databricks | Trino (Iceberg) |
+  |------|:------:|:-------------:|:---------------:|:--------:|:----------:|:---------------:|
+  | `supports_qualify` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
+  | `supports_merge` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
+  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
+  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ | ✓ | ✓ | ? |
+  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
+  | `supports_pivot` | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
+  | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
+  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_transactional_ddl` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
+  | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) | ✓ | ? |
+  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_retraction` | ✗ | ✗ | ✗ | ✗ | ✗ | ? |
+  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
+  | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
+  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ | ✓ | ✓ | ? |
+  | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ | ✓ | ? |
+  | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ | ✓ | ? |
+  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ | ✗ | ? |
+  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
+  | `supports_fingerprint_sidecar` (delta-restriction admission over an external `mutable_snapshot` source's synthesized fingerprint diff) | ✓ | ✗ | ✗ | ✗ | ✗ | ? |
+  | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ | ✓ | ? |
+  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` | `<=>` | ? |
 
   The Databricks column equals the Spark (Delta) column in every flag except
   `null_safe_equality`, which follows Spark SQL's own `<=>` spelling rather than DuckDB's
@@ -76,6 +79,14 @@ owners: [andrew]
   Databricks' native incremental-view-maintenance engine is unmodelled (§Known Divergences).
   These cells are inherited from the Spark (Delta) profile and not yet each independently
   executed against a live Databricks workspace (§Known Divergences).
+
+  Every Trino cell reads `?` — unmeasured — until it is executed against the live coordinator,
+  at which point the cell and `BackendCapabilities::trino_iceberg()` are written together in
+  the same commit. `?` is the honest spelling of *unmeasured*; seeding the column from Trino's
+  own documentation is exactly what the rule below this table forbids. The working prior is
+  that Trino sits near Spark (Delta) — Iceberg and Delta share the same per-table-commit,
+  no-cross-table-transaction atomicity shape — but that is a prior to test against, not a value
+  to write down (§Known Divergences).
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
   constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`,
@@ -107,6 +118,9 @@ owners: [andrew]
 - **`SMELT_DATABRICKS_HOST` / `SMELT_DATABRICKS_TOKEN`.** Databricks integration tests connect
   to the workspace named by these two variables. When either is unset, Databricks-targeted
   tests **skip** (not fail), exactly as Spark's and BigQuery's do.
+- **`SMELT_TRINO_URL`.** Trino integration tests connect to the coordinator this variable
+  names. When it is unset, Trino-targeted tests **skip** (not fail), exactly as Spark's,
+  BigQuery's and Databricks' do.
 
 ## Semantics
 
@@ -855,7 +869,9 @@ every model on first run. The flag is `true` for every backend today; the confor
 asserts each constructor sets it and that a first-run model against a fresh schema succeeds. A
 `databricks` target issues `CREATE SCHEMA IF NOT EXISTS <catalog>.<schema>` against Unity
 Catalog — the catalog-qualified form, since a Unity Catalog schema is always addressed within
-a catalog rather than standing alone.
+a catalog rather than standing alone. A `trino` target issues the same catalog-qualified
+`CREATE SCHEMA IF NOT EXISTS <catalog>.<schema>` against the Iceberg catalog, for the same
+reason: a Trino schema has no standalone address outside its catalog.
 
 ### Connection security
 A backend target's connection string may need secrets (an auth token) or TLS parameters that
@@ -902,6 +918,15 @@ form carries no secret for a log line to leak in the first place, so the redacti
 vacuous here rather than relied upon — the same code path applies unconditionally regardless of
 which form produced the config.
 
+A `trino` target carries its credential the same way `databricks` carries `token`: the
+password is not a substring of a connection URL but a distinct `password` key
+(`smelt_yml.md` §"Target shape"), sent as HTTP Basic auth alongside `user`. Because the key
+*is* the secret, a literal (non-`${VAR}`) `password` is a **hard configuration error**, not a
+smell, for the same reason as `databricks`' `token`. `password` absent is Trino's
+unauthenticated form — the local Docker tier's default — and carries no secret for the
+redaction rule to protect; the resolved password, when present, never reaches a log line, a
+run report, a diagnostic or an error message.
+
 ### Loading data into a backend
 Loading external rows into a backend (seeds, test fixtures, an Arrow batch) must not assume the
 backend's process shares the host filesystem. The transfer is performed through the backend's
@@ -917,6 +942,12 @@ work: serverless compute shares no filesystem with the client at all, so there i
 fallback to reach for even by mistake. Rows load through the session's own `createDataFrame`
 from Arrow, exactly as Spark Connect's does; smelt assumes neither a DBFS root nor a Volume
 mount is available to write through.
+
+A `trino` target's client protocol is HTTP (`/v1/statement`), with no host-filesystem
+assumption of its own; which bulk-loading path smelt takes over that protocol (row-by-row
+`INSERT`, a staged file the Iceberg connector reads, or another mechanism) is measured rather
+than assumed, and named here once phase 7 of `docs/outcomes/20260913-trino-target-spine`
+measures it.
 
 ### Cross-engine data exchange
 When a model on backend A references a model pinned to backend B (a cross-backend edge, found
@@ -935,6 +966,11 @@ rather than compiled to a `read_parquet()` substitution. The substitution's prec
 `warehouse` path both processes can read — cannot hold for Databricks: a `databricks` target
 has no `warehouse` key at all (it is one of the keys §"Target shape" hard-errors on), and
 serverless compute exposes no host-visible file layout for a DuckDB process to read back.
+
+A cross-backend edge into or out of a `trino` target is likewise **refused with a diagnostic**.
+The same precondition fails the same way: a `trino` target has no `warehouse` key at all (it is
+one of the keys §"Target shape" hard-errors on), and the object storage behind the Iceberg
+catalog is not a host filesystem path a DuckDB process could read back.
 
 ### Incremental & schema evolution per backend
 Strategy *resolution* (`incremental_models.md`) and change *classification*
@@ -1337,6 +1373,16 @@ resolves nested widening to a table rewrite.
   backend trait. Full per-leg disposition is tracked in the gap table in
   `docs/plans/20260719-prod-w4-spark.md`; the remaining DuckDB-only legs are follow-up work, not
   blockers to the supported-vs-beta label decision.
+- **Every built-in is implicitly `Native` on Trino.** `Signature::emission_at` returns `Native`
+  for any `(dialect, position)` pair with no registered entry, so `DialectId::Trino` enters the
+  function registry claiming every built-in is spelled natively on Trino — a claim no probe has
+  tested. `docs/outcomes/20260913-trino-emission/` owns closing this hole; until it does, a
+  model may compile to SQL Trino rejects.
+- **The Trino capability column is unmeasured.** Every cell in the Trino (Iceberg) column of
+  the capability matrix above reads `?`; the column is a hypothesis (Trino sits near Spark
+  (Delta)) until a later phase of `docs/outcomes/20260913-trino-target-spine` executes each
+  flag against a live coordinator, and `capability_conformance.rs` therefore asserts nothing
+  about Trino yet.
 
 ## References
 
@@ -1344,7 +1390,8 @@ resolves nested widening to a table rewrite.
   `crates/smelt-dialect/src/printer.rs`, `crates/smelt-dialect/src/type_conformance.rs`,
   `crates/smelt-backend/src/lib.rs` (`Backend` trait), `crates/smelt-backend-duckdb/`,
   `crates/smelt-backend-spark/`, `python/smelt/spark_adapter.py`,
-  `crates/smelt-state/src/ddl_spark.rs`.
+  `crates/smelt-state/src/ddl_spark.rs`, `crates/smelt-backend-trino/` (forward reference —
+  lands in `docs/outcomes/20260913-trino-target-spine`).
 - **Tests**: `crates/smelt-cli/tests/multi_engine_test.rs`,
   `crates/smelt-backend-spark/tests/load_table.rs`, `crates/smelt-backend-spark/src/tests.rs`,
   `crates/smelt-db/tests/prop_helpers/spark_oracle.rs`,
@@ -1352,6 +1399,7 @@ resolves nested widening to a table rewrite.
 - **User docs**: `docs-site/docs/` backend / targets pages.
 - **Plans (history)**: `docs/plans/20260328-multi-engine-example.md`,
   `docs/plans/20260628-spark-parity.md`,
+  `docs/outcomes/20260913-trino-target-spine/outcome.md`,
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Related specs**: `architecture.md` (§"Backend trait surface"), `smelt_yml.md`
   (§"Target shape"), `incremental_models.md`, `schema_evolution.md`, `testing.md`,
