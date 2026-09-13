@@ -343,7 +343,7 @@ pub async fn run_windowed_keyed_maintenance(
             Some(emit_create_table_as(
                 &qualified_table,
                 &delta_sql,
-                smelt_backend::maintenance_dialect(backend.dialect()),
+                smelt_backend::maintenance_dialect(backend.dialect())?,
             ))
         } else {
             None
@@ -396,7 +396,7 @@ pub async fn run_windowed_keyed_maintenance(
                 &delta_sql,
                 slice_predicate.as_ref(),
                 &mechanism,
-                smelt_backend::maintenance_dialect(backend.dialect()),
+                smelt_backend::maintenance_dialect(backend.dialect())?,
             ),
         };
         let action_sql = action_group
@@ -434,7 +434,7 @@ pub async fn run_windowed_keyed_maintenance(
                     &delta_sql,
                     partition_column,
                     &slice_lower,
-                    smelt_backend::maintenance_dialect(backend.dialect()),
+                    smelt_backend::maintenance_dialect(backend.dialect())?,
                 ) {
                     Some(probe_sql) => {
                         let ctx = crate::probes::ProbeContext {
@@ -733,7 +733,7 @@ pub async fn run_windowed_keyed_maintenance(
                             &delta_sql,
                             compared_columns,
                             partition_column,
-                            smelt_backend::maintenance_dialect(backend.dialect()),
+                            smelt_backend::maintenance_dialect(backend.dialect())?,
                         ) {
                             Some(sql) => sql,
                             None => bail!(

@@ -269,7 +269,7 @@ fn assemble_diagnostics_independently(
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
             smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
         })
-        .map(smelt_backend::maintenance_dialect)
+        .map(|d| smelt_backend::maintenance_dialect(d).unwrap())
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
 
     let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);

@@ -9,14 +9,17 @@
 //! The `match` is exhaustive over [`SqlDialect`]: a new dialect is a compile
 //! error here, never a silent default (`CLAUDE.md` §"Fail-loud discipline").
 //!
-//! **Spark is refused, not deferred.** Delta gives per-table atomicity and no
-//! cross-table transaction, so a ledger write and its data write cannot be
-//! made atomic there and the never-fold-twice refusal has no sound
-//! realisation — `docs/specs/state.md` §"Which dialects realise which
-//! structure" records that as a permanent absence. Asking for Spark ledger
-//! text is a caller bug (it should have consulted the availability layer and
-//! degraded), so it returns an error naming the dialect rather than
-//! DuckDB-flavoured SQL Spark cannot run.
+//! **Spark and Trino are refused, not deferred.** Delta gives per-table
+//! atomicity and no cross-table transaction, so a ledger write and its data
+//! write cannot be made atomic there and the never-fold-twice refusal has no
+//! sound realisation — `docs/specs/state.md` §"Which dialects realise which
+//! structure" records that as a permanent absence. Iceberg (queried through
+//! Trino in the `trino` target) shares Delta's per-table-commit atomicity, so
+//! the same refusal applies (2026-09-13 ruling; revisited by
+//! `20260913-trino-ledger`, not deferred here). Asking for Spark or Trino
+//! ledger text is a caller bug (it should have consulted the availability
+//! layer and degraded), so it returns an error naming the dialect rather than
+//! DuckDB-flavoured SQL neither can run.
 //!
 //! Realisability itself is **not** decided here — `realisable_state_structures`
 //! in `smelt-logical` owns it, and a run-layer caller consults that (via
@@ -58,7 +61,7 @@ pub fn ledger_table_ddl(dialect: SqlDialect, schema: &str) -> LedgerResult<Strin
     match dialect {
         SqlDialect::DuckDB => Ok(ddl_duckdb::generate_ledger_table_ddl(schema)),
         SqlDialect::BigQuery => Ok(ddl_bigquery::generate_ledger_table_ddl(schema)),
-        SqlDialect::SparkSQL => Err(UnsupportedLedgerDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(UnsupportedLedgerDialect::new(dialect)),
     }
 }
 
@@ -99,7 +102,7 @@ pub fn ledger_insert_sql(
             region_start,
             region_end,
         )),
-        SqlDialect::SparkSQL => Err(UnsupportedLedgerDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(UnsupportedLedgerDialect::new(dialect)),
     }
 }
 
@@ -153,7 +156,7 @@ pub fn ledger_fold_record_sql(
             region_start,
             region_end,
         )),
-        SqlDialect::SparkSQL => Err(UnsupportedLedgerDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(UnsupportedLedgerDialect::new(dialect)),
     }
 }
 
@@ -189,7 +192,7 @@ pub fn ledger_upsert_sql(
             region_start,
             region_end,
         )),
-        SqlDialect::SparkSQL => Err(UnsupportedLedgerDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(UnsupportedLedgerDialect::new(dialect)),
     }
 }
 
@@ -209,7 +212,7 @@ pub fn ledger_exists_sql(
         SqlDialect::BigQuery => Ok(ddl_bigquery::generate_ledger_exists_sql(
             schema, model, group, input, delta_id,
         )),
-        SqlDialect::SparkSQL => Err(UnsupportedLedgerDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(UnsupportedLedgerDialect::new(dialect)),
     }
 }
 
@@ -245,6 +248,6 @@ pub fn ledger_recompute_reset_sqls(
             input,
             delta_id,
         )),
-        SqlDialect::SparkSQL => Err(UnsupportedLedgerDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(UnsupportedLedgerDialect::new(dialect)),
     }
 }

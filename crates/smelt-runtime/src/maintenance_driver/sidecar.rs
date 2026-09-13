@@ -163,7 +163,8 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
     }
 
     let sidecar_table = format!("{schema}.{}", ddl_duckdb::FINGERPRINT_SIDECAR_TABLE_NAME);
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())
+        .map_err(|e| BackendError::unsupported(backend.dialect().name(), e.to_string()))?;
     let diff_sql = emit_fingerprint_sidecar_diff(
         source_table,
         source_key,
@@ -249,7 +250,8 @@ pub async fn refresh_fingerprint_sidecar(
     let digest_columns = resolve_fingerprint_digest_columns(projection, all_source_columns);
     let identity = fingerprint::projection_identity(projection);
     let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())
+        .map_err(|e| BackendError::unsupported(backend.dialect().name(), e.to_string()))?;
     let digest_select =
         emit_fingerprint_digest_select(source_table, source_key, &digest_columns, dialect);
     let refresh_sql = ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
@@ -433,7 +435,8 @@ pub async fn diff_repair_group_sidecar_changed_keys(
     }
 
     let sidecar_table = format!("{schema}.{}", ddl_duckdb::FINGERPRINT_SIDECAR_TABLE_NAME);
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())
+        .map_err(|e| BackendError::unsupported(backend.dialect().name(), e.to_string()))?;
     let diff_sql = emit_repair_group_sidecar_diff(
         source_table,
         group_key,
@@ -503,7 +506,8 @@ pub async fn refresh_repair_group_sidecar(
     let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
     let identity = repair_group_partition_identity(group_key, digest_columns);
     let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())
+        .map_err(|e| BackendError::unsupported(backend.dialect().name(), e.to_string()))?;
     let digest_select =
         emit_repair_group_digest_select(source_table, group_key, digest_columns, dialect);
     let refresh_sql = ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(

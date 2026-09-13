@@ -93,7 +93,7 @@ pub(crate) async fn bootstrap_self_ref_empty_target(
     let group = smelt_logical::maintenance::emit::emit_create_empty_table(
         &table_name,
         &columns,
-        smelt_backend::maintenance_dialect(backend.dialect()),
+        smelt_backend::maintenance_dialect(backend.dialect())?,
     );
     reporter.maintenance_statements(run_id, model_display_name, None, &group);
     retry_statement_group(request, run_id, model_display_name, reporter, || {

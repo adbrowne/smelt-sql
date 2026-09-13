@@ -103,7 +103,18 @@ impl Backend for KeyedNonDuckDbBackend {
         // an unrelated panic here.
         match self.dialect {
             smelt_backend::SqlDialect::BigQuery => smelt_backend::BackendCapabilities::bigquery(),
-            _ => smelt_backend::BackendCapabilities::spark(),
+            smelt_backend::SqlDialect::DuckDB | smelt_backend::SqlDialect::SparkSQL => {
+                smelt_backend::BackendCapabilities::spark()
+            }
+            // No test constructs this fake with `SqlDialect::Trino` today,
+            // and there is no `BackendCapabilities::trino_*()` constructor to
+            // return yet (`20260913-trino-incremental`'s subject). Named
+            // explicitly rather than folded into the wildcard above, so a
+            // future Trino leg added to this fixture fails loud instead of
+            // silently inheriting Spark's capabilities.
+            smelt_backend::SqlDialect::Trino => {
+                unreachable!("no test constructs a Trino KeyedNonDuckDbBackend fake yet")
+            }
         }
     }
     async fn load_table(
@@ -250,12 +261,16 @@ fn records_observed_deltas_follows_the_availability_row() {
         SqlDialect::DuckDB,
         SqlDialect::BigQuery,
         SqlDialect::SparkSQL,
+        SqlDialect::Trino,
     ] {
         let expected = match dialect {
             SqlDialect::DuckDB | SqlDialect::BigQuery => true,
             // Permanent, not pending: Delta has no cross-table transaction, so
-            // the record and its write cannot commit together.
-            SqlDialect::SparkSQL => false,
+            // the record and its write cannot commit together. Iceberg
+            // (queried through Trino) shares Delta's per-table-commit
+            // atomicity, so the same permanent absence applies (2026-09-13
+            // ruling).
+            SqlDialect::SparkSQL | SqlDialect::Trino => false,
         };
         assert_eq!(
             records_observed_deltas(dialect),

@@ -10,11 +10,14 @@
 //! a compile error here, never a silent default (`CLAUDE.md` §"Fail-loud
 //! discipline").
 //!
-//! **Spark is refused, not deferred** — Delta gives per-table atomicity and no
-//! cross-table transaction, so the record and the write it describes cannot be
-//! made atomic there, and a delta visible without its write breaks propagation
-//! soundness. `docs/specs/state.md` §"Which dialects realise which structure"
-//! records that as a permanent absence.
+//! **Spark and Trino are refused, not deferred** — Delta gives per-table
+//! atomicity and no cross-table transaction, so the record and the write it
+//! describes cannot be made atomic there, and a delta visible without its
+//! write breaks propagation soundness. `docs/specs/state.md` §"Which dialects
+//! realise which structure" records that as a permanent absence. Iceberg
+//! (queried through Trino) shares Delta's per-table-commit atomicity, so the
+//! same refusal applies (2026-09-13 ruling; `20260913-trino-ledger` revisits,
+//! not a deferral here).
 //!
 //! Realisability itself is **not** decided here —
 //! `realisable_state_structures` in `smelt-logical` owns it, and a run-layer
@@ -59,7 +62,9 @@ pub fn observed_delta_table_ddl(dialect: SqlDialect, schema: &str) -> ObservedDe
     match dialect {
         SqlDialect::DuckDB => Ok(ddl_duckdb::generate_observed_delta_table_ddl(schema)),
         SqlDialect::BigQuery => Ok(ddl_bigquery::generate_observed_delta_table_ddl(schema)),
-        SqlDialect::SparkSQL => Err(UnsupportedObservedDeltaDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => {
+            Err(UnsupportedObservedDeltaDialect::new(dialect))
+        }
     }
 }
 
@@ -93,7 +98,9 @@ pub fn observed_delta_upsert_sql(
             window_end,
             changed_keys_query,
         )),
-        SqlDialect::SparkSQL => Err(UnsupportedObservedDeltaDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => {
+            Err(UnsupportedObservedDeltaDialect::new(dialect))
+        }
     }
 }
 
@@ -120,6 +127,8 @@ pub fn observed_delta_select_sql(
             window_start,
             window_end,
         )),
-        SqlDialect::SparkSQL => Err(UnsupportedObservedDeltaDialect::new(dialect)),
+        SqlDialect::SparkSQL | SqlDialect::Trino => {
+            Err(UnsupportedObservedDeltaDialect::new(dialect))
+        }
     }
 }

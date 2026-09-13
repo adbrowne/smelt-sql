@@ -34,6 +34,19 @@ use std::sync::LazyLock;
 
 use probe::{Position, Probe};
 
+/// Dialects this audit actually covers, as opposed to every `DialectId` that
+/// exists.
+///
+/// `DialectId::ALL` is the exhaustive identity enumeration (criterion 2 of
+/// `20260913-trino-target-spine`); this audit's fixtures, probes and gap
+/// baseline are a separate, narrower claim. Trino has no fixture, no probe
+/// and no baseline entry yet — building those is `20260913-trino-emission`'s
+/// subject, named as out of scope for the target-spine outcome. Iterating
+/// `DialectId::ALL` here instead of this list would silently demand Trino
+/// coverage this phase does not provide.
+const AUDITED_DIALECTS: &[DialectId] =
+    &[DialectId::DuckDb, DialectId::SparkSql, DialectId::BigQuery];
+
 #[test]
 fn every_registry_entry_yields_a_probe_or_a_recorded_reason() {
     let mut underivable = Vec::new();
@@ -181,7 +194,7 @@ fn probe_aliases_are_unique() {
 
 #[test]
 fn the_fixture_has_a_column_for_every_type_constraint_family() {
-    for d in DialectId::ALL {
+    for d in AUDITED_DIALECTS {
         let cte = fixture::fixture_cte(*d);
         for (col, _) in fixture::COLUMNS {
             assert!(cte.contains(col), "{} fixture lacks {col}", d.slug());
@@ -262,7 +275,7 @@ fn override_names_are_unique() {
 fn every_probe_prints_for_every_dialect() {
     let probes = probe::derive_probes();
     assert!(!probes.is_empty());
-    for d in DialectId::ALL {
+    for d in AUDITED_DIALECTS {
         for p in &probes {
             let sql = probe::print_for(*d, &p.statement());
             assert!(
@@ -331,7 +344,7 @@ fn baseline_names_exactly_the_audited_dialects() {
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .filter_map(|l| l.trim().split_once(' ').map(|(k, _)| k.to_string()))
         .collect();
-    let expected: HashSet<String> = DialectId::ALL
+    let expected: HashSet<String> = AUDITED_DIALECTS
         .iter()
         .map(|d| format!("dialect_gaps_{}", d.slug()))
         .collect();
@@ -349,7 +362,7 @@ fn baseline_names_exactly_the_audited_dialects() {
 
 #[test]
 fn gap_count_ratchet() {
-    for d in DialectId::ALL {
+    for d in AUDITED_DIALECTS {
         let metric = format!("dialect_gaps_{}", d.slug());
         let current = ledger::dialect_divergences()
             .iter()

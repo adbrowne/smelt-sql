@@ -184,7 +184,7 @@ pub(crate) async fn resolve_upstream_mutation_gate(
         source,
         &source_table,
         &digest_columns,
-        smelt_backend::maintenance_dialect(backend.dialect()),
+        smelt_backend::maintenance_dialect(backend.dialect())?,
         mutation_baselines.get(source),
     )
     .await

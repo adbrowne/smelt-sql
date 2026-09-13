@@ -680,7 +680,7 @@ pub async fn execute_snapshot_reconcile(
             &write_suppression_overrides,
         )
         .map_err(|refusal| anyhow::anyhow!("{}", refusal))?;
-        let dialect = smelt_backend::maintenance_dialect(backend.dialect());
+        let dialect = smelt_backend::maintenance_dialect(backend.dialect())?;
         let merge_sql = build_cumulative_merge_sql(
             schema,
             db_table_name,

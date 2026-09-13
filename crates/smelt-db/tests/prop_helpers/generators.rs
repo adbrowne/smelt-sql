@@ -55,10 +55,16 @@ pub fn render_cte_columns(columns: &[TypedSource], dialect: SqlDialect) -> Optio
 }
 
 /// The synthetic join-key literal used by the JOIN scenarios, per dialect.
+///
+/// Named per dialect rather than a wildcard fallback, so a dialect's own
+/// spelling is a recorded decision rather than an accident inherited from
+/// whichever arm happened to be the default — the Trino/DuckDB/Spark spelling
+/// below is unverified against a live Trino engine (no oracle runs against
+/// Trino today); it is a provisional guess, not a measured fact.
 fn join_key_cast(dialect: SqlDialect) -> &'static str {
     match dialect {
         SqlDialect::BigQuery => "CAST(1 AS INT64)",
-        _ => "CAST(1 AS INTEGER)",
+        SqlDialect::DuckDB | SqlDialect::SparkSQL | SqlDialect::Trino => "CAST(1 AS INTEGER)",
     }
 }
 

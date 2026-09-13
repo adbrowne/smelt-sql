@@ -127,7 +127,7 @@ pub async fn execute_succession_maintenance(
             )
         );
     }
-    let dialect = smelt_backend::maintenance_dialect(backend.dialect());
+    let dialect = smelt_backend::maintenance_dialect(backend.dialect())?;
     let recipe = &cell.recipe;
 
     let (key_cols_typed, clock_type) = resolve_ledger_column_types(model_name, recipe, columns)?;
@@ -330,7 +330,7 @@ pub async fn rebuild_succession_state(
     reporter: &dyn RunReporter,
     run_id: &str,
 ) -> Result<ExecutionResult> {
-    let dialect = smelt_backend::maintenance_dialect(backend.dialect());
+    let dialect = smelt_backend::maintenance_dialect(backend.dialect())?;
     let recipe = &cell.recipe;
 
     // A `state_downgraded` cell (`docs/specs/state.md` §"The degradation

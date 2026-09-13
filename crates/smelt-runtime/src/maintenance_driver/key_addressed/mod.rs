@@ -279,7 +279,8 @@ pub async fn resolve_key_addressed_affected_keys(
         consumer_address,
     )
     .await?;
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())
+        .map_err(|e| BackendError::unsupported(backend.dialect().name(), e.to_string()))?;
     let affected_keys_select = match discovery {
         KeyDiscovery::UpstreamKeyed => {
             smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(

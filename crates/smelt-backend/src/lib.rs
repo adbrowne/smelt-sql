@@ -24,16 +24,40 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 
+/// A dialect with no [`MaintenanceDialect`] mapping was asked for one.
+///
+/// Trino/Iceberg is the live case: giving it its own `MaintenanceDialect`
+/// variant would demand ~150 Trino SQL spellings across ten emitters, which
+/// is `20260913-trino-incremental`'s subject, not this phase's
+/// (`docs/outcomes/20260913-trino-target-spine/phases/02-plan.md`). A caller
+/// reaching this should have consulted `smelt_logical::maintenance::
+/// availability` and downgraded before asking for maintenance-statement text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "no maintenance-statement dialect exists for '{dialect}': its incremental maintenance \
+     emitters are not yet implemented, so the plan layer should have downgraded this cell \
+     before the run reached a maintenance statement"
+)]
+pub struct UnsupportedMaintenanceDialect {
+    /// The dialect's own name, as `SqlDialect::name` spells it.
+    pub dialect: &'static str,
+}
+
 /// Map a backend's [`SqlDialect`] to the [`MaintenanceDialect`] the
 /// single-owner emitters key their dialect-specific variants on. The region
 /// `DELETE`+`INSERT` family is dialect-invariant; the whole-row `MERGE`
 /// families are not — GoogleSQL accepts neither `UPDATE SET *` nor
 /// `INSERT *`, so `BigQuery` selects the spelled-out arms.
-pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
+pub fn maintenance_dialect(
+    dialect: SqlDialect,
+) -> Result<MaintenanceDialect, UnsupportedMaintenanceDialect> {
     match dialect {
-        SqlDialect::DuckDB => MaintenanceDialect::DuckDb,
-        SqlDialect::SparkSQL => MaintenanceDialect::Spark,
-        SqlDialect::BigQuery => MaintenanceDialect::BigQuery,
+        SqlDialect::DuckDB => Ok(MaintenanceDialect::DuckDb),
+        SqlDialect::SparkSQL => Ok(MaintenanceDialect::Spark),
+        SqlDialect::BigQuery => Ok(MaintenanceDialect::BigQuery),
+        SqlDialect::Trino => Err(UnsupportedMaintenanceDialect {
+            dialect: dialect.name(),
+        }),
     }
 }
 
@@ -51,12 +75,13 @@ fn build_delete_insert_group(
 ) -> Result<StatementGroup, String> {
     let table_name = format!("{schema}.{name}");
     let region = Region::for_axis(partition.axis, &partition.start, &partition.end)?;
+    let maintenance_dialect = maintenance_dialect(dialect).map_err(|err| err.to_string())?;
     Ok(emit_delete_insert(
         &table_name,
         &partition.column,
         &region,
         sql,
-        maintenance_dialect(dialect),
+        maintenance_dialect,
     ))
 }
 
@@ -75,7 +100,11 @@ pub fn require_merge_columns(
     table: &str,
     columns: &[String],
 ) -> Result<(), BackendError> {
-    if matches!(maintenance_dialect(dialect), MaintenanceDialect::BigQuery) && columns.is_empty() {
+    let is_bigquery = matches!(
+        maintenance_dialect(dialect),
+        Ok(MaintenanceDialect::BigQuery)
+    );
+    if is_bigquery && columns.is_empty() {
         return Err(BackendError::execution_failed(
             format!("{schema}.{table}"),
             "column-scoped MERGE on BigQuery needs the model's output column list, and none was \
@@ -99,15 +128,15 @@ fn build_column_scoped_merge_group(
     unique_key: &[String],
     columns: &[String],
     dialect: SqlDialect,
-) -> StatementGroup {
+) -> Result<StatementGroup, UnsupportedMaintenanceDialect> {
     let table_name = format!("{schema}.{table}");
-    emit_column_scoped_merge(
+    Ok(emit_column_scoped_merge(
         &table_name,
         unique_key,
         source_sql,
         columns,
-        maintenance_dialect(dialect),
-    )
+        maintenance_dialect(dialect)?,
+    ))
 }
 
 /// The shared body of [`Backend::execute_model`]'s provided default: drop
@@ -561,7 +590,10 @@ pub trait Backend: Send + Sync {
         require_merge_columns(dialect, schema, table, columns)?;
         let group = build_column_scoped_merge_group(
             schema, table, source_sql, unique_key, columns, dialect,
-        );
+        )
+        .map_err(|err| BackendError::ConfigurationError {
+            message: err.to_string(),
+        })?;
         self.execute_statement_group(&group).await
     }
 
@@ -750,5 +782,35 @@ pub trait Backend: Send + Sync {
         self.execute_sql(refresh_sql).await?;
         self.execute_sql(gc_sql).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three dialects with a `MaintenanceDialect` mapping resolve; Trino
+    /// does not — naming it in the error rather than absorbing it into one of
+    /// the other three's emitters (`docs/outcomes/20260913-trino-target-spine/
+    /// phases/02-plan.md`).
+    #[test]
+    fn maintenance_dialect_is_ok_for_the_three_implemented_dialects_and_err_for_trino() {
+        assert_eq!(
+            maintenance_dialect(SqlDialect::DuckDB),
+            Ok(MaintenanceDialect::DuckDb)
+        );
+        assert_eq!(
+            maintenance_dialect(SqlDialect::SparkSQL),
+            Ok(MaintenanceDialect::Spark)
+        );
+        assert_eq!(
+            maintenance_dialect(SqlDialect::BigQuery),
+            Ok(MaintenanceDialect::BigQuery)
+        );
+
+        let err = maintenance_dialect(SqlDialect::Trino)
+            .expect_err("Trino has no MaintenanceDialect mapping yet");
+        assert_eq!(err.dialect, SqlDialect::Trino.name());
+        assert!(err.to_string().contains(SqlDialect::Trino.name()));
     }
 }

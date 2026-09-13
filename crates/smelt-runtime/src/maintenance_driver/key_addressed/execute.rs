@@ -66,7 +66,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         compiled_model_sql,
         downstream_keys,
         &affected_keys_select,
-        smelt_backend::maintenance_dialect(backend.dialect()),
+        smelt_backend::maintenance_dialect(backend.dialect())?,
     );
     let sidecar_refresh = RepairSidecarRefresh {
         schema,
@@ -99,7 +99,7 @@ pub async fn execute_key_addressed_model_edge_cell(
                 table,
                 downstream_keys,
                 &affected_keys_select,
-                smelt_backend::maintenance_dialect(backend.dialect()),
+                smelt_backend::maintenance_dialect(backend.dialect())?,
             );
             execute_diff_patch(
                 backend,

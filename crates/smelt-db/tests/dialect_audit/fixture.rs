@@ -130,6 +130,9 @@ fn array_lit(dialect: DialectId, elems: &str) -> String {
     match dialect {
         DialectId::DuckDb | DialectId::BigQuery => format!("[{elems}]"),
         DialectId::SparkSql => format!("ARRAY({elems})"),
+        // The cross-engine emission audit has no Trino coverage table yet —
+        // that is `20260913-trino-emission`'s subject, not this phase's.
+        DialectId::Trino => unreachable!("dialect_audit has no Trino fixtures yet"),
     }
 }
 

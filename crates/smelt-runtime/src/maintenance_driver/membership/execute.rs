@@ -44,7 +44,7 @@ pub async fn execute_staged_membership_recompute(
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())?;
     let staged_relation = format!("__smelt_staged_{table}");
     let group = emit_staged_candidate_conditional_recompute(
         &full_table,
@@ -101,7 +101,7 @@ pub async fn execute_staged_membership_recompute(
         candidate_select,
         compared_columns,
         partition_column,
-        smelt_backend::maintenance_dialect(dialect_id),
+        smelt_backend::maintenance_dialect(dialect_id)?,
     );
     let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
         dialect_id,
@@ -151,7 +151,7 @@ pub async fn execute_staged_keyless_recompute(
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())?;
     let staged_relation = format!("__smelt_staged_{table}");
     let sentinel_relation = format!("__smelt_sentinel_{table}");
     let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless(

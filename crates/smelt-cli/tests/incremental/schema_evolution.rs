@@ -441,7 +441,8 @@ async fn test_e2e_spark_parquet_blocked_without_flag() -> Result<()> {
         smelt_backend::SqlDialect::SparkSQL,
         Some(smelt_core::config::TableFormat::Parquet),
         None,
-    );
+    )
+    .unwrap();
 
     let result = smelt_cli::migration::check_and_migrate(
         &backend,
@@ -512,7 +513,8 @@ async fn test_e2e_spark_parquet_allowed_with_flag() -> Result<()> {
         smelt_backend::SqlDialect::SparkSQL,
         Some(smelt_core::config::TableFormat::Parquet),
         None,
-    );
+    )
+    .unwrap();
 
     let result = smelt_cli::migration::check_and_migrate(
         &backend,

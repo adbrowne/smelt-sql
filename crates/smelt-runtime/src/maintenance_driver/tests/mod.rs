@@ -382,6 +382,14 @@ impl Backend for RecordingBackend {
             SqlDialect::DuckDB => BackendCapabilities::duckdb(),
             SqlDialect::BigQuery => BackendCapabilities::bigquery(),
             SqlDialect::SparkSQL => BackendCapabilities::spark(),
+            // No test constructs a Trino fake backend today — the driver's
+            // Trino support is `20260913-trino-incremental`'s subject, not
+            // this phase's, and there is no `BackendCapabilities::trino_*()`
+            // constructor to return yet (`docs/outcomes/
+            // 20260913-trino-target-spine/phases/02-plan.md`).
+            SqlDialect::Trino => {
+                unreachable!("no test constructs a Trino fake backend in this driver test suite")
+            }
         }
     }
     async fn load_table(

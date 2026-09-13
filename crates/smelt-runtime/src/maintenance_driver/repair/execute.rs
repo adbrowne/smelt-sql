@@ -151,7 +151,7 @@ pub async fn execute_per_group_recompute(
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())?;
     let staged_relation = repair_staged_relation(table);
     let group = emit_per_group_recompute(
         &full_table,
@@ -260,7 +260,7 @@ pub async fn execute_diff_patch(
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())?;
     let staged_relation = diff_patch_staged_relation(table);
     let group = smelt_logical::maintenance::emit::emit_diff_patch(
         &full_table,

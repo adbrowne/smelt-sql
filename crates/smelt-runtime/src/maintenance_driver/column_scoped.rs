@@ -53,7 +53,7 @@ pub async fn execute_column_scoped_merge_full(
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())?;
     execute_column_scoped_write_with_observed_delta(
         backend,
         schema,
@@ -418,7 +418,9 @@ async fn execute_column_scoped_write_with_observed_delta(
                 source_select,
                 compared_columns,
                 partition_column,
-                maintenance_dialect(dialect_id),
+                maintenance_dialect(dialect_id).map_err(|e| {
+                    smelt_backend::BackendError::unsupported(dialect_id.name(), e.to_string())
+                })?,
             );
             let record_sql = smelt_state::observed_delta::observed_delta_upsert_sql(
                 dialect_id,
@@ -505,7 +507,7 @@ pub async fn execute_column_scoped_merge(
     )
     .map_err(|reason| anyhow::anyhow!("{reason}"))?;
 
-    let dialect = maintenance_dialect(backend.dialect());
+    let dialect = maintenance_dialect(backend.dialect())?;
     execute_column_scoped_write_with_observed_delta(
         backend,
         schema,

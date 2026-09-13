@@ -1486,11 +1486,7 @@ impl SqlCompiler {
             None
         };
 
-        let dialect_name = match self.dialect {
-            SqlDialect::DuckDB => "duckdb",
-            SqlDialect::SparkSQL => "spark",
-            SqlDialect::BigQuery => "bigquery",
-        };
+        let dialect_name = self.dialect.id().slug();
         let as_struct_emitter: Option<AsStructEmitter<'static>> = type_ctx.map(|tc| {
             let backend = dialect_name.to_string();
             let emitter: AsStructEmitter<'static> =
@@ -4056,5 +4052,96 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             "SELECT a FROM smelt.silver.events",
         );
         assert!(!is_self_referential(&model));
+    }
+
+    /// The as-struct emitter's `backend` string is `self.dialect.id().slug()`
+    /// for all four dialects — single ownership via `DialectId::slug`, not a
+    /// second hand-restated table in `build_emitters` (`docs/outcomes/
+    /// 20260913-trino-target-spine/phases/02-plan.md` task 8). Red before
+    /// that change: the old three-arm `match` had no arm for
+    /// `SqlDialect::Trino` and would not compile once the variant landed.
+    #[test]
+    fn as_struct_dialect_name_comes_from_the_slug() {
+        let schemas = {
+            let mut models = HashMap::new();
+            models.insert(
+                "orders".to_string(),
+                vec![(
+                    "order_id".to_string(),
+                    TypedColumn {
+                        data_type: DataType::BigInt,
+                        nullable: true,
+                    },
+                )],
+            );
+            Arc::new(UpstreamSchemas {
+                models,
+                seeds: HashMap::new(),
+                sources: Default::default(),
+                per_entity_sources: Vec::new(),
+                vars: Default::default(),
+                ..Default::default()
+            })
+        };
+
+        let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.models.orders o";
+        let model = ModelFile {
+            name: "test_as_struct".to_string(),
+            path: "models/test_as_struct.sql".into(),
+            content: sql.to_string(),
+            refs: extract_refs_from_sql(sql),
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        for dialect in [
+            SqlDialect::DuckDB,
+            SqlDialect::SparkSQL,
+            SqlDialect::BigQuery,
+            SqlDialect::Trino,
+        ] {
+            assert_eq!(dialect.id().slug(), dialect_name_of(dialect));
+
+            let config = make_test_config();
+            let mut compiler = SqlCompiler::new(config, &make_test_target());
+            compiler.dialect = dialect;
+            compiler.set_upstream_schemas(schemas.clone());
+
+            let compiled = compiler
+                .compile(&model, "main")
+                .unwrap_or_else(|e| panic!("{dialect:?} compile failed: {e}"));
+
+            // DuckDB and Spark support struct literals and replace the call;
+            // BigQuery and Trino do not, so the call passes through
+            // unexpanded rather than panicking or silently mis-emitting
+            // another dialect's spelling.
+            match dialect {
+                SqlDialect::DuckDB => assert!(
+                    compiled.sql.contains("'order_id': o.order_id"),
+                    "{dialect:?}: {}",
+                    compiled.sql
+                ),
+                SqlDialect::SparkSQL => assert!(
+                    compiled.sql.contains("struct(o.order_id AS order_id)"),
+                    "{dialect:?}: {}",
+                    compiled.sql
+                ),
+                SqlDialect::BigQuery | SqlDialect::Trino => assert!(
+                    compiled.sql.contains("smelt.as_struct"),
+                    "{dialect:?} has no struct literal, the call should pass through: {}",
+                    compiled.sql
+                ),
+            }
+        }
+    }
+
+    /// Test-only helper mirroring `SqlCompiler::build_emitters`'s
+    /// `dialect_name` computation, so the test above can assert the slug
+    /// independently of the SQL round-trip too.
+    fn dialect_name_of(dialect: SqlDialect) -> &'static str {
+        dialect.id().slug()
     }
 }

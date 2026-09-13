@@ -102,6 +102,15 @@ fn type_cast_sql(dt: &DataType, dialect: SqlDialect) -> String {
             DataType::Blob => "BYTES".to_string(),
             other => other.to_backend_sql(),
         },
+        // Trino: named explicitly rather than absorbed by the wildcard below,
+        // so a future change to `to_backend_sql()`'s spellings is caught by
+        // `trino_cast_spelling_is_a_named_arm` rather than silently
+        // reinterpreted for Trino too. `Float` -> `FLOAT` and `Blob` -> `BLOB`
+        // are suspect against Trino's real `REAL` and `VARBINARY` types;
+        // unmeasured until phase 6/7 of
+        // docs/outcomes/20260913-trino-target-spine/outcome.md run a live cast
+        // probe.
+        (dt, SqlDialect::Trino) => dt.to_backend_sql(),
         _ => dt.to_backend_sql(),
     }
 }
@@ -294,5 +303,16 @@ mod tests {
             SqlDialect::DuckDB,
         );
         assert!(result.contains("CAST(d AS DECIMAL(10,2)) AS d"));
+    }
+
+    #[test]
+    fn trino_cast_spelling_is_a_named_arm() {
+        // Pins today's spellings so a phase 6/7 live-run change to Trino's
+        // real cast spellings changes this test, not a silent wildcard.
+        assert_eq!(type_cast_sql(&DataType::Text, SqlDialect::Trino), "VARCHAR");
+        assert_eq!(
+            type_cast_sql(&DataType::Varchar { max_length: None }, SqlDialect::Trino),
+            "VARCHAR"
+        );
     }
 }

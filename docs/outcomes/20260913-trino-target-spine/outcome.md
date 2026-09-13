@@ -136,7 +136,7 @@ not an answer — every cell is still established by execution.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta: the `trino` target shape and capability column in `multi_backend.md` + `smelt_yml.md`, the foreign-key refusal diagnostics, the connection-security rule, and the Known Divergence naming the implicit-`Native` emission hole this outcome does not close | done |
-| 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | planned |
+| 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | done |
 | 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | pending |
 | 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | pending |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
@@ -199,5 +199,14 @@ not an answer — every cell is still established by execution.
   explicit audit task in phase 2, not a by-product of `cargo check`. The one wildcard left
   standing is `Signature::engine_native`'s implicit `Native`, already recorded as a Known
   Divergence owned by `20260913-trino-emission`.
+
+- **2026-09-14 — `dialect_audit/main.rs` gets a test-local `AUDITED_DIALECTS` const excluding
+  Trino, distinct from `DialectId::ALL`.** Phase 2's wildcard audit correctly named Trino arms
+  in `fixture.rs`/`probe.rs` as `unreachable!()` (Trino has no fixture/probe/baseline entry —
+  that's `20260913-trino-emission`'s job), but `dialect_audit/main.rs` has 4 tests that loop
+  directly over `DialectId::ALL`, which now includes Trino and hits those `unreachable!()` arms.
+  Building Trino audit coverage now would be out of scope; leaving `DialectId::ALL`
+  non-exhaustive would violate criterion 2. Added a 3-member `AUDITED_DIALECTS` const scoped to
+  this test file only; `DialectId::ALL` itself is untouched. See phase 2 summary.
 
 ## Blocked

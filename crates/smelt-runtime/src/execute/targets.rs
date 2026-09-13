@@ -7,12 +7,20 @@ use smelt_core::config::Config;
 /// `smelt_backend::maintenance_dialect(backend.dialect())`, so `--dry-run`
 /// (which never opens a connection) still renders statements in the target's
 /// own dialect (`docs/specs/cli.md` §"`--dry-run` prints the maintenance
-/// statements"). Falls back to DuckDb for an unrecognised target.
+/// statements"). Falls back to DuckDb for an unrecognised target; propagates
+/// [`smelt_backend::UnsupportedMaintenanceDialect`] for a target whose
+/// resolved [`smelt_backend::SqlDialect`] has no `MaintenanceDialect` mapping
+/// yet (e.g. `SqlDialect::Trino` — `BackendType` itself has no `Trino` arm as
+/// of this phase, so this path is unreachable today, but the signature is
+/// fallible now so it is not a silent default the moment one lands).
 pub(crate) fn maintenance_dialect_for_target(
     config: &Config,
     target: &str,
-) -> smelt_logical::maintenance::emit::MaintenanceDialect {
-    config
+) -> Result<
+    smelt_logical::maintenance::emit::MaintenanceDialect,
+    smelt_backend::UnsupportedMaintenanceDialect,
+> {
+    let Some(dialect) = config
         .targets
         .get(target)
         .and_then(|t| t.backend_type().ok())
@@ -22,8 +30,10 @@ pub(crate) fn maintenance_dialect_for_target(
             smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
             smelt_core::config::BackendType::Databricks => smelt_backend::SqlDialect::SparkSQL,
         })
-        .map(smelt_backend::maintenance_dialect)
-        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
+    else {
+        return Ok(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+    };
+    smelt_backend::maintenance_dialect(dialect)
 }
 
 /// `target`'s declared [`smelt_backend::SqlDialect`], purely from `Config`

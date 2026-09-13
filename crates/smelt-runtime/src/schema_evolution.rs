@@ -115,6 +115,23 @@ pub enum SchemaEvolutionResult {
     TableRewrite { description: String },
 }
 
+/// A dialect with no [`DdlBackend`] generator was asked for one.
+///
+/// Trino/Iceberg is the live case: no existing `DdlBackend` variant fits it
+/// without inventing DDL smelt has never measured against a live Trino
+/// server, and aliasing it onto `DdlBackend::Spark` would silently hand it
+/// Delta-flavoured DDL it may not accept
+/// (`docs/outcomes/20260913-trino-target-spine/phases/02-plan.md` task 9).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "no schema-evolution DDL generator exists for dialect '{dialect}': this dialect's DDL \
+     spellings are not yet implemented"
+)]
+pub struct UnsupportedDdlDialect {
+    /// The dialect's own name, as `SqlDialect::name` spells it.
+    pub dialect: &'static str,
+}
+
 /// Construct a `DdlBackend` from a SQL dialect and optional table format.
 ///
 /// For DuckDB, returns `DdlBackend::DuckDb`.
@@ -125,10 +142,10 @@ pub fn ddl_backend_for_dialect(
     dialect: SqlDialect,
     table_format: Option<TableFormat>,
     catalog: Option<&str>,
-) -> DdlBackend {
+) -> Result<DdlBackend, UnsupportedDdlDialect> {
     match dialect {
-        SqlDialect::DuckDB => DdlBackend::DuckDb,
-        SqlDialect::BigQuery => DdlBackend::BigQuery,
+        SqlDialect::DuckDB => Ok(DdlBackend::DuckDb),
+        SqlDialect::BigQuery => Ok(DdlBackend::BigQuery),
         SqlDialect::SparkSQL => {
             let format = match table_format {
                 Some(TableFormat::Parquet) => SparkTableFormat::Parquet,
@@ -138,12 +155,15 @@ pub fn ddl_backend_for_dialect(
                 SparkTableFormat::Delta => BackendCapabilities::spark_delta(),
                 SparkTableFormat::Parquet => BackendCapabilities::spark_parquet(),
             };
-            DdlBackend::Spark {
+            Ok(DdlBackend::Spark {
                 catalog: catalog.unwrap_or("spark_catalog").to_string(),
                 format,
                 capabilities,
-            }
+            })
         }
+        SqlDialect::Trino => Err(UnsupportedDdlDialect {
+            dialect: dialect.name(),
+        }),
     }
 }
 
@@ -535,20 +555,21 @@ mod tests {
 
     #[test]
     fn test_ddl_backend_duckdb() {
-        let backend = ddl_backend_for_dialect(SqlDialect::DuckDB, None, None);
+        let backend = ddl_backend_for_dialect(SqlDialect::DuckDB, None, None).unwrap();
         assert!(matches!(backend, DdlBackend::DuckDb));
     }
 
     #[test]
     fn test_ddl_backend_duckdb_ignores_format() {
         // DuckDB ignores table format
-        let backend = ddl_backend_for_dialect(SqlDialect::DuckDB, Some(TableFormat::Delta), None);
+        let backend =
+            ddl_backend_for_dialect(SqlDialect::DuckDB, Some(TableFormat::Delta), None).unwrap();
         assert!(matches!(backend, DdlBackend::DuckDb));
     }
 
     #[test]
     fn test_ddl_backend_spark_defaults_to_delta() {
-        let backend = ddl_backend_for_dialect(SqlDialect::SparkSQL, None, None);
+        let backend = ddl_backend_for_dialect(SqlDialect::SparkSQL, None, None).unwrap();
         match backend {
             DdlBackend::Spark {
                 format,
@@ -565,7 +586,8 @@ mod tests {
 
     #[test]
     fn test_ddl_backend_spark_delta() {
-        let backend = ddl_backend_for_dialect(SqlDialect::SparkSQL, Some(TableFormat::Delta), None);
+        let backend =
+            ddl_backend_for_dialect(SqlDialect::SparkSQL, Some(TableFormat::Delta), None).unwrap();
         match backend {
             DdlBackend::Spark {
                 format,
@@ -584,7 +606,8 @@ mod tests {
     #[test]
     fn test_ddl_backend_spark_parquet() {
         let backend =
-            ddl_backend_for_dialect(SqlDialect::SparkSQL, Some(TableFormat::Parquet), None);
+            ddl_backend_for_dialect(SqlDialect::SparkSQL, Some(TableFormat::Parquet), None)
+                .unwrap();
         match backend {
             DdlBackend::Spark {
                 format,
@@ -604,13 +627,26 @@ mod tests {
             SqlDialect::SparkSQL,
             Some(TableFormat::Delta),
             Some("unity_catalog"),
-        );
+        )
+        .unwrap();
         match backend {
             DdlBackend::Spark { catalog, .. } => {
                 assert_eq!(catalog, "unity_catalog");
             }
             _ => panic!("Expected Spark backend"),
         }
+    }
+
+    /// Trino has no `DdlBackend` generator yet — refused by name, never
+    /// aliased onto `DdlBackend::Spark`'s Delta-flavoured DDL
+    /// (`docs/outcomes/20260913-trino-target-spine/phases/02-plan.md` task
+    /// 9).
+    #[test]
+    fn ddl_backend_for_dialect_refuses_trino_by_name() {
+        let err = ddl_backend_for_dialect(SqlDialect::Trino, None, None)
+            .expect_err("Trino has no DdlBackend generator yet");
+        assert_eq!(err.dialect, SqlDialect::Trino.name());
+        assert!(err.to_string().contains(SqlDialect::Trino.name()));
     }
 
     #[test]

@@ -21,10 +21,11 @@ use smelt_logical::maintenance::{Corner, Technique};
 
 /// Every [`SqlDialect`], so a new one is a test failure rather than a silent
 /// omission. Kept exhaustive by [`every_dialect_is_covered`].
-const ALL_DIALECTS: [SqlDialect; 3] = [
+const ALL_DIALECTS: [SqlDialect; 4] = [
     SqlDialect::DuckDB,
     SqlDialect::SparkSQL,
     SqlDialect::BigQuery,
+    SqlDialect::Trino,
 ];
 
 const ALL_STRUCTURES: [StateStructure; 5] = [
@@ -66,7 +67,10 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 /// `ddl_spark.rs` carries schema-evolution DDL only, and Spark has no sound
 /// realisation to add: Delta gives per-table atomicity only and no cross-table
 /// transaction, so a ledger write and its data write cannot be made atomic
-/// (`docs/specs/state.md` §"Which dialects realise which structure").
+/// (`docs/specs/state.md` §"Which dialects realise which structure"). Trino
+/// (querying Iceberg) shares that same per-table-commit atomicity, so it has
+/// no emitters either (2026-09-13 ruling; `20260913-trino-ledger` revisits,
+/// not a deferral here).
 fn has_emitters(dialect: SqlDialect, structure: StateStructure) -> bool {
     match dialect {
         SqlDialect::DuckDB => true,
@@ -77,7 +81,7 @@ fn has_emitters(dialect: SqlDialect, structure: StateStructure) -> bool {
                 | StateStructure::ObservedOutputDeltas
                 | StateStructure::TombstoneLedger
         ),
-        SqlDialect::SparkSQL => false,
+        SqlDialect::SparkSQL | SqlDialect::Trino => false,
     }
 }
 
@@ -142,6 +146,12 @@ fn each_dialect_realises_exactly_the_structures_it_has_today() {
         "Spark's absence is permanent (no cross-table Delta transaction), not pending; got {:?}",
         realised(SqlDialect::SparkSQL),
     );
+    assert!(
+        realised(SqlDialect::Trino).is_empty(),
+        "Trino/Iceberg's absence is permanent (same per-table-commit atomicity as Delta), not \
+         pending; got {:?}",
+        realised(SqlDialect::Trino),
+    );
     assert_eq!(
         realised(SqlDialect::BigQuery),
         BTreeSet::from([
@@ -165,7 +175,10 @@ fn every_dialect_is_covered() {
     // the point — the array above must then grow too.
     for dialect in ALL_DIALECTS {
         match dialect {
-            SqlDialect::DuckDB | SqlDialect::SparkSQL | SqlDialect::BigQuery => {}
+            SqlDialect::DuckDB
+            | SqlDialect::SparkSQL
+            | SqlDialect::BigQuery
+            | SqlDialect::Trino => {}
         }
     }
     for structure in ALL_STRUCTURES {
@@ -177,7 +190,7 @@ fn every_dialect_is_covered() {
             | StateStructure::TombstoneLedger => {}
         }
     }
-    assert_eq!(ALL_DIALECTS.len(), 3);
+    assert_eq!(ALL_DIALECTS.len(), 4);
     assert_eq!(ALL_STRUCTURES.len(), 5);
 }
 

@@ -553,7 +553,7 @@ async fn explain_maintenance_plan(
         .and_then(|t| t.backend_type().ok())
         .map(backend_type_to_sql_dialect)
         .unwrap_or(smelt_backend::SqlDialect::DuckDB);
-    let dialect = smelt_backend::maintenance_dialect(sql_dialect);
+    let dialect = smelt_backend::maintenance_dialect(sql_dialect)?;
 
     // Availability resolution (`state.md` §"The degradation contract" step
     // 2, `docs/outcomes/20260904-state-residency/outcome.md` phase 6):

@@ -15,10 +15,11 @@ use smelt_state::{ledger, tombstone};
 use smelt_types::DataType;
 
 /// Every `SqlDialect`. Kept exhaustive by [`every_dialect_is_covered`].
-const ALL_DIALECTS: [SqlDialect; 3] = [
+const ALL_DIALECTS: [SqlDialect; 4] = [
     SqlDialect::DuckDB,
     SqlDialect::SparkSQL,
     SqlDialect::BigQuery,
+    SqlDialect::Trino,
 ];
 
 /// Every statement the dispatch can build, for one dialect. `None` where the
@@ -48,7 +49,10 @@ fn every_dialect_is_covered() {
         // is the point — the array above must then grow too, and so must the
         // dispatch's own exhaustive `match`.
         match dialect {
-            SqlDialect::DuckDB | SqlDialect::SparkSQL | SqlDialect::BigQuery => {}
+            SqlDialect::DuckDB
+            | SqlDialect::SparkSQL
+            | SqlDialect::BigQuery
+            | SqlDialect::Trino => {}
         }
         // Every dialect answers — with text or with a refusal, never a panic.
         let _ = all_statements(dialect);
@@ -68,6 +72,22 @@ fn spark_is_refused_by_name_rather_than_handed_duckdb_sql() {
         "the refusal must name the dialect: {err}"
     );
     assert!(all_statements(SqlDialect::SparkSQL).is_none());
+}
+
+/// Iceberg (queried through Trino) shares Delta's per-table-commit atomicity,
+/// so it is refused the same way Spark is — by name, never handed DuckDB SQL
+/// it cannot run (2026-09-13 ruling; `20260913-trino-ledger` revisits this,
+/// it is not a deferral here).
+#[test]
+fn trino_is_refused_by_name_rather_than_handed_duckdb_sql() {
+    let err = ledger::ledger_table_ddl(SqlDialect::Trino, "ds")
+        .expect_err("Trino must not receive ledger SQL");
+    assert_eq!(err.dialect, SqlDialect::Trino.name());
+    assert!(
+        err.to_string().contains(SqlDialect::Trino.name()),
+        "the refusal must name the dialect: {err}"
+    );
+    assert!(all_statements(SqlDialect::Trino).is_none());
 }
 
 /// The BigQuery path must carry no DuckDB-flavoured text: no double-quoted
@@ -242,9 +262,9 @@ fn all_observed_delta_statements(dialect: SqlDialect) -> Option<Vec<String>> {
     Some(vec![table, upsert, select])
 }
 
-/// Spark is refused by name, not given DuckDB SQL; every other dialect
-/// resolves. A new dialect makes the `match` inside the dispatch a compile
-/// error, and this test the place its verdict is stated.
+/// Spark and Trino are refused by name, not given DuckDB SQL; every other
+/// dialect resolves. A new dialect makes the `match` inside the dispatch a
+/// compile error, and this test the place its verdict is stated.
 #[test]
 fn the_observed_delta_dispatch_is_exhaustive_and_refuses_spark() {
     use smelt_state::observed_delta as od;
@@ -256,12 +276,12 @@ fn the_observed_delta_dispatch_is_exhaustive_and_refuses_spark() {
                     "{dialect:?} realises the observed-delta record"
                 );
             }
-            SqlDialect::SparkSQL => {
+            SqlDialect::SparkSQL | SqlDialect::Trino => {
                 let err = od::observed_delta_table_ddl(dialect, "ds")
-                    .expect_err("Spark has no observed-delta spelling");
-                assert_eq!(err.dialect, SqlDialect::SparkSQL.name());
+                    .expect_err("Spark/Trino has no observed-delta spelling");
+                assert_eq!(err.dialect, dialect.name());
                 assert!(
-                    err.to_string().contains(SqlDialect::SparkSQL.name()),
+                    err.to_string().contains(dialect.name()),
                     "the refusal must name the dialect: {err}"
                 );
                 assert!(od::observed_delta_upsert_sql(
@@ -419,11 +439,13 @@ fn the_tombstone_dispatch_is_exhaustive_and_refuses_spark() {
         );
         let drop = tombstone::tombstone_table_drop_ddl(dialect, "ds.customer_history__tombstones");
         match dialect {
-            SqlDialect::SparkSQL => {
-                let err = ddl.expect_err("Spark has no tombstone ledger").to_string();
-                assert!(err.contains("Spark"), "{err}");
+            SqlDialect::SparkSQL | SqlDialect::Trino => {
+                let err = ddl
+                    .expect_err("Spark/Trino has no tombstone ledger")
+                    .to_string();
+                assert!(err.contains(dialect.name()), "{err}");
                 assert!(err.contains("not realisable"), "{err}");
-                drop.expect_err("Spark has no tombstone ledger");
+                drop.expect_err("Spark/Trino has no tombstone ledger");
             }
             SqlDialect::DuckDB | SqlDialect::BigQuery => {
                 ddl.expect("a realising dialect");

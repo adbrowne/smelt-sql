@@ -8,13 +8,18 @@ pub enum DialectId {
     DuckDb,
     SparkSql,
     BigQuery,
+    Trino,
 }
 
 impl DialectId {
     /// Every dialect, in report order. Exhaustive by construction: adding a
     /// variant without adding it here fails `all_is_exhaustive`.
-    pub const ALL: &'static [DialectId] =
-        &[DialectId::DuckDb, DialectId::SparkSql, DialectId::BigQuery];
+    pub const ALL: &'static [DialectId] = &[
+        DialectId::DuckDb,
+        DialectId::SparkSql,
+        DialectId::BigQuery,
+        DialectId::Trino,
+    ];
 
     /// The lowercase key already used by `smelt-runtime`'s as-struct emitter and
     /// the type-divergence ledger. There must not be a second spelling.
@@ -23,6 +28,7 @@ impl DialectId {
             DialectId::DuckDb => "duckdb",
             DialectId::SparkSql => "spark",
             DialectId::BigQuery => "bigquery",
+            DialectId::Trino => "trino",
         }
     }
 
@@ -41,10 +47,13 @@ mod tests {
         // exhaustive, so every variant must be produced by the iteration.
         for d in DialectId::ALL {
             match d {
-                DialectId::DuckDb | DialectId::SparkSql | DialectId::BigQuery => {}
+                DialectId::DuckDb
+                | DialectId::SparkSql
+                | DialectId::BigQuery
+                | DialectId::Trino => {}
             }
         }
-        assert_eq!(DialectId::ALL.len(), 3);
+        assert_eq!(DialectId::ALL.len(), 4);
     }
 
     #[test]
@@ -57,6 +66,7 @@ mod tests {
         assert_eq!(DialectId::DuckDb.slug(), "duckdb");
         assert_eq!(DialectId::SparkSql.slug(), "spark");
         assert_eq!(DialectId::BigQuery.slug(), "bigquery");
+        assert_eq!(DialectId::Trino.slug(), "trino");
         assert_eq!(DialectId::from_slug("postgres"), None);
     }
 

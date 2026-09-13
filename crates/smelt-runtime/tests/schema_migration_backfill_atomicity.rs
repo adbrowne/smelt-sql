@@ -244,7 +244,7 @@ async fn derived_backfill_folds_into_migration_group_and_backfills_every_row() {
     }
     let column_defaults: HashMap<String, String> = HashMap::new();
 
-    let ddl_backend = ddl_backend_for_dialect(backend.dialect(), None, None);
+    let ddl_backend = ddl_backend_for_dialect(backend.dialect(), None, None).unwrap();
     let retry = no_retry_policy();
     let result = check_and_migrate(
         &backend,
@@ -349,7 +349,7 @@ async fn failing_backfill_expression_rolls_back_the_whole_group_no_orphan_column
     );
     let column_defaults: HashMap<String, String> = HashMap::new();
 
-    let ddl_backend = ddl_backend_for_dialect(backend.dialect(), None, None);
+    let ddl_backend = ddl_backend_for_dialect(backend.dialect(), None, None).unwrap();
     let retry = no_retry_policy();
     let result = check_and_migrate(
         &backend,
@@ -429,7 +429,7 @@ async fn partially_applied_migration_group_is_repaired_on_retry() {
     }
     let column_defaults: HashMap<String, String> = HashMap::new();
 
-    let ddl_backend = ddl_backend_for_dialect(backend.dialect(), None, None);
+    let ddl_backend = ddl_backend_for_dialect(backend.dialect(), None, None).unwrap();
     let retry = no_retry_policy();
     let result = check_and_migrate(
         &backend,

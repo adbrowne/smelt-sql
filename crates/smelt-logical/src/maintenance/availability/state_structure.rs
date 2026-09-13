@@ -50,11 +50,14 @@ use crate::maintenance::{KeyDiscovery, PlanCell, Technique};
 /// (whose capability flag above is the second source of truth that must flip
 /// with it) and the tombstone ledger
 /// (`docs/outcomes/20260906-bigquery-correctness` phase 15). They flip on as
-/// each realisation lands. **Spark's are not**:
+/// each realisation lands. **Spark's and Trino's are not**:
 /// Delta gives per-table atomicity and no cross-table transaction, so a ledger
 /// write and its data write cannot be made atomic there and the additive
 /// never-fold-twice refusal has no sound Delta realisation — an honest
-/// permanent absence, not a deferral.
+/// permanent absence, not a deferral. Iceberg (queried through Trino in the
+/// `trino` target) shares Delta's per-table-commit atomicity, so the same
+/// permanent absence applies (2026-09-13 ruling; `20260913-trino-ledger`
+/// revisits, not a deferral here).
 pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
     match dialect {
         SqlDialect::DuckDB => vec![
@@ -70,7 +73,7 @@ pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
             StateStructure::ObservedOutputDeltas,
             StateStructure::TombstoneLedger,
         ],
-        SqlDialect::SparkSQL => vec![],
+        SqlDialect::SparkSQL | SqlDialect::Trino => vec![],
     }
 }
 

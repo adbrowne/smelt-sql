@@ -241,7 +241,9 @@ pub(super) async fn build_dry_run_outcome(
             let Some(inc) = plan.incremental.as_ref() else {
                 continue;
             };
-            let dialect = maintenance_dialect_for_target(config, &model_target);
+            let Ok(dialect) = maintenance_dialect_for_target(config, &model_target) else {
+                continue;
+            };
             let partition_col = &inc.timeseries.partition_column;
             let table_name = format!("{schema}.{}", model_file.db_name_owned());
             let per_model_source_bounds =

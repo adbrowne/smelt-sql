@@ -17,10 +17,12 @@
 //! §"Maintenance-plan purity"; `docs/specs/incremental_models.md`
 //! §"Statement emission (single owner)"). This module never authors one.
 //!
-//! **Spark is refused, not deferred** — same permanent absence the ledger
-//! and observed-delta dispatches record, for the same reason: Delta has no
-//! cross-table transaction, so the tombstone record and the presented write
-//! cannot be made atomic.
+//! **Spark and Trino are refused, not deferred** — same permanent absence the
+//! ledger and observed-delta dispatches record, for the same reason: Delta
+//! has no cross-table transaction, so the tombstone record and the presented
+//! write cannot be made atomic. Iceberg (queried through Trino) shares
+//! Delta's per-table-commit atomicity, so the same refusal applies
+//! (2026-09-13 ruling; `20260913-trino-ledger` revisits, not a deferral here).
 //!
 //! Realisability itself is **not** decided here —
 //! `realisable_state_structures` in `smelt-logical` owns it, and a run-layer
@@ -84,7 +86,7 @@ pub fn tombstone_table_ddl(
             clock_col,
             clock_type,
         )?),
-        SqlDialect::SparkSQL => Err(TombstoneDdlError::UnsupportedDialect {
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(TombstoneDdlError::UnsupportedDialect {
             dialect: dialect.name(),
         }),
     }
@@ -103,7 +105,7 @@ pub fn tombstone_table_drop_ddl(
         SqlDialect::BigQuery => Ok(ddl_bigquery::generate_tombstone_table_drop_ddl(
             qualified_name,
         )),
-        SqlDialect::SparkSQL => Err(TombstoneDdlError::UnsupportedDialect {
+        SqlDialect::SparkSQL | SqlDialect::Trino => Err(TombstoneDdlError::UnsupportedDialect {
             dialect: dialect.name(),
         }),
     }

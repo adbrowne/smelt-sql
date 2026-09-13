@@ -301,7 +301,10 @@ fn build_bound_context(model_name: &str, graph: &DependencyGraph, config: &Confi
 /// (private to that crate, so duplicated here rather than reused).
 fn backend_type_to_maintenance_dialect(
     backend_type: smelt_core::config::BackendType,
-) -> smelt_logical::maintenance::emit::MaintenanceDialect {
+) -> Result<
+    smelt_logical::maintenance::emit::MaintenanceDialect,
+    smelt_backend::UnsupportedMaintenanceDialect,
+> {
     let dialect = match backend_type {
         smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
         smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
@@ -369,12 +372,14 @@ pub fn build_model_diagnostics_response(
         .get(&target)
         .map(|t| t.schema.clone())
         .unwrap_or_else(|| "main".to_string());
-    let dialect = config
+    let dialect = match config
         .targets
         .get(&target)
         .and_then(|t| t.backend_type().ok())
-        .map(backend_type_to_maintenance_dialect)
-        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+    {
+        Some(bt) => backend_type_to_maintenance_dialect(bt)?,
+        None => smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    };
 
     let mut registry = smelt_runtime::CompilerRegistry::new(config, &config.targets);
     if let Some(ws) = ws {

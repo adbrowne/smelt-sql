@@ -1297,8 +1297,23 @@ pub async fn execute_project(
                             plan.model_file.metadata.as_deref(),
                             target_config,
                         );
+                        // A dialect with no `DdlBackend` generator yet
+                        // (Trino/Iceberg) skips schema evolution rather than
+                        // being handed another dialect's DDL spellings —
+                        // `docs/outcomes/20260913-trino-target-spine/
+                        // phases/02-plan.md` task 9.
                         let ddl_backend =
-                            ddl_backend_for_dialect(backend.dialect(), table_format, None);
+                            match ddl_backend_for_dialect(backend.dialect(), table_format, None) {
+                                Ok(b) => Some(b),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Schema evolution DDL generator unavailable for '{}': {e}. \
+                                         Skipping schema evolution.",
+                                        plan.name,
+                                    );
+                                    None
+                                }
+                            };
                         let schema_evolution_retry =
                             RetryPolicy::from_request(request, run_id, &plan.name, reporter);
                         match check_and_migrate(
@@ -1313,7 +1328,7 @@ pub async fn execute_project(
                             request.dry_run,
                             &column_defaults,
                             &backfill_exprs,
-                            Some(&ddl_backend),
+                            ddl_backend.as_ref(),
                             &schema_evolution_retry,
                         )
                         .await
@@ -1774,7 +1789,7 @@ pub async fn execute_project(
                                             key,
                                             Some(slice),
                                             &region,
-                                            smelt_backend::maintenance_dialect(backend.dialect()),
+                                            smelt_backend::maintenance_dialect(backend.dialect())?,
                                         );
                                     (select, None)
                                 }
@@ -1798,7 +1813,7 @@ pub async fn execute_project(
                                     let select =
                                         crate::maintenance_driver::repair_keys_literal_select(
                                             &keys,
-                                            smelt_backend::maintenance_dialect(backend.dialect()),
+                                            smelt_backend::maintenance_dialect(backend.dialect())?,
                                         );
                                     let refresh = crate::maintenance_driver::RepairSidecarRefresh {
                                         schema,
@@ -1846,7 +1861,7 @@ pub async fn execute_project(
                                     &compiled.sql,
                                     key,
                                     &affected_keys_select,
-                                    smelt_backend::maintenance_dialect(backend.dialect()),
+                                    smelt_backend::maintenance_dialect(backend.dialect())?,
                                 );
                             match write {
                                 crate::maintenance_driver::RepairWrite::TargetedDeleteInsert => {
@@ -1872,7 +1887,7 @@ pub async fn execute_project(
                                             &db_table_name,
                                             key,
                                             &affected_keys_select,
-                                            smelt_backend::maintenance_dialect(backend.dialect()),
+                                            smelt_backend::maintenance_dialect(backend.dialect())?,
                                         );
                                     // A group whose PRESENTED value is
                                     // unchanged but whose hidden state moved
@@ -2544,7 +2559,7 @@ pub async fn execute_project(
                         source_infos,
                         model_target,
                         schema,
-                        smelt_backend::maintenance_dialect(backend.dialect()),
+                        smelt_backend::maintenance_dialect(backend.dialect())?,
                     )
                     .await?;
 
@@ -3424,7 +3439,7 @@ pub async fn execute_project(
                         plan.model_file.metadata.as_deref(),
                         Some(&inc_plan.timeseries),
                         &compiled.sql,
-                        smelt_backend::maintenance_dialect(backend.dialect()),
+                        smelt_backend::maintenance_dialect(backend.dialect())?,
                     );
                     model_probe_records.extend(
                         crate::model_probes::dispatch_declared_model_probes(
@@ -3464,7 +3479,7 @@ pub async fn execute_project(
                             &source_postures,
                             model_target,
                             schema,
-                            smelt_backend::maintenance_dialect(backend.dialect()),
+                            smelt_backend::maintenance_dialect(backend.dialect())?,
                         );
                         if !source_probes.is_empty() {
                             let (refreshed, records) =
@@ -3517,7 +3532,7 @@ pub async fn execute_project(
                             end_date,
                             model_target,
                             schema,
-                            smelt_backend::maintenance_dialect(backend.dialect()),
+                            smelt_backend::maintenance_dialect(backend.dialect())?,
                         );
                         if !contract_probes.is_empty() {
                             let result =
@@ -3818,7 +3833,7 @@ pub async fn execute_project(
                                     window_end: &partition.end,
                                 },
                                 Some(&facts.region_write),
-                                smelt_backend::maintenance_dialect(backend.dialect()),
+                                smelt_backend::maintenance_dialect(backend.dialect())?,
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
                                 &ledger_ensure_sqls,
@@ -3915,7 +3930,7 @@ pub async fn execute_project(
                                     consumer_address: &consumer_address,
                                 },
                                 Some(&facts.region_write),
-                                smelt_backend::maintenance_dialect(backend.dialect()),
+                                smelt_backend::maintenance_dialect(backend.dialect())?,
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
                                 &ledger_ensure_sqls,
@@ -3999,7 +4014,7 @@ pub async fn execute_project(
                                 &partition.column,
                                 &region,
                                 &compiled.sql,
-                                smelt_backend::maintenance_dialect(backend.dialect()),
+                                smelt_backend::maintenance_dialect(backend.dialect())?,
                             );
                             let chunk = crate::reporter::ChunkInfo {
                                 index: batch_idx,
@@ -4313,7 +4328,7 @@ pub async fn execute_project(
                         .as_ref()
                         .and_then(|m| m.timeseries.as_ref()),
                     &compiled.sql,
-                    smelt_backend::maintenance_dialect(backend.dialect()),
+                    smelt_backend::maintenance_dialect(backend.dialect())?,
                 );
                 model_probe_records.extend(
                     crate::model_probes::dispatch_declared_model_probes(
@@ -4343,7 +4358,7 @@ pub async fn execute_project(
                         &source_postures,
                         model_target,
                         schema,
-                        smelt_backend::maintenance_dialect(backend.dialect()),
+                        smelt_backend::maintenance_dialect(backend.dialect())?,
                     );
                     if !source_probes.is_empty() {
                         let (refreshed, records) =

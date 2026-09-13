@@ -11,6 +11,8 @@ pub enum SqlDialect {
     SparkSQL,
     /// Google BigQuery (GoogleSQL) dialect
     BigQuery,
+    /// Trino SQL dialect (used to query Iceberg tables in the `trino` target).
+    Trino,
 }
 
 impl SqlDialect {
@@ -20,6 +22,7 @@ impl SqlDialect {
             SqlDialect::DuckDB => "DuckDB",
             SqlDialect::SparkSQL => "Spark SQL",
             SqlDialect::BigQuery => "BigQuery",
+            SqlDialect::Trino => "Trino",
         }
     }
 
@@ -32,6 +35,7 @@ impl SqlDialect {
             SqlDialect::DuckDB => DialectId::DuckDb,
             SqlDialect::SparkSQL => DialectId::SparkSql,
             SqlDialect::BigQuery => DialectId::BigQuery,
+            SqlDialect::Trino => DialectId::Trino,
         }
     }
 
@@ -48,10 +52,16 @@ impl SqlDialect {
     /// `MAX(x) FILTER (WHERE p)` and BigQuery answered `400 Syntax error:
     /// Expected ")" but got "("`. DuckDB has it, and Spark SQL has had it
     /// since 3.0.
+    ///
+    /// Trino in fact supports `FILTER (WHERE …)`, but this lands as a
+    /// conservative `false` — refusing the construct rather than emitting SQL
+    /// Trino might reject — until phase 8 of
+    /// `docs/outcomes/20260913-trino-target-spine/outcome.md` measures the
+    /// real value against a live engine.
     pub fn supports_aggregate_filter_clause(self) -> bool {
         match self {
             SqlDialect::DuckDB | SqlDialect::SparkSQL => true,
-            SqlDialect::BigQuery => false,
+            SqlDialect::BigQuery | SqlDialect::Trino => false,
         }
     }
 
@@ -63,10 +73,16 @@ impl SqlDialect {
     /// [`Self::supports_aggregate_filter_clause`]. GoogleSQL has only the
     /// numeric form — a live run got `400 Syntax error: Unexpected keyword
     /// PRECEDING`. DuckDB and Spark SQL both accept the interval form.
+    ///
+    /// Trino's actual support is unmeasured; this lands as a conservative
+    /// `false` — refusing the construct rather than emitting SQL Trino might
+    /// reject — until phase 8 of
+    /// `docs/outcomes/20260913-trino-target-spine/outcome.md` measures the
+    /// real value against a live engine.
     pub fn supports_interval_range_frame(self) -> bool {
         match self {
             SqlDialect::DuckDB | SqlDialect::SparkSQL => true,
-            SqlDialect::BigQuery => false,
+            SqlDialect::BigQuery | SqlDialect::Trino => false,
         }
     }
 }
@@ -474,6 +490,7 @@ mod tests {
             SqlDialect::DuckDB,
             SqlDialect::SparkSQL,
             SqlDialect::BigQuery,
+            SqlDialect::Trino,
         ];
         let ids: Vec<_> = dialects.iter().map(|d| d.id()).collect();
         let mut sorted = ids.clone();
@@ -485,5 +502,17 @@ mod tests {
             DialectId::ALL.len(),
             "a DialectId has no SqlDialect"
         );
+    }
+
+    #[test]
+    fn trino_dialect_identity_and_language_properties() {
+        assert_eq!(SqlDialect::Trino.name(), "Trino");
+        assert_eq!(SqlDialect::Trino.id(), DialectId::Trino);
+        // Conservative provisional landing: false makes smelt refuse the
+        // construct rather than emit SQL Trino may reject. Phase 8 of
+        // docs/outcomes/20260913-trino-target-spine/outcome.md measures the
+        // real values against a live engine.
+        assert!(!SqlDialect::Trino.supports_aggregate_filter_clause());
+        assert!(!SqlDialect::Trino.supports_interval_range_frame());
     }
 }
