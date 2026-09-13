@@ -145,6 +145,7 @@ fn all_lowerings_execute_on_both_backends() {
             TargetKind::DuckDb => ("dev", "main"),
             TargetKind::Spark => ("spark", SPARK_SCHEMA),
             TargetKind::BigQuery { dataset } => ("bq", dataset.as_str()),
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
 
         let out = run_smelt_run(&root, target_name);

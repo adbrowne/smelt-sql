@@ -27,6 +27,21 @@ pub struct DeclaredProbe {
     pub sql: String,
 }
 
+/// Whether [`declared_model_probes`] would build anything for this
+/// model — pure and dialect-free, so a caller can skip resolving a
+/// [`MaintenanceDialect`] entirely for a model that declares no probe at
+/// all (a plain full-refresh model on a backend with no maintenance-dialect
+/// mapping yet, e.g. Trino, must not be forced through that resolution just
+/// because the probe call site sits on its path).
+pub fn any_declared_probe(
+    metadata: Option<&ModelMetadata>,
+    timeseries: Option<&TimeseriesConfig>,
+) -> bool {
+    timeseries.is_some_and(|ts| ts.assert_monotonic)
+        || metadata
+            .is_some_and(|m| !m.functional_dependencies.is_empty() || m.bounded_domain.is_some())
+}
+
 /// Build the declared-probe set for `model_name`'s run — pure, no I/O.
 /// `cell` names the maintenance cell/technique these probes license (the
 /// diagnostic's "Licensed cell:" text). Returns one probe per declaration

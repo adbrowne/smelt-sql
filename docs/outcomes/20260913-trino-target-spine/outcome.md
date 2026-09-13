@@ -147,11 +147,29 @@ not an answer — every cell is still established by execution.
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, a table and a view materialized as Iceberg objects and read back through `execute_model`, and the `smelt-backends` factory constructing it by name | done |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | done |
 | 8 | Establish the capability profile **by execution**: one probe per matrix flag against the live coordinator, plus the two `SqlDialect` *language* properties (`supports_aggregate_filter_clause`, `supports_interval_range_frame`) phase 2 landed conservatively `false`; `BackendCapabilities::trino_iceberg()` replaces phase 6's provisional all-`false` profile and the spec table is written in the same commit, constructor-matches-table conformance test, measured errors quoted for every `✗` | done |
-| 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | planned |
+| 9 | End-to-end on the real pipeline: `dialect_and_capabilities` stops refusing Trino, an example workspace compiles and materializes a table and a view on the Trino target via `execute_project` with zero diagnostics and a run report written, wired into `smelt-cli`'s target-parity suite the way Spark's and BigQuery's are — criterion 7 | done |
 | 10 | CI: the `compat.yml` Trino job gated like `spark-integration`, the unset-`SMELT_TRINO_URL` skip proved to be a skip, `changes` filter for Trino paths | pending |
 | 11 | Close: `docs-site/` Trino target page, `hardening-baseline` entry for the new crate, `verify-phase.sh` green, divergences updated, and the measured `✗` consequences (no `PIVOT`, no temp tables, no transactional DDL) handed forward to the sibling outcomes that own them | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 9: end-to-end, with two real bugs found and fixed along the way.**
+  `dialect_and_capabilities` is infallible again (`TrinoCapabilitiesUnmeasured` deleted); a
+  table and a view materialize on a live Trino/Iceberg tier via `smelt run` and read back
+  correctly. The plan's test 2 (`trino_compile_refuses_qualify`) was wrong on the facts —
+  `QUALIFY` is rewritten to a subquery on every dialect with `supports_qualify = false`
+  (Spark, BigQuery, now Trino too), never refused; swapped for a test of
+  `supports_native_ivm = false`, the flag that actually hard-refuses at compile time. Two bugs
+  found running the walking skeleton for real: (1) the full-refresh path's declared-probe and
+  append-only-posture-probe call sites in `execute/project/mod.rs` eagerly resolved a
+  `MaintenanceDialect` even for a model declaring zero probes, hard-failing any plain model on
+  Trino for a feature it never used — fixed with dialect-free "would this fire" predicates
+  that only resolve the dialect when actually needed; (2) nothing ever called
+  `Backend::ensure_schema` for Trino (Spark/BigQuery do it inside their own already-networked
+  constructors; `TrinoBackend::new` is deliberately network-call-free, pinned by an existing
+  `smelt-backends` test) — fixed with a generic `requires_schema_init` gate in
+  `execute_project` right after backend construction, harmlessly redundant for the other three
+  backends.
 
 - **2026-09-14 — phase 8: the capability profile, measured against a live coordinator.**
   27 probes ran in `crates/smelt-backend-trino/tests/capability_probes.rs`, zero skipped

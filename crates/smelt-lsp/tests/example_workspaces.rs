@@ -517,6 +517,11 @@ async fn ecommerce() {
 }
 
 #[tokio::test]
+async fn trino_spine() {
+    assert_example_workspace_clean("trino_spine").await;
+}
+
+#[tokio::test]
 async fn functions_demo() {
     assert_example_workspace_clean("functions_demo").await;
 }

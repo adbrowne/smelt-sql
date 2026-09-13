@@ -31,6 +31,14 @@ fn ecommerce_no_diagnostics() {
     check_workspace_no_diagnostics("examples/ecommerce");
 }
 
+/// `examples/trino_spine` declares `dev` (DuckDB) and `trino` targets over
+/// two literal-row models — no seed or source, so this checks clean with no
+/// live coordinator (`docs/outcomes/20260913-trino-target-spine` phase 9).
+#[test]
+fn trino_spine_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/trino_spine");
+}
+
 #[test]
 fn functions_demo_no_diagnostics() {
     check_workspace_no_diagnostics("examples/functions_demo");

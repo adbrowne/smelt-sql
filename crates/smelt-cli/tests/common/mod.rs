@@ -28,6 +28,10 @@ pub enum TargetKind {
     BigQuery {
         dataset: String,
     },
+    /// Trino, carrying the suite-scoped Iceberg schema this run isolates in.
+    Trino {
+        schema: String,
+    },
 }
 
 /// Returns `SPARK_CONNECT_URL` from the environment, or `None` when absent.
@@ -112,6 +116,25 @@ pub fn targets_to_run(label: &str) -> Vec<TargetKind> {
     if bigquery_enabled() {
         targets.push(TargetKind::BigQuery {
             dataset: bq_dataset(label),
+        });
+    }
+    targets
+}
+
+/// [`targets_to_run`] plus the Trino leg when a live coordinator is reachable
+/// (`SMELT_TRINO_URL` set — see [`trino_env`]).
+///
+/// Kept separate from `targets_to_run` itself: the incremental/merge/
+/// schema-evolution parity suites over `targets_to_run` cover maintenance
+/// techniques Trino doesn't support yet (owned by the sibling
+/// `20260913-trino-incremental` outcome, run under a fully-degraded,
+/// Spark-shaped state-residency profile). Only suites that exercise plain
+/// table/view materialization should call this variant.
+pub fn targets_to_run_with_trino(label: &str) -> Vec<TargetKind> {
+    let mut targets = targets_to_run(label);
+    if let Some(_env) = trino_env() {
+        targets.push(TargetKind::Trino {
+            schema: trino_schema(label),
         });
     }
     targets
@@ -212,6 +235,7 @@ pub fn targets_yaml(kind: &TargetKind, warehouse_dir: &Path) -> (String, String)
             )
         }
         TargetKind::BigQuery { dataset } => ("bq".to_string(), bq_target_body(dataset)),
+        TargetKind::Trino { schema } => ("trino".to_string(), trino_target_body(schema)),
     }
 }
 
@@ -402,6 +426,16 @@ pub fn seed_source_table(
                 });
             }
         }
+        TargetKind::Trino { .. } => {
+            // Dead today: `source_seed.rs` calls `targets_to_run`, which never
+            // yields `Trino`. `seed_parity.rs::seed_loads_into_trino` already
+            // covers the live Trino seed path via `trino_backend`/`load_table`
+            // directly; this generic harness doesn't need a second one.
+            panic!(
+                "seed_source_table has no Trino arm — see \
+                 seed_parity.rs::seed_loads_into_trino for the live Trino seed leg"
+            );
+        }
     }
 }
 
@@ -475,6 +509,10 @@ pub fn count_table_rows(
                 })
             }
         }
+        TargetKind::Trino { .. } => {
+            // Dead today — see the matching arm in `seed_source_table` above.
+            panic!("count_table_rows has no Trino arm — use fetch_trino_rows and count the result");
+        }
     }
 }
 
@@ -546,6 +584,16 @@ fn execute_sql_on(
                 })
             }
         }
+        TargetKind::Trino { schema } => {
+            use smelt_backend::Backend;
+            let backend = trino_backend(schema);
+            rt.block_on(async {
+                backend
+                    .execute_sql(sql)
+                    .await
+                    .unwrap_or_else(|e| panic!("Trino execute_sql failed: {e}"))
+            })
+        }
     }
 }
 
@@ -604,14 +652,12 @@ pub fn assert_table_parity(actual: &[Vec<String>], expected: &[Vec<String>], lab
 
 // ─── W7·P7: Trino seed-parity helpers ───────────────────────────────────────
 //
-// Trino is deliberately NOT a `TargetKind` variant and never appears in
-// `targets_to_run()`: `dialect_and_capabilities` still refuses `type: trino`
-// until phase 8 lands `BackendCapabilities::trino_iceberg()`
-// (`docs/outcomes/20260913-trino-target-spine`), so wiring it into the
-// helper every W1+ suite shares would turn those currently-green suites red
-// for a reason unrelated to seeding. `smelt seed` never constructs a
-// `SqlCompiler` (`commands/seed.rs` reaches only `create_backend`), so the
-// Trino leg below is reachable today as a standalone path.
+// `TargetKind::Trino` is a real variant since phase 9
+// (`docs/outcomes/20260913-trino-target-spine`), reached via
+// `targets_to_run_with_trino`. `targets_to_run` itself stays Trino-free — the
+// incremental/merge/schema-evolution parity suites over `targets_to_run`
+// exercise maintenance techniques the sibling `20260913-trino-incremental`
+// outcome owns, not this one.
 
 /// The live Trino environment a suite runs against, or `None` when the leg
 /// should skip. Mirrors `crates/smelt-backend-trino/tests/backend_live.rs`'s
@@ -658,18 +704,27 @@ pub fn trino_schema(label: &str) -> String {
     format!("smelt_seed_{label}_{}", std::process::id())
 }
 
+/// The body of a `trino` target block (4-space indented, no leading key),
+/// matching [`targets_yaml`]'s shape for the other backends.
+///
+/// Panics if `SMELT_TRINO_URL` is unset — callers gate on [`trino_env`] first.
+pub fn trino_target_body(schema: &str) -> String {
+    let env = trino_env().expect("trino_target_body called without a Trino environment");
+    format!(
+        "type: trino\n    host: {}\n    port: {}\n    user: {}\n    \
+         catalog: {}\n    schema: {schema}\n    tls: {}",
+        env.host, env.port, env.user, env.catalog, env.tls
+    )
+}
+
 /// The whole `trino:` target block (2-space indented, ready to concatenate
 /// under `targets:` in a hand-written `smelt.yml`), or empty when
 /// `SMELT_TRINO_URL` is unset.
 pub fn trino_target_block(schema: &str) -> String {
-    let Some(env) = trino_env() else {
+    if trino_env().is_none() {
         return String::new();
-    };
-    format!(
-        "  trino:\n    type: trino\n    host: {}\n    port: {}\n    user: {}\n    \
-         catalog: {}\n    schema: {schema}\n    tls: {}\n",
-        env.host, env.port, env.user, env.catalog, env.tls
-    )
+    }
+    format!("  trino:\n    {}\n", trino_target_body(schema))
 }
 
 /// Connects a `TrinoBackend` to `schema` from the ambient test environment.

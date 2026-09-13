@@ -614,30 +614,13 @@ fn output_column_names(projection: &Projection) -> Vec<String> {
     names
 }
 
-/// A `trino` target has no [`BackendCapabilities`] constructor yet: the
-/// profile is established **by execution** against the live coordinator
-/// (`multi_backend.md` §Surface), which is
-/// `20260913-trino-target-spine` phase 8's job, not this one's. Returning
-/// this rather than a placeholder constructor — or aliasing Trino onto
-/// `BackendCapabilities::spark()` — keeps `capability_conformance.rs` and the
-/// spec's `?`-cells gate meaningful: nothing claims a Trino capability that
-/// was never measured.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "the trino backend has no measured BackendCapabilities profile yet — \
-     see docs/outcomes/20260913-trino-target-spine phase 8"
-)]
-pub struct TrinoCapabilitiesUnmeasured;
-
-fn dialect_and_capabilities(
-    backend_type: BackendType,
-) -> Result<(SqlDialect, BackendCapabilities), TrinoCapabilitiesUnmeasured> {
+fn dialect_and_capabilities(backend_type: BackendType) -> (SqlDialect, BackendCapabilities) {
     match backend_type {
-        BackendType::DuckDB => Ok((SqlDialect::DuckDB, BackendCapabilities::duckdb())),
-        BackendType::Spark => Ok((SqlDialect::SparkSQL, BackendCapabilities::spark())),
-        BackendType::BigQuery => Ok((SqlDialect::BigQuery, BackendCapabilities::bigquery())),
-        BackendType::Databricks => Ok((SqlDialect::SparkSQL, BackendCapabilities::databricks())),
-        BackendType::Trino => Err(TrinoCapabilitiesUnmeasured),
+        BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
+        BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
+        BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
+        BackendType::Databricks => (SqlDialect::SparkSQL, BackendCapabilities::databricks()),
+        BackendType::Trino => (SqlDialect::Trino, BackendCapabilities::trino_iceberg()),
     }
 }
 
@@ -1324,7 +1307,7 @@ impl UpstreamSchemas {
 impl SqlCompiler {
     pub(crate) fn new(config: Config, target: &Target) -> anyhow::Result<Self> {
         let (dialect, capabilities) = match target.backend_type() {
-            Ok(bt) => dialect_and_capabilities(bt)?,
+            Ok(bt) => dialect_and_capabilities(bt),
             Err(_) => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         };
         Ok(Self {
@@ -2745,24 +2728,70 @@ mod tests {
         }
     }
 
-    /// A `trino` target errors by name rather than borrowing another
-    /// backend's `BackendCapabilities` profile — the capability profile is
-    /// established by execution (`20260913-trino-target-spine` phase 8), not
-    /// aliased onto Spark's.
+    /// A `trino` target compiles against the profile phase 8 measured by
+    /// execution (`BackendCapabilities::trino_iceberg()`), not a placeholder
+    /// or another backend's profile.
     #[test]
-    fn dialect_and_capabilities_refuses_trino_until_measured() {
+    fn dialect_and_capabilities_returns_measured_trino_profile() {
         let mut target = make_test_target();
         target.target_type = "trino".to_string();
         target.host = Some("localhost".to_string());
         target.catalog = Some("iceberg".to_string());
         target.user = Some("smelt".to_string());
 
-        let err = SqlCompiler::new(make_test_config(), &target)
-            .err()
-            .expect("a trino target must be refused until capabilities are measured");
+        let compiler = SqlCompiler::new(make_test_config(), &target)
+            .expect("a trino target must compile with its measured capability profile");
+        assert_eq!(compiler.dialect, SqlDialect::Trino);
+        assert_eq!(compiler.capabilities, BackendCapabilities::trino_iceberg());
+    }
+
+    /// The measured `false` capability flags reach the compile-path refusal
+    /// rather than sitting inert. `QUALIFY` is not this proof — every
+    /// dialect with `supports_qualify = false` (Spark, BigQuery, and now
+    /// Trino) gets a printer-level subquery rewrite, not a refusal, so a
+    /// `QUALIFY` model compiles cleanly on Trino too (see
+    /// `qualify_preserved_duckdb`/`qualify_rewrite_spark` in
+    /// `smelt-dialect/tests/snapshots.rs`). `supports_native_ivm = false` is
+    /// the flag with an actual hard compile-time refusal
+    /// (`check_native_ivm_gate`): `refresh: materialized_view` on Trino must
+    /// be refused exactly like it already is on DuckDB
+    /// (`test_materialized_view_hard_errors_without_native_ivm`).
+    #[test]
+    fn trino_compile_refuses_materialized_view_without_native_ivm() {
+        let mut target = make_test_target();
+        target.target_type = "trino".to_string();
+        target.host = Some("localhost".to_string());
+        target.catalog = Some("iceberg".to_string());
+        target.user = Some("smelt".to_string());
+
+        let compiler = SqlCompiler::new(make_test_config(), &target)
+            .expect("a trino target must compile with its measured capability profile");
+
+        let model = ModelFile {
+            name: "mv_model".to_string(),
+            path: "models/mv_model.sql".into(),
+            content: "SELECT device_id, COUNT(*) AS n FROM smelt.raw_events GROUP BY device_id"
+                .to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: Some(Box::new(smelt_core::metadata::ModelMetadata {
+                materialization: Some(Materialization::Table),
+                refresh: Some(RefreshStrategy::MaterializedView),
+                ..Default::default()
+            })),
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("mv_model.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let err = compiler
+            .compile(&model, "main")
+            .expect_err("refresh: materialized_view on Trino must hard-error");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("trino"),
-            "error must name trino: {err}"
+            message.contains("requires native incremental-view maintenance"),
+            "expected the §\"No silent fallback\" hard error, got: {}",
+            message
         );
     }
 

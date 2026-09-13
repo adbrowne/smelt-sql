@@ -67,6 +67,10 @@ fn add_column_ddl(kind: &TargetKind, schema: &str) -> String {
         TargetKind::BigQuery { dataset } => {
             format!("ALTER TABLE {dataset}.event_totals ADD COLUMN event_count INT64")
         }
+        TargetKind::Trino { .. } => unreachable!(
+            "targets_to_run never yields Trino — schema evolution on Trino is owned by \
+             docs/outcomes/20260913-trino-incremental"
+        ),
     }
 }
 
@@ -110,6 +114,7 @@ fn add_column_migration_matches_across_backends() {
             TargetKind::DuckDb => "main",
             TargetKind::Spark => SPARK_SCHEMA,
             TargetKind::BigQuery { dataset } => dataset.as_str(),
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
 
         match &kind {
@@ -255,6 +260,10 @@ fn add_column_migration_matches_across_backends() {
                         .unwrap_or_else(|e| panic!("BigQuery insert v2 rows failed: {e}"));
                 });
             }
+            TargetKind::Trino { .. } => unreachable!(
+                "targets_to_run never yields Trino — schema evolution on Trino is owned by \
+                 docs/outcomes/20260913-trino-incremental"
+            ),
         }
 
         // Fetch final rows and compare.  DuckDB establishes the reference;
@@ -309,6 +318,7 @@ fn ddl_backend_for(kind: &TargetKind) -> DdlBackend {
         TargetKind::DuckDb => DdlBackend::DuckDb,
         TargetKind::BigQuery { .. } => DdlBackend::BigQuery,
         TargetKind::Spark => unreachable!("Spark is filtered out of these tests"),
+        TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
     }
 }
 
@@ -394,6 +404,7 @@ fn execute_all(
             });
         }
         TargetKind::Spark => unreachable!("Spark is filtered out of these tests"),
+        TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
     }
 }
 
@@ -436,6 +447,7 @@ fn create_table(
             });
         }
         TargetKind::Spark => unreachable!("Spark is filtered out of these tests"),
+        TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
     }
 }
 
@@ -461,6 +473,7 @@ fn generated_add_column_ddl_executes_on_every_backend() {
             TargetKind::DuckDb => "main",
             TargetKind::BigQuery { dataset } => dataset.as_str(),
             TargetKind::Spark => unreachable!(),
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
 
         // v1: two columns.
@@ -531,6 +544,7 @@ fn generated_widen_type_ddl_executes_on_every_backend() {
             TargetKind::DuckDb => "main",
             TargetKind::BigQuery { dataset } => dataset.as_str(),
             TargetKind::Spark => unreachable!(),
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
 
         // Seeded with an explicit column type rather than a CAST: GoogleSQL
@@ -542,6 +556,7 @@ fn generated_widen_type_ddl_executes_on_every_backend() {
             TargetKind::DuckDb => ("DECIMAL(5,2)", format!("{schema}.{TABLE}")),
             TargetKind::BigQuery { dataset } => ("NUMERIC(5,2)", format!("`{dataset}.{TABLE}`")),
             TargetKind::Spark => unreachable!(),
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
         execute_all(
             &rt,

@@ -1,0 +1,20 @@
+name: trino_spine
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+  trino:
+    type: trino
+    host: localhost
+    port: 8080
+    user: smelt
+    catalog: iceberg
+    schema: smelt_spine
+
+default_materialization: table

@@ -103,6 +103,9 @@ fn seed_loads_into_both_backends() {
             TargetKind::DuckDb => ("dev", "main"),
             TargetKind::Spark => ("spark", SPARK_SCHEMA),
             TargetKind::BigQuery { dataset } => ("bq", dataset.as_str()),
+            TargetKind::Trino { .. } => {
+                unreachable!("targets_to_run never yields Trino — see seed_loads_into_trino below")
+            }
         };
 
         let out = run_smelt_seed(&root, target_name);
@@ -122,14 +125,12 @@ fn seed_loads_into_both_backends() {
 /// Prove a CSV seed loads into Trino through the real CLI path
 /// (`smelt seed --target trino`).
 ///
-/// Deliberately **not** part of `seed_loads_into_both_backends`: Trino is not
-/// a `TargetKind` member (`dialect_and_capabilities` still refuses `type:
-/// trino` until `docs/outcomes/20260913-trino-target-spine` phase 8 lands
-/// `BackendCapabilities::trino_iceberg()`), so folding it into
-/// `targets_to_run()` would turn that green suite red for a reason unrelated
-/// to seeding. `smelt seed` itself never constructs a `SqlCompiler`
-/// (`commands/seed.rs` reaches only `create_backend`), so this leg is
-/// reachable today. Skips green when `SMELT_TRINO_URL` is unset.
+/// Deliberately **not** folded into `seed_loads_into_both_backends`:
+/// `targets_to_run()` stays Trino-free by design (see `common::TargetKind`),
+/// so this suite drives Trino directly via `trino_target_block`/
+/// `fetch_trino_rows` instead. `smelt seed` never constructs a `SqlCompiler`
+/// (`commands/seed.rs` reaches only `create_backend`), so this leg has been
+/// reachable since phase 7. Skips green when `SMELT_TRINO_URL` is unset.
 #[test]
 fn seed_loads_into_trino() {
     let Some(_) = trino_env() else {

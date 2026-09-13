@@ -126,6 +126,7 @@ fn pipe_query_agrees_across_lowered_and_native_emission() {
                 ran_on_bigquery = true;
                 ("bq", dataset.as_str())
             }
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
 
         let out = run_smelt_run(&root, target_name);

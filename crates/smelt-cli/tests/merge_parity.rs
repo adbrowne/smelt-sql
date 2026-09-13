@@ -96,6 +96,9 @@ fn cumulative_merge_matches_across_backends() {
             TargetKind::DuckDb => "main",
             TargetKind::Spark => SPARK_SCHEMA,
             TargetKind::BigQuery { dataset } => dataset.as_str(),
+            TargetKind::Trino { .. } => {
+                unreachable!("targets_to_run never yields Trino")
+            }
         };
 
         match &kind {
@@ -198,6 +201,12 @@ fn cumulative_merge_matches_across_backends() {
                         .await
                         .unwrap_or_else(|e| panic!("BigQuery merge_into failed: {e}"));
                 });
+            }
+            TargetKind::Trino { .. } => {
+                unreachable!(
+                    "targets_to_run never yields Trino — MERGE parity on Trino is owned by \
+                     docs/outcomes/20260913-trino-incremental"
+                )
             }
         }
 

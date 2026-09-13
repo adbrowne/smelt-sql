@@ -10,6 +10,7 @@
 | `web_analytics/` | Bronze→silver→gold pipeline over JSON events with three parallel identity-resolution algorithms compared side-by-side | 10 SQL models + 2 functions + 5 tests |
 | `broken/` | Intentionally broken models for testing error handling | 5 SQL |
 | `test_workspace/` | Minimal workspace for VSCode/LSP integration testing | 7 SQL + 3 Python |
+| `trino_spine/` | Walking-skeleton `type: trino` target: a table and a view over literal rows, no seed or source needed | 2 SQL |
 | `huge/` | Auto-generated 2000-model stress test workspace | 1000 SQL + 1000 Python |
 
 ## Quick Start

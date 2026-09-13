@@ -78,6 +78,7 @@ fn incremental_delete_insert_is_idempotent_on_both() {
             TargetKind::DuckDb => "main",
             TargetKind::Spark => SPARK_SCHEMA,
             TargetKind::BigQuery { dataset } => dataset.as_str(),
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
 
         let partition = PartitionRange {
@@ -255,6 +256,10 @@ fn incremental_delete_insert_is_idempotent_on_both() {
                         .unwrap_or_else(|e| panic!("BigQuery insert_into_from_query failed: {e}"));
                 });
             }
+            TargetKind::Trino { .. } => unreachable!(
+                "targets_to_run never yields Trino — DELETE+INSERT parity on Trino is owned by \
+                 docs/outcomes/20260913-trino-incremental"
+            ),
         }
 
         let actual = fetch_rows(&kind, &db_path, &warehouse, schema, "daily_totals");

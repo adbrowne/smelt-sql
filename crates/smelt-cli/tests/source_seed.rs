@@ -40,6 +40,7 @@ fn seed_source_table_self_test() {
             TargetKind::DuckDb => "main".to_string(),
             TargetKind::Spark => "smelt_w1".to_string(),
             TargetKind::BigQuery { dataset } => dataset.clone(),
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
         let table_fqn = format!("{schema}.{table_name}");
 

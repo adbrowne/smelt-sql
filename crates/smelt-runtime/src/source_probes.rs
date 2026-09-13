@@ -96,6 +96,25 @@ fn resolve_model_source_infos<'a>(
     resolved
 }
 
+/// Whether [`append_only_posture_probes`] would build anything for this
+/// model — the same eligibility walk, but dialect-free, so a caller can skip
+/// resolving a [`MaintenanceDialect`] for a model that reads no
+/// append-only-postured source at all (a plain full-refresh model on a
+/// backend with no maintenance-dialect mapping yet, e.g. Trino, must not be
+/// forced through that resolution just because this probe call site sits on
+/// its path).
+pub fn any_append_only_posture_probe(model_file: &ModelFile, source_infos: &[SourceInfo]) -> bool {
+    resolve_model_source_infos(model_file, source_infos)
+        .into_iter()
+        .any(|(_, info)| {
+            info.mutation_profile
+                .as_ref()
+                .is_some_and(|p| p.kind == MutationProfile::AppendOnly)
+                && info.timeseries.is_some()
+                && !info.columns.is_empty()
+        })
+}
+
 /// Build the declared append-only posture probe set for `model_name`'s
 /// run — pure, no I/O. `cell` names the maintenance cell/technique these
 /// probes license. Only a source with ALL of: declared

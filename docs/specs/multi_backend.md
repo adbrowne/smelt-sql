@@ -1204,6 +1204,12 @@ resolves nested widening to a table rewrite.
   `examples/github_activity` (`silver.actor_sessions` and its downstream) that build on DuckDB
   and not on BigQuery.
 
+- **A Trino `array(...)` result column does not decode to Arrow yet.** A model projecting an
+  array-typed column reads back from Trino with an error rather than an Arrow list value — the
+  HTTP statement client's result-page decoder (`20260913-trino-target-spine` phase 5) has no
+  arm for the JSON shape Trino's `/v1/statement` protocol uses for array cells. No plan is yet
+  tracking the close.
+
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,
   not a path smelt takes. Tracked in `docs/research/20260816-bigquery-backend.md`.

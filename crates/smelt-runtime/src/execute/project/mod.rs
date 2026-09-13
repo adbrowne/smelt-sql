@@ -323,6 +323,24 @@ pub async fn execute_project(
         let backend = backend_factory
             .create(target_name, target_config, project_dir)
             .await?;
+        // `requires_schema_init = true` (`multi_backend.md` §"Session
+        // initialization") means the backend's own construction makes no
+        // network call and creates nothing — Spark's and BigQuery's own
+        // constructors already call `ensure_schema` themselves (they open a
+        // session anyway), but Trino's is a plain, I/O-free HTTP-client
+        // wrapper (`crates/smelt-backends/tests/create_backend.rs`
+        // `factory_constructs_a_trino_backend_from_a_target` pins that this
+        // stays true), so this run's own first touch of the target is the
+        // one place left to ensure the schema exists before any model writes
+        // into it.
+        if backend.capabilities().requires_schema_init {
+            backend
+                .ensure_schema(&target_config.schema)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to ensure schema for target '{target_name}': {e}")
+                })?;
+        }
         backends.insert(target_name.clone(), backend);
     }
 
@@ -4319,17 +4337,31 @@ pub async fn execute_project(
                 // `bounded_domain:`) before the materialization write —
                 // a firing probe fails the run before anything is written
                 // (`docs/specs/model_properties.md` §"Probe obligation").
-                let declared_probes = crate::model_probes::declared_model_probes(
-                    &plan.name,
-                    &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                // Only resolve a `MaintenanceDialect` when this model
+                // actually declares a probe — a plain full-refresh model on
+                // a backend with no maintenance-dialect mapping yet (Trino;
+                // `docs/outcomes/20260913-trino-incremental` owns adding
+                // one) must not be refused for a feature it never uses.
+                let model_timeseries = plan
+                    .model_file
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.timeseries.as_ref());
+                let declared_probes = if crate::model_probes::any_declared_probe(
                     plan.model_file.metadata.as_deref(),
-                    plan.model_file
-                        .metadata
-                        .as_ref()
-                        .and_then(|m| m.timeseries.as_ref()),
-                    &compiled.sql,
-                    smelt_backend::maintenance_dialect(backend.dialect())?,
-                );
+                    model_timeseries,
+                ) {
+                    crate::model_probes::declared_model_probes(
+                        &plan.name,
+                        &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                        plan.model_file.metadata.as_deref(),
+                        model_timeseries,
+                        &compiled.sql,
+                        smelt_backend::maintenance_dialect(backend.dialect())?,
+                    )
+                } else {
+                    Vec::new()
+                };
                 model_probe_records.extend(
                     crate::model_probes::dispatch_declared_model_probes(
                         backend,
@@ -4350,16 +4382,26 @@ pub async fn execute_project(
                     let source_postures = file_store
                         .load_source_postures()
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
-                    let source_probes = crate::source_probes::append_only_posture_probes(
-                        &plan.name,
-                        &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                    // Same lazy-dialect rationale as the declared-probe
+                    // site above: a model reading no append-only-postured
+                    // source must not need a `MaintenanceDialect` either.
+                    let source_probes = if crate::source_probes::any_append_only_posture_probe(
                         &plan.model_file,
                         source_infos,
-                        &source_postures,
-                        model_target,
-                        schema,
-                        smelt_backend::maintenance_dialect(backend.dialect())?,
-                    );
+                    ) {
+                        crate::source_probes::append_only_posture_probes(
+                            &plan.name,
+                            &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                            &plan.model_file,
+                            source_infos,
+                            &source_postures,
+                            model_target,
+                            schema,
+                            smelt_backend::maintenance_dialect(backend.dialect())?,
+                        )
+                    } else {
+                        Vec::new()
+                    };
                     if !source_probes.is_empty() {
                         let (refreshed, records) =
                             crate::source_probes::dispatch_and_record_append_only_postures(

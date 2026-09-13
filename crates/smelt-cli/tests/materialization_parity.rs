@@ -17,8 +17,8 @@
 
 mod common;
 use common::{
-    assert_table_parity, bq_target_block, drop_bq_dataset, fetch_rows, spark_connect_url,
-    targets_to_run, TargetKind,
+    assert_table_parity, bq_target_block, drop_bq_dataset, drop_trino_schema, fetch_rows,
+    spark_connect_url, targets_to_run_with_trino, trino_schema, trino_target_block, TargetKind,
 };
 use std::process::Command;
 use tempfile::TempDir;
@@ -78,9 +78,10 @@ fn stage_mat_workspace(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf
          paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n  \
            spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    \
-           schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n{bq_block}\
+           schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n{bq_block}{trino_block}\
          default_materialization: table\n",
-        bq_block = bq_target_block(BQ_LABEL)
+        bq_block = bq_target_block(BQ_LABEL),
+        trino_block = trino_target_block(&trino_schema(BQ_LABEL))
     );
     std::fs::write(root.join("smelt.yml"), yml).unwrap();
     std::fs::write(root.join("models").join("view_model.sql"), VIEW_MODEL).unwrap();
@@ -118,11 +119,12 @@ fn view_and_table_materialize_consistently_on_both() {
     let mut ref_view: Vec<Vec<String>> = Vec::new();
     let mut ref_table: Vec<Vec<String>> = Vec::new();
 
-    for kind in targets_to_run(BQ_LABEL) {
+    for kind in targets_to_run_with_trino(BQ_LABEL) {
         let (target_name, schema) = match &kind {
             TargetKind::DuckDb => ("dev", "main"),
             TargetKind::Spark => ("spark", SPARK_SCHEMA),
             TargetKind::BigQuery { dataset } => ("bq", dataset.as_str()),
+            TargetKind::Trino { schema } => ("trino", schema.as_str()),
         };
 
         let out = run_smelt(&root, target_name);
@@ -149,6 +151,9 @@ fn view_and_table_materialize_consistently_on_both() {
         // table model: physical table.
         let table_rows = fetch_rows(&kind, &db_path, &warehouse, schema, "table_model");
         drop_bq_dataset(&kind);
+        if let TargetKind::Trino { schema } = &kind {
+            drop_trino_schema(schema);
+        }
         assert_table_parity(
             &table_rows,
             &expected,

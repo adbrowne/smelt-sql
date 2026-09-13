@@ -230,6 +230,16 @@ pub async fn create_backend(
             // `password` is never logged — connection-security rule
             // (`multi_backend.md` §"Connection security"). Absent means no
             // `Authorization` header at all (the unauthenticated local tier).
+            //
+            // Constructing a `TrinoBackend` makes no network call (unlike
+            // Spark's/BigQuery's own constructors, which already open a
+            // session) — `create_backend` must stay reachable with no live
+            // coordinator (`crates/smelt-backends/tests/create_backend.rs`
+            // `factory_constructs_a_trino_backend_from_a_target`). Ensuring
+            // the schema for `requires_schema_init = true`
+            // (`BackendCapabilities::trino_iceberg()`) is therefore the
+            // execute pipeline's job, not this factory's — see
+            // `execute_project`'s own schema-init step.
             Ok(Box::new(TrinoBackend::new(TrinoClientConfig {
                 base_url,
                 user: user.clone(),

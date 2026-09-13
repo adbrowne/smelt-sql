@@ -26,6 +26,7 @@ fn harness_runs_trivial_model_on_every_available_target() {
             TargetKind::DuckDb => "dev",
             TargetKind::Spark => "spark",
             TargetKind::BigQuery { .. } => "bq",
+            TargetKind::Trino { .. } => unreachable!("targets_to_run never yields Trino"),
         };
         let out = run_smelt_on(&root, target_name, &[]);
         drop_bq_dataset(&kind);
