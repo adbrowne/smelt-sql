@@ -177,9 +177,27 @@ of the models or the tooling.
 | 9f | **[live]** Resume 9d from its task 4 under the 9e fix: full refresh over the already-loaded 8 days, windows 9/10/11 each with its oracle refresh, both sweeps re-run, `08-parity.json` and `09b-equivalence.json` committed, `dbx_registry_entries_are_all_live` and the report-driven gates restored; closes criterion 7 and re-closes criterion 8 (rows 8, 9b and 9d come off `## Blocked`) | done |
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
-| 11b | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume state path seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing, their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
+| 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | planned |
+| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing, their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 11b plan): **row 11b split into 11b (offline) and 11c (live).** `phases/11a-summary.md`
+  "For the next planner" named three defects that make criterion 11's "three consecutive
+  **scheduled** runs complete" unreachable as deployed, every one of them provable and fixable
+  with no workspace: (a) the loader task is fed `{{job.trigger.time.iso_date}}`, i.e. today's
+  real calendar date, while the fixture holds a fixed historical range — the first scheduled run
+  would ask for a day that does not exist; (b) the loader's DuckDB access shells out to a
+  `duckdb` CLI binary that is very unlikely to exist in a Databricks serverless Python
+  environment, and `loader_env` does not declare it; (c) nothing provisions or seeds the Unity
+  Catalog Volume the `smelt_run` task already points `--project-dir` at, so `.smelt/` has nowhere
+  to persist and no run is a genuine incremental window over the previous one. Doing these inside
+  the live row would have meant discovering them one failed scheduled run at a time, each costing
+  a day of wall-clock on a daily cron. None of it leaves the outcome — all three serve criterion
+  11 directly and are now row 11b, gated offline so the headless loop can grind them; the live
+  deploy-and-observe work is row 11c unchanged, plus 11a's open question about the Volume FUSE
+  layer's advisory locking and rename atomicity, which only a live Volume can answer. Nothing
+  added to `## Out of scope`.
 
 - 2026-09-13 (phase 11a implement): **row 11a done — the Asset Bundle, CLI pinning and offline
   `validate` gate all landed and are green.** Two of the plan's own assumptions turned out wrong
