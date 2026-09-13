@@ -1,0 +1,40 @@
+[package]
+name = "smelt-backend-trino"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Trino backend implementation for smelt via the /v1/statement HTTP protocol"
+
+[dependencies]
+# Backend trait / BackendError
+smelt-backend = { path = "../smelt-backend" }
+
+# Arrow record batches
+arrow = { workspace = true }
+
+# HTTP client for /v1/statement + nextUri paging
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Async runtime
+tokio.workspace = true
+async-trait = "0.1"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Date/time parsing for Trino date/timestamp string values
+chrono.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Structured logging
+tracing.workspace = true
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

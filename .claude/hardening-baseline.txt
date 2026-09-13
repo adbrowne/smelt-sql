@@ -39,6 +39,9 @@ smelt-backends expect 0
 smelt-backend-spark expect 0
 smelt-backend-spark println 0
 smelt-backend-spark unwrap 0
+smelt-backend-trino expect 0
+smelt-backend-trino println 0
+smelt-backend-trino unwrap 0
 smelt-backends println 0
 smelt-backends unwrap 0
 smelt-backend unwrap 0

@@ -4114,6 +4114,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-backend-trino"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smelt-backend",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "smelt-backends"
 version = "0.3.2"
 dependencies = [
