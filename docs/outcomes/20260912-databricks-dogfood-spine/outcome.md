@@ -181,8 +181,30 @@ of the models or the tooling.
 | 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
 | 11d | Ambient form, offline: a `databricks` target whose `host` **and** `token` are both absent builds its session from the workload's own ambient workspace context (no `.host(...)` call at all), replacing the spec's measured-false claim that a job exports `DATABRICKS_HOST`; `host` present with `token` absent and `host` absent with `token` present both keep their current meanings (the latter refused with a diagnostic). Threaded through the config validator, `SessionArgs::Databricks`, `SparkBackend::new_databricks`, `DatabricksAdapter`, the `databricks_job` target and the dogfood loader's three duplicated host-resolution sites — all gated with no workspace | done |
 | 11e | **[live]** Resume 11c from its task 7 under the 11d fix: compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored (11c's other legs — deploy, seed, probe — are done and stay done) | blocked |
+| 11f | Make the deployed wheel installable on Databricks serverless compute, offline: a single-owner `scripts/dbx-wheel-build.sh` builds smelt's `bindings = "bin"` wheel against a declared **manylinux_2_28** floor (`maturin --zig` first, a manylinux Docker container as the documented fallback) and refuses to emit a wheel tagged above that floor or left unrepaired; `databricks.yml`'s `smelt_wheel` artifact calls it instead of a bare `maturin build`; gated by the script's own `verify` mode under test plus a structural bundle test, and proved by building a real compliant wheel with no workspace | planned |
+| 11g | **[live]** Resume 11e from its task 3 under the 11f wheel: redeploy (wheel + Volume seed), one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | pending |
 
 ## Decision log
+
+- 2026-09-13 (phase 11f plan, reshape): **the 11e wheel blocker becomes its own offline row (11f),
+  and 11e's unreached live legs become row 11g; the manylinux floor is decided here rather than
+  escalated.** 11e's `## Blocked` entry hands the decision to "the next planner", and the work
+  serves criterion 11 directly — the criterion requires smelt to reach the job task as a wheel
+  built from the bundle's own `artifacts:` block, so a wheel that platform's installer refuses is
+  criterion-11 work, not an out-of-scope toolchain nicety. Three facts settled the route with no
+  further live round-trip: (a) the vendored `libduckdb.so` the wheel already repairs in needs at
+  most `GLIBC_2.25`/`GLIBCXX_3.4.22` (measured with `objdump -T`), so the DuckDB dependency does
+  not itself force a high floor — only the locally-linked `smelt` binary does; (b) Databricks
+  serverless `client: "2"` compute is Ubuntu-22.04-class (glibc 2.35), so **manylinux_2_28** is
+  comfortably installable there while staying a floor `maturin` can actually hit, and going lower
+  (2_17) buys nothing this outcome can check; (c) both candidate builders are available on this
+  machine (`docker` 29.7.2 is installed; `ziglang`/`cargo-zigbuild` are a pip/cargo install away),
+  so the row tries `--zig` first for being containerless and CI-portable and keeps the manylinux
+  Docker image as a documented, tested-by-the-same-`verify`-mode fallback rather than a fork. The
+  floor is enforced by the build script itself, so a future dev machine with a newer glibc cannot
+  silently reintroduce the same defect. 11e stays `blocked` as the historical record; its tasks
+  3-10 are row 11g verbatim, adjusted only for the 12th fixture day 11e genuinely landed. Nothing
+  left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 11e implement, attempt 1): **row 11e blocked — the smoke run's own purpose
   (catch defects before compressing the cadence) worked exactly as designed, fixing four real
