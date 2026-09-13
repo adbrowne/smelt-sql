@@ -42,7 +42,22 @@ artifacts:
     # add a pinned `smelt-sql==<version>` to resources/github_activity_job.yml's
     # `smelt_env` dependencies instead.
     path: ../..
-    build: maturin build --release --out dist
+    # `databricks bundle deploy` runs this command in its own subprocess
+    # environment, which does not reliably carry the invoking shell's
+    # DUCKDB_LIB_DIR/LD_LIBRARY_PATH (measured phase 11c: a deploy run right
+    # after a manual, correctly-linked `maturin build` still fell back to
+    # compiling DuckDB from source) — so the build command resolves the
+    # system DuckDB lib itself, the same two locations
+    # scripts/mise-duckdb-lib-dir.sh checks, rather than trusting inherited
+    # env.
+    build: >-
+      bash -c 'set -euo pipefail; for d in /usr/local/lib "$HOME/.local/lib/duckdb"; do [ -e
+      "$d/libduckdb.so" ] && export DUCKDB_LIB_DIR="$d" && break; done;
+      export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR:-}:${LD_LIBRARY_PATH:-}";
+      rm -rf target/release/build/libduckdb-sys-* target/release/deps/libduckdb_sys-*
+      target/release/deps/libduckdb-*.rlib target/release/deps/smelt-*
+      target/release/smelt target/maturin;
+      maturin build --release --out dist'
 
 include:
   - resources/*.yml

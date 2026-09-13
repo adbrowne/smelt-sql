@@ -19,7 +19,14 @@ import os
 import subprocess
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+# Databricks' serverless job-environment launcher (`client: "2"`) runs this
+# file via `exec(compile(...))` inside a notebook-style REPL rather than a
+# real `python <file>` invocation, so `__file__` is not injected into
+# globals (measured phase 11c: `NameError: name '__file__' is not defined`
+# under client "2", though it worked under the "Invalid platform channel
+# Client-1"-rejected client "1"). `sys.argv[0]` still carries the script's
+# own deployed path in both launch modes.
+_HERE = os.path.dirname(os.path.abspath(globals().get("__file__") or sys.argv[0]))
 _BUNDLE_ROOT = os.path.dirname(_HERE)  # examples/github_activity
 _SYNC_ROOT = os.path.dirname(os.path.dirname(_BUNDLE_ROOT))  # repo root, once synced
 _LOADER = os.path.join(_SYNC_ROOT, "scripts", "dbx-dogfood-loader.py")

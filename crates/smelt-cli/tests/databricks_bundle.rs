@@ -441,6 +441,90 @@ fn bundle_seed_never_overwrites_run_state() {
     );
 }
 
+/// Phase 11c test 1: every branch of dbx-bundle.sh that invokes `databricks`
+/// against a real workspace must export both `DATABRICKS_HOST` and
+/// `DATABRICKS_TOKEN` — the 11c deploy attempt found `seed`/`deploy`/`run`
+/// silently missing the token export, which broke every live subcommand
+/// outright. This locks the fix in structurally rather than trusting a live
+/// failure to catch a regression.
+#[test]
+fn every_live_subcommand_exports_both_credentials() {
+    let script = read(&repo_root().join("scripts/dbx-bundle.sh"));
+
+    // Every non-validate `databricks` invocation site in the script must have
+    // a `DATABRICKS_HOST=... DATABRICKS_TOKEN=...` prefix somewhere in the
+    // two lines above it.
+    let lines: Vec<&str> = script.lines().collect();
+    let mut checked_any = false;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let is_live_invocation = (trimmed.starts_with("exec databricks")
+            || trimmed.starts_with("databricks jobs")
+            || trimmed.starts_with("databricks fs cp"))
+            && !trimmed.contains("--version");
+        if !is_live_invocation {
+            continue;
+        }
+        checked_any = true;
+        let window_start = i.saturating_sub(2);
+        let window = lines[window_start..=i].join("\n");
+        assert!(
+            window.contains("DATABRICKS_HOST=\"${SMELT_DBX_HOST}\""),
+            "live invocation at line {} must export DATABRICKS_HOST from SMELT_DBX_HOST:\n{}",
+            i + 1,
+            window
+        );
+        assert!(
+            window.contains("DATABRICKS_TOKEN=\"${SMELT_DBX_TOKEN}\""),
+            "live invocation at line {} must export DATABRICKS_TOKEN from SMELT_DBX_TOKEN:\n{}",
+            i + 1,
+            window
+        );
+    }
+    assert!(
+        checked_any,
+        "expected at least one live `databricks` invocation site in dbx-bundle.sh"
+    );
+}
+
+/// Phase 11c test 2: the `runs` subcommand must be read-only — no mutating
+/// `databricks` verb (`deploy`, `run`, `bundle run`, `fs cp`, `destroy`) may
+/// appear in its branch, since it exists purely to poll scheduled-run status
+/// during the wait loop.
+#[test]
+fn runs_subcommand_is_read_only() {
+    let script = read(&repo_root().join("scripts/dbx-bundle.sh"));
+    let start = script
+        .find("if [[ \"${SUBCOMMAND}\" == \"runs\" ]]")
+        .expect("expected a runs subcommand branch in dbx-bundle.sh");
+    let end = script[start..]
+        .find("if [[ \"${SUBCOMMAND}\" == \"seed\" ]]")
+        .map(|i| start + i)
+        .expect("expected the seed branch to follow the runs branch");
+    let runs_block = &script[start..end];
+
+    assert!(
+        runs_block.contains("jobs list-runs") || runs_block.contains("jobs list"),
+        "runs branch must call `databricks jobs list`/`list-runs`"
+    );
+    assert!(
+        runs_block.contains("jobs get-run"),
+        "runs branch must call `databricks jobs get-run`"
+    );
+    for forbidden in [
+        "bundle deploy",
+        "bundle run",
+        "bundle destroy",
+        "fs cp",
+        "jobs run-now",
+    ] {
+        assert!(
+            !runs_block.contains(forbidden),
+            "runs branch must not contain the mutating verb `{forbidden}`"
+        );
+    }
+}
+
 #[test]
 fn databricks_bundle_validate_is_clean() {
     if Command::new("databricks")

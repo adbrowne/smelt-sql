@@ -10,6 +10,8 @@
 #     bash scripts/dbx-bundle.sh deploy               # needs SMELT_DBX_HOST
 #     bash scripts/dbx-bundle.sh run github_activity_daily
 #     bash scripts/dbx-bundle.sh seed                 # needs SMELT_DBX_HOST
+#     bash scripts/dbx-bundle.sh runs list <job-name>  # read-only: jobs list-runs
+#     bash scripts/dbx-bundle.sh runs get <run-id>     # read-only: jobs get-run
 #
 # `validate` never needs a workspace or a credential — it is a pure schema
 # check against the committed YAML plus the referenced local files, which is
@@ -42,10 +44,10 @@ fi
 shift
 
 case "${SUBCOMMAND}" in
-  validate|deploy|run|seed)
+  validate|deploy|run|seed|runs)
     ;;
   *)
-    echo "unsupported subcommand '${SUBCOMMAND}' — only validate, deploy, run and seed are wrapped" >&2
+    echo "unsupported subcommand '${SUBCOMMAND}' — only validate, deploy, run, seed and runs are wrapped" >&2
     exit 1
     ;;
 esac
@@ -86,16 +88,67 @@ if [[ -z "${SMELT_DBX_TOKEN:-}" ]]; then
   exit 1
 fi
 
+if [[ "${SUBCOMMAND}" == "runs" ]]; then
+  RUNS_ACTION="${1:-}"
+  if [[ -z "${RUNS_ACTION}" ]]; then
+    echo "usage: $(basename "$0") runs {list <job-name>|get <run-id>}" >&2
+    exit 1
+  fi
+  shift
+
+  case "${RUNS_ACTION}" in
+    list)
+      JOB_NAME="${1:-}"
+      if [[ -z "${JOB_NAME}" ]]; then
+        echo "usage: $(basename "$0") runs list <job-name>" >&2
+        exit 1
+      fi
+      JOB_ID="$(DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
+        databricks jobs list --output json \
+        | python3 -c "import json,sys; jobs=json.load(sys.stdin); matches=[j['job_id'] for j in jobs if j.get('settings',{}).get('name')=='${JOB_NAME}']; print(matches[0])" 2>/dev/null)"
+      if [[ -z "${JOB_ID}" ]]; then
+        echo "no job found named '${JOB_NAME}'" >&2
+        exit 1
+      fi
+      DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
+        exec databricks jobs list-runs --job-id "${JOB_ID}" --output json
+      ;;
+    get)
+      RUN_ID="${1:-}"
+      if [[ -z "${RUN_ID}" ]]; then
+        echo "usage: $(basename "$0") runs get <run-id>" >&2
+        exit 1
+      fi
+      DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
+        exec databricks jobs get-run "${RUN_ID}" --output json
+      ;;
+    *)
+      echo "unsupported runs action '${RUNS_ACTION}' — only list and get are wrapped" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 if [[ "${SUBCOMMAND}" == "seed" ]]; then
   CATALOG="${SMELT_DBX_CATALOG:-workspace}"
   SCHEMA="${SMELT_DBX_SCHEMA:-smelt_dogfood}"
   VOLUME="${SMELT_DBX_VOLUME:-smelt_project}"
-  VOLUME_PATH="/Volumes/${CATALOG}/${SCHEMA}/${VOLUME}/project"
+  # `databricks fs cp` needs the `dbfs:` scheme prefix to address a Unity
+  # Catalog Volume path at all — without it the CLI reports the volume's own
+  # root as "no such directory" even though the volume exists (measured
+  # against CLI v1.16.1, phase 11c).
+  VOLUME_PATH="dbfs:/Volumes/${CATALOG}/${SCHEMA}/${VOLUME}/project"
 
   # Only these two names are copied — .smelt/ (the run-state ledger) is
   # deliberately absent from this list, so re-running seed against an
   # already-deployed project can never clobber it.
   SEED_ITEMS=(smelt.yml models)
+
+  # `fs cp` refuses to create the destination directory implicitly when
+  # copying a file into it, so the project/ directory must exist first — a
+  # freshly `bundle deploy`-created Volume starts empty.
+  DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
+    databricks fs mkdir "${VOLUME_PATH}"
 
   for item in "${SEED_ITEMS[@]}"; do
     DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \

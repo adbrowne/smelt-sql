@@ -178,9 +178,36 @@ of the models or the tooling.
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
-| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | planned |
+| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
 
 ## Decision log
+
+- 2026-09-13 (phase 11c implement, resumed attempt): **blocked on a real ambient-host gap after
+  fixing two other genuine job-launch defects.** Deploy, seed, the compressed-cadence redeploy,
+  and the `volume_probe` job (clean: `flock`/`os.replace()`/`fsync` all honoured on the Volume)
+  all succeeded. Fixed along the way and committed: the `runs` read-only subcommand and its two
+  structural tests (plan tasks 1–2); a `dbfs:`-scheme bug in `seed`'s Volume path plus a missing
+  `mkdir` (Databricks CLI v1.16.1 does not create the destination directory implicitly);
+  `client: "1"` → `"2"` on all three job environments, since `client: "1"` failed to launch at
+  all on this workspace (`Invalid platform channel Client-1`) — the first bundle-job task ever
+  run here, so invisible until now; a `__file__` → `sys.argv[0]` fallback in `load_next_day.py`
+  for `client: "2"`'s REPL-style `exec()` launch, which never injects `__file__`; and a
+  maturin/duckdb build-staleness fix (the `smelt_wheel` artifact's build command now resolves
+  `DUCKDB_LIB_DIR` and clears stale `libduckdb-sys`/`smelt` build state itself, since
+  `libduckdb-sys`'s bundled-download fallback was intermittently winning a Cargo fingerprint race
+  across repeated local `deploy` invocations). With those fixed, every scheduled run still fails
+  at `load_next_day`: the loader hard-requires `SMELT_DBX_HOST`, and a full `os.environ` dump
+  from inside the live job task shows no `DATABRICKS_HOST` (or any host-bearing
+  `DATABRICKS_*`/`DBX_*` var) at all — contradicting the ambient-form design
+  `docs/specs/multi_backend.md` §"Connection security" and this phase's own plan assumed already
+  landed. The env dump does show `SPARK_REMOTE` (a live Spark Connect URL), meaning the real
+  ambient channel is a pre-established Connect session, not an env-var host. Fixing this is a
+  design decision (build ambient sessions with no explicit host at all vs. find another way to
+  inject a real host into the job's environment) spanning the Rust `SparkFlavor::Databricks`
+  contract and the Python adapter, not a patch — recorded in `## Blocked` with two candidate
+  routes for the next planner. Workspace left at the committed daily cadence
+  (`0 0 6 * * ?`, UNPAUSED). `bash .claude/scripts/verify-phase.sh` ALL GREEN. Nothing left the
+  outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 11c plan): **no split — row 11c stays one row, with the schedule cadence
   made a bundle variable so three *scheduled* runs fit one sitting.** The 11a plan entry flagged
@@ -1042,6 +1069,56 @@ of the models or the tooling.
   `smelt`-spawning call sites). Nothing left the outcome; nothing added to `## Out of scope`.
 
 ## Blocked
+
+- **2026-09-13 — phase 11c (deploy + three scheduled runs, live).** Deploy, seed, the
+  compressed-cadence redeploy, and the `volume_probe` job all succeeded (probe verdict: `flock`
+  advisory locking, `os.replace()` rename atomicity, and `fsync` are all honoured on the Unity
+  Catalog Volume's FUSE layer — see `phases/11c-volume-probe.md`). Every scheduled run of the
+  daily job then failed at its first task, `load_next_day`, before any of the three consecutive
+  successes criterion 11 needs could accumulate.
+
+  **Two failures fixed in this phase, in order:** (1) `client: "1"` (every job environment's
+  committed serverless-environment version) failed to launch at all —
+  `Invalid platform channel Client-1 ... Workspace doesn't support Client-1 channel for REPL` —
+  reproduced identically via raw `databricks jobs run-now`, so a genuine workspace constraint,
+  not a CLI quirk; this was the **first bundle-job task ever run on this workspace** (every
+  prior live phase used `smelt run --target databricks` directly via Databricks Connect from this
+  machine, never through a Job), so the gap was invisible until now. Fixed: `client: "2"` on all
+  three job environments. (2) `client: "2"`'s launcher executes job files via
+  `exec(compile(f.read(), filename, 'exec'))` inside a notebook-style REPL, so `__file__` is
+  never injected into globals — `load_next_day.py`'s own path discovery broke
+  (`NameError: name '__file__' is not defined`). Fixed: fall back to `sys.argv[0]`.
+
+  **The blocking gap.** With both of those fixed, `load_next_day` reaches
+  `scripts/dbx-dogfood-loader.py`, which hard-requires `os.environ["SMELT_DBX_HOST"]` and exits
+  with `SMELT_DBX_HOST is not set — source scripts/dbx-dogfood-env.sh first` when absent. A full
+  `os.environ` dump captured from inside the live job task (~140 keys) contains **no
+  `DATABRICKS_HOST`, no `DATABRICKS_*`/`DBX_*` host variable at all** — contradicting
+  `docs/specs/multi_backend.md` §"Connection security"'s stated ambient-form design ("a
+  Databricks job automatically exports `DATABRICKS_HOST` into its own runtime environment"),
+  which the `databricks_job` smelt target (`examples/github_activity/smelt.yml`,
+  `host: ${DATABRICKS_HOST}`) and this phase's original plan both assumed as already landed. The
+  env dump does show `SPARK_REMOTE` (a live Spark Connect URL/token string) — the job launcher
+  has already established an ambient Spark Connect session by the time task code runs; that is
+  the real ambient channel on this workspace, not an env-var host.
+
+  **Why this is not this phase's own fix.** Making the loader (and, almost certainly, the
+  `databricks_job` target's own Rust/Python session-building path, never actually exercised this
+  phase since `load_next_day` blocks it upstream) work ambiently is a design decision, not a
+  patch: either (a) build the ambient Databricks/Spark session with **no explicit host** at all
+  (bare `DatabricksSession.builder.getOrCreate()`, relying on `SPARK_REMOTE` the way plain
+  `pyspark.sql.SparkSession.builder.getOrCreate()` would) — which changes
+  `crates/smelt-backend-spark/src/lib.rs`'s `SparkFlavor::Databricks` contract (currently always
+  `Some(host)`) and `python/smelt/databricks_adapter.py`'s unconditional `.host(host)` call — or
+  (b) find and inject a real host value into the job's environment via some bundle-level
+  mechanism so the existing `${DATABRICKS_HOST}`-reading paths keep working unmodified. Candidate
+  route (a) matches the actual meaning of "ambient" and generalizes to any workspace; route (b)
+  is narrower but preserves the current contract. Recommend revisiting
+  `docs/specs/multi_backend.md` §"Connection security"'s ambient-form claim against this measured
+  fact before choosing either route. See `phases/11c-summary.md` for the full list of what
+  landed and is committed (the `runs` subcommand, the `dbfs:` seed fix, the `client: "2"` fix,
+  the `__file__` fix, and the maturin/duckdb build-staleness fix) — none of it is undone by this
+  block.
 
 - **2026-09-13 — phase 9d (replay under 9c's fix, live). RESOLVED by phases 9e/9f — 9e's
   ledgerless rebuild closed the gap offline, and 9f's replay confirms it live (clean 16/16

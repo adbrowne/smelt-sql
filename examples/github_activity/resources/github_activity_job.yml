@@ -37,7 +37,14 @@ resources:
       environments:
         - environment_key: loader_env
           spec:
-            client: "1"
+            # `client: "1"` failed every job-task launch on this workspace
+            # ("Invalid platform channel Client-1 ... Workspace doesn't
+            # support Client-1 channel for REPL") — measured phase 11c
+            # against the `volume_probe` job, the first bundle-job task ever
+            # run on this workspace (every prior live phase drove
+            # `smelt run --target databricks` directly from this machine,
+            # never through a Job). `client: "2"` launches cleanly.
+            client: "2"
             dependencies:
               - databricks-connect==15.4.5
               - pyarrow
@@ -45,7 +52,7 @@ resources:
 
         - environment_key: smelt_env
           spec:
-            client: "1"
+            client: "2"
             dependencies:
               - ../../../dist/*.whl
 
@@ -66,5 +73,4 @@ resources:
       environments:
         - environment_key: probe_env
           spec:
-            client: "1"
-            dependencies: []
+            client: "2"
