@@ -1,8 +1,9 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** blocked
-**Blocked summary:** every phase row is `done` or `blocked`. Criteria 1-10 are met and
+**Status:** active
+**Blocked summary (historical — see the 2026-09-14 unblock entry at the top of `## Blocked`
+for the resolution):** every phase row is `done` or `blocked`. Criteria 1-10 are met and
 evidenced by the committed phase summaries; criterion 11 is not: no scheduled run has completed.
 11j's seed bootstrap worked (11k confirmed `--auto` now derives a real window), but surfaced a
 new, unreviewed design question one layer deeper: external-step invocation has no
@@ -195,8 +196,36 @@ of the models or the tooling.
 | 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
 | 11j | Bootstrap tooling, offline: a `smelt state seed-interval` command that writes one model's interval directly into `.smelt/targets/<target>/intervals.json` using the model's real current hash, so a target with no local run history (the Volume-resident `databricks_job` store) can be seeded from data already known to be ingested, gated with no workspace | done |
 | 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
+| 11l | Give external steps an explicit, opt-in freshness carve-out, offline: `ExecuteRequest::assume_external_steps_fresh` + `smelt run --skip-external-steps` (declines to invoke a reached step and records it `RunOutcomeKind::Skipped` in the manifest rather than refusing with `ExternalStepNotInvocable`), `docs/specs/sources.md` §Semantics 12 and `docs/specs/run_state.md` updated, `run_smelt.py`'s `smelt_run` task wired to pass the flag (trusting `smelt_run`'s `depends_on: load_next_day` job-task ordering as the freshness guarantee) — gated by a new offline `external_step_invocation.rs` case and the existing `databricks_bundle` structural suite, no workspace needed | done |
+| 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | pending |
 
 ## Blocked
+
+- **2026-09-14 — UNBLOCKED (human decision): the external-step-invocation design question is
+  resolved as a narrow, explicit opt-in trust flag, not frontier tracking or a freshness-proof
+  mode.** Andrew reviewed the three candidates in the 2026-09-14 phase-11k entry below directly
+  in-session and chose a fourth, more pragmatic shape than any of them: rather than teaching
+  external steps their own interval/frontier tracking (candidate 1) or requiring a probed
+  freshness check (candidate 2) or resolving candidate 3's ambient-session tension, the caller
+  simply asserts the produced sources are already fresh and smelt trusts that assertion — no
+  proof, explicit opt-in, off by default. Concretely: `ExecuteRequest::
+  assume_external_steps_fresh` (only takes effect when `invoke_external_steps` is already
+  `false`) and the CLI flag `smelt run --skip-external-steps` that sets both together; a
+  declined-and-trusted step is recorded `RunOutcomeKind::Skipped` in the run manifest rather
+  than invoked, and `docs/specs/sources.md` §Semantics 12 now names this as the one licensed
+  carve-out of the "reading possibly-stale content is never the fallback" rule. `run_smelt.py`'s
+  `smelt_run` task now passes the flag, trusting `resources/github_activity_job.yml`'s
+  `smelt_run` → `depends_on: load_next_day` task ordering as the freshness guarantee (the
+  loader task always lands the window before `smelt_run` starts) rather than anything smelt
+  itself verifies. Landed as phase 11l (offline, done — implementation, spec, docs-site, and a
+  new `external_step_invocation.rs` red→green case, all gated with no workspace) across three
+  commits (`feat(runtime): add opt-in carve-out to skip external-step invocation and trust
+  existing sources`, `feat(cli): wire smelt run --skip-external-steps ...`, `feat(dogfood): pass
+  --skip-external-steps to the job's smelt_run task`). Phase 11m (live: redeploy, smoke run,
+  three scheduled runs, closes criterion 11) is `pending` and loop-grindable — it needs the
+  already-working `scripts/dbx-dogfood-env.sh` credential path, not a new one. Status moved from
+  `blocked` back to `active`; the `**Blocked summary**` line above is now historical (kept for
+  the phase-11k design-question record it documents, not as the outcome's current state).
 
 - **2026-09-14 — terminal judgement re-affirmed, and the loop-stall that hid it fixed.**
   A PLAN step re-scanned the phase table: no row is `pending` or `planned`, so there was
