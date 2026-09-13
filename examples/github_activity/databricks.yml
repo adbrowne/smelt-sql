@@ -22,6 +22,14 @@ variables:
       and its `.smelt/` run state, so each scheduled run is a genuine
       incremental window over the previous one rather than a fresh checkout.
     default: smelt_project
+  schedule_cron:
+    description: >-
+      Quartz cron expression for the daily job. Overridden to a compressed
+      cadence (e.g. `0 0/20 * * * ?`) only for the phase-11c proof deploy that
+      must observe three consecutive scheduled runs in one sitting; the
+      committed default is the real once-a-day cadence
+      (docs/outcomes/20260912-databricks-dogfood-spine/phases/11c-plan.md).
+    default: "0 0 6 * * ?"
 
 artifacts:
   smelt_wheel:

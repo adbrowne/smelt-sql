@@ -81,6 +81,11 @@ if [[ -z "${SMELT_DBX_HOST:-}" ]]; then
   exit 1
 fi
 
+if [[ -z "${SMELT_DBX_TOKEN:-}" ]]; then
+  echo "SMELT_DBX_TOKEN is not set — run scripts/dbx-auth.sh then source scripts/dbx-dogfood-env.sh first" >&2
+  exit 1
+fi
+
 if [[ "${SUBCOMMAND}" == "seed" ]]; then
   CATALOG="${SMELT_DBX_CATALOG:-workspace}"
   SCHEMA="${SMELT_DBX_SCHEMA:-smelt_dogfood}"
@@ -93,12 +98,13 @@ if [[ "${SUBCOMMAND}" == "seed" ]]; then
   SEED_ITEMS=(smelt.yml models)
 
   for item in "${SEED_ITEMS[@]}"; do
-    DATABRICKS_HOST="${SMELT_DBX_HOST}" databricks fs cp --recursive --overwrite \
+    DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
+      databricks fs cp --recursive --overwrite \
       "${BUNDLE_DIR}/${item}" "${VOLUME_PATH}/${item}"
   done
   echo "seeded ${VOLUME_PATH}"
   exit 0
 fi
 
-DATABRICKS_HOST="${SMELT_DBX_HOST}" \
+DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
   exec databricks bundle "${SUBCOMMAND}" --target dogfood "$@"

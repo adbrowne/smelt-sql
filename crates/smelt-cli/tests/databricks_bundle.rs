@@ -39,26 +39,36 @@ fn job_yml() -> serde_yaml::Value {
 }
 
 fn the_one_job() -> serde_yaml::Value {
+    named_job("github_activity_daily")
+}
+
+fn named_job(name: &str) -> serde_yaml::Value {
     let doc = job_yml();
     let jobs = doc["resources"]["jobs"]
         .as_mapping()
         .expect("resources.jobs is a mapping");
-    assert_eq!(
-        jobs.len(),
-        1,
-        "expected exactly one job resource, found {}",
-        jobs.len()
-    );
-    jobs.values().next().unwrap().clone()
+    jobs.get(serde_yaml::Value::String(name.to_string()))
+        .unwrap_or_else(|| panic!("expected a job resource named `{name}`"))
+        .clone()
 }
 
 #[test]
 fn bundle_declares_one_daily_scheduled_serverless_job() {
     let job = the_one_job();
 
-    let cron = job["schedule"]["quartz_cron_expression"]
+    let cron_ref = job["schedule"]["quartz_cron_expression"]
         .as_str()
         .expect("job.schedule.quartz_cron_expression is a string");
+    assert_eq!(
+        cron_ref, "${var.schedule_cron}",
+        "job schedule must reference the schedule_cron variable, not a literal cron, so the \
+         phase-11c proof deploy can compress the cadence without editing this file"
+    );
+
+    let bundle = databricks_yml();
+    let cron = bundle["variables"]["schedule_cron"]["default"]
+        .as_str()
+        .expect("variables.schedule_cron.default is a string");
     assert!(!cron.trim().is_empty(), "cron expression must not be empty");
     // A daily cron in Quartz syntax fires once per day: fixed second/minute/hour
     // fields and `*` (every day of month) with `?` in the day-of-week field, or
@@ -289,6 +299,60 @@ fn bundle_declares_the_volume_the_smelt_run_task_points_at() {
              variable `{var}` the volume resource does"
         );
     }
+}
+
+/// Phase 11c test 2: the schedule declares `pause_status: UNPAUSED` so a
+/// deploy enables it rather than relying on the Jobs API's create-time
+/// default (which leaves a newly created schedule paused).
+#[test]
+fn bundle_schedule_is_explicitly_unpaused() {
+    let job = the_one_job();
+    let pause_status = job["schedule"]["pause_status"]
+        .as_str()
+        .expect("job.schedule.pause_status is a string");
+    assert_eq!(
+        pause_status, "UNPAUSED",
+        "schedule must explicitly declare UNPAUSED so a deploy enables it rather than \
+         inheriting the API's paused-by-default create behaviour"
+    );
+}
+
+/// Phase 11c test 3: the `volume_probe` job's Volume path must compose from
+/// the same `${var.…}` references the `smelt_run` task uses, so probe and
+/// job cannot measure different paths.
+#[test]
+fn bundle_volume_probe_targets_the_declared_volume() {
+    let job = named_job("github_activity_volume_probe");
+    let tasks = job["tasks"].as_sequence().unwrap();
+    let probe_task = tasks
+        .iter()
+        .find(|t| t["task_key"].as_str() == Some("volume_probe"))
+        .expect("volume_probe task exists");
+    let volume_path = probe_task["spark_python_task"]["parameters"][0]
+        .as_str()
+        .expect("first parameter is the project path");
+
+    for var in ["${var.catalog}", "${var.schema}", "${var.volume_name}"] {
+        assert!(
+            volume_path.contains(var),
+            "volume_probe's path `{volume_path}` must reference the same bundle variable \
+             `{var}` the smelt_run task and volume resource do"
+        );
+    }
+
+    let smelt_run_job = the_one_job();
+    let smelt_run_tasks = smelt_run_job["tasks"].as_sequence().unwrap();
+    let smelt_run = smelt_run_tasks
+        .iter()
+        .find(|t| t["task_key"].as_str() == Some("smelt_run"))
+        .expect("smelt_run task exists");
+    let smelt_run_path = smelt_run["spark_python_task"]["parameters"][0]
+        .as_str()
+        .expect("first parameter is the project path");
+    assert_eq!(
+        volume_path, smelt_run_path,
+        "volume_probe and smelt_run must resolve to the identical Volume path"
+    );
 }
 
 /// Test 7: `loader_env`'s `dependencies:` must cover every module the loader

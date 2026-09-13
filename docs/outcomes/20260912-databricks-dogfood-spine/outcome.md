@@ -178,7 +178,7 @@ of the models or the tooling.
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
-| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | planned |
+| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | blocked |
 
 ## Decision log
 
@@ -1208,3 +1208,64 @@ of the models or the tooling.
   headless phases mint their own refresh via the now-allowed `dbx-auth.sh`. This unblocks
   phases 5–9 and 11 for the loop, provided the cache TTL is actually raised before a live run
   longer than ~1 hour is attempted unattended.
+
+- **2026-09-13 — phase 11c (deploy and prove three scheduled runs, live). Human-gated: needs a
+  Unity Catalog grant.** Tasks 1–4 of the plan landed and are green: the `schedule_cron`
+  bundle variable plus explicit `pause_status: UNPAUSED` (tests
+  `bundle_declares_one_daily_scheduled_serverless_job` amended,
+  `bundle_schedule_is_explicitly_unpaused` new), the `volume_probe` job resource and
+  `dbx_job/volume_probe.py` (flock advisory, `os.replace()` rename atomicity, `fsync` probes;
+  test `bundle_volume_probe_targets_the_declared_volume` new), `.smelt-dbx-venv` rebuilt so
+  `duckdb` is present, and `scripts/dbx-verify.sh` green against a freshly reachable workspace
+  (the encrypted token had expired since phase 9f; `dbx-auth.sh` reminted it). All 12
+  `databricks_bundle` tests plus `databricks bundle validate` are green.
+
+  **What stopped task 5.** `scripts/dbx-bundle.sh deploy` failed two ways, the second of which
+  is the real blocker:
+  1. A genuine bug, fixed in this phase: the wrapper's `deploy`/`run`/`seed` branches exported
+     only `DATABRICKS_HOST`, never `DATABRICKS_TOKEN`, so every live subcommand failed
+     unified-auth resolution outright (there is no `~/.databrickscfg` in this environment —
+     credentials are ambient env vars only). Fixed by also exporting
+     `DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}"` on every `deploy`/`run`/`seed` invocation, plus an
+     explicit `SMELT_DBX_TOKEN` presence check alongside the existing `SMELT_DBX_HOST` one.
+  2. A separate local-only fix, also landed: `pyproject.toml`'s `data = "smelt_sql.data"`
+     requires that directory to exist for `maturin build` (it's gitignored — CI and
+     `tests/agent-loop/harness/build_local_wheel.sh` both `mkdir -p` it locally); this worktree
+     never had it. Created `smelt_sql.data/scripts/` (untracked, matches `.gitignore`).
+  3. **The actual blocker.** With both of the above fixed, `deploy` built the wheel, uploaded
+     bundle files, created both job resources (`github_activity_daily`,
+     `github_activity_volume_probe` — confirmed present via `databricks jobs list`), then failed
+     on the Volume resource: `cannot create resources.volumes.smelt_dogfood_project: User does
+     not have CREATE VOLUME on Schema 'workspace.smelt_dogfood'. (403 PERMISSION_DENIED)`.
+     Phase 4b/4c's grant (`scripts/dbx-provision.sh`) predates 11b's Volume resource and only
+     ever granted `USE SCHEMA, CREATE TABLE, SELECT, MODIFY` — `CREATE VOLUME` was never in
+     scope because nothing needed it yet.
+
+  **Fix authored, not applied.** `scripts/dbx-provision.sh`'s oauth-m2m grant statement now
+  also grants `CREATE VOLUME` on `${CATALOG}.${SCHEMA}` (i.e. `workspace.smelt_dogfood` only —
+  the oracle schema has no Volume and keeps its narrower grant). This is a schema-owner-only
+  operation the scoped service-principal credential cannot self-grant (by design — the same
+  reason `dbx-query.sh` is deliberately read-only and never used to attempt this). Unblocking
+  needs a human, via one of:
+  1. Re-run `bash scripts/dbx-provision.sh` (idempotent — re-issues `CREATE SCHEMA IF NOT
+     EXISTS` plus the now-widened `GRANT`) as whichever workspace identity owns/administers
+     `workspace.smelt_dogfood` (this is what phase 4b already did once; it just predates the
+     Volume requirement).
+  2. Or run the single missing grant by hand: `GRANT CREATE VOLUME ON SCHEMA
+     workspace.smelt_dogfood TO `<the oauth-m2m client id in
+     ~/.config/databricks-smelt-dogfood/config.env>`;`.
+
+  **State left in the workspace.** Two job resources exist
+  (`github_activity_daily` id `459361340805633`, `github_activity_volume_probe` id
+  `42210763587936`) with the daily job's schedule at the committed default
+  (`0 0 6 * * ?`, `UNPAUSED`) — harmless (it will simply fail its `smelt_run` task once
+  triggered, since the Volume it needs doesn't exist yet) and will be reconciled by the next
+  successful `deploy` once the grant lands. No Volume, no seed, no probe run, no scheduled-run
+  evidence — none of tasks 5–13 beyond the deploy attempt were reachable.
+
+  **Candidate options for resuming 11c**, in the order they should be tried: (a) human runs one
+  of the two grant routes above, then the loop resumes 11c from task 5 (`deploy`); (b) if Volume
+  creation turns out to need a broader Unity Catalog admin capability than a single `GRANT`
+  (unconfirmed — untested against this workspace), the human instead pre-creates the Volume by
+  hand and the bundle deploy step may need `databricks bundle deployment bind` to adopt it
+  rather than create it, which would be new work for whichever phase resumes this row.
