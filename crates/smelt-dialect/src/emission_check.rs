@@ -108,6 +108,14 @@ const INTERVAL_RANGE_FRAME_UNSUPPORTED: &str =
 const TEMPLATE_MODIFIER_STAR: &str =
     "this built-in's target spelling is a fixed template over positional arguments; a `*` \
      argument cannot be expressed by a template and is refused rather than silently dropped";
+/// The target dialect's grammar has no `UNPIVOT` clause at all
+/// ([`SqlDialect::supports_unpivot`]). smelt already refuses `PIVOT`/`UNPIVOT` for every
+/// backend at the diagnostic layer (`DiagnosticCode::UnsupportedConstruct`) because a
+/// pivot's output columns depend on data values a compile-time analysis cannot see, so no
+/// lowering is admissible here either — this is the compile-path backstop for an entry
+/// point (`compile_with_sql`) that runs no diagnostics query.
+const UNPIVOT_UNSUPPORTED: &str =
+    "this dialect's grammar has no UNPIVOT clause; UNPIVOT is not supported on this backend";
 
 /// Does `node` (a `FUNCTION_CALL`) carry an `INTERVAL`-offset `RANGE` frame in
 /// **its own** `OVER` clause?
@@ -238,6 +246,17 @@ pub fn unsupported_emissions(
     let id = dialect.id();
     root.descendants()
         .filter_map(|node| {
+            // `UNPIVOT` is a clause, not a call — it has no registry name to
+            // resolve, so it is checked ahead of (and separately from) the
+            // FUNCTION_CALL/BINARY_EXPR match below.
+            if node.kind() == SyntaxKind::UNPIVOT_CLAUSE && !dialect.supports_unpivot() {
+                return Some(UnsupportedEmission {
+                    name: "UNPIVOT",
+                    dialect: id,
+                    reason: UNPIVOT_UNSUPPORTED,
+                    range: trimmed_range(&node),
+                });
+            }
             let (name, position) = match node.kind() {
                 SyntaxKind::FUNCTION_CALL => (
                     FunctionCall::cast(node.clone())?.name()?,

@@ -341,21 +341,32 @@ diverge only at `0 ^ -1`, where DuckDB yields infinity and GoogleSQL raises — 
 not a wrong answer.
 
 ### Clause-level dialect refusals
-Not every dialect difference is a built-in's spelling. Two SQL *clauses* smelt's grammar accepts
-are absent from GoogleSQL entirely, and neither has a registry entry to carry a verdict, because
-neither belongs to any one function:
+Not every dialect difference is a built-in's spelling. Some SQL *clauses* smelt's grammar
+accepts are absent from a target dialect entirely, and none has a registry entry to carry a
+verdict, because none belongs to any one function:
 
 - **The aggregate `FILTER (WHERE …)` clause.** DuckDB and Spark SQL have it; GoogleSQL has no such
   clause and answers `Syntax error: Expected ")" but got "("`.
 - **An `INTERVAL`-offset `RANGE` window frame** (`RANGE BETWEEN INTERVAL '2 days' PRECEDING`).
   DuckDB and Spark SQL have it; GoogleSQL's `RANGE` frames take a numeric offset over a numeric
   `ORDER BY` only, and answer `Syntax error: Unexpected keyword PRECEDING`.
+- **The `UNPIVOT` clause.** Trino's grammar has no `UNPIVOT` keyword: a live coordinator answers
+  `mismatched input 'UNPIVOT'` (`docs/outcomes/20260913-trino-emission` phase 4). This is
+  narrower than it first looks — `PIVOT` and `UNPIVOT` are not symmetric on Trino, unlike every
+  other supported backend: `PIVOT (COUNT(id) FOR cat IN ('a'))` executes cleanly on the same
+  coordinator, so `supports_pivot` stays `Native` (`true`) for Trino and only `UNPIVOT` needs a
+  refusal. The diagnostic layer (`DiagnosticCode::UnsupportedConstruct`,
+  `check_unsupported_constructs`) already refuses both `PIVOT` and `UNPIVOT` for **every**
+  backend, because a pivot's output columns depend on data values a compile-time analysis
+  cannot see — this clause-level refusal is the backstop for a compile entry point
+  (`compile_with_sql`) that runs no diagnostics query and would otherwise print `UNPIVOT`
+  verbatim to a coordinator that cannot parse it.
 
-Both are declared as dialect facts (`SqlDialect::supports_aggregate_filter_clause`,
-`SqlDialect::supports_interval_range_frame`) and refused at **compile time** with
-`UnsupportedOnBackend`, naming the construct, the backend, and the portable rewrite — never
-emitted verbatim and left to the engine. The refusal is checked on the call that carries the
-clause, not on an enclosing or nested one.
+Each is declared as a dialect fact (`SqlDialect::supports_aggregate_filter_clause`,
+`SqlDialect::supports_interval_range_frame`, `SqlDialect::supports_unpivot`) and refused at
+**compile time** with `UnsupportedOnBackend`, naming the construct, the backend, and — where one
+exists — the portable rewrite; never emitted verbatim and left to the engine. The refusal is
+checked on the call or clause that carries the construct, not on an enclosing or nested one.
 
 Neither is lowered automatically, and in both cases the reason is that the automatic lowering
 would be unsound or unreachable rather than merely unwritten:
@@ -375,18 +386,24 @@ would be unsound or unreachable rather than merely unwritten:
 
 Trino's own absences, measured directly against a live coordinator
 (`docs/outcomes/20260913-trino-target-spine`): no `QUALIFY` clause, no trailing commas in a
-select list, and no `PIVOT` clause. `QUALIFY` and trailing commas are refused at compile time the
-same way as the two constructs above — `SqlDialect::supports_qualify` and
+select list, and no `UNPIVOT` clause. `QUALIFY` and trailing commas are refused at compile time
+the same way as the two constructs above — `SqlDialect::supports_qualify` and
 `SqlDialect::supports_trailing_commas` already cover any dialect with the flag `false`, Trino
 included, since neither requires a Trino-specific rewrite: `QUALIFY` lowers to the existing
-wrap-in-subquery rewrite and a trailing comma is simply never emitted. `PIVOT` is a sharper case:
-it makes Trino the first backend the capability matrix records with `supports_pivot: false`, and
-unlike `QUALIFY` there is no existing generic lowering to fall back on, so whether `PIVOT` gets a
-lowering that reproduces the same rows or a compile-time `UnsupportedOnBackend` refusal is a
-decision this outcome settles and records here once made (`docs/outcomes/20260913-trino-emission`
-phase 4). Measured positively, not negatively: `[a, b]` array literal syntax **does** work on
-Trino — unlike Spark, which needs `ARRAY(a, b, c)` — so Trino's `supports_array_literal` verdict
-is an explicit `Native`, stated rather than inherited by omission.
+wrap-in-subquery rewrite and a trailing comma is simply never emitted. `UNPIVOT` is refused the
+same way, via `SqlDialect::supports_unpivot` (§"Clause-level dialect refusals") — there is no
+lowering to admit: smelt already refuses both `PIVOT` and `UNPIVOT` for every target at the
+diagnostic layer, because a pivot's output columns depend on data values no compile-time
+analysis can see, and a Trino-specific lowering would have to enumerate the `IN`-list values to
+name its own output columns — precisely the projection smelt declines to derive
+(§"Source-derived projection" in `architecture.md`). `PIVOT` itself is not in this list: measured
+against the same coordinator, `PIVOT (COUNT(id) FOR cat IN ('a'))` executes cleanly, so
+`supports_pivot` stays `Native` (`true`) for Trino, matching every other supported backend — the
+two clauses are not symmetric here, unlike everywhere else they are both supported or both
+refused. Measured positively, not negatively, in the same session: `[a, b]` array literal syntax
+**does** work on Trino — unlike Spark, which needs `ARRAY(a, b, c)` — so Trino's
+`supports_array_literal` verdict is an explicit `Native`, stated rather than inherited by
+omission.
 
 ### Refusal covers function bodies
 A `smelt.define` function call is opaque in the calling model's own CST — the body is inlined at

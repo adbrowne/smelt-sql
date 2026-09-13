@@ -2795,6 +2795,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trino_compile_refuses_unpivot() {
+        let mut target = make_test_target();
+        target.target_type = "trino".to_string();
+        target.host = Some("localhost".to_string());
+        target.catalog = Some("iceberg".to_string());
+        target.user = Some("smelt".to_string());
+
+        let compiler = SqlCompiler::new(make_test_config(), &target)
+            .expect("a trino target must compile with its measured capability profile");
+
+        let model = ModelFile {
+            name: "unpivot_model".to_string(),
+            path: "models/unpivot_model.sql".into(),
+            content: "SELECT * FROM t UNPIVOT (val FOR name IN (a, b, c))".to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("unpivot_model.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let err = compiler
+            .compile(&model, "main")
+            .expect_err("UNPIVOT on Trino must hard-error at compile time");
+        let message = err.to_string();
+        assert!(
+            message.contains("UnsupportedOnBackend"),
+            "expected the UnsupportedOnBackend refusal, got: {}",
+            message
+        );
+        assert!(
+            message.contains("UNPIVOT"),
+            "expected the construct named in the error, got: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn trino_compile_keeps_pivot_native() {
+        let mut target = make_test_target();
+        target.target_type = "trino".to_string();
+        target.host = Some("localhost".to_string());
+        target.catalog = Some("iceberg".to_string());
+        target.user = Some("smelt".to_string());
+
+        let compiler = SqlCompiler::new(make_test_config(), &target)
+            .expect("a trino target must compile with its measured capability profile");
+
+        let model = ModelFile {
+            name: "pivot_model".to_string(),
+            path: "models/pivot_model.sql".into(),
+            content: "SELECT * FROM t PIVOT (COUNT(id) FOR cat IN ('a'))".to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("pivot_model.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        // PIVOT is native on Trino (measured live, phase 4 of
+        // docs/outcomes/20260913-trino-emission) — this is the compile
+        // layer's dialect-refusal check only; the diagnostics-layer refusal
+        // that blocks PIVOT for every backend runs earlier, over the
+        // Salsa-tracked `file_diagnostics` query, not over this direct
+        // `compile()` call.
+        compiler
+            .compile(&model, "main")
+            .expect("PIVOT is native on Trino and must not be refused at the dialect layer");
+    }
+
     /// Helper function to parse SQL and extract refs with real TextRange values
     fn extract_refs_from_sql(sql: &str) -> Vec<RefInfo> {
         let parse = smelt_parser::parse(sql);

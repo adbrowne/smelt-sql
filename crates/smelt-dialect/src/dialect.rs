@@ -84,6 +84,23 @@ impl SqlDialect {
             SqlDialect::BigQuery => false,
         }
     }
+
+    /// Whether this dialect's grammar has the `UNPIVOT` clause.
+    ///
+    /// A language property, declared here for the same reason as
+    /// [`Self::supports_aggregate_filter_clause`]. This is **not** symmetric
+    /// with `PIVOT` on Trino — measured against a live coordinator in phase 4
+    /// of `docs/outcomes/20260913-trino-emission/outcome.md`:
+    /// `PIVOT (COUNT(id) FOR cat IN ('a'))` executes cleanly, but `UNPIVOT
+    /// (val FOR name IN (a, b, c))` fails to parse (`mismatched input
+    /// 'UNPIVOT'`) — Trino's grammar simply has no `UNPIVOT` keyword. DuckDB
+    /// and Spark SQL have both clauses.
+    pub fn supports_unpivot(self) -> bool {
+        match self {
+            SqlDialect::DuckDB | SqlDialect::SparkSQL | SqlDialect::BigQuery => true,
+            SqlDialect::Trino => false,
+        }
+    }
 }
 
 /// How a backend spells a null-safe equality comparison — one where two
@@ -120,7 +137,15 @@ pub struct BackendCapabilities {
     /// Supports MERGE statement (upsert)
     pub supports_merge: bool,
 
-    /// Supports PIVOT/UNPIVOT natively
+    /// Supports the `PIVOT` clause natively.
+    ///
+    /// This flag covers `PIVOT` only. `UNPIVOT` is a separate grammar
+    /// construct that can diverge from it — Trino accepts `PIVOT` but has no
+    /// `UNPIVOT` keyword at all — so `UNPIVOT` is governed independently by
+    /// [`crate::SqlDialect::supports_unpivot`], a dialect fact rather than a
+    /// capability flag, since no production code consults this one (both
+    /// constructs are refused for every backend at the diagnostic layer
+    /// before either reaches print time).
     pub supports_pivot: bool,
 
     /// Supports DATE 'YYYY-MM-DD' literal syntax

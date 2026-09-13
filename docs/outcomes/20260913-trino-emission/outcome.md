@@ -126,7 +126,7 @@ including its null-safe join spelling.
 | 1 | Spec delta: `multi_backend.md` gains Trino to §"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission audit" (which legs run where, and Trino's per-PR-vs-nightly tier), and the §"Parity contract" statement for a fourth dialect | done |
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | done |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | done |
-| 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | planned |
+| 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | done |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | pending |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | pending |
@@ -232,5 +232,20 @@ including its null-safe join spelling.
   was measured `false`. Phase 4 settles it against a live coordinator first (phase 3's
   precedent), blocks rather than guesses if the tier cannot be brought up, and if the probe
   measures `true` states a `Native` verdict and corrects the other sentence instead.
+- **2026-09-14 — phase 4 done; live measurement split the plan's binary assumption.**
+  Against a live coordinator: `PIVOT (COUNT(id) FOR cat IN ('a'))` executes cleanly, but
+  `UNPIVOT (val FOR name IN (a,b,c))` fails to parse (`mismatched input 'UNPIVOT'`) — the
+  plan expected both to measure `false` together under one flag; they diverge. Ruling:
+  `BackendCapabilities::trino_iceberg().supports_pivot` stays `true` (already was — no
+  code or matrix change), `PIVOT` gets no refusal and no lowering (it's Native). A new,
+  separate dialect fact `SqlDialect::supports_unpivot()` (`false` for Trino only) gates a
+  new clause-level refusal in `emission_check.rs`, fired only for `UNPIVOT`. The universal
+  diagnostic-layer refusal of both constructs, for every backend, is unchanged and remains
+  the primary gate; this phase's refusal is the `compile_with_sql` backstop, narrowed to
+  the one construct Trino's grammar genuinely lacks. Census unchanged (232 rows — neither
+  construct is a registry entry). One unrelated ratchet needed a sign-off: the two new
+  `compile.rs` tests pushed that file from 4233 to 4306 lines (`SqlCompiler` test helpers
+  are `pub(crate)`, so they can't live in a separate integration-test file); resynced via
+  `large-file-check.sh --update`. See `phases/04-summary.md`.
 
 ## Blocked
