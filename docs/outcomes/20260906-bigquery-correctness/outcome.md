@@ -1,7 +1,7 @@
 # Outcome: Every defect the real pipeline hits on BigQuery is fixed, and DuckDB and BigQuery agree
 
 **Created:** 2026-09-06
-**Status:** done (2026-09-11; reopened 2026-09-10, closed by phase 16's live run)
+**Status:** done
 **Driver:** outcome loop (`.claude/outcome-backlog`). Phases 1-10 were loop-ground and are
 `done`. Of the reopening, phases 11-15 are loop-grindable — the emitters and the structural
 gate are provable offline, and phases 12-15 must prove their SQL by unit test and by
@@ -117,6 +117,14 @@ rediscovered.
   different soundness argument. Phase 11 corrects Spark's `realisable_state_structures`
   row to say so and records the reason in `docs/specs/state.md`; phases 12-15 are
   BigQuery-only. Spark's honest downgrade is in scope; Spark's realisation is not.
+- **The five inbound punch-list items banked after closure** (2026-09-12, from the spine's
+  phase 16): the `--event-time-end` full-refresh scan bound, the window-frame lowering
+  seam, the run-time invisibility of the degradation contract's precision half, the
+  alphabetical `default_target` fallback, and the shared `_smelt_ledger` ([#203](https://github.com/adbrowne/smelt-sql/issues/203)).
+  They arrived after this outcome's criteria were judged met, and the lead item is a
+  product question ("should the bound reach a full refresh's source scans?") that no
+  success criterion here answers — so they need a human ruling and their own outcome
+  rather than a silent reopening.
 - **Any change to what the downgraded plan computes.** A recorded downgrade already
   preserves the equivalence invariant by construction (`recompute_equivalent`); this
   outcome makes the downgrade *honest and then unnecessary* on BigQuery, and never widens
@@ -144,6 +152,15 @@ rediscovered.
 | 16 | Close the reopening: re-run `examples/github_activity` live on BigQuery, regenerate coverage, move the ratchets, extend the findings handoff | done |
 
 ## Decision log
+
+- 2026-09-13 (loop bookkeeping): **`**Status:**` normalised to exactly `done`.** The line
+  had read `done (2026-09-11; reopened 2026-09-10, closed by phase 16's live run)`, and
+  `outcome-loop.sh`'s `outcome_dir()` matches the status value with `case … done|blocked`,
+  so the parenthetical made an exhausted outcome look workable and the loop re-selected it
+  ahead of the backlog's real head. Closure provenance lives in this log, not in the status
+  line. Judged against the criteria at the same time: all 16 rows `done`, `## Blocked`
+  empty, criteria 1-10 and the reopening's 11-16 evidenced by their phase summaries. The
+  five inbound items of the 2026-09-12 entry are recorded under Out of scope, not absorbed.
 
 - 2026-09-12 (inbound, from `20260906-bigquery-dogfood-spine` phase 16): **the criterion-8
   findings handoff is complete and is this outcome's input.**
