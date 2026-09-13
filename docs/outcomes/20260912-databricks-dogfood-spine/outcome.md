@@ -1,11 +1,14 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** blocked — 11j's seed bootstrap worked (11k confirmed `--auto` now derives a real
-window), but surfaced a new, unreviewed design question one layer deeper: external-step
-invocation has no frontier/freshness awareness at all, so `sources.raw.github_loader` (the
-DuckDB-CLI dev-target loader) is unconditionally re-invoked and cannot run against Databricks.
-See `## Blocked` and `docs/outcomes/20260912-databricks-dogfood-spine/phases/11k-summary.md`.
+**Status:** blocked — every phase row is `done` or `blocked`. Criteria 1-10 are met and
+evidenced by the committed phase summaries; criterion 11 is not: no scheduled run has completed.
+11j's seed bootstrap worked (11k confirmed `--auto` now derives a real window), but surfaced a
+new, unreviewed design question one layer deeper: external-step invocation has no
+frontier/freshness awareness at all, so `sources.raw.github_loader` (the DuckDB-CLI dev-target
+loader) is unconditionally re-invoked and cannot run against Databricks. A human must choose a
+direction before any further phase is plannable — see the 2026-09-14 outcome-level entry at the
+top of `## Blocked`, and `docs/outcomes/20260912-databricks-dogfood-spine/phases/11k-summary.md`.
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -193,6 +196,47 @@ of the models or the tooling.
 | 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 
 ## Blocked
+
+- **2026-09-14 — outcome-level (terminal judgement): every phase row is now `done` or `blocked`;
+  criteria 1-10 are met, criterion 11 is not.** Re-judged after 11k. The evidence for 1-10 is
+  unchanged from the 2026-09-13 outcome-level entry below and is carried by the committed
+  summaries (1-3 by phases 1/2/3; 4 by 4c; 5 by 5; 6 by 6-6f's clean 16/16 full refresh; 7 by
+  7/7b and 9f's re-measured windows; 8 by 9f's `08-parity.json` and `09b-equivalence.json`; 9 by
+  phase 10's findings handoff, spec updates and docs-site page; 10 by every phase's green
+  `verify-phase.sh`). **Criterion 11 remains open for the same reason, one layer deeper:** the
+  bundle, dual-arch wheel, ambient `databricks_job` target, self-driving loader and
+  Volume-resident project directory are all committed, deployed and gated, `--auto` now derives a
+  real window from the seeded frontier (11j/11k), but **no scheduled run has ever completed** —
+  `smelt run` inside the job now fails at `sources.raw.github_loader`'s external step instead of
+  at frontier detection.
+
+  **What a human must decide** (full reasoning in `phases/11k-summary.md`; none of these may be
+  improvised by a phase because each changes user-visible semantics and needs a spec edit first —
+  `docs/specs/sources.md` §Semantics 12's fail-loud rule, and for (3) also 11d's ambient-only
+  commitment in `docs/specs/multi_backend.md`):
+
+  1. **External steps get their own interval/frontier tracking**, parallel to models', so
+     `graph.steps_required_by` skips a step whose produced sources already cover the requested
+     window. Needs `docs/specs/sources.md` changed and `smelt state seed-interval` (or a sibling)
+     extended to seed step coverage.
+  2. **A spec'd "declines invocation, trusts already-produced sources" mode**, gated on an
+     explicit freshness *proof* (the produced table's own max/count against the claimed window),
+     never blind trust — a narrow, named carve-out of the fail-loud rule rather than its removal.
+  3. **Target-aware dispatch inside the step's own `command:`** — blocked on its own tension: a
+     freshness check needs a live connection, but the step runs as a plain subprocess with no
+     share of the job's ambient Databricks Connect session, which 11d's ambient-only (no
+     host/token) design for `databricks_job` forbids resolving with a token. That tension needs an
+     explicit ruling before this option is viable at all.
+
+  Also still worth settling in the same decision (unverified, flagged by 11i): whether BigQuery's
+  dogfood spine has the identical gap and simply never exercised it.
+
+  **State left clean.** The bundle is deployed at the committed daily cadence (`0 0 6 * * ?`,
+  UNPAUSED); the cadence was never compressed this pass so nothing needs restoring, and the
+  Volume holds the seeded `databricks_job` intervals plus both current wheels. Rows 11c/11e/11g/
+  11i/11k all resume from their live legs the moment a direction is chosen — no offline work is
+  pending on any of them. Row 4b stays superseded by 4c. The follow-on `databricks-correctness`
+  outcome is unaffected: criterion 9's handoff is banked.
 
 - **2026-09-14 — phase 11k (live): frontier seeding worked; the blocker moved one layer deeper,
   to external-step invocation.** The seed bootstrap (11j's tool, carried out live by 11k) fixed
@@ -466,6 +510,14 @@ of the models or the tooling.
   the next implement pass.
 
 ## Decision log
+
+- 2026-09-14 (outcome-level, terminal): **outcome stays `blocked` after re-judging the success
+  criteria with every phase row terminal.** Criteria 1-10 are met and evidenced by the committed
+  phase summaries; criterion 11 is not met — no scheduled run has completed, and the remaining
+  gap (how external steps participate in frontier tracking) is a design decision requiring a spec
+  edit and human review, not a plannable phase. Recorded at the top of `## Blocked` with the
+  three candidate directions. The loop advances to the next backlog outcome (the Trino
+  programme).
 
 - 2026-09-14 (phase 11k, live): **the seed worked; the blocker moved one layer deeper, to
   external-step invocation, not frontier detection.** After seeding `databricks_job`'s interval
