@@ -1,3 +1,4 @@
 target/
 .smelt/
 .last_run.json
+dist/

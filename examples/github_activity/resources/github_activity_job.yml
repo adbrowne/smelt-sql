@@ -58,9 +58,29 @@ resources:
             # change between runs (docs.databricks.com/compute/serverless/
             # dependencies) — so both wheels ship, disambiguated by a
             # platform_machine marker rather than a single unscoped glob.
+            #
+            # Referenced by deployed workspace path (`${workspace.file_path}`)
+            # plus the exact filename (`${var.x86_64_wheel_name}` /
+            # `${var.aarch64_wheel_name}`, set by `scripts/dbx-bundle.sh
+            # deploy` from what it just built) — not a local relative glob,
+            # and not a wildcard even at the workspace path: a local glob
+            # here is checked by the bundle CLI against a location it cannot
+            # resolve correctly for a `path: ../..` artifact synced alongside
+            # this bundle (measured phase 11i; matches the unresolved
+            # upstream regression databricks/cli#2969, DABs dist/.internal
+            # cleanup), and pip's own `/Workspace/...` requirement resolver
+            # does not expand `*` either (measured the same phase: "is not a
+            # valid wheel filename"). The exact filename is what's left.
+            # `${workspace.file_path}` is the bundle's *sync destination
+            # root* (`.../dogfood/files`), not the bundle root's own uploaded
+            # subtree — this bundle's external `sync.paths` entries
+            # (`../../scripts`, `../../python`) push the sync root up to the
+            # repo root, so the bundle root's own files land nested at
+            # `files/examples/github_activity/...` (measured phase 11i via
+            # `databricks workspace list`), hence the extra path segment.
             dependencies:
-              - ../../../dist/*_x86_64.whl; platform_machine == "x86_64"
-              - ../../../dist/*_aarch64.whl; platform_machine == "aarch64"
+              - ${workspace.file_path}/examples/github_activity/dist/${var.x86_64_wheel_name}; platform_machine == "x86_64"
+              - ${workspace.file_path}/examples/github_activity/dist/${var.aarch64_wheel_name}; platform_machine == "aarch64"
 
     # A one-off job, run manually (`scripts/dbx-bundle.sh run volume_probe`),
     # never scheduled — it measures the deployed Volume's FUSE-layer

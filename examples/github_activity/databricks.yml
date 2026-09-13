@@ -30,9 +30,35 @@ variables:
       committed default is the real once-a-day cadence
       (docs/outcomes/20260912-databricks-dogfood-spine/phases/11c-plan.md).
     default: "0 0 6 * * ?"
+  x86_64_wheel_name:
+    description: >-
+      Exact filename of the freshly-built x86_64 wheel, passed by
+      `scripts/dbx-bundle.sh deploy` (phase 11i) — `smelt_env.dependencies`
+      needs the exact deployed workspace filename, not a glob (pip's
+      `/Workspace/...` requirement resolution does not expand `*`). The
+      default is a placeholder `validate` never resolves against a real
+      wheel; `dbx-bundle.sh deploy` is the only supported caller of `deploy`
+      and always overrides it with the file actually on disk.
+    default: "smelt_sql-unset-x86_64.whl"
+  aarch64_wheel_name:
+    description: >-
+      Exact filename of the freshly-built aarch64 wheel — see
+      `x86_64_wheel_name`.
+    default: "smelt_sql-unset-aarch64.whl"
 
 artifacts:
-  smelt_wheel:
+  # Two artifacts, not one — measured phase 11i: a single `type: whl`
+  # artifact whose build produces two wheels (one per architecture) hits a
+  # known Databricks CLI limitation (databricks/cli#2969): the artifact
+  # mechanism assumes exactly one file per artifact, picks the newest by
+  # mtime ("Skipping wheel ... (older than ...)" in `--debug` output), and
+  # its dist/ cleanup pass removes the file it didn't pick — breaking
+  # whichever of the two `smelt_env.dependencies` globs pointed at the
+  # removed wheel. Splitting into one artifact per architecture, each scoped
+  # to its own filename glob via `files:`, gives the CLI no ambiguity to
+  # resolve, so neither wheel is ever treated as a stale duplicate of the
+  # other.
+  smelt_wheel_x86_64:
     type: whl
     # Placeholder for a PyPI dependency: dev is ahead of the last PyPI
     # release, so the job installs this freshly-built local wheel rather than
@@ -52,7 +78,25 @@ artifacts:
     # a glibc compatibility floor Databricks serverless compute's installer
     # accepts (declared once, in the script), and refuses to leave a
     # non-compliant wheel in dist/.
-    build: bash scripts/dbx-wheel-build.sh
+    # The build also mirrors its wheel into the bundle root's own `dist/`:
+    # `resources/github_activity_job.yml`'s `smelt_env.dependencies` glob is
+    # checked by the bundle CLI against a location that does not include
+    # anything reached by climbing back out of the bundle root — even a
+    # provably-correct relative path landing on the artifact's own `path:
+    # ../..` build output matches nothing there (measured phase 11i) — so a
+    # real copy inside the bundle root is what that check needs to see.
+    # `dist/` under repo root stays canonical for every other consumer
+    # (`dbx-wheel-build.sh verify`, this file's own artifact `path:`).
+    build: bash scripts/dbx-wheel-build.sh build x86_64 && mkdir -p examples/github_activity/dist && cp dist/*_x86_64.whl examples/github_activity/dist/
+    files:
+      - source: ../../dist/*_x86_64.whl
+
+  smelt_wheel_aarch64:
+    type: whl
+    path: ../..
+    build: bash scripts/dbx-wheel-build.sh build aarch64 && mkdir -p examples/github_activity/dist && cp dist/*_aarch64.whl examples/github_activity/dist/
+    files:
+      - source: ../../dist/*_aarch64.whl
 
 include:
   - resources/*.yml

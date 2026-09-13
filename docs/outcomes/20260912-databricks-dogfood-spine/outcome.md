@@ -184,9 +184,86 @@ of the models or the tooling.
 | 11f | Make the deployed wheel installable on Databricks serverless compute, offline: a single-owner `scripts/dbx-wheel-build.sh` builds smelt's `bindings = "bin"` wheel against a declared **manylinux_2_28** floor (`maturin --zig` first, a manylinux Docker container as the documented fallback) and refuses to emit a wheel tagged above that floor or left unrepaired; `databricks.yml`'s `smelt_wheel` artifact calls it instead of a bare `maturin build`; gated by the script's own `verify` mode under test plus a structural bundle test, and proved by building a real compliant wheel with no workspace | done |
 | 11g | **[live]** Resume 11e from its task 3 under the 11f wheel: redeploy (wheel + Volume seed), one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
 | 11h | Give the bundle's wheel an `aarch64` variant, offline: extend `scripts/dbx-wheel-build.sh` to cross-compile a second wheel (zig `aarch64-unknown-linux-gnu` target or a second Docker manylinux image) against an `aarch64` `libduckdb.so`, verified at the same `manylinux_2_28`/Python-3.11 floor as the `x86_64` build; rewrite `github_activity_job.yml`'s `smelt_env.dependencies` from the bare `../../../dist/*.whl` glob to two explicit entries scoped by a `platform_machine` environment marker — Databricks' own documented fix for serverless compute's undocumented per-run `aarch64`/`x86_64` selection; gated by a structural test of the two-entry marker-scoped dependency list plus both wheels' own `verify` pass, with no workspace | done |
-| 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | planned |
+| 11i | **[live]** Resume 11g from its task 3 under the 11h dual-arch wheel: redeploy, seed, one manual smoke run, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks (accounting for the 12 fixture days already loaded), the compute consumed recorded against the Free Edition quotas of criterion 4, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored | blocked |
 
 ## Blocked
+
+- **2026-09-13 — phase 11i (live legs, sixth attempt).** The plan landed and the credential
+  was live; this pass got substantially further than any prior attempt — past deploy, past
+  the wheel install, past the ambient-session config load, into `smelt run` itself — and
+  fixed **five independent, real bugs** along the way, each a first-time discovery (every
+  prior attempt blocked before reaching that code path at all). All five are fixed and
+  committed; `bash .claude/scripts/verify-phase.sh` is ALL GREEN. A sixth, deeper blocker
+  remains open and is why this pass stops short of the three scheduled runs.
+
+  **Fixed, in the order the live loop surfaced them:**
+  1. **Databricks CLI dual-wheel artifact bug** (matches upstream `databricks/cli#2969`): a
+     single `type: whl` artifact producing two architecture-specific wheels picks the newest
+     by mtime and its cleanup pass deletes the other, breaking whichever `smelt_env.dependencies`
+     glob pointed at the deleted one. Fixed by splitting into two artifacts
+     (`smelt_wheel_x86_64`, `smelt_wheel_aarch64`), each scoped to its own filename via `files:`.
+  2. **`smelt_env.dependencies` local-glob resolution.** A local relative glob in
+     `environments.spec.dependencies`, even when it resolves to a real, provably-correct path
+     (verified by direct shell `ls` at the exact resolved location, at every candidate relative
+     depth, both before and after mirroring the wheel into the bundle root), is checked by the
+     bundle CLI against a location it never actually finds — reproducible regardless of timing
+     or mirroring. Worked around by referencing the deployed workspace path instead
+     (`${workspace.file_path}/...`), which defers resolution to the serverless environment's
+     own installer at job-run time.
+  3. **Wildcards don't expand in `/Workspace/...` requirement specs.** pip's installer treats
+     `${workspace.file_path}/dist/*_x86_64.whl` as a literal filename, not a glob — `*_x86_64.whl
+     is not a valid wheel filename`. Fixed by having `scripts/dbx-bundle.sh deploy` pre-build,
+     read the two exact resulting filenames off disk, and pass them through as bundle variables
+     (`x86_64_wheel_name`/`aarch64_wheel_name`) rather than duplicating the wheel-naming
+     convention in YAML.
+  4. **`${workspace.file_path}` is the sync *destination root*, not the bundle root's own
+     uploaded subtree.** This bundle's external `sync.paths` entries (`../../scripts`,
+     `../../python`) push the sync root up to the repo root, so the bundle root's own files
+     land nested at `files/examples/github_activity/...` (confirmed via `databricks workspace
+     list`) — not at `files/` directly. The dependency reference needed that extra path segment.
+  5. **The installed wheel's RPATH doesn't resolve on this environment's actual layout.**
+     `readelf -d` on the installed `smelt` binary shows `RPATH: $ORIGIN/../smelt_sql.libs`,
+     which assumes the vendored libduckdb installs as a sibling of `bin/`; this environment
+     nests site-packages under `lib/python3.11/site-packages/` instead, so the RPATH math never
+     finds it (`error while loading shared libraries: libduckdb-<hash>.so`). Fixed in
+     `run_smelt.py` by importing `smelt_sql` to get its real installed location and setting
+     `LD_LIBRARY_PATH` from that, rather than trusting the RPATH.
+
+  A sixth issue was also found and given a narrow, contained fix rather than left blocking:
+  `smelt.yml` interpolates every declared target's env-var references eagerly, including the
+  unused `databricks`/`databricks_oracle` targets' `${SMELT_DBX_HOSTNAME}`/`${SMELT_DBX_TOKEN}`,
+  even when the job only ever selects `databricks_job` (which carries neither). `run_smelt.py`
+  now supplies inert placeholder values for those two variables — `databricks_job`'s ambient
+  session never reads them, so this doesn't touch the ambient-auth design at all.
+
+  **The blocker that remains, genuinely architectural, not infra:** `smelt run --auto` cannot
+  find the day `load_next_day` just landed. `--auto`'s frontier detection
+  (`compute_auto_time_range` in `crates/smelt-cli/src/commands/run_setup.rs`) reads a purely
+  *local* `.smelt/` interval store keyed by target name, and ends its window at real
+  wall-clock "today" — both assumptions this scenario breaks. `databricks_job` is a
+  **separately-named target** from `databricks` (11d's ambient-auth split), even though both
+  write to the identical physical `workspace.smelt_dogfood` schema where 12+ days already sit;
+  the `databricks_job`-scoped interval store starts empty regardless of what the schema
+  actually holds, so `compute_auto_time_range` finds no `latest` date and returns `None`,
+  and the run refuses with `ExternalStepNotInvocable: ... '{run_date}' has no value in this
+  run` before any model executes. Passing an explicit `--start`/`--end` instead of `--auto`
+  would sidestep the local-store lookup, but picking the *right* window requires exactly the
+  frontier information the local store doesn't have either — and hand-computing it from
+  wall-clock-disconnected fixture semantics from inside `run_smelt.py` would be authoring a
+  second, ad hoc frontier mechanism outside smelt's own, which is worse than the gap it
+  patches. This needs a design decision the plan does not answer: whether `--auto` should
+  reconcile against the backend's own resident state (not just the local interval store) for
+  cloud targets, whether `databricks_job` and `databricks` should reuse one interval store
+  keyed by physical location, or whether the scheduled job should pass an explicit
+  `--start`/`--end` computed by the loader task and handed across via a Databricks Jobs task
+  value (`dbutils.jobs.taskValues`) instead of relying on `--auto` at all. None of these is a
+  small, safe call to make unreviewed mid-flight; each has real implications for the
+  equivalence invariant and for every other cloud target (BigQuery's dogfood spine may have
+  the identical `--auto`/target-aliasing gap and simply never hit it if its job design differs).
+
+  Deployed state was left clean before stopping: the bundle is deployed at the committed daily
+  cadence (`0 0 6 * * ?`, UNPAUSED) — the compressed-cadence step (task 6) was never reached, so
+  there is nothing to restore. The credential remains live as of this pass.
 
 - 2026-09-13 (phase 11i implement, fifth attempt): **credential confirmed live, plan still
   missing.** `bash scripts/dbx-verify.sh` now passes clean end-to-end (reachability on both

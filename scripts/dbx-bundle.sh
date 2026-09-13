@@ -159,5 +159,26 @@ if [[ "${SUBCOMMAND}" == "seed" ]]; then
   exit 0
 fi
 
+if [[ "${SUBCOMMAND}" == "deploy" ]]; then
+  # The two `smelt_env.dependencies` entries reference the deployed wheel by
+  # its exact workspace path (`${workspace.file_path}/dist/<exact
+  # filename>`), not a wildcard glob — pip's library installer resolves a
+  # `/Workspace/...` requirement as a literal path with no shell-style glob
+  # expansion (measured phase 11i: `*_x86_64.whl is not a valid wheel
+  # filename`). So the exact filenames must be known before `bundle deploy`
+  # runs. Pre-build here (idempotent — `bundle deploy`'s own artifact build
+  # step rebuilds identically) purely to read the resulting filenames off
+  # disk, then pass them through as bundle variables rather than duplicating
+  # `dbx-wheel-build.sh`'s own cp311/manylinux_2_28 spelling in YAML.
+  bash "${REPO_ROOT}/scripts/dbx-wheel-build.sh"
+  X86_64_WHEEL="$(basename "$(ls "${REPO_ROOT}"/dist/*_x86_64.whl)")"
+  AARCH64_WHEEL="$(basename "$(ls "${REPO_ROOT}"/dist/*_aarch64.whl)")"
+  DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
+    exec databricks bundle deploy --target dogfood \
+    --var "x86_64_wheel_name=${X86_64_WHEEL}" \
+    --var "aarch64_wheel_name=${AARCH64_WHEEL}" \
+    "$@"
+fi
+
 DATABRICKS_HOST="${SMELT_DBX_HOST}" DATABRICKS_TOKEN="${SMELT_DBX_TOKEN}" \
   exec databricks bundle "${SUBCOMMAND}" --target dogfood "$@"

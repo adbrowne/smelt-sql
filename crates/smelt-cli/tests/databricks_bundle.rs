@@ -142,20 +142,27 @@ fn bundle_tasks_are_loader_then_smelt_run_in_order() {
 #[test]
 fn bundle_smelt_comes_from_the_locally_built_wheel() {
     let bundle = databricks_yml();
-    let artifact = &bundle["artifacts"]["smelt_wheel"];
-    assert_eq!(artifact["type"].as_str().unwrap(), "whl");
-    let build = artifact["build"]
-        .as_str()
-        .expect("artifacts.smelt_wheel.build is a string");
-    assert!(
-        build.contains("dbx-wheel-build.sh"),
-        "wheel artifact must be built by scripts/dbx-wheel-build.sh (which itself calls maturin): {build}"
-    );
+    // Two artifacts, not one (phase 11i): a single `type: whl` artifact
+    // producing both architectures' wheels hit databricks/cli#2969 (the
+    // artifact mechanism assumes one file per artifact and deletes the one
+    // it doesn't pick). Each is independently checked here.
+    for name in ["smelt_wheel_x86_64", "smelt_wheel_aarch64"] {
+        let artifact = &bundle["artifacts"][name];
+        assert_eq!(artifact["type"].as_str().unwrap(), "whl", "{name}");
+        let build = artifact["build"]
+            .as_str()
+            .unwrap_or_else(|| panic!("artifacts.{name}.build is a string"));
+        assert!(
+            build.contains("dbx-wheel-build.sh"),
+            "{name} must be built by scripts/dbx-wheel-build.sh (which itself calls maturin): {build}"
+        );
+    }
 
     let job_text = read(&bundle_dir().join("resources/github_activity_job.yml"));
     assert!(
-        job_text.contains(".whl"),
-        "the smelt_env environment must depend on a locally-built wheel"
+        job_text.contains("wheel_name"),
+        "the smelt_env environment must depend on a locally-built wheel by its exact-filename \
+         variable"
     );
     assert!(
         !job_text.contains("smelt-sql=="),
@@ -214,6 +221,15 @@ fn job_target_is_ambient() {
     // validate`/`deploy`/`run` — that is the *deployer's* credential, not
     // the deployed job task's environment, so only the job resource and its
     // task scripts are checked for a host-bearing variable.
+    //
+    // `run_smelt.py` legitimately sets `SMELT_DBX_HOSTNAME` (note: distinct
+    // from `SMELT_DBX_HOST`, which this still catches) to an inert
+    // placeholder string — `smelt.yml` interpolates every target's env-var
+    // references eagerly at load time, including the unused `databricks`/
+    // `databricks_oracle` targets', so `databricks_job` (the target this
+    // task actually selects, and which carries neither `host` nor `token`)
+    // needs *something* there to load at all (measured phase 11i). The
+    // placeholder is never read by the ambient session this target builds.
     for path in [
         bundle_dir().join("resources/github_activity_job.yml"),
         bundle_dir().join("dbx_job/load_next_day.py"),
@@ -221,7 +237,7 @@ fn job_target_is_ambient() {
     ] {
         let text = read(&path);
         assert!(
-            !text.contains("SMELT_DBX_HOST") && !text.contains("DATABRICKS_HOST"),
+            !text.contains("SMELT_DBX_HOST\"") && !text.contains("DATABRICKS_HOST"),
             "{path:?} must export no host-bearing env var for the job target — measured \
              (phase 11c) that a Free Edition serverless job task never receives one"
         );
@@ -614,24 +630,26 @@ fn wheel_verify_rejects_an_unrepaired_linux_tag() {
     );
 }
 
-/// Phase 11f test 4: the `smelt_wheel` artifact's `build:` must invoke the
+/// Phase 11f test 4: each wheel artifact's `build:` must invoke the
 /// single-owner script rather than a bare `maturin build`, so a second
 /// spelling of the build (and its manylinux floor) cannot drift back in.
 #[test]
 fn smelt_wheel_build_uses_the_manylinux_build_script() {
     let bundle = databricks_yml();
-    let build = bundle["artifacts"]["smelt_wheel"]["build"]
-        .as_str()
-        .expect("artifacts.smelt_wheel.build is a string");
-    assert!(
-        build.contains("dbx-wheel-build.sh"),
-        "smelt_wheel build must invoke scripts/dbx-wheel-build.sh: {build}"
-    );
-    assert!(
-        !build.contains("maturin build"),
-        "smelt_wheel build must not contain a bare 'maturin build' — that belongs solely to \
-         dbx-wheel-build.sh: {build}"
-    );
+    for name in ["smelt_wheel_x86_64", "smelt_wheel_aarch64"] {
+        let build = bundle["artifacts"][name]["build"]
+            .as_str()
+            .unwrap_or_else(|| panic!("artifacts.{name}.build is a string"));
+        assert!(
+            build.contains("dbx-wheel-build.sh"),
+            "{name} build must invoke scripts/dbx-wheel-build.sh: {build}"
+        );
+        assert!(
+            !build.contains("maturin build"),
+            "{name} build must not contain a bare 'maturin build' — that belongs solely to \
+             dbx-wheel-build.sh: {build}"
+        );
+    }
 }
 
 /// Phase 11f test 5: the manylinux floor literal is stated exactly once, in
@@ -750,9 +768,14 @@ fn smelt_env_dependencies_are_arch_scoped() {
         x86.contains("platform_machine == \"x86_64\""),
         "x86_64 entry must carry a platform_machine marker: {x86}"
     );
+    // References the exact deployed filename via a bundle variable, not a
+    // literal glob suffix (phase 11i): pip's `/Workspace/...` requirement
+    // resolver does not expand `*`, so the exact filename `dbx-bundle.sh
+    // deploy` just built is passed through `${var.x86_64_wheel_name}` /
+    // `${var.aarch64_wheel_name}` instead.
     assert!(
-        x86.contains("_x86_64.whl"),
-        "x86_64 entry must glob a wheel ending _x86_64.whl: {x86}"
+        x86.contains("${var.x86_64_wheel_name}"),
+        "x86_64 entry must reference the exact-filename variable: {x86}"
     );
 
     let arm = deps
@@ -764,8 +787,8 @@ fn smelt_env_dependencies_are_arch_scoped() {
         "aarch64 entry must carry a platform_machine marker: {arm}"
     );
     assert!(
-        arm.contains("_aarch64.whl"),
-        "aarch64 entry must glob a wheel ending _aarch64.whl: {arm}"
+        arm.contains("${var.aarch64_wheel_name}"),
+        "aarch64 entry must reference the exact-filename variable: {arm}"
     );
 }
 
