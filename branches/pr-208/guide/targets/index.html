@@ -3798,7 +3798,9 @@ processes it as a genuine incremental window. <code>scripts/dbx-bundle.sh</code>
 <a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">                                         </span><span class="c1"># bundle against a local stub; needs no workspace</span>
 <a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>bash<span class="w"> </span>scripts/dbx-bundle.sh<span class="w"> </span>deploy<span class="w">       </span><span class="c1"># databricks bundle deploy — uploads the bundle and</span>
 <a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">                                         </span><span class="c1"># the locally-built wheel</span>
-<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>bash<span class="w"> </span>scripts/dbx-bundle.sh<span class="w"> </span>run<span class="w"> </span>github_activity_daily<span class="w">   </span><span class="c1"># databricks bundle run</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>bash<span class="w"> </span>scripts/dbx-bundle.sh<span class="w"> </span>seed<span class="w">         </span><span class="c1"># copies smelt.yml and models/ onto the Volume —</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">                                         </span><span class="c1"># never .smelt/, so it cannot reset run state</span>
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>bash<span class="w"> </span>scripts/dbx-bundle.sh<span class="w"> </span>run<span class="w"> </span>github_activity_daily<span class="w">   </span><span class="c1"># databricks bundle run</span>
 </code></pre></div>
 <p>smelt reaches the job as a wheel declared in the bundle's <code>artifacts:</code> block — the same
 <code>bindings = "bin"</code> maturin build the PyPI release uses (root <code>pyproject.toml</code>) — which <code>bundle
@@ -3809,8 +3811,19 @@ release tracks the CLI's <code>dev</code> branch, the <code>artifacts:</code> bl
 <p>The job's own <code>databricks</code> target authenticates with the <strong>ambient</strong> session — no <code>token</code> key at
 all, and <code>host</code> supplied by the job's own runtime environment rather than a developer's config
 (see "Credentials" above). The project itself, including its <code>.smelt/</code> run state, lives on a
-Unity Catalog Volume rather than the job's own ephemeral workspace-files checkout, so each
-scheduled run is a genuine incremental window over the previous one rather than a fresh start.</p>
+Unity Catalog Volume — declared as a bundle resource (<code>resources/volume.yml</code>) rather than assumed
+pre-existing — instead of the job's own ephemeral workspace-files checkout, so each scheduled run
+is a genuine incremental window over the previous one rather than a fresh start. <code>bundle deploy</code>
+creates the Volume; <code>scripts/dbx-bundle.sh seed</code> then copies <code>smelt.yml</code> and <code>models/</code> onto it.
+Re-running <code>seed</code> is safe to repeat — it never touches <code>.smelt/</code>, the run-state ledger that makes
+incremental windows possible, so a re-seed cannot silently reset a deployed project's state.</p>
+<p>The loader task passes <code>--next-day</code> rather than a literal date: the fixture the dogfood pipeline
+replays holds a fixed historical range with no relationship to the job trigger's real calendar
+date, so a scheduled run advances the fixture by its own ledger (the live <code>_loader_days</code> table)
+instead of trusting wall-clock time, and exits cleanly (not as a job failure) once the fixture is
+exhausted. The loader's own DuckDB access prefers the <code>duckdb</code> Python module over shelling out to
+a CLI binary, since a serverless Databricks Python environment installs packages but has no CLI
+on <code>PATH</code>.</p>
 <h2 id="switching-targets">Switching targets<a class="headerlink" href="#switching-targets" title="Permanent link">&para;</a></h2>
 <p>Use the <code>--target</code> flag on any command:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># Run against DuckDB (default)</span>
