@@ -178,9 +178,28 @@ of the models or the tooling.
 | 10 | Bank the evidence: the findings handoff, spec Known Divergences updated, docs-site Databricks target page, `ROADMAP.md` item 11 revised, and `.env` (the wizard library's default `ENV_FILE`, currently untracked-but-unignored) added to `.gitignore` | done |
 | 11a | Bundle and tooling, offline: the Databricks CLI pinned and installed through `mise` (`mise run setup-databricks`), the committed Asset Bundle (`examples/github_activity/databricks.yml` + `resources/`) declaring one daily-scheduled serverless job with the loader task then the `smelt run` task, smelt installed from the locally-built `bindings = "bin"` wheel in `artifacts:`, the ambient-credential `databricks` job target, the Volume-resident project/state path, `scripts/dbx-bundle.sh` + its `.claude/settings.json` allow-list entry, the deployment-form spec note and docs-site subsection — all gated per-PR with no workspace (structural bundle test + `databricks bundle validate` when the CLI is present) | done |
 | 11b | Make the scheduled job self-driving and serverless-safe, offline: the loader gains `--next-day` (earliest fixture day its own ledger has not recorded) so a scheduled run advances the fixture rather than trusting `{{job.trigger.time.iso_date}}`'s real calendar date; its DuckDB access stops requiring a `duckdb` CLI binary a serverless Python environment will not have; the Unity Catalog Volume the `smelt_run` task points `--project-dir` at is declared as a bundle resource and seeded by a `scripts/dbx-bundle.sh seed` stage that cannot clobber `.smelt/` — all gated per-PR with no workspace | done |
-| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing, their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | pending |
+| 11c | **[live]** Deploy and prove it: `databricks bundle deploy` to the dogfood target, the Volume seeded, the schedule enabled, **three consecutive scheduled runs** (not manually triggered) completing under a temporarily compressed cadence (the cron becomes a bundle variable; the committed default stays daily and is restored at the end), their run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, the Volume FUSE layer's `.smelt/lock` advisory-locking and rename-atomicity behaviour measured by a committed `volume_probe` job, and the compute the schedule consumed recorded against the Free Edition quotas of criterion 4 | planned |
 
 ## Decision log
+
+- 2026-09-13 (phase 11c plan): **no split — row 11c stays one row, with the schedule cadence
+  made a bundle variable so three *scheduled* runs fit one sitting.** The 11a plan entry flagged
+  the scheduled-run leg as wall-clock bound: a daily cron needs three calendar days, which no
+  headless implement step can wait out, and splitting the row would not have removed the wait —
+  it would only have moved it. Instead the committed `quartz_cron_expression` becomes
+  `${var.schedule_cron}` with the daily expression as its default, so the proof deploy passes
+  `--var schedule_cron='0 0/20 * * * ?'` and the three runs fire inside ~40 minutes, then the row
+  redeploys at the committed default. The criterion's substance is preserved exactly — the runs
+  are `trigger: PERIODIC`, never manually triggered, and the committed artifact is still a
+  daily-scheduled job, which is what the per-PR gate checks. Two further readings: (a) 11a's open
+  question about the Volume FUSE layer's advisory locking and rename atomicity is answered by a
+  committed `volume_probe` job rather than inferred from whether the runs happened to succeed,
+  because "three runs completed" does not distinguish a working `flock` from one that silently
+  no-ops; (b) the Volume's `.smelt/` starts empty while `smelt_dogfood` already holds 9f's tables,
+  so scheduled run 1 is a full refresh and runs 2 and 3 are the genuine incremental windows the
+  criterion asks for — test 6 of the plan asserts the loader advanced a distinct fixture day each
+  run (19 of the fixture's 30 days remain unloaded), which is what makes them windows rather than
+  repeats. Nothing left the outcome; nothing added to `## Out of scope`.
 
 - 2026-09-13 (phase 11b plan): **row 11b split into 11b (offline) and 11c (live).** `phases/11a-summary.md`
   "For the next planner" named three defects that make criterion 11's "three consecutive
