@@ -1,0 +1,79 @@
+# Pinned docker compose tier for the Trino target: a Trino coordinator, an
+# Iceberg REST catalog, and MinIO object storage. See scripts/README-trino.md
+# for the version table and why each pin was chosen.
+#
+# All writable state lives in named volumes (removed by `docker compose down
+# -v`), never a host bind mount — the only bind mount is the read-only
+# scripts/trino-catalog/ directory. This is deliberate: scripts/spark-up.sh
+# hit a failure mode where a `chmod` on a root/container-owned leftover host
+# directory aborted under `set -e` *before* `docker run`, so every test then
+# failed with no hint the server had never started. Named volumes have no
+# host-owned path for that chmod to abort on.
+name: smelt-trino
+
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: smelt-trino-minio
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    command: server /data --console-address ":9001"
+    volumes:
+      - smelt-trino-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: smelt-trino-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 admin password &&
+      mc mb --ignore-existing local/warehouse
+      "
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.10.1
+    container_name: smelt-trino-iceberg-rest
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    volumes:
+      - smelt-trino-iceberg-rest-data:/tmp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/v1/config"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  trino:
+    image: trinodb/trino:483
+    container_name: smelt-trino-coordinator
+    ports:
+      - "${SMELT_TRINO_PORT:-18080}:8080"
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+    volumes:
+      - ./trino-catalog:/etc/trino/catalog:ro
+      - smelt-trino-coordinator-data:/data
+
+volumes:
+  smelt-trino-minio-data:
+  smelt-trino-iceberg-rest-data:
+  smelt-trino-coordinator-data:

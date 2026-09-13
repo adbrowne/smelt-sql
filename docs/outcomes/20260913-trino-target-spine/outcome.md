@@ -138,7 +138,7 @@ not an answer — every cell is still established by execution.
 | 1 | Spec delta: the `trino` target shape and capability column in `multi_backend.md` + `smelt_yml.md`, the foreign-key refusal diagnostics, the connection-security rule, and the Known Divergence naming the implicit-`Native` emission hole this outcome does not close | done |
 | 2 | `DialectId::Trino` + `SqlDialect::Trino` land with no wildcard match arm anywhere absorbing them; `ALL` exhaustiveness and slug round-trip green; every resulting compile error across the workspace resolved deliberately rather than defaulted | done |
 | 3 | `BackendType::Trino` and the `trino` target shape in `smelt-core::config`: the keys parse, a literal password is refused pre-interpolation, every foreign key is named (not the first only), and a committed `examples/` fixture proves the refusal — the implementation half of criterion 1 | done |
-| 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | planned |
+| 4 | The Docker tier: pinned `docker compose` (Trino + Iceberg REST catalog + MinIO), committed catalog properties, `scripts/trino-{up,down,env}.sh` idempotent over container-owned leftovers, `README-trino.md` version pins | done |
 | 5 | `smelt-backend-trino`: the HTTP statement client (`/v1/statement` + `nextUri` paging, result pages → Arrow, typed `BackendError` mapping, credential redaction) proved by unit tests with no live server | pending |
 | 6 | The `Backend` trait impl over the live tier: DDL, existence, row count, preview, `ensure_schema`, and a model materialized as an Iceberg table and read back | pending |
 | 7 | `load_table`: the Arrow path over the seed type set with the bulk-strategy decision measured and recorded, NULL-in-non-nullable rejection, type round-trip, `seed_parity` Trino leg | pending |
@@ -261,5 +261,20 @@ not an answer — every cell is still established by execution.
   so phase 4 takes it rather than re-implementing `ensure_container_writable`. No reshape of the
   remaining rows: the phase 3 summary surfaced nothing out of scope, and phases 4 and 5 are
   independently unblocked.
+
+- **2026-09-14 — phase 4's pins: `trinodb/trino:483` (equal to `:latest` at pin time, pinned by
+  digit so a future `:latest` move can't silently change CI behavior), `apache/iceberg-rest-fixture:1.10.1`
+  (the Apache project's own REST-catalog fixture, JDBC/SQLite-backed so `down -v` always yields a
+  clean catalog), `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` and
+  `quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z`.** MinIO no longer publishes to Docker Hub, so
+  both MinIO images come from `quay.io/minio/*`; picked the newest plain `RELEASE.*` tag with no
+  `-cpuv1`/`hotfix` suffix. Only the Trino coordinator publishes a host port (`18080` by default,
+  `SMELT_TRINO_PORT` to override); MinIO and the Iceberg REST catalog are reachable only inside
+  the compose network, so there is nothing else to collide with `spark-up.sh`'s `15002`/
+  `smelt-spark`. Live legs run: `trino-up.sh` reached ready, a `POST /v1/statement` round-trip
+  (`CREATE SCHEMA` → `CREATE TABLE` → `INSERT` → `SELECT`) returned the inserted row
+  `[1, "hello"]` confirming the write went through to MinIO and back, and a second `trino-up.sh`
+  run with no intervening `down` reached ready again — the idempotency requirement, satisfied
+  structurally by named volumes rather than by leftover-detection logic.
 
 ## Blocked
