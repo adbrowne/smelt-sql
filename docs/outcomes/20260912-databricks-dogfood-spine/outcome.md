@@ -197,7 +197,7 @@ of the models or the tooling.
 | 11j | Bootstrap tooling, offline: a `smelt state seed-interval` command that writes one model's interval directly into `.smelt/targets/<target>/intervals.json` using the model's real current hash, so a target with no local run history (the Volume-resident `databricks_job` store) can be seeded from data already known to be ingested, gated with no workspace | done |
 | 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 | 11l | Give external steps an explicit, opt-in freshness carve-out, offline: `ExecuteRequest::assume_external_steps_fresh` + `smelt run --skip-external-steps` (declines to invoke a reached step and records it `RunOutcomeKind::Skipped` in the manifest rather than refusing with `ExternalStepNotInvocable`), `docs/specs/sources.md` §Semantics 12 and `docs/specs/run_state.md` updated, `run_smelt.py`'s `smelt_run` task wired to pass the flag (trusting `smelt_run`'s `depends_on: load_next_day` job-task ordering as the freshness guarantee) — gated by a new offline `external_step_invocation.rs` case and the existing `databricks_bundle` structural suite, no workspace needed | done |
-| 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | pending |
+| 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | planned |
 
 ## Blocked
 
@@ -553,6 +553,16 @@ of the models or the tooling.
   the next implement pass.
 
 ## Decision log
+
+- 2026-09-14 (phase 11m plan): **no reshape — 11l already absorbed 11k's discovery, and 11m is
+  the single remaining row.** The external-step design question 11k surfaced was answered by a
+  human and landed as 11l, so nothing was left to split, merge or defer; every remaining leg of
+  criterion 11 stays inside this outcome. One fact the plan records for the implement step: the
+  dogfood credential is **expired at plan time** — `bash scripts/dbx-verify.sh` fails every
+  schema check with `PERMISSION_DENIED: Invalid Token`. Re-minting it (`scripts/dbx-auth.sh`)
+  needs an interactive passphrase, so a headless implement pass that cannot supply it must emit
+  `<<PHASE_BLOCKED>>` naming the credential prompt, and must do no partial live work — a live leg
+  that silently skips is indistinguishable from one that passed.
 
 - 2026-09-14 (outcome-level, terminal): **outcome stays `blocked` after re-judging the success
   criteria with every phase row terminal.** Criteria 1-10 are met and evidenced by the committed
