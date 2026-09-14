@@ -149,7 +149,7 @@ approximated.
 | 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | done |
 | 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | blocked |
 | 3a | Real (non-dry-run) execution resolves each model's run window and every batch `TimeRange` in that model's OWN partition axis (gap 2), so an integer-axis model's injected predicates render bare rather than quoted | done |
-| 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | planned |
+| 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | blocked |
 | 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | pending |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
@@ -330,3 +330,50 @@ approximated.
   hit the same gaps for any calendar-partitioned or snapshot-reconcile-shaped model), or (b) accept
   the `backend_live.rs` statement-level proofs as sufficient for phase 3's own scope and rescope
   Tests 7-8 into whichever fix phase lands gap 1/2/3. Full trace: `phases/03-summary.md`.
+
+- **2026-09-15 — phase 3b blocked before its live-tier tests: the 2026-09-14 global-ANSI-literal
+  ruling is unsound for a declared-VARCHAR calendar partition column, discovered via
+  `cargo test --workspace` on the implementation, not via design review.** The plan's Task 5
+  ("run `cargo test --workspace` and repair every fixture pinning the old spelling") was followed
+  literally, and it surfaced more than fixture text: `crates/smelt-runtime/tests/statement_parity/
+  staged_candidate_conditional.rs::events_deduped_composed_suppression_storm_rerun_writes_zero_rows`
+  fails against a REAL DuckDB connection — not a pinned-text assertion — with `Binder Error: Cannot
+  compare values of type VARCHAR and type DATE - an explicit cast is required`. The fixture is
+  copied verbatim from `examples/web_analytics/models/sources/raw/events.yml`, which declares its
+  `partition_column` (`event_date`) as `type: VARCHAR` on purpose — comment: "hive partition value;
+  emitted as Utf8 by the partitioned writer (DuckDB casts to DATE on use)". This is the flagship
+  web-analytics example's real raw/bronze layer, not a test artifact: a Hive-style partitioned
+  writer commonly emits the partition value as a string column, with casting left to consumers.
+
+  The 2026-09-14 ruling's premise — "the ANSI typed literal … is accepted unchanged by DuckDB,
+  Spark, BigQuery and Trino alike, so one spelling serves every dialect" — is true only when the
+  column being compared is *itself* DATE/TIMESTAMP-typed. Gap 1's original symptom (`date <=
+  varchar(10)`, Trino refusing a bare string against a typed column) and this new symptom (`VARCHAR
+  <> DATE`, DuckDB refusing a typed literal against a string column) are the SAME defect — a
+  literal/column type mismatch — surfacing in opposite directions. Forcing the literal to always be
+  typed trades one direction of the bug for the other; it does not close it. No spelling of the
+  literal alone (independent of the actual column's SQL type) can satisfy both a strict DATE column
+  and a legitimately-VARCHAR one.
+
+  This is a design question the plan does not answer and phase 3b's own scope discipline ("this
+  phase changes literal rendering only… does not touch axis resolution") rules out resolving
+  unilaterally: `partition_literal`/`Region`/`inject_source_filters`/`inject_time_filter` are
+  deliberately schema-blind (single-owner rendering, no dialect or column-type threading per the
+  architecture invariants), and today have no channel to learn a referenced column's actual SQL
+  type. Closing this soundly needs one of:
+  (a) thread the source's declared column type (already present in `columns:` — see `type: VARCHAR`
+  above) through to the literal renderer so it can choose bare-vs-typed per predicate, the largest
+  change but the only one that is correct for both directions;
+  (b) cast the *column* instead of typing the *literal* — e.g. `CAST(event_date AS DATE) >= DATE
+  '…'` — which fixes both directions without threading type info to the renderer, but changes the
+  predicate shape everywhere and needs its own soundness check (a malformed string in an untyped
+  column would now fail the cast rather than compare lexicographically, which may be desired
+  fail-loud behavior or may be a behavior change worth flagging separately);
+  (c) narrow gap 1's fix to only the Trino target (a dialect-keyed emission choice after all,
+  contradicting the 2026-09-14 ruling's "no dialect threading" rationale, but avoiding any change to
+  DuckDB/Spark/BigQuery's already-working bare-quoted rendering for non-Trino targets).
+  No code from this attempt survives — `partition_literal`, its callers, and all touched fixtures
+  were reverted to a clean HEAD before this entry was written; the tree is clean. Recommended next
+  step: escalate options (a)-(c) for a ruling before re-attempting 3b; option (b) is the least
+  invasive if a controller confirms the cast's fail-loud behavior on malformed strings is
+  acceptable. Full trace: `phases/03b-summary.md`.
