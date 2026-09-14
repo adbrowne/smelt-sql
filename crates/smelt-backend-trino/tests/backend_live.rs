@@ -601,3 +601,39 @@ async fn load_table_loads_a_multi_chunk_batch() {
 
     drop_schema(&env).await;
 }
+
+/// Phase 10 of `20260913-trino-emission`: decides whether the "array
+/// doesn't decode to Arrow" divergence entry in
+/// `docs/specs/multi_backend.md` §Known Divergences is closed or must be
+/// narrowed. `trino_type_to_arrow` (phase 9) already maps the `array(...)`
+/// type *signature* to `DataType::List` (`build_column`'s `data_types` pass
+/// succeeds), but `build_column` itself has no `DataType::List` builder arm,
+/// so a projected `ARRAY[...]` column fails at the *cell* decode step. This
+/// asserts that specific failure mode rather than the broader "unrecognised
+/// type signature" error, so the divergence entry can name the cell decoder
+/// precisely, not the type map phase 9 already fixed. If this test starts
+/// failing because `build_column` gained a `List` arm, delete it and close
+/// the divergence entry instead of updating the assertion.
+#[tokio::test]
+async fn array_result_column_decodes_to_arrow() {
+    let Some(env) = live_env_or_skip("array_result_column_decodes_to_arrow").await else {
+        return;
+    };
+
+    let err = env
+        .backend
+        .execute_sql("SELECT ARRAY[1, 2, 3] AS xs")
+        .await
+        .expect_err(
+            "array result columns do not decode yet (narrowed divergence, \
+             docs/specs/multi_backend.md §Known Divergences) — remove this \
+             test and close the entry if this starts succeeding",
+        );
+    let message = err.to_string();
+    assert!(
+        message.contains("no column builder for Arrow type") && message.contains("List"),
+        "expected the cell-decoder gap for List, got: {message}"
+    );
+
+    drop_schema(&env).await;
+}

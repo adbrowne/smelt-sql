@@ -132,7 +132,7 @@ including its null-safe join spelling.
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | done |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | done |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | done |
-| 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | planned |
+| 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | done |
 
 ## Decision log
 
@@ -408,5 +408,21 @@ including its null-safe join spelling.
   phase 10 settles it with a live test and lands whichever wording that test proves, because
   republishing a spec while one of its divergence entries is stale is the same defect this
   outcome exists to prevent, one level up.
+
+- **2026-09-14 — phase 10 done; all 12 success criteria satisfied.** The live test
+  (`array_result_column_decodes_to_arrow`) proved the array-decode divergence is real but
+  narrower than stated: `trino_type_to_arrow` correctly maps `array(...)` to `DataType::List`
+  (phase 9's fix holds), but `build_column` — the result-page *cell* decoder — has no `List`
+  builder arm, so the entry was narrowed to name that function rather than deleted. The
+  implicit-`Native` entry was deleted outright: its closing gate
+  (`census::tests::no_dialect_has_unverified_pairs`) is green and the census file is gone. The
+  stale `crates/smelt-backend-trino/` forward-reference in §References was corrected. Doc
+  regeneration (`SMELT_REGEN_DOCS=1`) produced no diff — the committed `dialect-coverage.md`
+  already matched the registry. `docs-site/docs/guide/targets.md` needed no edit: its Trino
+  section already states both known gaps without an unqualified "everything works" claim, and
+  no other target's page links `dialect-coverage.md` either, so Trino wasn't inconsistent.
+  `verify-phase.sh` and the full live sweep (`dialect_audit`, `smelt-backend-trino`,
+  `type_property_tests`, `emission_ownership`, `dialect_seam`, `projection_dialect_invariance`)
+  are all green; no baseline changed. This outcome is ready to be marked `done`.
 
 ## Blocked

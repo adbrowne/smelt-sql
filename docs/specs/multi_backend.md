@@ -1343,11 +1343,12 @@ resolves nested widening to a table rewrite.
   `examples/github_activity` (`silver.actor_sessions` and its downstream) that build on DuckDB
   and not on BigQuery.
 
-- **A Trino `array(...)` result column does not decode to Arrow yet.** A model projecting an
-  array-typed column reads back from Trino with an error rather than an Arrow list value — the
-  HTTP statement client's result-page decoder (`20260913-trino-target-spine` phase 5) has no
-  arm for the JSON shape Trino's `/v1/statement` protocol uses for array cells. No plan is yet
-  tracking the close.
+- **A Trino `array(...)` result column does not decode to Arrow yet.** `trino_type_to_arrow`
+  maps the `array(...)` type *signature* to `DataType::List` correctly, so a query's declared
+  schema is right; the gap is narrower than that — the result-page *cell* decoder
+  (`build_column` in `crates/smelt-backend-trino/src/arrow_convert.rs`) has no `DataType::List`
+  builder arm, so a model projecting an array-typed column reads back with an error rather than
+  an Arrow list value. No plan is yet tracking the close.
 
 - **No maintenance dialect on Trino.** `maintenance_dialect` returns `Err` for
   `SqlDialect::Trino`, so no incremental/maintenance family runs on a `trino` target today — a
@@ -1555,12 +1556,6 @@ resolves nested widening to a table rewrite.
   backend trait. Full per-leg disposition is tracked in the gap table in
   `docs/plans/20260719-prod-w4-spark.md`; the remaining DuckDB-only legs are follow-up work, not
   blockers to the supported-vs-beta label decision.
-- **Every built-in is implicitly `Native` on Trino.** `Signature::emission_at` returns `Native`
-  for any `(dialect, position)` pair with no registered entry, so `DialectId::Trino` enters the
-  function registry claiming every built-in is spelled natively on Trino — a claim no probe has
-  tested. `docs/outcomes/20260913-trino-emission/` phases 2 (the coverage gate, red) through 6
-  (the live audit legs that turn `unverified` claims into `passing` or `gap`) own closing this
-  hole; until it does, a model may compile to SQL Trino rejects.
 
 ## References
 
@@ -1568,8 +1563,7 @@ resolves nested widening to a table rewrite.
   `crates/smelt-dialect/src/printer.rs`, `crates/smelt-dialect/src/type_conformance.rs`,
   `crates/smelt-backend/src/lib.rs` (`Backend` trait), `crates/smelt-backend-duckdb/`,
   `crates/smelt-backend-spark/`, `python/smelt/spark_adapter.py`,
-  `crates/smelt-state/src/ddl_spark.rs`, `crates/smelt-backend-trino/` (forward reference —
-  lands in `docs/outcomes/20260913-trino-target-spine`).
+  `crates/smelt-state/src/ddl_spark.rs`, `crates/smelt-backend-trino/`.
 - **Tests**: `crates/smelt-cli/tests/multi_engine_test.rs`,
   `crates/smelt-backend-spark/tests/load_table.rs`, `crates/smelt-backend-spark/src/tests.rs`,
   `crates/smelt-db/tests/prop_helpers/spark_oracle.rs`,
