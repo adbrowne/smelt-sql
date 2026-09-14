@@ -155,17 +155,42 @@ approximated.
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | blocked |
 | 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | done |
 | 3f | Gap 4: every partition literal the windowed-keyed maintenance driver emits goes through 3b2's single literal-renderer owner, typed against the referenced column — the driving-source pushdown filter (`smelt-runtime/src/maintenance_driver/{driver.rs,cumulative.rs}`) and the target-scan slice bound (`TargetSlicePredicate::Range` in both keyed-fold emitters, plus `emit_recurrence_bound_probe`'s reuse of it) — the third and fourth emission sites of the class 3a/3b2 fixed | done |
-| 3g | Gap 5: `Technique::KeyedFold` gets a **plan-time** availability resolution mirroring the repair family's `resolve_availability` — the idempotent grade downgrades to a reachable technique on a structure-less backend, the additive grade takes a named, explain-visible downgrade or refuses with a diagnostic naming the backend and the missing structure (criterion 3's never-fold-twice route). An execution-time `BackendError::unsupported` is not sufficient: criterion 3 requires the verdict on the cell and explain-visible | pending |
+| 3g | Gap 5: `Technique::KeyedFold` gets a **plan-time** availability resolution mirroring the repair family's `resolve_availability` — the idempotent grade downgrades to a reachable technique on a structure-less backend, the additive grade takes a named, explain-visible downgrade or refuses with a diagnostic naming the backend and the missing structure (criterion 3's never-fold-twice route). An execution-time `BackendError::unsupported` is not sufficient: criterion 3 requires the verdict on the cell and explain-visible | planned |
 | 3h | Phase 3d's deferred legs, re-attempted on 3f+3g: the whole-row `MERGE` upsert (keyed-fold) family end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg (3d's reverted `RecordingBackend`/`emit_keyed_fold` byte-identity design redone) | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
-| 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
+| 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible. Includes succession's own partition-literal sites (its `driving_steps` call site in `execute/project/mod.rs` still passes `Undeclared`, 3f's untouched residue): if the degraded succession route emits a literal against a typed column on Trino, it goes through 3b2's single renderer like every other site of the class | pending |
 | 7 | `statement_parity`'s structural no-authoring leg for `smelt-backend-trino`, plus a check that adding Trino introduced no second plan-derivation site and no consumer-side dialect branch | pending |
 | 8 | The generative gate: `maintenance_conformance` Trino leg modelled on the Spark leg, over the live tier, oracle-equal after **every** run step with cells resolved under Trino's actual availability, recipe pool no narrower than the admitted families, gated in `compat.yml` | pending |
 | 9 | Contract lattice on Trino: `frozen_horizon` and `retain_departed` through the single oracle transform and probe emitter or refused by existing rules, `deferral` refusing per T3, no ad hoc point | pending |
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — 3g's design fixed at planning time: the keyed fold's requirement is
+  grade-dependent, and the additive cell's degraded route is the whole-target rebuild.**
+  The row offered "a named, explain-visible downgrade **or** a refusal". Planning read the
+  driver and found the two grades already behave differently: the `Grade::Idempotent` arm
+  *skips* its merge-ledger record where unrealisable (a repeat merge of the same window
+  converges), while only `Grade::Additive` needs the never-fold-twice ledger. So the fix is
+  not one verdict for `Technique::KeyedFold` but two — idempotent requires nothing and is not
+  downgraded (which is what makes criterion 2's whole-row `MERGE` upsert reachable on Trino at
+  all), additive downgrades to the recompute family and is executed by the run shape's own
+  whole-target route, precisely the paragraph `state.md` §"The degradation contract" already
+  writes for a downgrade-reached `PerGroupRecompute` cell with no `key_scope` and no
+  `ScanClamp`. The downgrade route is preferred over the refusal because it reuses the
+  existing rebuild path (`succession`'s `state_downgraded` flag is the precedent), keeps the
+  cell's recorded verdict and the run's actual behaviour coherent, and leaves criterion 8's
+  "a downgraded cell is asserted oracle-equal, not exempted" satisfiable. No substitute
+  implementation is built: nothing new executes that did not exist before.
+- **2026-09-15 — reshape at 3g planning: row 6 widened to name succession's partition
+  literals.** 3f's summary left succession's own `driving_steps` call site at
+  `PartitionColumnType::Undeclared` as "worth a follow-up census", out of 3f's scope. On Trino
+  the succession cell is downgraded to the full-rebuild route, which row 6 owns, and a bare
+  string bound against a typed column is the same failure 3a/3b2/3f fixed four times over — so
+  it serves criteria 3 and 8 and is not deferred out. Folded into row 6 rather than given its
+  own row, because whether that route emits a partition literal at all is unverified; row 6
+  runs it live and will settle it. No row added, split or reordered.
 
 - **2026-09-15 — phase 3f done.** All five identified sites of the class now render through
   `partition_literal`: the two `TargetSlicePredicate::Range` emitters, `emit_recurrence_bound_probe`,
