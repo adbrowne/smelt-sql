@@ -5,8 +5,11 @@
 **Blocked summary:** (resolved 2026-09-14) every phase row was `done` or `blocked` on the
 dogfood Databricks credential having expired; the credential has now been refreshed by a human
 and `bash scripts/dbx-verify.sh` is green (reachability, both schemas, out-of-scope refusal).
-Row 11m flipped `blocked` -> `pending`; resumes from `phases/11m-summary.md`'s documented
-prerequisite. Criteria 1-10 remain met; criterion 11 is what 11m closes. See the 2026-09-14
+Row 11m flipped `blocked` -> `pending` -> `planned`; resumes from `phases/11m-summary.md`'s
+documented prerequisite. Re-measured 2026-09-14 22:36: the credential is `oauth-m2m` with a
+**one-hour** token, so the human's 21:28 mint has already lapsed — but the gpg passphrase is
+cached in `gpg-agent`, making a headless re-mint possible; `phases/11m-plan.md` §Prerequisites
+carries the probe-then-auth recipe and the mid-phase refresh discipline. Criteria 1-10 remain met; criterion 11 is what 11m closes. See the 2026-09-14
 entries at the top of `## Blocked`.
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
@@ -194,7 +197,7 @@ of the models or the tooling.
 | 11j | Bootstrap tooling, offline: a `smelt state seed-interval` command that writes one model's interval directly into `.smelt/targets/<target>/intervals.json` using the model's real current hash, so a target with no local run history (the Volume-resident `databricks_job` store) can be seeded from data already known to be ingested, gated with no workspace | done |
 | 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 | 11l | Give external steps an explicit, opt-in freshness carve-out, offline: `ExecuteRequest::assume_external_steps_fresh` + `smelt run --skip-external-steps` (declines to invoke a reached step and records it `RunOutcomeKind::Skipped` in the manifest rather than refusing with `ExternalStepNotInvocable`), `docs/specs/sources.md` §Semantics 12 and `docs/specs/run_state.md` updated, `run_smelt.py`'s `smelt_run` task wired to pass the flag (trusting `smelt_run`'s `depends_on: load_next_day` job-task ordering as the freshness guarantee) — gated by a new offline `external_step_invocation.rs` case and the existing `databricks_bundle` structural suite, no workspace needed | done |
-| 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | pending |
+| 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | planned |
 
 ## Blocked
 
@@ -602,6 +605,18 @@ of the models or the tooling.
 
 ## Decision log
 
+- 2026-09-14 (phase 11m re-plan, post credential refresh): **still no reshape** — 11m remains the
+  single remaining row and every leg of criterion 11 stays inside it. What changed is the
+  prerequisite picture, and the plan was revised rather than re-created: the dogfood credential is
+  `oauth-m2m`, so `scripts/dbx-auth.sh` mints a token that lives exactly one hour. The human's
+  21:28 mint had already expired when this plan step measured at 22:36 (`dbx-verify.sh` still
+  `PERMISSION_DENIED: Invalid Token`), but a non-interactive
+  `gpg --batch --pinentry-mode error --decrypt` probe against `secret.gpg` exits 0, proving the
+  passphrase is cached in `gpg-agent` and a headless re-mint needs no prompt. 11m's Prerequisites
+  now carry that probe-then-auth recipe, the rule that a probe failure blocks rather than
+  improvises, and the ruling that because three compressed-cadence scheduled runs plus an oracle
+  sweep exceed 60 minutes, **re-minting mid-phase is a routine step, not an incident** — with the
+  committed daily cron restored first if the cache wall is hit part-way.
 - 2026-09-14 (phase 11m plan): **no reshape — 11l already absorbed 11k's discovery, and 11m is
   the single remaining row.** The external-step design question 11k surfaced was answered by a
   human and landed as 11l, so nothing was left to split, merge or defer; every remaining leg of

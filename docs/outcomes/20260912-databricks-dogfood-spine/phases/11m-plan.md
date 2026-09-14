@@ -19,14 +19,32 @@ behaviour change.
 
 ## Prerequisites (verify before any live task; do not skip green)
 
-- The dogfood credential is valid. **Measured at plan time (2026-09-14): it is not** —
-  `bash scripts/dbx-verify.sh` fails every schema check with `PERMISSION_DENIED: Invalid Token`.
-  Re-mint with `bash scripts/dbx-auth.sh` (prompts for the passphrase protecting the encrypted
-  secret) then `source scripts/dbx-dogfood-env.sh`, and re-run `scripts/dbx-verify.sh` until it
-  reports reachability **and** the out-of-scope-write refusal green.
-- If the passphrase cannot be supplied in this session (headless), do **no** partial live work:
-  emit `<<PHASE_BLOCKED>>` naming the credential prompt as the sole blocker, exactly as the
-  outcome's driver note requires. An unreachable workspace is never a skip-green.
+Re-measured at plan time **2026-09-14 22:36 local**. The picture has changed since the first
+11m plan pass — record these three facts, they drive the whole phase:
+
+- The credential is `oauth-m2m` and its minted bearer token lives **exactly one hour**
+  (`scripts/dbx-auth.sh` writes `expires_in` from the OIDC exchange). A human re-minted it at
+  21:28; it expired at 22:28, so `bash scripts/dbx-verify.sh` currently still fails every schema
+  check with `PERMISSION_DENIED: Invalid Token`. **That is a stale token, not a stale secret.**
+- **The gpg passphrase is cached in `gpg-agent` right now**, so re-minting is possible from this
+  headless session with no prompt. Prove it non-interactively *before* invoking the auth script,
+  because a cache miss would otherwise hang on pinentry:
+
+      gpg --quiet --batch --pinentry-mode error --decrypt --output /dev/null \
+        "${SMELT_DBX_CONFIG_DIR:-$HOME/.config/databricks-smelt-dogfood}/secret.gpg"
+
+  Exit 0 ⇒ cached ⇒ `timeout 120 bash scripts/dbx-auth.sh < /dev/null` will complete silently.
+  Non-zero ⇒ the cache lapsed ⇒ **stop**: emit `<<PHASE_BLOCKED>>` naming the gpg passphrase as
+  the sole blocker (11m-summary.md's precedent). Never attempt a bare `dbx-auth.sh` on a cache
+  miss, and never do partial live work on an unreachable workspace.
+- **The one-hour token will expire mid-phase.** Three scheduled runs on a compressed cadence plus
+  an oracle sweep exceed 60 minutes, so treat re-minting as a routine step, not an incident: run
+  the probe-then-auth pair again before each long stage (tasks 4, 5, 7) and immediately on any
+  `Invalid Token` from any `dbx-*.sh` script, then re-`source scripts/dbx-dogfood-env.sh`.
+  `gpg-agent`'s `max-cache-ttl` is a hard wall (~2h from the human's 21:28 entry on stock
+  settings); if the probe starts failing part-way through, block on the passphrase rather than
+  abandoning a half-driven cadence — restore the committed daily cron first (task 9) so the
+  workspace is not left on a compressed schedule.
 - 11l merged (`--skip-external-steps` in `run_smelt.py`) and 11k's `sync.include: [dist/*.whl]`
   fix present in `databricks.yml` — both are committed on this branch.
 
@@ -47,7 +65,10 @@ costs a red/green cycle and gains nothing (11i plan's ruling, re-affirmed).
 
 ## Tasks
 
-1. Re-mint the credential and run `bash scripts/dbx-verify.sh` to green (see Prerequisites).
+1. Re-mint the credential: run the gpg cache probe, then
+   `timeout 120 bash scripts/dbx-auth.sh < /dev/null`, then `source scripts/dbx-dogfood-env.sh`,
+   then `bash scripts/dbx-verify.sh` to green on both legs (see Prerequisites). Re-run this pair
+   whenever the hour lapses.
 2. `bash scripts/dbx-bundle.sh deploy` — picks up 11l's `run_smelt.py` and 11k's `sync.include`
    fix. Confirm via `databricks workspace list` that **both** wheels (`_x86_64`, `_aarch64`) are
    present at the path `smelt_env.dependencies` references, since that silent-drop bug is recent.
