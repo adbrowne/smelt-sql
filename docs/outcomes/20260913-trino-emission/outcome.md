@@ -132,7 +132,7 @@ including its null-safe join spelling.
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | done |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | done |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | done |
-| 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | pending |
+| 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | planned |
 
 ## Decision log
 
@@ -396,5 +396,17 @@ including its null-safe join spelling.
   keep `dialect_audit` green per the plan's own verification step ("proves the oracle change
   didn't disturb the schema/value legs") — it did disturb them, positively, and the ratchet
   required following through rather than reverting the mapping fix.
+
+- **2026-09-14 — phase 10 planned; no phase-table reshape.** Phase 10 is the last row, and
+  phase 9's summary surfaced nothing that serves the Success criteria and lacks a home: its one
+  carry-forward (re-check the remaining `#209` ledger rows for a schema-leg type-decode reason
+  phase 9's `trino_type_to_arrow` fixes already closed) is close work and became task 3 of this
+  phase rather than a new row. One scope call the outcome could not have anticipated: §Known
+  Divergences carries a *second* Trino entry — "a `array(...)` result column does not decode to
+  Arrow yet" — whose truth phase 9 may have partly changed (it taught the type map `array(...)`;
+  the result-page cell decoder is a different question). Rather than reason about it in prose,
+  phase 10 settles it with a live test and lands whichever wording that test proves, because
+  republishing a spec while one of its divergence entries is stale is the same defect this
+  outcome exists to prevent, one level up.
 
 ## Blocked
