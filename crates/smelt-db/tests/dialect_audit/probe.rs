@@ -573,15 +573,13 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
         DialectId::DuckDb => SqlDialect::DuckDB,
         DialectId::SparkSql => SqlDialect::SparkSQL,
         DialectId::BigQuery => SqlDialect::BigQuery,
-        // The cross-engine emission audit has no Trino coverage table yet —
-        // that is `20260913-trino-emission`'s subject, not this phase's.
-        DialectId::Trino => unreachable!("dialect_audit has no Trino probes yet"),
+        DialectId::Trino => SqlDialect::Trino,
     };
     let capabilities = match dialect {
         DialectId::DuckDb => BackendCapabilities::duckdb(),
         DialectId::SparkSql => BackendCapabilities::spark(),
         DialectId::BigQuery => BackendCapabilities::bigquery(),
-        DialectId::Trino => unreachable!("dialect_audit has no Trino probes yet"),
+        DialectId::Trino => BackendCapabilities::trino_iceberg(),
     };
     let parsed = smelt_parser::parse(smelt_sql);
     let root = parsed.syntax();

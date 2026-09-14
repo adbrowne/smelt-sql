@@ -42,6 +42,7 @@ pub const COLUMNS: &[(&str, &str)] = &[
 fn ty(dialect: DialectId, col: &str) -> &'static str {
     let bq = dialect == DialectId::BigQuery;
     let spark = dialect == DialectId::SparkSql;
+    let trino = dialect == DialectId::Trino;
     match col {
         "rid" => {
             if bq {
@@ -101,6 +102,8 @@ fn ty(dialect: DialectId, col: &str) -> &'static str {
                 "ARRAY<INT64>"
             } else if spark {
                 "ARRAY<BIGINT>"
+            } else if trino {
+                "ARRAY(BIGINT)"
             } else {
                 "BIGINT[]"
             }
@@ -108,6 +111,8 @@ fn ty(dialect: DialectId, col: &str) -> &'static str {
         "iv_interval" => {
             if spark {
                 "INTERVAL DAY"
+            } else if trino {
+                "INTERVAL DAY TO SECOND"
             } else {
                 "INTERVAL"
             }
@@ -117,6 +122,8 @@ fn ty(dialect: DialectId, col: &str) -> &'static str {
                 "BYTES"
             } else if spark {
                 "BINARY"
+            } else if trino {
+                "VARBINARY"
             } else {
                 "BLOB"
             }
@@ -130,9 +137,7 @@ fn array_lit(dialect: DialectId, elems: &str) -> String {
     match dialect {
         DialectId::DuckDb | DialectId::BigQuery => format!("[{elems}]"),
         DialectId::SparkSql => format!("ARRAY({elems})"),
-        // The cross-engine emission audit has no Trino coverage table yet —
-        // that is `20260913-trino-emission`'s subject, not this phase's.
-        DialectId::Trino => unreachable!("dialect_audit has no Trino fixtures yet"),
+        DialectId::Trino => format!("ARRAY[{elems}]"),
     }
 }
 
@@ -277,14 +282,15 @@ const ROWS: &[Row] = &[
 fn cell(dialect: DialectId, col_idx: usize, value: Option<&str>) -> String {
     let (col, _) = COLUMNS[col_idx];
     let type_name = ty(dialect, col);
-    // Spark's day-time `CAST(<string> AS INTERVAL DAY)` only accepts a bare
-    // signed-integer string (`CAST('1' AS ...)`), not the `'1 day'` text
-    // DuckDB and GoogleSQL both accept — verified live 2026-09-06 (DuckDB
-    // and BigQuery: `CAST('1 day' AS INTERVAL)` parses; Spark:
-    // `INVALID_INTERVAL_FORMAT`). Spark's own `INTERVAL '<n>' DAY` literal
-    // syntax is the one form every engine here accepts, so it replaces the
-    // `CAST(...)` wrapper outright for this column on this dialect alone.
-    if col == "iv_interval" && dialect == DialectId::SparkSql {
+    // Spark's and Trino's day-time `CAST(<string> AS INTERVAL DAY TO SECOND)`
+    // only accept a bare signed-integer string, not the `'1 day'` text
+    // DuckDB and GoogleSQL both accept — verified live (DuckDB and BigQuery:
+    // `CAST('1 day' AS INTERVAL)` parses; Spark: `INVALID_INTERVAL_FORMAT`;
+    // Trino, 2026-09-14: `Cannot cast varchar(5) to interval day to second`).
+    // The `INTERVAL '<n>' DAY` literal syntax is the one form every engine
+    // here accepts, so it replaces the `CAST(...)` wrapper outright for this
+    // column on these two dialects.
+    if col == "iv_interval" && matches!(dialect, DialectId::SparkSql | DialectId::Trino) {
         return match value {
             None => format!("CAST(NULL AS {type_name})"),
             Some(v) => {

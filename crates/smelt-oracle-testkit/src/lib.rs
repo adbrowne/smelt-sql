@@ -16,6 +16,7 @@ mod bigquery_oracle;
 mod duckdb_oracle;
 mod error_class;
 mod spark_oracle;
+mod trino_oracle;
 mod type_comparison;
 mod value;
 
@@ -24,5 +25,6 @@ pub use bigquery_oracle::{BigQueryOracle, BqField};
 pub use duckdb_oracle::{DuckDbOracle, TypeOracle};
 pub use error_class::{classify_oracle_error, OracleErrorKind};
 pub use spark_oracle::SparkOracle;
+pub use trino_oracle::TrinoOracle;
 pub use type_comparison::{compare_types, TypeMatch};
 pub use value::{compare_cells, Cell, ValueMatch, ValueOracle};

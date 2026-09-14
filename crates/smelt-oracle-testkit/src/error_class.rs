@@ -120,6 +120,28 @@ fn is_recognized_query_refusal(msg: &str) -> bool {
         return true;
     }
 
+    // Trino: `BackendError`'s own `Display` strings, captured verbatim from
+    // the live `20260913-trino-emission` phase 5 schema-leg sweep.
+    // `map_trino_error` (`smelt-backend-trino/src/error.rs`) turns every
+    // coordinator-rejected query into one of these three prefixes — an
+    // unrecognised function ("Feature not supported by trino: ... not
+    // registered"), a syntax/argument-arity error ("Execution failed for
+    // 'trino': ..."), or a missing catalog object — and `execute_schema`'s
+    // own "no column metadata" and `trino_type_to_arrow`'s "unrecognised
+    // Trino type signature" client-side errors are wrapped in the same
+    // `execution_failed` constructor, so they share the prefix too. A
+    // transport-level `Connection failed: ...` (the oracle itself unusable)
+    // is deliberately not listed here — it must stay `Fatal`.
+    const TRINO_REFUSALS: &[&str] = &[
+        "Feature not supported by trino:",
+        "Execution failed for 'trino':",
+        "Table or view not found:",
+        "Schema not found:",
+    ];
+    if TRINO_REFUSALS.iter().any(|p| msg.contains(p)) {
+        return true;
+    }
+
     false
 }
 
@@ -218,6 +240,20 @@ mod classify_oracle_error_tests {
             // --- Fatal: kept defensively even though the live probe shows a
             // bad token doesn't take this shape — a revoked-permission case
             // may still produce a plain 401/403. ---
+            // --- Trino, captured verbatim from the live phase 5 sweep. ---
+            (
+                "Feature not supported by trino: line 1:3167: Function 'age' not registered",
+                QueryRefusal,
+            ),
+            (
+                "Execution failed for 'trino': line 1:3167: mismatched input 'LEFT'. Expecting: '*', 'ALL', 'DISTINCT', <expression>",
+                QueryRefusal,
+            ),
+            (
+                "Execution failed for 'trino': unrecognised Trino type signature: array(bigint)",
+                QueryRefusal,
+            ),
+            ("Connection failed: tcp connect error", Fatal),
             ("401 Unauthorized: invalid credentials", Fatal),
             (
                 "403 POST https://bigquery.googleapis.com/bigquery/v2/projects/x/jobs: Access Denied",

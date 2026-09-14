@@ -69,6 +69,45 @@ impl TrinoClient {
         Ok(batches)
     }
 
+    /// Submit `sql`, follow `nextUri` to completion so any error surfaces,
+    /// and return the reported `(name, type)` pairs from the result schema.
+    /// Decodes no rows — the schema-only audit leg needs types, not data,
+    /// and an array cell's decode gap must never masquerade as a rejected
+    /// probe.
+    pub async fn execute_schema(&self, sql: &str) -> Result<Vec<(String, String)>, BackendError> {
+        let url = format!(
+            "{}/v1/statement",
+            self.config.base_url.trim_end_matches('/')
+        );
+        let mut page = self
+            .send(self.http.post(&url).body(sql.to_string()))
+            .await?;
+
+        let mut columns: Option<Vec<Column>> = None;
+        loop {
+            if let Some(error) = &page.error {
+                return Err(map_trino_error(error));
+            }
+            if let Some(cols) = &page.columns {
+                columns = Some(cols.clone());
+            }
+            match page.next_uri.clone() {
+                Some(next_uri) => {
+                    page = self.send(self.http.get(&next_uri)).await?;
+                }
+                None => break,
+            }
+        }
+
+        let columns = columns.ok_or_else(|| {
+            BackendError::execution_failed(
+                "trino",
+                format!("Trino returned no column metadata for: {sql}"),
+            )
+        })?;
+        Ok(columns.into_iter().map(|c| (c.name, c.raw_type)).collect())
+    }
+
     async fn send(&self, builder: reqwest::RequestBuilder) -> Result<QueryResults, BackendError> {
         let mut builder = builder
             .header("X-Trino-User", &self.config.user)

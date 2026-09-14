@@ -4,11 +4,11 @@
 //! Refines the three-way `passing`/`gap`/`unverified` vocabulary
 //! `docs/specs/multi_backend.md` §"Cross-engine emission audit" states:
 //! `passing` splits into [`Coverage::Stated`] (an explicit verdict exists) and
-//! [`Coverage::Verified`] (the implicit `Native` default is backed by a live
-//! audit leg — the entry's dialect is a [`crate::AUDITED_DIALECTS`] member).
+//! [`Coverage::Verified`] (the implicit `Native` default is backed by both a
+//! live schema leg and a live value leg — see `BOTH_LEGS_LIVE` below).
 //! [`Coverage::Unverified`] is the hole the implicit-`Native` default opens:
-//! no explicit verdict, and no audit leg to have observed the default
-//! correct. Every `Unverified` pair for [`DialectId::Trino`] must be named,
+//! no explicit verdict, and no both-legs-live audit to have observed the
+//! default correct. Every `Unverified` pair for [`DialectId::Trino`] must be named,
 //! line for line, in the shrink-only census at
 //! `.claude/trino-emission-census.txt` — a pair absent from that file fails
 //! immediately, and a recorded pair that has since gained a verdict or an
@@ -24,6 +24,16 @@ use crate::ledger::{LedgerRow, Verdict};
 use crate::report::{applicable_positions, position_label};
 use crate::AUDITED_DIALECTS;
 
+/// Dialects with **both** the schema and value legs live — the narrower set
+/// `classify` consults for `Coverage::Verified`, distinct from
+/// [`crate::AUDITED_DIALECTS`] (which drives the offline totality gates: the
+/// fixture gate and the print-for-every-dialect gate). A dialect can join
+/// `AUDITED_DIALECTS` with only a schema leg — as Trino did in
+/// `20260913-trino-emission` phase 5 — without every one of its 232 census
+/// rows silently flipping to `Verified` on the strength of that leg alone.
+/// Trino joins this set once phase 6 lands its value leg.
+const BOTH_LEGS_LIVE: &[DialectId] = &[DialectId::DuckDb, DialectId::SparkSql, DialectId::BigQuery];
+
 /// The four-way refinement of `passing`/`gap`/`unverified`
 /// (`docs/specs/multi_backend.md` §"Cross-engine emission audit") the census
 /// classifies each `(dialect, entry, position)` pair into.
@@ -31,8 +41,9 @@ use crate::AUDITED_DIALECTS;
 pub enum Coverage {
     /// An explicit `(dialect, position)` verdict exists in the registry.
     Stated,
-    /// No explicit verdict, but the dialect is audited — the implicit
-    /// `Native` default has been observed correct by a live leg.
+    /// No explicit verdict, but the dialect has both legs live — the implicit
+    /// `Native` default has been observed correct by a live schema leg AND a
+    /// live value leg.
     Verified,
     /// A ledger row (`Gap` or `Divergent`) covers this pair — a live finding,
     /// checked ahead of the registry's own verdict because a pair the
@@ -76,7 +87,7 @@ pub fn classify(
     if sig.stated_emission_at(dialect, position).is_some() {
         return Coverage::Stated;
     }
-    if AUDITED_DIALECTS.contains(&dialect) {
+    if BOTH_LEGS_LIVE.contains(&dialect) {
         Coverage::Verified
     } else {
         Coverage::Unverified
@@ -270,11 +281,11 @@ mod tests {
     }
 
     #[test]
-    fn unverified_pairs_exist_only_for_unaudited_dialects() {
+    fn unverified_pairs_exist_only_for_dialects_without_both_legs() {
         let entries: Vec<&Signature> = BuiltinRegistry::names()
             .filter_map(BuiltinRegistry::resolve)
             .collect();
-        for dialect in AUDITED_DIALECTS {
+        for dialect in BOTH_LEGS_LIVE {
             let rows = census_for(
                 *dialect,
                 entries.iter().copied(),
@@ -282,11 +293,32 @@ mod tests {
             );
             assert!(
                 rows.is_empty(),
-                "{} is audited but has Unverified pairs: {:?}",
+                "{} has both legs live but has Unverified pairs: {:?}",
                 dialect.slug(),
                 sorted_keys(&rows)
             );
         }
+    }
+
+    /// The regression guard for the `Verified`-becomes-leg-aware flip: joining
+    /// `AUDITED_DIALECTS` with only a schema leg must not make a dialect's
+    /// unstated pairs read as `Verified`.
+    #[test]
+    fn a_schema_only_dialect_is_not_yet_verified() {
+        assert!(
+            AUDITED_DIALECTS.contains(&DialectId::Trino),
+            "Trino must be in AUDITED_DIALECTS (schema leg is live)"
+        );
+        assert!(
+            !BOTH_LEGS_LIVE.contains(&DialectId::Trino),
+            "Trino must not be in BOTH_LEGS_LIVE yet (no value leg until phase 6)"
+        );
+        let sig = test_signature("TEST_SCHEMA_ONLY_UNSTATED");
+        assert_eq!(
+            classify(DialectId::Trino, &sig, Position::Scalar, &[]),
+            Coverage::Unverified,
+            "a schema-only audit leg must not flip an unstated pair to Verified"
+        );
     }
 
     #[test]

@@ -1320,11 +1320,11 @@ resolves nested widening to a table rewrite.
   `SqlDialect::Trino`, so no incremental/maintenance family runs on a `trino` target today — a
   full refresh is the only route. Owner: `docs/outcomes/20260913-trino-incremental/`.
 
-- **No `dialect_audit` Trino leg.** The cross-engine emission audit's `AUDITED_DIALECTS` is a
-  three-member test-local const that does not include Trino, so Trino has no fixture, probe,
-  ledger row or baseline metric, and `docs/reference/dialect-coverage.md` has no Trino column.
-  Owner: `docs/outcomes/20260913-trino-emission/` phases 5 (schema leg) and 6 (value leg, ledger,
-  ratchet metric).
+- **No `dialect_audit` Trino value leg.** Trino has a live schema leg (fixture, probes, ledger
+  rows, `dialect_gaps_trino` baseline metric, and a `docs/reference/dialect-coverage.md` column),
+  but no value leg yet — the census's `Verified` classification stays withheld from Trino until
+  both legs are live, so an unstated pair reads `Unverified`, never a false pass. Owner:
+  `docs/outcomes/20260913-trino-emission/` phase 6 (value leg, ledger, ratchet metric).
 
 - **`supports_transactional_ddl = false` measures smelt's client, not Trino's grammar.** The
   measured `Client does not support transactions` error comes from smelt's stateless

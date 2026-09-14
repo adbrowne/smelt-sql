@@ -219,3 +219,48 @@ async fn an_http_5xx_is_not_parsed_as_a_result_page() {
     let message = err.to_string();
     assert!(message.contains("503"));
 }
+
+#[tokio::test]
+async fn execute_schema_returns_columns_without_decoding_rows() {
+    let (base_url, state) = spawn_stub().await;
+    // `data` carries a cell shape `rows_to_record_batch` cannot decode
+    // (an array with no smelt Arrow mapping yet) — proving the schema leg
+    // never touches it.
+    state.pages.lock().unwrap().push_back(json!({
+        "id": "q1", "stats": {"state": "FINISHED"},
+        "columns": [
+            {"name": "a", "type": "bigint"},
+            {"name": "b", "type": "array(bigint)"},
+        ],
+        "data": [[1, ["not", "decodable", "as", "arrow"]]],
+    }));
+
+    let client = TrinoClient::new(config(&base_url));
+    let columns = client.execute_schema("select a, b from t").await.unwrap();
+    assert_eq!(
+        columns,
+        vec![
+            ("a".to_string(), "bigint".to_string()),
+            ("b".to_string(), "array(bigint)".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn execute_schema_errors_on_a_rejected_query() {
+    let (base_url, state) = spawn_stub().await;
+    state.pages.lock().unwrap().push_back(json!({
+        "id": "q1", "stats": {"state": "FAILED"},
+        "error": {
+            "message": "line 1:8: mismatched input 'nonsense'",
+            "errorCode": 1,
+            "errorName": "SYNTAX_ERROR",
+            "errorType": "USER_ERROR",
+        },
+    }));
+
+    let client = TrinoClient::new(config(&base_url));
+    let err = client.execute_schema("select nonsense").await.unwrap_err();
+    assert!(matches!(err, BackendError::ExecutionFailed { .. }));
+    assert!(err.to_string().contains("mismatched input"));
+}

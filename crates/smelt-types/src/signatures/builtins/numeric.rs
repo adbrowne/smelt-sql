@@ -41,24 +41,53 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
         // engines. Verified live 2026-09-06: DuckDB `log(100)` = `log10(100)` =
         // 2.0 while Spark's `log(100)` = `ln(100)` = 4.605...; both agree
         // `log(2, 8)` = 3.0.
-        .with_emission(&[(
-            DialectId::SparkSql,
-            Position::Any,
-            Emission::Conditional(&[
-                ConditionalArm {
-                    arity: Some(1),
-                    classes: &[],
-                    verdict: SettledEmission::Rename("LOG10"),
-                },
-                // `otherwise` covers every other arity — in practice, the
-                // two-argument `LOG(base, x)` form, native on both engines.
-                ConditionalArm {
-                    arity: None,
-                    classes: &[],
-                    verdict: SettledEmission::Native,
-                },
-            ]),
-        )]),
+        .with_emission(&[
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Conditional(&[
+                    ConditionalArm {
+                        arity: Some(1),
+                        classes: &[],
+                        verdict: SettledEmission::Rename("LOG10"),
+                    },
+                    // `otherwise` covers every other arity — in practice, the
+                    // two-argument `LOG(base, x)` form, native on both engines.
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[],
+                        verdict: SettledEmission::Native,
+                    },
+                ]),
+            ),
+            // Trino has no one-argument `log(x)` overload at all — only
+            // `log(x, b)`, which requires two DOUBLEs (verified live,
+            // `20260913-trino-emission` phase 5: `LOG(CAST(10 AS BIGINT))`
+            // -> "Unexpected parameters (bigint) for function log. Expected:
+            // log(double, double)", while the two-argument call succeeds
+            // with implicit BIGINT->DOUBLE widening). The one-argument form
+            // is refused at compile time rather than emitted into a runtime
+            // error the engine would reject.
+            (
+                DialectId::Trino,
+                Position::Any,
+                Emission::Conditional(&[
+                    ConditionalArm {
+                        arity: Some(1),
+                        classes: &[],
+                        verdict: SettledEmission::Unsupported {
+                            reason: "Trino's `log` has no one-argument overload; use `LN` \
+                                     for natural log or the two-argument `LOG(x, base)`",
+                        },
+                    },
+                    ConditionalArm {
+                        arity: None,
+                        classes: &[],
+                        verdict: SettledEmission::Native,
+                    },
+                ]),
+            ),
+        ]),
     );
     insert(Signature::new(
         "LN",

@@ -32,6 +32,7 @@ mod leg_tests;
 mod legs;
 mod registry_totality;
 mod spark;
+mod trino;
 
 use smelt_types::DialectId;
 
@@ -39,11 +40,16 @@ use smelt_types::DialectId;
 /// exists.
 ///
 /// `DialectId::ALL` is the exhaustive identity enumeration (criterion 2 of
-/// `20260913-trino-target-spine`); this audit's fixtures, probes and gap
-/// baseline are a separate, narrower claim. Trino has no fixture, no probe
-/// and no baseline entry yet — building those is `20260913-trino-emission`'s
-/// subject, named as out of scope for the target-spine outcome. Iterating
-/// `DialectId::ALL` here instead of this list would silently demand Trino
-/// coverage this phase does not provide.
-const AUDITED_DIALECTS: &[DialectId] =
-    &[DialectId::DuckDb, DialectId::SparkSql, DialectId::BigQuery];
+/// `20260913-trino-target-spine`). This audit's fixtures, probes and gap
+/// baseline are a separate, narrower claim, driving the offline totality
+/// gates (the fixture gate and the print-for-every-dialect gate) — it does
+/// **not** mean a member has both legs live. Trino joined this list in
+/// `20260913-trino-emission` phase 5 with only its schema leg live; the
+/// `census` module's `Verified` classification consults a separate,
+/// narrower set for that reason (see `census::BOTH_LEGS_LIVE`).
+const AUDITED_DIALECTS: &[DialectId] = &[
+    DialectId::DuckDb,
+    DialectId::SparkSql,
+    DialectId::BigQuery,
+    DialectId::Trino,
+];

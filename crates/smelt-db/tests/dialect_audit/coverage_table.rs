@@ -39,7 +39,7 @@ fn every_entry_and_dialect_appears_in_the_table() {
     }
     // Every dialect has a verification-tier row: the table's honesty depends
     // on saying which cells a live leg actually visits.
-    for label in ["DuckDB", "Spark SQL", "BigQuery"] {
+    for label in ["DuckDB", "Spark SQL", "BigQuery", "Trino"] {
         assert!(
             rendered.contains(&format!("| {label} |")),
             "{label} has no verification-tier row"

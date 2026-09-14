@@ -127,7 +127,7 @@ including its null-safe join spelling.
 | 2 | The coverage gate first, red: a standing test naming every registry entry with no explicit Trino verdict and no audit verification, distinguishing *unverified* from *passing* from *gap* — landed before any verdict, so the hole is visible as a failure | done |
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | done |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | done |
-| 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | planned |
+| 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | done |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | pending |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | pending |
@@ -264,5 +264,18 @@ including its null-safe join spelling.
   decodes no row data, so the recorded `array(...)` Arrow-decode divergence cannot masquerade as a
   rejected probe. Unlike phase 3, this phase has no offline fallback — the legs are the
   never-skip-green ones, so an unreachable tier is `<<PHASE_BLOCKED>>`, not a stated verdict.
+
+- **2026-09-14 — phase 5 done.** The live schema leg found 57 gaps (53 unregistered builtins, 4
+  type-leg mismatches), tracked in bulk under #209, plus one entry (`LOG`'s one-argument form)
+  that got a real `Emission::Conditional` registry fix rather than a ledger row, since a single
+  ledger row cannot express "gap on this arm, pass on the other" when one of the two probes
+  carries no arm of its own. `census.rs`'s `Verified` classification now consults a `BOTH_LEGS_LIVE`
+  set distinct from `AUDITED_DIALECTS`, exactly as planned — Trino joined the latter only, so the
+  232-row (now 217-row, after phases 3/4's own verdicts) census is unaffected. Confirmed (not
+  anticipated in the plan): running the full-workspace `cargo test` with the Trino tier exported
+  causes namespace/transaction collisions in `smelt-backend-trino`'s own test suite under
+  concurrent scheduling — pre-existing, reproduced with and without this phase's changes, avoided
+  by running targeted live commands first and `verify-phase.sh` with the tier unexported, matching
+  phases 3/4's own pattern. See `phases/05-summary.md`.
 
 ## Blocked

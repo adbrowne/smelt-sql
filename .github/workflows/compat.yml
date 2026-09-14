@@ -57,6 +57,10 @@ jobs:
               - 'crates/smelt-cli/tests/common/**'
               - 'crates/smelt-runtime/**'
               - 'crates/smelt-dialect/**'
+              - 'crates/smelt-db/tests/dialect_audit/**'
+              - 'crates/smelt-oracle-testkit/**'
+              - 'crates/smelt-types/**'
+              - '.claude/dialect-gaps-baseline.txt'
               - 'examples/trino_spine/**'
               - 'scripts/trino-*'
               - 'scripts/trino-catalog/**'
@@ -507,6 +511,20 @@ jobs:
           cargo test -p smelt-cli --test trino_smoke --test seed_parity --test materialization_parity --quiet 2>&1 | tee trino-cli-test.log | tail -60
           if grep -qi skipping trino-cli-test.log; then
             echo "::error::a Trino leg in smelt-cli skipped with the tier up — SMELT_TRINO_URL should be set in this job"
+            exit 1
+          fi
+
+      # The dialect_audit binary also carries Spark and BigQuery legs, which
+      # legitimately skip green with no session/credential in this job — the
+      # check is deliberately narrow to `schema_leg_trino` rather than a bare
+      # `skipping`, unlike the two steps above (which run no other dialect's
+      # legs and can afford the broad check).
+      - name: Run the dialect_audit Trino schema leg
+        run: |
+          set -o pipefail
+          cargo test -p smelt-db --test dialect_audit --quiet 2>&1 | tee dialect-audit-test.log | tail -60
+          if grep -q "skipping schema_leg_trino" dialect-audit-test.log; then
+            echo "::error::schema_leg_trino skipped with the tier up — SMELT_TRINO_URL should be set in this job"
             exit 1
           fi
 

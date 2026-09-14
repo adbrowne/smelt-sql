@@ -9,7 +9,9 @@ description = "Dev-only cross-engine oracle transport: DuckDB / Spark / BigQuery
 
 [dependencies]
 smelt-types = { path = "../smelt-types" }
+smelt-backend-trino = { path = "../smelt-backend-trino" }
 duckdb = { workspace = true }
 arrow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }

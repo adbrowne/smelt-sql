@@ -3,7 +3,7 @@
 
 use crate::probe;
 use crate::{fixture, overrides, AUDITED_DIALECTS};
-use smelt_oracle_testkit::{DuckDbOracle, ValueOracle};
+use smelt_oracle_testkit::{DuckDbOracle, TrinoOracle, ValueOracle};
 use smelt_types::{BuiltinRegistry, DialectId};
 
 #[test]
@@ -178,6 +178,29 @@ fn the_duckdb_fixture_executes_and_yields_eight_rows() {
         .execute_rows(&sql)
         .unwrap_or_else(|e| panic!("fixture must execute: {e}\n{sql}"));
     assert_eq!(rows.len(), fixture::ROW_COUNT);
+}
+
+/// Live. Selects named columns rather than `*` so `arr_int`/`bin_blob`/
+/// `iv_interval` — none of which `trino_type_to_arrow` decodes yet — are not
+/// in scope; this test proves the fixture executes and yields the right row
+/// count, not that every column decodes.
+#[test]
+fn the_trino_fixture_executes_and_yields_eight_rows() {
+    let Some(oracle) = TrinoOracle::from_env() else {
+        eprintln!(
+            "SMELT_TRINO_URL unset — skipping the_trino_fixture_executes_and_yields_eight_rows"
+        );
+        return;
+    };
+    let sql = format!(
+        "{}SELECT rid, g, n_int, n_bigint, n_double, n_dec, s_text, b_bool, d_date, ts_ts \
+         FROM fixture",
+        fixture::fixture_cte(DialectId::Trino)
+    );
+    let count = oracle
+        .row_count(&sql)
+        .unwrap_or_else(|e| panic!("fixture must execute: {e}\n{sql}"));
+    assert_eq!(count, fixture::ROW_COUNT);
 }
 
 /// An override naming an entry the registry does not have is dead weight that
