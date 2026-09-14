@@ -152,7 +152,7 @@ approximated.
 | 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | blocked |
 | 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | done |
 | 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | done |
-| 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
+| 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | planned |
 | 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
@@ -163,6 +163,18 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — reshape at phase 3d planning: no row added, split or reordered; 3d absorbs phase 3's
+  unlanded Test 9 (CI wiring) and generalizes the live-gated census from a hardcoded list to a
+  directory scan.** Phase 3's Tests 7-8 are 3d's stated scope already; its Test 9 (the
+  `trino-integration` job runs the new binaries) was never landed, and the survey done while planning
+  found the gap is wider than the two new binaries: `trino_incremental_families`,
+  `trino_state_residency`, `trino_ddl_live`, `trino_lock_versioning`, `trino_posture_plan_invariance`
+  and `trino_broken_foreign_keys` are all live-gated and none is run by the job, so each passes
+  vacuously in CI by skipping. A hardcoded census in `trino_ci_wiring.rs` is what let that drift
+  happen, so the fix is to derive the census rather than extend the list. This serves criteria 2, 5
+  and 11 — a gate nothing runs proves nothing — and so does not leave the outcome. The live legs 3d
+  adds also run serially (`--test-threads=1`) per 3b2's interim workaround, pending phase 3e.
 
 - **2026-09-15 — phase 3b2 landed: `column_type` must be resolved through the SAME projection
   `apply_type_casts` uses, never through `resolved_model_schema` (the axis's own resolution
