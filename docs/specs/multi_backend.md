@@ -963,7 +963,23 @@ set is never offered that technique, at plan time, not surfaced as a runtime err
   in the same statement. `false` does not refuse the change-suppressed MERGE transform; it
   changes its lowering — the departed-row delete is emitted as a separate scoped `DELETE`
   statement inside the same statement group instead of a `MERGE` clause (the dialect split the
-  transform's licence names).
+  transform's licence names). Trino is now the second backend measuring `false` here (`WHEN NOT
+  MATCHED BY SOURCE THEN DELETE` refuses with `mismatched input 'BY'. Expecting: 'AND', 'THEN'`,
+  `docs/outcomes/20260913-trino-incremental/phases/01-summary.md`), and the same consequence
+  applies — but over the **non-atomic, `TargetSchema`-resident** staged group Trino builds
+  (`staged_relation_residence = TargetSchema`, `staged_relation_group_is_atomic = false`, below),
+  never the session-temporary, atomic group every other `false` case so far has had: the three
+  recovery obligations that non-atomic shape already carries (every stage statement precedes any
+  target mutation; the relation's name is derived, deterministic, and collision-safe; the group
+  reclaims its own relation with a leading `DROP ... IF EXISTS`) cover the departed-row delete
+  too, since it executes inside the same non-atomic group as every other statement there. The
+  clause forms phase 1 measured **accepted** are the vocabulary the merge-less conditional write
+  is built from: `WHEN MATCHED THEN DELETE` (the delete arm, used in place of the absent `BY
+  SOURCE` clause), a `WHEN MATCHED AND <pred>` guard (confirmed to restrict which matched rows
+  update), two ordered `WHEN MATCHED` arms resolving **first-match-wins** (confirmed: the first
+  matching arm's action applies, never the second), and a subquery `USING (SELECT … FROM
+  <staged>) s` source (matching the shape T3's staged relation presents, as opposed to a `VALUES`
+  list).
 - **`supports_staged_relation_group`** — the backend can execute a statement group built around a
   named staged relation (`CREATE` it, populate it, run dependent statements against it, `DROP`
   it). Gates the staged-candidate conditional DELETE+INSERT — the merge-less realisation of
@@ -1024,11 +1040,21 @@ their own struct fields (see §Known Divergences).
 
 ### Whole-row MERGE
 
-The column-scoped merge and keyed-fold emitters upsert a whole row, and the two SQL families
-spell that differently. DuckDB and Spark accept `WHEN MATCHED THEN UPDATE SET *` and `WHEN NOT
-MATCHED THEN INSERT *`, which name no columns. GoogleSQL accepts neither: `SET *` is a syntax
-error, and the whole-row insert is spelled `INSERT ROW`. So BigQuery's matched arm is rendered
-column by column, `c = source.c`, over the model's output projection.
+The column-scoped merge and keyed-fold emitters upsert a whole row, and the SQL families spell
+that in **three** ways, not two. DuckDB and Spark accept `WHEN MATCHED THEN UPDATE SET *` and
+`WHEN NOT MATCHED THEN INSERT *`, which name no columns. GoogleSQL accepts neither: `SET *` is a
+syntax error, and the whole-row insert is spelled `INSERT ROW`. So BigQuery's matched arm is
+rendered column by column, `c = source.c`, over the model's output projection. Trino is a third,
+distinct family, not a member of either: measured by executing each form against a live
+Iceberg-backed coordinator (`docs/outcomes/20260913-trino-incremental/phases/01-summary.md`),
+every star/`ROW` shorthand is a grammar-level parse error on **both** arms —
+`WHEN MATCHED THEN UPDATE SET *` (`mismatched input '*'. Expecting: <identifier>`),
+`WHEN NOT MATCHED THEN INSERT *` (`mismatched input '*'. Expecting: '(', 'VALUES'`), and
+`WHEN NOT MATCHED THEN INSERT ROW` (`mismatched input 'ROW'. Expecting: '(', 'VALUES'`) each
+refuse. So Trino, like BigQuery, renders both arms column by column — `UPDATE SET c = source.c`
+and the explicit column-list `INSERT (c, …) VALUES (source.c, …)` — over the model's output
+projection; unlike BigQuery, Trino has no `INSERT ROW` fallback at all, so its not-matched arm is
+never spelled any other way.
 
 That projection is carried on the compiled model (`CompiledModel::output_columns`), derived from
 the model's source select list using the same notion of an output column name the analyzer's
@@ -1188,6 +1214,27 @@ The `trino` target realises none of the five correctness structures `state.md`'s
 in autocommit, so a ledger write and its data write can never commit together. Every cell that
 would otherwise depend on one of those structures takes the degradation contract's
 recompute-family downgrade instead, carrying `MaintenanceStateDowngraded`; it is never refused.
+Which landing state that is, per `Technique`, is derived once by
+`smelt_logical::maintenance::availability` rather than asserted here:
+
+| `Technique` | On `trino` | Diagnostic |
+|---|---|---|
+| `DeleteInsert` | reachable; the write window is emulated (`DELETE` + `INSERT`), since `supports_insert_overwrite` is `✗` | — |
+| `PerGroupRecompute`, no `key_scope` | reachable | — |
+| `PerGroupRecompute`, key-addressed (`UpstreamKeyed` / `DownstreamGrainOverUpstream`) | refused — needs the fingerprint sidecar, and a clamped current-source scan is unsound here, not merely wider | `UnsupportedOnBackend` |
+| `KeyedFold` | downgraded to its recompute-family equivalent — no reconciliation ledger, so no never-fold-twice refusal | `MaintenanceStateDowngraded` |
+| `ColumnScopedMerge`, `InPlaceUpdate` | downgraded — no transactional merge ledger, exactly as on Spark (Delta) | `MaintenanceStateDowngraded` |
+| `SuccessionPatch` | downgraded to `DeleteInsert` (full rebuild), never a ledger-less patch | `MaintenanceStateDowngraded` |
+
+`supports_column_scoped_merge = ✓` and the `ColumnScopedMerge` row above are **not** in conflict:
+the flag describes a statement shape Trino can execute (§"Whole-row MERGE"'s column-by-column
+form), while the plan cell's technique demands a correctness structure — the transactional merge
+ledger — the dialect does not realise, and admission asks the second question after the first.
+Trino introduces **no new diagnostic code**: the three codes named above —
+`MaintenanceStateDowngraded`, `UnsupportedOnBackend`, and `DeclaredContractRequiresState` (used by
+`contract.deferral`'s refusal, below) — cover every route in the table, so no later phase may mint
+a Trino-specific one.
+
 Schema evolution is a separate axis: Iceberg supports it directly, and its measured
 `SchemaOperation` mapping lands in `ddl_trino`
 (`docs/outcomes/20260913-trino-ledger/outcome.md`). The contract lattice degrades the same way:
