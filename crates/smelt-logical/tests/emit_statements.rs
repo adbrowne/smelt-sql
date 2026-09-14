@@ -1692,43 +1692,225 @@ fn source_mutation_fingerprint_panics_on_empty_digest_columns() {
 
 /// `docs/specs/incremental_shapes.md` §"The partition grain" rule 8a — a
 /// partition literal renders in its axis's own domain: quoted and escaped
-/// on the calendar axis, bare on the integer axis, and `Err` for a
-/// non-integer value on the integer axis.
+/// on the calendar axis (`Text`/`Undeclared` column type), bare on the
+/// integer axis, and `Err` for a non-integer value on the integer axis.
 #[test]
 fn partition_literal_renders_per_axis() {
-    use smelt_logical::maintenance::emit::partition_literal;
+    use smelt_logical::maintenance::emit::{partition_literal, PartitionColumnType};
     use smelt_logical::PartitionAxis;
 
     assert_eq!(
-        partition_literal(PartitionAxis::Calendar, "2026-01-01").unwrap(),
+        partition_literal(
+            PartitionAxis::Calendar,
+            PartitionColumnType::Undeclared,
+            "2026-01-01"
+        )
+        .unwrap(),
         "'2026-01-01'"
     );
     assert_eq!(
-        partition_literal(PartitionAxis::Calendar, "it's").unwrap(),
+        partition_literal(PartitionAxis::Calendar, PartitionColumnType::Text, "it's").unwrap(),
         "'it''s'"
     );
-    assert_eq!(partition_literal(PartitionAxis::Integer, "7").unwrap(), "7");
     assert_eq!(
-        partition_literal(PartitionAxis::Integer, "-3").unwrap(),
+        partition_literal(PartitionAxis::Integer, PartitionColumnType::Undeclared, "7").unwrap(),
+        "7"
+    );
+    assert_eq!(
+        partition_literal(
+            PartitionAxis::Integer,
+            PartitionColumnType::Undeclared,
+            "-3"
+        )
+        .unwrap(),
         "-3"
     );
-    assert!(partition_literal(PartitionAxis::Integer, "2026-01-01").is_err());
-    assert!(partition_literal(PartitionAxis::Integer, "not-a-number").is_err());
+    assert!(partition_literal(
+        PartitionAxis::Integer,
+        PartitionColumnType::Undeclared,
+        "2026-01-01"
+    )
+    .is_err());
+    assert!(partition_literal(
+        PartitionAxis::Integer,
+        PartitionColumnType::Undeclared,
+        "not-a-number"
+    )
+    .is_err());
+}
+
+/// `docs/specs/incremental_shapes.md` §"The partition grain" rule 8a — the
+/// referenced partition column's own type decides the calendar-axis
+/// spelling: `DATE '…'`/`TIMESTAMP '…'` for a `Date`/`Timestamp` column,
+/// unchanged quoted-string for `Text`/`Undeclared`.
+#[test]
+fn partition_literal_types_a_calendar_literal_by_column_type() {
+    use smelt_logical::maintenance::emit::{partition_literal, PartitionColumnType};
+    use smelt_logical::PartitionAxis;
+
+    assert_eq!(
+        partition_literal(
+            PartitionAxis::Calendar,
+            PartitionColumnType::Date,
+            "2026-01-01"
+        )
+        .unwrap(),
+        "DATE '2026-01-01'"
+    );
+    for (value, expected) in [
+        ("2026-01-01 00:00:00", "TIMESTAMP '2026-01-01 00:00:00'"),
+        ("2026-01-01T00:00:00", "TIMESTAMP '2026-01-01T00:00:00'"),
+        (
+            "2026-01-01 00:00:00.123456",
+            "TIMESTAMP '2026-01-01 00:00:00.123456'",
+        ),
+    ] {
+        assert_eq!(
+            partition_literal(
+                PartitionAxis::Calendar,
+                PartitionColumnType::Timestamp,
+                value
+            )
+            .unwrap(),
+            expected,
+            "value: {value}"
+        );
+    }
+    assert_eq!(
+        partition_literal(
+            PartitionAxis::Calendar,
+            PartitionColumnType::Text,
+            "2026-01-01"
+        )
+        .unwrap(),
+        "'2026-01-01'"
+    );
+    assert_eq!(
+        partition_literal(
+            PartitionAxis::Calendar,
+            PartitionColumnType::Undeclared,
+            "2026-01-01"
+        )
+        .unwrap(),
+        "'2026-01-01'"
+    );
+    assert_eq!(
+        partition_literal(PartitionAxis::Integer, PartitionColumnType::Undeclared, "7").unwrap(),
+        "7"
+    );
+}
+
+/// A value that parses as neither date nor timestamp shape against a
+/// `Date`/`Timestamp` column is `Err` naming the value (fail-loud, matching
+/// the integer arm). Against `Text`/`Undeclared` it stays today's escaped
+/// string.
+#[test]
+fn partition_literal_refuses_a_non_calendar_shaped_value_for_a_typed_column() {
+    use smelt_logical::maintenance::emit::{partition_literal, PartitionColumnType};
+    use smelt_logical::PartitionAxis;
+
+    let err = partition_literal(
+        PartitionAxis::Calendar,
+        PartitionColumnType::Date,
+        "not-a-date",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("not-a-date"),
+        "error must name the value: {err}"
+    );
+
+    let err = partition_literal(
+        PartitionAxis::Calendar,
+        PartitionColumnType::Timestamp,
+        "not-a-date",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("not-a-date"),
+        "error must name the value: {err}"
+    );
+
+    assert_eq!(
+        partition_literal(PartitionAxis::Calendar, PartitionColumnType::Text, "it's").unwrap(),
+        "'it''s'"
+    );
+    assert_eq!(
+        partition_literal(
+            PartitionAxis::Calendar,
+            PartitionColumnType::Undeclared,
+            "it's"
+        )
+        .unwrap(),
+        "'it''s'"
+    );
 }
 
 #[test]
 fn region_for_axis_renders_per_axis() {
+    use smelt_logical::maintenance::emit::PartitionColumnType;
     use smelt_logical::PartitionAxis;
 
-    let calendar = Region::for_axis(PartitionAxis::Calendar, "2026-01-01", "2026-01-02").unwrap();
+    let calendar = Region::for_axis(
+        PartitionAxis::Calendar,
+        PartitionColumnType::Undeclared,
+        "2026-01-01",
+        "2026-01-02",
+    )
+    .unwrap();
     assert_eq!(calendar.start, "'2026-01-01'");
     assert_eq!(calendar.end, "'2026-01-02'");
 
-    let integer = Region::for_axis(PartitionAxis::Integer, "1", "2").unwrap();
+    let integer = Region::for_axis(
+        PartitionAxis::Integer,
+        PartitionColumnType::Undeclared,
+        "1",
+        "2",
+    )
+    .unwrap();
     assert_eq!(integer.start, "1");
     assert_eq!(integer.end, "2");
 
-    assert!(Region::for_axis(PartitionAxis::Integer, "1", "not-a-number").is_err());
+    assert!(Region::for_axis(
+        PartitionAxis::Integer,
+        PartitionColumnType::Undeclared,
+        "1",
+        "not-a-number"
+    )
+    .is_err());
+}
+
+/// `Region::predicate` renders `col >= start AND col < end` using the typed
+/// literal spelling `Region::for_axis` produced — the `Date` case renders
+/// `DATE '…'` bounds; the `Text` case is byte-identical to today.
+#[test]
+fn region_predicate_uses_the_column_type() {
+    use smelt_logical::maintenance::emit::PartitionColumnType;
+    use smelt_logical::PartitionAxis;
+
+    let date_region = Region::for_axis(
+        PartitionAxis::Calendar,
+        PartitionColumnType::Date,
+        "2026-01-01",
+        "2026-01-02",
+    )
+    .unwrap();
+    assert_eq!(
+        date_region.predicate(None, "dt"),
+        "dt >= DATE '2026-01-01' AND dt < DATE '2026-01-02'"
+    );
+
+    let text_region = Region::for_axis(
+        PartitionAxis::Calendar,
+        PartitionColumnType::Text,
+        "2026-01-01",
+        "2026-01-02",
+    )
+    .unwrap();
+    assert_eq!(
+        text_region.predicate(None, "dt"),
+        "dt >= '2026-01-01' AND dt < '2026-01-02'"
+    );
 }
 
 /// Spark/Databricks has no `sha256` function, only `sha2(expr, bits)`

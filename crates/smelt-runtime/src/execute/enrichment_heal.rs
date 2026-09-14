@@ -194,6 +194,7 @@ pub(crate) async fn dispatch_enrichment_keyed_heal_for_run(
         start: window_start,
         end: window_end,
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     let retry = RetryPolicy::from_request(request, run_id, model_name, reporter);
     execute_enrichment_keyed_heal(

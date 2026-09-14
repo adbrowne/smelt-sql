@@ -161,12 +161,20 @@ fn test_expand_function_calls_reveals_inner_range_bound() {
         "expected the smelt.<path> source ref to survive expansion, got: {expanded}"
     );
 
-    let mut dep_ts: HashMap<String, (Vec<String>, String)> = HashMap::new();
+    let mut dep_ts: HashMap<
+        String,
+        (
+            Vec<String>,
+            String,
+            smelt_logical::maintenance::emit::PartitionColumnType,
+        ),
+    > = HashMap::new();
     dep_ts.insert(
         "smelt.silver.events_parsed".to_string(),
         (
             vec!["silver".to_string(), "events_parsed".to_string()],
             "event_date".to_string(),
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         ),
     );
 
@@ -291,6 +299,7 @@ fn test_compile_with_time_filter_injection() {
         start: "2024-01-15".to_string(),
         end: "2024-01-18".to_string(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
     let filtered = inject_time_filter(sql, "event_time", &range).expect("filter ok");
 

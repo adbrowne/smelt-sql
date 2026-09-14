@@ -773,6 +773,7 @@ async fn explain_maintenance_plan(
             model,
             &canonical,
             &source_timeseries,
+            &source_infos,
             &fn_bodies_for_windowing,
             &region,
         )?,
@@ -941,6 +942,7 @@ fn build_derived_window(
     model: &smelt_core::ModelFile,
     canonical: &str,
     source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    source_infos: &[smelt_core::SourceInfo],
     fn_bodies: &smelt_runtime::FnBodyMap,
     region: &smelt_cli::explain::RegionLiterals,
 ) -> Result<Option<smelt_cli::explain::DerivedWindow>> {
@@ -974,6 +976,9 @@ fn build_derived_window(
         .iter()
         .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
         .collect();
+    // This `dep_ts` only feeds `compute_incremental_windows` (skew/scan-bound
+    // derivation, no literal rendering) — unlike `build_model_source_bounds`
+    // below, it carries no column type.
     let dep_ts: HashMap<String, (Vec<String>, String)> = source_timeseries
         .iter()
         .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
@@ -1001,6 +1006,7 @@ fn build_derived_window(
         start: start.clone(),
         end: end.clone(),
         axis,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     let windows = smelt_runtime::windowing::compute_incremental_windows(
@@ -1024,7 +1030,8 @@ fn build_derived_window(
         return Ok(None);
     };
 
-    let scan_bounds = smelt_runtime::build_model_source_bounds(model, source_timeseries, canonical);
+    let scan_bounds =
+        smelt_runtime::build_model_source_bounds(model, source_timeseries, source_infos, canonical);
 
     Ok(Some(smelt_cli::explain::DerivedWindow {
         output_start: output_start.to_string(),

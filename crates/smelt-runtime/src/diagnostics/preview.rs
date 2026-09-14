@@ -228,6 +228,11 @@ fn build_technique_statements(
         start: "{{window_start}}".to_string(),
         end: "{{window_end}}".to_string(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        // `Undeclared`: a display-only technique preview has no resolved
+        // schema, and the placeholder tokens below aren't real calendar
+        // values anyway — `Undeclared`'s quoted-string arm renders them
+        // unchanged (today's spelling).
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     match technique {
@@ -309,6 +314,7 @@ fn build_technique_statements(
                     partition_col: driving_ts.partition_column.clone(),
                     before_secs: 0,
                     after_secs: 0,
+                    column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
                 },
             );
             let pushed = inject_source_filters(&stripped_sql, &bound_map, &time_range);

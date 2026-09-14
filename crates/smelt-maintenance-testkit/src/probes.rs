@@ -297,8 +297,12 @@ pub async fn compiled_sql_matches_derived_clamp(ctx: &CaseContext) -> ProbeOutco
     }
 
     let compiled = reporter.sql_for(&recipe.model_name);
+    // The source's clock column is always declared `type: DATE`
+    // (`render.rs`'s generative fixture template), so the injected pushdown
+    // filter renders a typed `DATE '…'` literal, not a bare quoted string
+    // (`docs/specs/incremental_shapes.md` §"The partition grain" rule 8a).
     let expected = format!(
-        "{col} >= '{start}' AND {col} < '{end}'",
+        "{col} >= DATE '{start}' AND {col} < DATE '{end}'",
         col = recipe.source.clock_column,
         start = filter_start.format("%Y-%m-%d"),
         end = filter_end.format("%Y-%m-%d"),

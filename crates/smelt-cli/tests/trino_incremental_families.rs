@@ -30,7 +30,10 @@
 //! anchor function. Gap 3 was landed in phase 3c (`docs/outcomes/
 //! 20260913-trino-incremental/phases/03c-plan.md`) —
 //! `snapshot_reconcile_keyed_model_runs_on_trino` below is the real
-//! CLI-level proof. Gap 1 is still open.
+//! CLI-level proof. Gap 1 was landed in phase 3b2 (`docs/outcomes/
+//! 20260913-trino-incremental/phases/03b2-plan.md`) —
+//! `calendar_axis_incremental_model_runs_on_trino` below is the real
+//! CLI-level proof.
 
 mod common;
 use common::{
@@ -40,25 +43,6 @@ use common::{
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-
-/// Gap 1 — the calendar-literal type-coercion gap.
-///
-/// `smelt_logical::maintenance::emit::types::partition_literal`'s calendar
-/// axis renders a bare quoted string (`'2026-01-01'`), and
-/// `smelt-runtime`'s injected scan-window predicate
-/// (`transformer.rs::inject_time_filter`/`inject_source_filters`) does the
-/// same. DuckDB, Spark and BigQuery all implicitly coerce that string
-/// against a `DATE`/`TIMESTAMP` column in a comparison; Trino refuses
-/// outright: `Cannot apply operator: date <= varchar(10)` (measured live,
-/// a plain `grain: partition` passthrough model over a `DATE`-partitioned
-/// append-only source). Fixing this needs a dialect-aware literal — an
-/// ANSI `DATE '...'`/`TIMESTAMP '...'` spelling works on all four engines,
-/// but changing `partition_literal`'s output format is a global,
-/// byte-format change that ~19 files across the workspace pin exact
-/// literal text against, so it needs its own reviewed change, not a
-/// phase-3-scoped one.
-#[allow(dead_code)]
-fn gap_1_calendar_literal_type_coercion() {}
 
 fn stage_int_partition_project(tmp: &tempfile::TempDir, schema: &str) -> std::path::PathBuf {
     let root = tmp.path().join("int_partition_trino");
@@ -93,6 +77,51 @@ fn stage_int_partition_project(tmp: &tempfile::TempDir, schema: &str) -> std::pa
          \x20 event_time_column: event_ts\n  partition_column: batch_id\n  granularity: day\n\
          ---\n\
          SELECT CAST(batch_id AS BIGINT) AS batch_id, event_ts, id FROM smelt.seed_events\n",
+    )
+    .unwrap();
+
+    root
+}
+
+fn stage_calendar_partition_project(tmp: &tempfile::TempDir, schema: &str) -> std::path::PathBuf {
+    let root = tmp.path().join("calendar_partition_trino");
+    fs::create_dir_all(root.join("models")).unwrap();
+
+    let yml = format!(
+        "name: calendar_partition_trino\nversion: 1\npaths:\n  - models\ntargets:\n{}default_materialization: table\n",
+        trino_target_block(schema)
+    );
+    fs::write(root.join("smelt.yml"), yml).unwrap();
+
+    // `event_date` is CAST to a real DATE column — the mart below passes it
+    // through unchanged, so its own output schema (read via
+    // `resolved_model_schema`) infers `event_date` as `DataType::Date`, and
+    // gap 1's fix renders the injected calendar-axis literal `DATE '…'`
+    // rather than a bare quoted string a strict engine refuses.
+    fs::write(
+        root.join("models/seed_calendar_events.sql"),
+        "---\n\
+         materialization: table\n\
+         ---\n\
+         SELECT * FROM (VALUES\n\
+         \x20  (CAST(1 AS BIGINT), CAST('2026-01-01' AS DATE), CAST('2026-01-01' AS DATE)),\n\
+         \x20  (CAST(2 AS BIGINT), CAST('2026-01-01' AS DATE), CAST('2026-01-01' AS DATE)),\n\
+         \x20  (CAST(3 AS BIGINT), CAST('2026-01-02' AS DATE), CAST('2026-01-02' AS DATE)),\n\
+         \x20  (CAST(4 AS BIGINT), CAST('2026-01-03' AS DATE), CAST('2026-01-03' AS DATE))\n\
+         ) AS t(id, event_date, event_ts)\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models/calendar_partition_mart.sql"),
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20 event_time_column: event_ts\n  partition_column: event_date\n  granularity: day\n\
+         ---\n\
+         SELECT CAST(event_date AS DATE) AS event_date, event_ts, id \
+         FROM smelt.seed_calendar_events\n",
     )
     .unwrap();
 
@@ -183,6 +212,89 @@ fn integer_axis_incremental_model_runs_on_trino() {
         ("1".to_string(), "2".to_string()),
         ("2".to_string(), "3".to_string()),
         ("3".to_string(), "4".to_string()),
+    ];
+    assert_eq!(rows, expected, "unexpected row set after the phased run");
+
+    drop_trino_schema(&schema);
+}
+
+/// Gap 1 (landed, `docs/outcomes/20260913-trino-incremental/
+/// phases/03b2-plan.md`) — the live leg: a calendar-`partition_column`
+/// model, whose own output schema infers the column as a real `DATE`, runs a
+/// `--batch-size 1` backfill and a steady-state re-run end to end through
+/// `smelt run --target trino`, no longer refused with `Cannot apply
+/// operator: date <= varchar(10)` now that the injected calendar-axis
+/// literal renders `DATE '…'`-typed against a `DATE`-declared column instead
+/// of a bare quoted string.
+#[test]
+fn calendar_axis_incremental_model_runs_on_trino() {
+    let Some(_env) = trino_env() else {
+        eprintln!("SMELT_TRINO_URL unset — skipping calendar_axis_incremental_model_runs_on_trino");
+        return;
+    };
+    let schema = trino_schema("calendar_partition");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = stage_calendar_partition_project(&tmp, &schema);
+
+    let first = run_smelt(&root, &["--target", "trino"]);
+    assert!(
+        first.status.success(),
+        "first run (seed) failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+
+    let backfill = run_smelt(
+        &root,
+        &[
+            "--target",
+            "trino",
+            "--event-time-start",
+            "2026-01-01",
+            "--event-time-end",
+            "2026-01-04",
+            "--batch-size",
+            "1",
+        ],
+    );
+    assert!(
+        backfill.status.success(),
+        "windowed backfill failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&backfill.stdout),
+        String::from_utf8_lossy(&backfill.stderr),
+    );
+
+    let steady_state = run_smelt(
+        &root,
+        &[
+            "--target",
+            "trino",
+            "--event-time-start",
+            "2026-01-01",
+            "--event-time-end",
+            "2026-01-04",
+            "--batch-size",
+            "1",
+        ],
+    );
+    assert!(
+        steady_state.status.success(),
+        "steady-state re-run failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&steady_state.stdout),
+        String::from_utf8_lossy(&steady_state.stderr),
+    );
+
+    let mut rows = fetch_trino_rows(&schema, "calendar_partition_mart")
+        .into_iter()
+        .map(|r| (r[0].clone(), r[2].clone()))
+        .collect::<Vec<_>>();
+    rows.sort();
+    let expected = vec![
+        ("2026-01-01".to_string(), "1".to_string()),
+        ("2026-01-01".to_string(), "2".to_string()),
+        ("2026-01-02".to_string(), "3".to_string()),
+        ("2026-01-03".to_string(), "4".to_string()),
     ];
     assert_eq!(rows, expected, "unexpected row set after the phased run");
 

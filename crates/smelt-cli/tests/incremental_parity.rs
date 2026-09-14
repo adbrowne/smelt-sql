@@ -86,6 +86,7 @@ fn incremental_delete_insert_is_idempotent_on_both() {
             start: window_start.to_string(),
             end: window_end.to_string(),
             axis: smelt_backend::PartitionAxis::Calendar,
+            column_type: smelt_backend::PartitionColumnType::Undeclared,
         };
 
         match &kind {

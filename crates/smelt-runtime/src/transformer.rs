@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use smelt_logical::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
-use smelt_logical::maintenance::emit::partition_literal;
+use smelt_logical::maintenance::emit::{partition_literal, PartitionColumnType};
 use smelt_logical::{Offset, PartitionAxis, ScanWindowVerdict, Seconds};
 use smelt_parser::{parse, File, FunctionCall};
 use thiserror::Error;
@@ -21,6 +21,12 @@ pub struct TimeRange {
     pub end: String,
     #[serde(skip)]
     pub axis: PartitionAxis,
+    /// The referenced partition column's own declared/inferred SQL type —
+    /// decides whether a calendar-axis literal renders `DATE`/`TIMESTAMP`-typed
+    /// or as a quoted string (same rule 8a). `Undeclared` renders exactly as
+    /// today's calendar-axis behaviour.
+    #[serde(skip)]
+    pub column_type: PartitionColumnType,
 }
 
 /// Errors that can occur during query transformation
@@ -60,6 +66,31 @@ pub struct SourceBound {
     pub before_secs: u64,
     /// Seconds to look forward after `run_end`.
     pub after_secs: u64,
+    /// `partition_col`'s own declared/inferred SQL type — decides whether the
+    /// pushdown filter's literal renders `DATE`/`TIMESTAMP`-typed or as a
+    /// quoted string on the calendar axis (`docs/specs/incremental_shapes.md`
+    /// §"The partition grain" rule 8a). A source's own column type is
+    /// independent of the model's own `partition_column` type, which is why
+    /// this lives on the bound rather than being read off `range`.
+    pub column_type: PartitionColumnType,
+}
+
+/// [`partition_literal`], except the two symbolic output-window placeholders
+/// (`{{window_start}}`/`{{window_end}}`) render unchanged rather than being
+/// parsed against `column_type`. `diagnostics::preview::placeholder_range`
+/// legitimately feeds these tokens through this path for a no-`--period`
+/// technique preview; once a real `DATE`/`TIMESTAMP` `column_type` reaches
+/// the strict renderer, parsing the literal placeholder text as a date
+/// fails — this wrapper is the fix.
+fn render_time_literal(
+    axis: PartitionAxis,
+    column_type: PartitionColumnType,
+    value: &str,
+) -> Result<String, String> {
+    if value == "{{window_start}}" || value == "{{window_end}}" {
+        return Ok(value.to_string());
+    }
+    partition_literal(axis, column_type, value)
 }
 
 /// Inject per-source pushdown filters into the SQL.
@@ -136,25 +167,32 @@ pub fn inject_source_filters(
         // (`PartitionPoint::parse_in_axis`/`Display`), so a render failure
         // here is unreachable in production; the `unwrap_or` fallback keeps
         // this function infallible rather than propagating a `Result` no
-        // real caller can trigger.
-        let start_lit = partition_literal(range.axis, &filter_start).unwrap_or_else(|_| {
-            debug_assert!(
-                false,
-                "inject_source_filters: '{filter_start}' does not render in axis {:?} — \
-                 caller invariant violated",
-                range.axis
-            );
-            format!("'{}'", filter_start.replace('\'', "''"))
-        });
-        let end_lit = partition_literal(range.axis, &filter_end).unwrap_or_else(|_| {
-            debug_assert!(
-                false,
-                "inject_source_filters: '{filter_end}' does not render in axis {:?} — \
-                 caller invariant violated",
-                range.axis
-            );
-            format!("'{}'", filter_end.replace('\'', "''"))
-        });
+        // real caller can trigger. `render_time_literal` (rather than
+        // `partition_literal` directly) passes the two symbolic
+        // `{{window_start}}`/`{{window_end}}` output-window placeholders
+        // through unchanged — a legitimate no-`--period` technique-preview
+        // value (`diagnostics::preview::placeholder_range`) that would
+        // otherwise trip a typed-column parse.
+        let start_lit = render_time_literal(range.axis, bound.column_type, &filter_start)
+            .unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "inject_source_filters: '{filter_start}' does not render in axis \
+                         {:?} — caller invariant violated",
+                    range.axis
+                );
+                format!("'{}'", filter_start.replace('\'', "''"))
+            });
+        let end_lit = render_time_literal(range.axis, bound.column_type, &filter_end)
+            .unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "inject_source_filters: '{filter_end}' does not render in axis {:?} — \
+                         caller invariant violated",
+                    range.axis
+                );
+                format!("'{}'", filter_end.replace('\'', "''"))
+            });
 
         // Wrap each occurrence of `smelt_ref` in the SQL with a subquery filter.
         // We need to be careful not to match partial identifiers.
@@ -412,9 +450,9 @@ pub fn inject_time_filter(
     }
 
     let safe_column = event_time_column.replace('\'', "''");
-    let safe_start = partition_literal(range.axis, &range.start)
+    let safe_start = partition_literal(range.axis, range.column_type, &range.start)
         .map_err(TransformError::InvalidPartitionLiteral)?;
-    let safe_end = partition_literal(range.axis, &range.end)
+    let safe_end = partition_literal(range.axis, range.column_type, &range.end)
         .map_err(TransformError::InvalidPartitionLiteral)?;
 
     Ok(format!(
@@ -535,6 +573,110 @@ mod tests {
 
     // ─── Phase 5b: axis-domain literal rendering ─────────────────────────────
 
+    /// `docs/outcomes/20260913-trino-incremental/phases/03b2-plan.md` §Tests
+    /// #4 — two `SourceBound`s over the same calendar range, one `Date`, one
+    /// `Text`, produce `DATE '…'` and `'…'` respectively.
+    #[test]
+    fn injected_source_filter_types_a_date_column_and_quotes_a_varchar_one() {
+        let range = TimeRange {
+            start: "2026-01-01".into(),
+            end: "2026-01-02".into(),
+            axis: PartitionAxis::Calendar,
+            column_type: PartitionColumnType::Undeclared,
+        };
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.date_events".to_string(),
+            SourceBound {
+                partition_col: "dt".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+                column_type: PartitionColumnType::Date,
+            },
+        );
+        bounds.insert(
+            "smelt.silver.varchar_events".to_string(),
+            SourceBound {
+                partition_col: "dt".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+                column_type: PartitionColumnType::Text,
+            },
+        );
+
+        let date_result =
+            inject_source_filters("SELECT * FROM smelt.silver.date_events", &bounds, &range);
+        assert!(
+            date_result.contains("dt >= DATE '2026-01-01' AND dt < DATE '2026-01-02'"),
+            "expected a typed DATE literal, got: {date_result}"
+        );
+
+        let varchar_result =
+            inject_source_filters("SELECT * FROM smelt.silver.varchar_events", &bounds, &range);
+        assert!(
+            varchar_result.contains("dt >= '2026-01-01' AND dt < '2026-01-02'"),
+            "expected an unchanged quoted-string literal, got: {varchar_result}"
+        );
+    }
+
+    /// `docs/outcomes/20260913-trino-incremental/phases/03b2-plan.md` §Tests
+    /// #5 — `inject_time_filter` over a model whose own partition column
+    /// infers DATE emits `DATE '…'` in the `_smelt_output_clamp` predicate.
+    #[test]
+    fn output_clamp_types_the_models_own_partition_column() {
+        let sql = "SELECT * FROM t";
+        let range = TimeRange {
+            start: "2026-01-01".into(),
+            end: "2026-01-08".into(),
+            axis: PartitionAxis::Calendar,
+            column_type: PartitionColumnType::Date,
+        };
+        let result = inject_time_filter(sql, "event_date", &range).unwrap();
+        assert!(
+            result.contains(
+                "_smelt_output_clamp WHERE event_date >= DATE '2026-01-01' AND event_date < \
+                 DATE '2026-01-08'"
+            ),
+            "expected a typed DATE clamp, got: {result}"
+        );
+    }
+
+    /// `docs/outcomes/20260913-trino-incremental/phases/03b2-plan.md` §Tests
+    /// #6 — regression fence for 3b's discovered panic: the two symbolic
+    /// output-window placeholders render unchanged and do not trip the
+    /// strict typed-column renderer.
+    #[test]
+    fn render_time_literal_passes_symbolic_window_placeholders_through() {
+        assert_eq!(
+            render_time_literal(
+                PartitionAxis::Calendar,
+                PartitionColumnType::Date,
+                "{{window_start}}"
+            )
+            .unwrap(),
+            "{{window_start}}"
+        );
+        assert_eq!(
+            render_time_literal(
+                PartitionAxis::Calendar,
+                PartitionColumnType::Timestamp,
+                "{{window_end}}"
+            )
+            .unwrap(),
+            "{{window_end}}"
+        );
+        // A real value still goes through the strict renderer.
+        assert_eq!(
+            render_time_literal(
+                PartitionAxis::Calendar,
+                PartitionColumnType::Date,
+                "2026-01-01"
+            )
+            .unwrap(),
+            "DATE '2026-01-01'"
+        );
+    }
+
     #[test]
     fn inject_time_filter_renders_integer_bounds_bare() {
         let sql = "SELECT * FROM t";
@@ -542,6 +684,7 @@ mod tests {
             start: "1".into(),
             end: "2".into(),
             axis: PartitionAxis::Integer,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let result = inject_time_filter(sql, "batch_id", &range).unwrap();
         assert!(
@@ -558,6 +701,7 @@ mod tests {
             start: "1".into(),
             end: "2".into(),
             axis: PartitionAxis::Integer,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let mut bounds = std::collections::HashMap::new();
         bounds.insert(
@@ -566,6 +710,7 @@ mod tests {
                 partition_col: "batch_id".to_string(),
                 before_secs: 0,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
         let result = inject_source_filters(sql, &bounds, &range);
@@ -583,6 +728,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let result = inject_time_filter(sql, "event_date", &range).unwrap();
         assert_eq!(
@@ -605,6 +751,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
             axis: PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let sql = "SELECT * FROM smelt.silver.events_parsed";
         let mut bounds = std::collections::HashMap::new();
@@ -614,6 +761,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 86400,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
         let injected = inject_source_filters(sql, &bounds, &range);
@@ -637,6 +785,7 @@ mod tests {
             start: "1".into(),
             end: "2".into(),
             axis: PartitionAxis::Integer,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let sql = "SELECT * FROM smelt.silver.events";
         let mut bounds = std::collections::HashMap::new();
@@ -646,6 +795,7 @@ mod tests {
                 partition_col: "batch_id".to_string(),
                 before_secs: 0,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
         let injected = inject_source_filters(sql, &bounds, &range);
@@ -677,6 +827,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let mut bounds = std::collections::HashMap::new();
         bounds.insert(
@@ -685,6 +836,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 86400, // 1 day
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
 
@@ -715,6 +867,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         // Empty bounds — regions is a lookup, not in the map
         let bounds = std::collections::HashMap::new();
@@ -740,6 +893,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let mut bounds = std::collections::HashMap::new();
         bounds.insert(
@@ -748,6 +902,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 86400, // 1 day
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
 
@@ -777,6 +932,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let mut bounds = std::collections::HashMap::new();
         // Union bound: before = 1d, after = 0
@@ -786,6 +942,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 86400, // 1 day
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
 
@@ -810,6 +967,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let mut bounds = std::collections::HashMap::new();
         bounds.insert(
@@ -818,6 +976,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 0,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
 
@@ -857,6 +1016,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 0,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
         assert!(is_transparent_single_source(&bounds));
@@ -872,6 +1032,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 86400,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
         assert!(!is_transparent_single_source(&bounds));
@@ -889,6 +1050,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 0,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
         bounds.insert(
@@ -897,6 +1059,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 0,
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
         assert!(!is_transparent_single_source(&bounds));
@@ -930,6 +1093,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
 
         // A source with a real 1-day lookback margin (e.g. a bounded RANGE
@@ -941,6 +1105,7 @@ mod tests {
                 partition_col: "event_date".to_string(),
                 before_secs: 86400, // 1 day
                 after_secs: 0,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         );
 
@@ -989,6 +1154,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
@@ -1008,6 +1174,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
@@ -1035,6 +1202,7 @@ GROUP BY 1, 2
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
 
         let result = inject_time_filter(sql, "transaction_timestamp", &range).unwrap();
@@ -1061,6 +1229,7 @@ GROUP BY 1, 2
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
 
         let result = inject_time_filter(sql, "event_time", &range);
@@ -1074,6 +1243,7 @@ GROUP BY 1, 2
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
 
         // Contract change with the F1 subquery wrap (deliberate, see

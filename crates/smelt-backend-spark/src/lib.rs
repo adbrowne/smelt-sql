@@ -630,8 +630,13 @@ impl Backend for SparkBackend {
         sql: &str,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        let region = Region::for_axis(partition.axis, &partition.start, &partition.end)
-            .map_err(|message| BackendError::ConfigurationError { message })?;
+        let region = Region::for_axis(
+            partition.axis,
+            partition.column_type,
+            &partition.start,
+            &partition.end,
+        )
+        .map_err(|message| BackendError::ConfigurationError { message })?;
         let group = emit_delete_insert(
             &table_name,
             &partition.column,

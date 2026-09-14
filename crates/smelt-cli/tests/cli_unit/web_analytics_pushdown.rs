@@ -54,6 +54,7 @@ fn bound_json_to_source_bound(json: &SourceBoundJson) -> Option<SourceBound> {
             partition_col: partition_col.clone(),
             before_secs: iso8601_duration_to_secs(before),
             after_secs: iso8601_duration_to_secs(after),
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         }),
         // Unbounded and NotDerivable sources are not pushdown candidates.
         _ => None,
@@ -144,6 +145,7 @@ fn test_pushdown_reduces_scan() {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     // If sessions has no bounded sources (e.g., bound derivation not wired for function bodies),
@@ -188,6 +190,7 @@ fn test_full_run_equivalent_with_pushdown() {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     let result_with_pushdown = inject_source_filters(&sql, &bound_map, &range);

@@ -94,6 +94,12 @@ pub struct PartitionRange {
     /// `smelt_logical::maintenance::emit::partition_literal`; backends never
     /// decide quoting themselves.
     pub axis: crate::PartitionAxis,
+
+    /// The partition column's own declared/inferred SQL type — on the
+    /// calendar axis this decides whether `start`/`end` render as a typed
+    /// `DATE`/`TIMESTAMP` literal or a quoted string (same rule 8a). Ignored
+    /// on the integer axis.
+    pub column_type: crate::PartitionColumnType,
 }
 
 /// Materialization strategy for tables.

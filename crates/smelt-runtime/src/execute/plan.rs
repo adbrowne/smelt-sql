@@ -66,7 +66,7 @@ pub(crate) fn build_model_plans(
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
     request: &ExecuteRequest,
-    partition_axes: &HashMap<String, smelt_logical::PartitionAxis>,
+    partition_axes: &HashMap<String, super::window::ResolvedAxis>,
 ) -> Result<(Vec<ModelPlan>, usize)> {
     let mut model_plans: Vec<ModelPlan> = Vec::new();
     let mut total_batches: usize = 0;
@@ -107,6 +107,7 @@ pub(crate) fn build_model_plans(
         // for a malformed-but-present window).
         type AxisWindow<'a> = (
             smelt_logical::PartitionAxis,
+            smelt_logical::maintenance::emit::PartitionColumnType,
             &'a smelt_core::config::TimeseriesConfig,
             Option<(
                 crate::windowing::PartitionPoint,
@@ -116,30 +117,39 @@ pub(crate) fn build_model_plans(
         let axis_and_window: Option<AxisWindow> = match &ts_config {
             None => None,
             Some(ts) => {
-                let axis = partition_axes.get(model_name).copied().unwrap_or_else(|| {
-                    // Undecidable type — not a positive disproof of either
-                    // domain (same fail-open posture as
-                    // `derive_partition_grid_unit`). Fall back to the axis
-                    // implied by the run-window literal's own form so a
-                    // first-run without a resolvable schema still works for
-                    // the common calendar case.
-                    let implied =
-                        crate::windowing::axis_implied_by_literal_form(request.start.as_deref());
-                    warn!(
-                        "model '{model_name}': partition column '{}' type could not be \
-                         resolved from the output schema; falling back to the axis implied \
-                         by the run-window literal's form ({:?})",
-                        ts.partition_column, implied
-                    );
-                    implied
-                });
+                let resolved = partition_axes.get(model_name).copied();
+                let (axis, column_type) = match resolved {
+                    Some(r) => (r.axis, r.column_type),
+                    None => {
+                        // Undecidable type — not a positive disproof of either
+                        // domain (same fail-open posture as
+                        // `derive_partition_grid_unit`). Fall back to the axis
+                        // implied by the run-window literal's own form so a
+                        // first-run without a resolvable schema still works for
+                        // the common calendar case; the column type stays
+                        // `Undeclared` (today's spelling, unchanged).
+                        let implied = crate::windowing::axis_implied_by_literal_form(
+                            request.start.as_deref(),
+                        );
+                        warn!(
+                            "model '{model_name}': partition column '{}' type could not be \
+                             resolved from the output schema; falling back to the axis implied \
+                             by the run-window literal's form ({:?})",
+                            ts.partition_column, implied
+                        );
+                        (
+                            implied,
+                            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+                        )
+                    }
+                };
                 let window = window_for_axis(axis, start_date, end_date, request)?;
-                Some((axis, ts, window))
+                Some((axis, column_type, ts, window))
             }
         };
 
         match (inc_config, axis_and_window) {
-            (Some(inc), Some((axis, ts, Some((window_start, window_end))))) => {
+            (Some(inc), Some((axis, column_type, ts, Some((window_start, window_end))))) => {
                 let ts = ts.clone();
 
                 // Own `smelt.ref()` list, unfiltered — a self-edge (BL7,
@@ -232,12 +242,14 @@ pub(crate) fn build_model_plans(
                             start: clamped_start_date.format("%Y-%m-%d").to_string(),
                             end: end_date.format("%Y-%m-%d").to_string(),
                             axis: smelt_logical::PartitionAxis::Calendar,
+                            column_type,
                         }
                     }
                     (start, end) => TimeRange {
                         start: start.to_string(),
                         end: end.to_string(),
                         axis: start.axis(),
+                        column_type,
                     },
                 };
 
@@ -320,7 +332,7 @@ pub(crate) fn build_model_plans(
                     refresh: refresh.clone(),
                 });
             }
-            (Some(_inc), Some((_axis, _ts, None))) => {
+            (Some(_inc), Some((_axis, _column_type, _ts, None))) => {
                 // Incremental config present but no time window resolved for
                 // this model's axis. Fall back to full refresh; the model
                 // still compiles and executes.

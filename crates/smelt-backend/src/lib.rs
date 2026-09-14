@@ -13,7 +13,7 @@ pub use smelt_core::config::{
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_delete_insert, partition_literal, MaintenanceDialect,
-    MaintenanceStatement, Region, StatementGroup,
+    MaintenanceStatement, PartitionColumnType, Region, StatementGroup,
 };
 pub use smelt_logical::PartitionAxis;
 pub use types::{
@@ -73,7 +73,12 @@ fn build_delete_insert_group(
     dialect: SqlDialect,
 ) -> Result<StatementGroup, String> {
     let table_name = format!("{schema}.{name}");
-    let region = Region::for_axis(partition.axis, &partition.start, &partition.end)?;
+    let region = Region::for_axis(
+        partition.axis,
+        partition.column_type,
+        &partition.start,
+        &partition.end,
+    )?;
     let maintenance_dialect = maintenance_dialect(dialect).map_err(|err| err.to_string())?;
     Ok(emit_delete_insert(
         &table_name,

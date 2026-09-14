@@ -8,82 +8,12 @@
 # smaller files are left unconstrained (see BASELINE_MIN_LINES in the script).
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
-# 2026-09-15 (docs/outcomes/20260913-trino-incremental phase 03c, sign-off:
-# Andrew Browne): repair_lowering.rs 1572 -> 1884, adding the gap-3 unit legs
-# (`downgraded_clampless_cell_has_no_repair_family_lowering`'s runtime-level
-# sibling tests, the `repair_cell_slice` fence test) and the DuckDB-backed
-# `downgraded_keyed_model_recomputes_full_scan_and_matches_a_full_refresh`
-# conformance leg, in the same shape as the file's existing per-scenario test
-# fixtures — not a new abstraction, so grown in place rather than split.
-#
-# 2026-09-15 (docs/outcomes/20260913-trino-incremental phase 03a, sign-off:
-# Andrew Browne): execute/project/mod.rs 5098 -> 5115, documenting (one-line
-# comments) which of the hardcoded-`PartitionAxis::Calendar` sites the phase's
-# audit found are genuinely calendar-only by construction, alongside the fix
-# to the two real bugs (`run_range`/`scan_range` now resolve `batch.
-# partition_start.axis()`/`batch.scan_start.axis()` instead of a hardcoded
-# `Calendar`) — comments only, not a new abstraction, so grown in place.
-#
-# 2026-09-14 (docs/outcomes/20260913-trino-incremental phase 03, sign-off:
-# Andrew Browne): fingerprint.rs 1196 -> 1202, adding the `MaintenanceDialect::
-# Trino` arm to `emit_repair_group_digest_select`'s combine expression (never
-# reached in production — the fingerprint-sidecar family Trino declines — but
-# spelled for totality per the no-silent-reuse discipline), in the same shape
-# as the file's existing per-dialect arms — not a new abstraction, so grown in
-# place rather than split.
-#
-# 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 07, sign-off: Andrew
-# Browne): cumulative.rs 2178 -> 2183, repair_lowering.rs 1570 -> 1572,
-# technique_lowering/basic.rs 1120 -> 1122 — re-keying each file's staged
-# relation call sites from an ad hoc `&str` name to `&StagedRelation`
-# (residence/atomicity capability data), each a one-to-three-line wrap at an
-# existing call site, not a new abstraction — grown in place rather than
-# split.
-#
-# 2026-09-14 (docs/outcomes/20260913-trino-emission phase 9, sign-off: Andrew
-# Browne): type_property_tests.rs 1744 -> 1910 and divergences.rs newly
-# crossing the 1000-line floor at 1170, adding the Trino leg (oracle,
-# coverage floor, sweep arm, six deterministic smoke-test arms) and its
-# divergence registry entries in the same shape as the existing DuckDB/Spark/
-# BigQuery legs — not a new abstraction, so grown in place rather than split.
-#
-# 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 03, sign-off: Andrew
-# Browne): schema_tracking.rs 4611 -> 4662, adding the `DdlBackend::Trino`
-# variant plus its whole-diff dispatch block and the "unreachable" refusal
-# arm, in the same shape and same file as the existing BigQuery and Spark
-# arms already there — not a new abstraction, so grown in place rather than
-# split. The Trino generator itself is new (`crates/smelt-state/src/ddl_trino/`,
-# a module directory) precisely to avoid growing a second large file.
-#
-# 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 04, sign-off: Andrew
-# Browne): commands/explain.rs 1197 -> 1204, explain.rs 2599 -> 2610, and
-# smelt-db/queries/maintenance/tests.rs 1254 -> 1266 — widening
-# `maintenance_dialect`'s `Result` through `smelt explain`'s existing
-# dialect-consuming call sites (a `Result<MaintenanceDialect,
-# UnsupportedMaintenanceDialect>` in place of a `?`-unwrapped value, plus the
-# `build_admitted_statement_group`/`build_all_cell_statements` fallback logic
-# this requires) and one new `backend_dialect_for` unit test, in the same
-# shape as the file's existing dialect-dispatch code — not a new abstraction,
-# so grown in place rather than split.
-#
-# 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 06, sign-off: Andrew
-# Browne): execute/project/mod.rs 5064 -> 5098, fixing two unconditional
-# `smelt_backend::maintenance_dialect(backend.dialect())?` call sites that
-# hard-errored on Trino regardless of whether the model declared anything:
-# the `contract.frozen_horizon` live-probe dispatch (now gated through the
-# new `crate::contract_probes::resolve_frozen_horizon_dialect` seam) and the
-# batch-loop's `declared_model_probes` call (now gated by
-# `crate::model_probes::any_declared_probe`, mirroring the full-refresh
-# site's existing gate a few hundred lines below). Grown in place — both
-# fixes are narrow, targeted edits to existing call sites, not a new
-# abstraction warranting a split.
-#
-crates/smelt-backend-duckdb/src/lib.rs 1902
-crates/smelt-cli/src/commands/explain.rs 1204
-crates/smelt-cli/src/explain.rs 2610
+crates/smelt-backend-duckdb/src/lib.rs 1905
+crates/smelt-cli/src/commands/explain.rs 1211
+crates/smelt-cli/src/explain.rs 2615
 crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/dbx_dogfood_loader.rs 1210
-crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1443
+crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1444
 crates/smelt-cli/tests/e2e/functions_e2e.rs 1194
 crates/smelt-cli/tests/e2e/per_partition_equivalence.rs 1573
 crates/smelt-cli/tests/github_activity_bq_oracle.rs 1002
@@ -144,7 +74,7 @@ crates/smelt-logical/src/rules/rule_diagnostics.rs 1587
 crates/smelt-logical/tests/backbuild_conformance.rs 3294
 crates/smelt-logical/tests/backbuild_options.rs 2249
 crates/smelt-logical/tests/backbuild_property.rs 1063
-crates/smelt-logical/tests/emit_statements.rs 1807
+crates/smelt-logical/tests/emit_statements.rs 1989
 crates/smelt-logical/tests/keyed_families.rs 1309
 crates/smelt-logical/tests/maintenance_grouping.rs 1072
 crates/smelt-lsp/src/backend/hover_impl.rs 1072
@@ -168,20 +98,20 @@ crates/smelt-parser/src/parser/select.rs 1455
 crates/smelt-parser/src/parser/smelt_ext.rs 1798
 crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
-crates/smelt-runtime/src/compile.rs 4273
-crates/smelt-runtime/src/cumulative.rs 2183
-crates/smelt-runtime/src/execute/project/mod.rs 5115
+crates/smelt-runtime/src/compile.rs 4317
+crates/smelt-runtime/src/cumulative.rs 2184
+crates/smelt-runtime/src/execute/project/mod.rs 5180
 crates/smelt-runtime/src/meta_eval.rs 2180
-crates/smelt-runtime/src/transformer.rs 1174
+crates/smelt-runtime/src/transformer.rs 1344
 crates/smelt-runtime/src/windowing.rs 1277
 crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1061
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
 crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1201
-crates/smelt-runtime/tests/observed_delta/main.rs 1066
+crates/smelt-runtime/tests/observed_delta/main.rs 1074
 crates/smelt-runtime/tests/repair_lowering.rs 1884
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1122
-crates/smelt-runtime/tests/windowing_parity.rs 1150
+crates/smelt-runtime/tests/windowing_parity.rs 1151
 crates/smelt-state/src/ddl_duckdb.rs 1883
 crates/smelt-state/src/ddl_spark.rs 1708
 crates/smelt-state/src/file_store.rs 1723

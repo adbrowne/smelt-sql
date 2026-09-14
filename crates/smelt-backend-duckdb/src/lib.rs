@@ -577,9 +577,9 @@ impl Backend for DuckDbBackend {
         // Range-based DELETE: `column >= start AND column < end`, rendered
         // through the single-owner axis renderer (quoted on the calendar
         // axis, bare on the integer axis).
-        let start_lit = partition_literal(partition.axis, &partition.start)
+        let start_lit = partition_literal(partition.axis, partition.column_type, &partition.start)
             .map_err(|message| BackendError::ConfigurationError { message })?;
-        let end_lit = partition_literal(partition.axis, &partition.end)
+        let end_lit = partition_literal(partition.axis, partition.column_type, &partition.end)
             .map_err(|message| BackendError::ConfigurationError { message })?;
         let delete_sql = format!(
             "DELETE FROM {} WHERE {} >= {} AND {} < {}",
@@ -1175,6 +1175,7 @@ mod tests {
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
             axis: smelt_backend::PartitionAxis::Calendar,
+            column_type: smelt_backend::PartitionColumnType::Undeclared,
         };
 
         backend
@@ -1231,6 +1232,7 @@ mod tests {
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
             axis: smelt_backend::PartitionAxis::Calendar,
+            column_type: smelt_backend::PartitionColumnType::Undeclared,
         };
 
         backend
@@ -1285,6 +1287,7 @@ mod tests {
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
             axis: smelt_backend::PartitionAxis::Calendar,
+            column_type: smelt_backend::PartitionColumnType::Undeclared,
         };
 
         // The INSERT SELECT references a column that doesn't exist in

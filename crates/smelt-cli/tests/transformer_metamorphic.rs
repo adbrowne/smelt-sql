@@ -262,6 +262,7 @@ fn window_partition_union_equals_unwindowed_run() {
             start: date(0),
             end: date(SPAN_DAYS),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
 
         // Baselines: the raw resolved model, and the full-domain clamp.
@@ -285,6 +286,7 @@ fn window_partition_union_equals_unwindowed_run() {
                 partition_col: "dt".to_string(),
                 before_secs: recipe.before_days * 86_400,
                 after_secs: recipe.after_days * 86_400,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         )]);
 
@@ -296,6 +298,7 @@ fn window_partition_union_equals_unwindowed_run() {
                 start: start.clone(),
                 end: end.clone(),
                 axis: smelt_logical::PartitionAxis::Calendar,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             };
             let clamped = inject_time_filter(&model_sql, "dt", &range)
                 .unwrap_or_else(|e| panic!("case {case}: clamp refused: {e:?}"));
@@ -362,6 +365,7 @@ fn qualified_clamp_column_is_refused() {
         start: date(0),
         end: date(SPAN_DAYS),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
     let result = inject_time_filter("SELECT e.dt FROM events e", "e.dt", &range);
     assert!(result.is_err(), "qualified clamp column must be refused");

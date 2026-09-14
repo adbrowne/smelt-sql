@@ -95,6 +95,7 @@ fn test_window() -> smelt_backend::PartitionRange {
         start: "2024-01-01".to_string(),
         end: "2024-01-02".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     }
 }
 

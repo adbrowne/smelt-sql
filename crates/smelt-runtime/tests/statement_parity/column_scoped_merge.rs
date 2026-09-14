@@ -115,6 +115,7 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
         start: "2025-01-10".to_string(),
         end: "2025-01-11".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
         &backend,
@@ -221,6 +222,7 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
         &backend,

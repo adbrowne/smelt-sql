@@ -554,6 +554,7 @@ pub async fn execute_cumulative_aggregate(
                     partition_col: driving_ts.partition_column.clone(),
                     before_secs: 0,
                     after_secs: 0,
+                    column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
                 },
             );
             let pushed = inject_source_filters(&clean_sql, &bound_map, &step.range);

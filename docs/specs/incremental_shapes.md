@@ -1708,9 +1708,15 @@ inferred *output* facts (§Future Extensions).
    SQL-inferred lookback/lookahead, or a derived partition-column skew — have no conversion into an integer axis's units; if any of them would
    be nonzero for an integer-axis model, that is a hard refusal (fail-closed), never silently
    zeroed or coerced 1:1 into "N units". A partition literal is rendered **in the axis's own
-   domain** everywhere a run emits one — the output clamp, the per-source scan filter, and the
-   maintenance region's `DELETE` predicate — and everywhere `smelt explain` reports one: quoted
-   and escaped (`'2026-01-01'`) on the calendar axis, bare (`7`) on the integer axis. A
+   domain and the referenced partition column's own type** everywhere a run emits one — the
+   output clamp, the per-source scan filter, and the maintenance region's `DELETE` predicate —
+   and everywhere `smelt explain` reports one: on the integer axis, bare (`7`); on the calendar
+   axis, `DATE 'YYYY-MM-DD'` or `TIMESTAMP 'YYYY-MM-DD HH:MM:SS[.fff]'` when the referenced
+   partition column is declared or inferred `DATE`/`TIMESTAMP`, and a quoted, escaped string
+   (`'2026-01-01'`) when it is declared a string type or its type is not resolvable. The
+   *column's* type decides, not the target dialect, because a literal/column type mismatch is
+   refused by a strict engine (Trino) in the typed-column direction and by DuckDB in the
+   string-column direction; the renderer stays dialect-blind and remains the single owner. A
    `contract.frozen_horizon` declared on an integer-axis model is also a hard refusal: its
    horizon is a day count with no conversion into partition units, consistent with the day-typed
    widening refusal above.

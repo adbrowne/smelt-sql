@@ -6,10 +6,10 @@
 //! `.smelt/` while producing the same table values as `state.mode:
 //! intervals` for the same project.
 //!
-//! Covers `materialization: table` models only — Trino has no
-//! `MaintenanceDialect` variant yet (phase 6's summary), so no `refresh:
-//! incremental` model can complete a live run on Trino today. The
-//! incremental shapes are covered offline by
+//! Covers `materialization: table` models only — `refresh: incremental`
+//! models (Trino has had a `MaintenanceDialect::Trino` variant since phase 3,
+//! `docs/outcomes/20260913-trino-incremental/phases/03-plan.md`) are covered
+//! live by `trino_incremental_families.rs` and offline by
 //! `trino_posture_plan_invariance.rs` instead.
 //!
 //! Skips green when `SMELT_TRINO_URL` is unset. Run it with:

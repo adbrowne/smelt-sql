@@ -439,6 +439,7 @@ async fn empty_delta_cascade_is_a_no_op() {
         start: "2026-07-01".to_string(),
         end: "2026-07-02".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
 
     // Leg (a): the write itself, executed for real — snapshot the target

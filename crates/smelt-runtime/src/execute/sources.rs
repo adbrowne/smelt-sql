@@ -10,6 +10,28 @@ use crate::transformer::{
     pin_run_deterministic_clocks, TimeRange,
 };
 
+/// The declared type of `column` on the source YAML addressed by
+/// `smelt_path` (e.g. `smelt.silver.events_parsed`), or
+/// [`PartitionColumnType::Undeclared`] when no matching source or column is
+/// declared — an upstream *model* dependency (not a source YAML entry) has
+/// no [`smelt_core::SourceInfo`] entry and always falls into this arm, which
+/// is behavior-preserving (today's calendar-axis spelling).
+pub(crate) fn source_partition_column_type(
+    source_infos: &[smelt_core::SourceInfo],
+    smelt_path: &str,
+    column: &str,
+) -> smelt_logical::maintenance::emit::PartitionColumnType {
+    let Some(path) = smelt_path.strip_prefix("smelt.") else {
+        return smelt_logical::maintenance::emit::PartitionColumnType::Undeclared;
+    };
+    source_infos
+        .iter()
+        .find(|s| s.address_segments.join(".") == path)
+        .and_then(|s| s.columns.iter().find(|c| c.name == column))
+        .map(|c| smelt_logical::maintenance::emit::partition_column_type_for_type(&c.data_type))
+        .unwrap_or(smelt_logical::maintenance::emit::PartitionColumnType::Undeclared)
+}
+
 /// Per-model source-scan bound map (INTERVAL-derived lookback per upstream
 /// timeseries source), the input `derive_batch_filtered_sql` needs to clamp a
 /// batch's read + write. Mirrors the real run's own inline derivation so the
@@ -23,6 +45,7 @@ use crate::transformer::{
 pub fn build_model_source_bounds(
     model_file: &smelt_core::ModelFile,
     source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    source_infos: &[smelt_core::SourceInfo],
     model_name: &str,
 ) -> HashMap<String, crate::transformer::SourceBound> {
     let sql_for_bounds = smelt_parser::strip_frontmatter(&model_file.content);
@@ -31,13 +54,25 @@ pub fn build_model_source_bounds(
         .iter()
         .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
         .collect();
-    let dep_ts: HashMap<String, (Vec<String>, String)> = source_timeseries
+    let dep_ts: HashMap<
+        String,
+        (
+            Vec<String>,
+            String,
+            smelt_logical::maintenance::emit::PartitionColumnType,
+        ),
+    > = source_timeseries
         .iter()
         .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
         .filter_map(|(smelt_ref, ts)| {
             let path = smelt_ref.strip_prefix("smelt.")?;
             let segs: Vec<String> = path.split('.').map(String::from).collect();
-            Some((smelt_ref.clone(), (segs, ts.partition_column.clone())))
+            let column_type =
+                source_partition_column_type(source_infos, smelt_ref, &ts.partition_column);
+            Some((
+                smelt_ref.clone(),
+                (segs, ts.partition_column.clone(), column_type),
+            ))
         })
         .collect();
     let horizon_ceiling = model_file

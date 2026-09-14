@@ -31,6 +31,7 @@ fn _unused_range_ref() -> TimeRange {
         start: String::new(),
         end: String::new(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     }
 }
 

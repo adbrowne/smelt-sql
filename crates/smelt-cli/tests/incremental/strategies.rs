@@ -244,6 +244,7 @@ async fn test_insert_overwrite_matches_full_refresh() -> Result<()> {
                 start: "2024-12-27".to_string(),
                 end: "2024-12-30".to_string(),
                 axis: smelt_backend::PartitionAxis::Calendar,
+                column_type: smelt_backend::PartitionColumnType::Undeclared,
             },
         )
         .await?;
@@ -278,6 +279,7 @@ async fn test_insert_overwrite_overlapping_is_idempotent() -> Result<()> {
                     start: start.to_string(),
                     end: end.to_string(),
                     axis: smelt_backend::PartitionAxis::Calendar,
+                    column_type: smelt_backend::PartitionColumnType::Undeclared,
                 },
             )
             .await?;

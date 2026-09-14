@@ -18,7 +18,9 @@ use arrow::array::{
     RecordBatch, StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use smelt_backend::{Backend, BackendError, Materialization, PartitionAxis, PartitionRange};
+use smelt_backend::{
+    Backend, BackendError, Materialization, PartitionAxis, PartitionColumnType, PartitionRange,
+};
 use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
 
 /// One live-run's connection, catalog and isolated schema.
@@ -798,6 +800,7 @@ async fn delete_and_insert_transactional_covers_two_disjoint_windows() {
                 start: "1".to_string(),
                 end: "2".to_string(),
                 axis: PartitionAxis::Integer,
+                column_type: PartitionColumnType::Undeclared,
             },
             "SELECT * FROM (VALUES (1, 1), (1, 2)) AS t(batch_id, val)",
         )
@@ -813,6 +816,7 @@ async fn delete_and_insert_transactional_covers_two_disjoint_windows() {
                 start: "2".to_string(),
                 end: "3".to_string(),
                 axis: PartitionAxis::Integer,
+                column_type: PartitionColumnType::Undeclared,
             },
             "SELECT * FROM (VALUES (2, 3), (2, 4), (2, 5)) AS t(batch_id, val)",
         )

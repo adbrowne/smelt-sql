@@ -108,7 +108,7 @@ pub(crate) fn resolve_partition_axes(
     selected: &[String],
     graph_lock: &DependencyGraph,
     config: &Config,
-) -> HashMap<String, smelt_logical::PartitionAxis> {
+) -> HashMap<String, ResolvedAxis> {
     let mut out = HashMap::new();
     let Some(workspace) = smelt_db::Workspace::try_get(db) else {
         return out;
@@ -140,10 +140,24 @@ pub(crate) fn resolve_partition_axes(
             continue;
         };
         if let Some(axis) = smelt_logical::partition_axis_for_type(&typed.data_type) {
-            out.insert(model_name.clone(), axis);
+            let column_type =
+                smelt_logical::maintenance::emit::partition_column_type_for_type(&typed.data_type);
+            out.insert(model_name.clone(), ResolvedAxis { axis, column_type });
         }
     }
     out
+}
+
+/// A selected model's resolved `partition_column` axis plus the column's own
+/// declared/inferred type — the pair [`partition_literal`][pl] renders
+/// against (`docs/specs/incremental_shapes.md` §"The partition grain" rule
+/// 8a).
+///
+/// [pl]: smelt_logical::maintenance::emit::partition_literal
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedAxis {
+    pub(crate) axis: smelt_logical::PartitionAxis,
+    pub(crate) column_type: smelt_logical::maintenance::emit::PartitionColumnType,
 }
 
 /// Resolve the effective run-window bounds for one model's axis. Calendar
@@ -238,6 +252,7 @@ mod tests {
         let batch = crate::windowing::PartitionPoint::Integer(1);
         let region = smelt_logical::maintenance::emit::Region::for_axis(
             batch.axis(),
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             &batch.to_string(),
             &crate::windowing::PartitionPoint::Integer(2).to_string(),
         )

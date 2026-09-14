@@ -170,6 +170,7 @@ fn sql_delete_partitions_range() {
         start: "2024-01-01".to_string(),
         end: "2024-01-08".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     assert_eq!(
         sql::delete_partitions_range("cat.db.tbl", &partition),
@@ -184,6 +185,7 @@ fn sql_delete_partitions_range_escapes_quotes() {
         start: "it's".to_string(),
         end: "they're".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     assert_eq!(
         sql::delete_partitions_range("cat.db.tbl", &partition),
@@ -212,6 +214,7 @@ fn sql_insert_overwrite() {
         start: "2024-01-01".to_string(),
         end: "2024-01-02".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     assert_eq!(
         sql::insert_overwrite("cat.db.daily", "SELECT * FROM staging", &partition),
@@ -597,6 +600,7 @@ mod integration {
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
             axis: smelt_backend::PartitionAxis::Calendar,
+            column_type: smelt_backend::PartitionColumnType::Undeclared,
         };
         let result = backend.delete_partitions(schema, name, &partition).await;
 

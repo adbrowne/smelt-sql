@@ -43,7 +43,7 @@ use crate::schema_evolution::{
     full_refresh_escape_requires_rebuild, infer_deployed_columns, SchemaEvolutionResult,
 };
 use crate::select::{select_executable_models, SelectionRequest};
-use crate::transformer::TimeRange;
+use crate::transformer::{inject_source_filters, TimeRange};
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::{build_fn_body_map, EphemeralResolver, UpstreamSchemas};
 
@@ -1736,6 +1736,7 @@ pub async fn execute_project(
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
                         axis: smelt_logical::PartitionAxis::Calendar,
+                        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
                     };
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
@@ -2206,6 +2207,7 @@ pub async fn execute_project(
                             start: window_start,
                             end: window_end,
                             axis: smelt_backend::PartitionAxis::Calendar,
+                            column_type: smelt_backend::PartitionColumnType::Undeclared,
                         };
                         let retry_policy =
                             RetryPolicy::from_request(request, run_id, &plan.name, reporter);
@@ -2374,6 +2376,7 @@ pub async fn execute_project(
                         start: window_start,
                         end: window_end,
                         axis: smelt_backend::PartitionAxis::Calendar,
+                        column_type: smelt_backend::PartitionColumnType::Undeclared,
                     };
                     let row_count = match write {
                         crate::maintenance_driver::MembershipRecomputeWrite::StagedRecompute {
@@ -3023,17 +3026,31 @@ pub async fn execute_project(
                     None => None,
                 };
 
-                let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
-                    source_timeseries
-                        .iter()
-                        .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
-                        .filter_map(|(smelt_ref, ts)| {
-                            // Strip the leading "smelt." prefix to get the path segments.
-                            let path = smelt_ref.strip_prefix("smelt.")?;
-                            let segs: Vec<String> = path.split('.').map(String::from).collect();
-                            Some((smelt_ref.clone(), (segs, ts.partition_column.clone())))
-                        })
-                        .collect();
+                let dep_ts: std::collections::HashMap<
+                    String,
+                    (
+                        Vec<String>,
+                        String,
+                        smelt_logical::maintenance::emit::PartitionColumnType,
+                    ),
+                > = source_timeseries
+                    .iter()
+                    .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
+                    .filter_map(|(smelt_ref, ts)| {
+                        // Strip the leading "smelt." prefix to get the path segments.
+                        let path = smelt_ref.strip_prefix("smelt.")?;
+                        let segs: Vec<String> = path.split('.').map(String::from).collect();
+                        let column_type = crate::execute::sources::source_partition_column_type(
+                            source_infos,
+                            smelt_ref,
+                            &ts.partition_column,
+                        );
+                        Some((
+                            smelt_ref.clone(),
+                            (segs, ts.partition_column.clone(), column_type),
+                        ))
+                    })
+                    .collect();
                 let horizon_ceiling = plan
                     .model_file
                     .metadata
@@ -3044,6 +3061,48 @@ pub async fn execute_project(
                 for warning in &horizon_warnings {
                     warn!("model '{}': {warning}", plan.name);
                 }
+
+                // Resolved through the SAME projection `apply_type_casts`
+                // uses (`SqlCompiler::resolve_partition_column_type`), not
+                // `IncrementalPlan::column_type` (`resolved_model_schema`-
+                // derived — a separate inference that can genuinely
+                // disagree, `docs/outcomes/20260913-trino-incremental/
+                // phases/03b2-summary.md`) — so an injected literal always
+                // types against the column the write actually produces.
+                // Resolved off a *shape probe*: `inject_source_filters`
+                // wraps a bounded source ref in a derived-table subquery,
+                // which can itself change how the outer projection's column
+                // types resolve (a source-shaped FROM vs. a plain
+                // `smelt.<path>` reference) — so the probe must carry that
+                // same wrapping, not the model's bare source text. The
+                // probe range's own literal values are never rendered
+                // (structure-only); `Undeclared` keeps it infallible.
+                let model_column_type = {
+                    let probe_axis = inc_plan
+                        .batches
+                        .first()
+                        .map(|b| b.partition_start.axis())
+                        .unwrap_or(smelt_logical::PartitionAxis::Calendar);
+                    let (probe_start, probe_end) = match probe_axis {
+                        smelt_logical::PartitionAxis::Calendar => {
+                            ("2026-01-01".to_string(), "2026-01-02".to_string())
+                        }
+                        smelt_logical::PartitionAxis::Integer => {
+                            ("1".to_string(), "2".to_string())
+                        }
+                    };
+                    let probe_range = TimeRange {
+                        start: probe_start,
+                        end: probe_end,
+                        axis: probe_axis,
+                        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+                    };
+                    let probe_sql =
+                        inject_source_filters(&sql_for_bounds, &per_model_source_bounds, &probe_range);
+                    compilers
+                        .get(model_target)
+                        .resolve_partition_column_type(&probe_sql, &inc_plan.timeseries.partition_column)
+                };
 
                 let mut used_column_scoped_merge = false;
 
@@ -3391,6 +3450,7 @@ pub async fn execute_project(
                         start: batch.partition_start.to_string(),
                         end: batch.partition_end.to_string(),
                         axis: batch.partition_start.axis(),
+                        column_type: model_column_type,
                     };
                     // The scan-side skew inversion of this same batch
                     // (`windowing::IncrementalBatch::scan_start`/`scan_end` —
@@ -3406,6 +3466,7 @@ pub async fn execute_project(
                         start: batch.scan_start.to_string(),
                         end: batch.scan_end.to_string(),
                         axis: batch.scan_start.axis(),
+                        column_type: model_column_type,
                     };
 
                     // Two-layer widened-scan + exact output clamp
@@ -3699,6 +3760,7 @@ pub async fn execute_project(
                         start: batch.partition_start.to_string(),
                         end: batch.partition_end.to_string(),
                         axis: batch.partition_start.axis(),
+                        column_type: model_column_type,
                     };
 
                     // Reconciliation ledger (`docs/specs/incremental_models.md`
@@ -3882,6 +3944,7 @@ pub async fn execute_project(
                         // single column — never a silent skip.
                         let region = smelt_logical::maintenance::emit::Region::for_axis(
                             partition.axis,
+                            partition.column_type,
                             &partition.start,
                             &partition.end,
                         )
@@ -3975,6 +4038,7 @@ pub async fn execute_project(
                             .unwrap_or_default();
                         let region = smelt_logical::maintenance::emit::Region::for_axis(
                             partition.axis,
+                            partition.column_type,
                             &partition.start,
                             &partition.end,
                         )
@@ -4075,6 +4139,7 @@ pub async fn execute_project(
                                 format!("{schema}.{}", plan.model_file.db_name_owned());
                             let region = smelt_logical::maintenance::emit::Region::for_axis(
                                 partition.axis,
+                                partition.column_type,
                                 &partition.start,
                                 &partition.end,
                             )

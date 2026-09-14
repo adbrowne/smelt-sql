@@ -90,6 +90,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(result.contains("WHERE status = 'active'"));
@@ -105,6 +106,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(
@@ -120,6 +122,7 @@ mod tests {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
             axis: smelt_logical::PartitionAxis::Calendar,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let result = inject_time_filter(sql, "created_at", &range);
         assert!(matches!(result, Err(TransformError::NoFromClause)));

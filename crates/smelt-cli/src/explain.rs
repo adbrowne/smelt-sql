@@ -1400,6 +1400,10 @@ fn build_delete_insert_period_statement_group(
         start: dw.output_start.clone(),
         end: dw.output_end.clone(),
         axis: dw.axis,
+        // `Undeclared`: `dw.axis` itself is inferred from the `--period`
+        // literal's own form (no schema handle available here) — same
+        // fail-open posture as `axis`, unchanged spelling.
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
     // `--period` is a single, unbatched window — the whole invocation's own
     // outer envelope, never an interior chunk — so its scan range equals its
@@ -1423,6 +1427,7 @@ fn build_delete_insert_period_statement_group(
 
     let region_used = smelt_logical::maintenance::emit::Region::for_axis(
         dw.axis,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &dw.output_start,
         &dw.output_end,
     )

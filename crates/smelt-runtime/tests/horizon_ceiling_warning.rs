@@ -39,11 +39,22 @@ fn load_fixture(example_dir: &str) -> (String, Option<smelt_core::config::DataLa
     (sql_body, metadata.horizon_ceiling)
 }
 
-fn dep_ts() -> HashMap<String, (Vec<String>, String)> {
+fn dep_ts() -> HashMap<
+    String,
+    (
+        Vec<String>,
+        String,
+        smelt_logical::maintenance::emit::PartitionColumnType,
+    ),
+> {
     let mut dep_ts = HashMap::new();
     dep_ts.insert(
         "smelt.events".to_string(),
-        (vec!["events".to_string()], "event_date".to_string()),
+        (
+            vec!["events".to_string()],
+            "event_date".to_string(),
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+        ),
     );
     dep_ts
 }

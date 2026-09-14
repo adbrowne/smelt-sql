@@ -48,19 +48,19 @@ smelt rebuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run
 
 -- chunk 1/2: [2026-04-01, 2026-04-10)
 BEGIN
-  DELETE FROM main.silver_events_parsed WHERE event_date >= '2026-04-01' AND event_date < '2026-04-10'
+  DELETE FROM main.silver_events_parsed WHERE event_date >= DATE '2026-04-01' AND event_date < DATE '2026-04-10'
   INSERT INTO main.silver_events_parsed SELECT * FROM (
 -- … model SELECT body (see the full SQL below) …
 
-) AS _smelt_output_clamp WHERE event_date >= '2026-04-01' AND event_date < '2026-04-10'
+) AS _smelt_output_clamp WHERE event_date >= DATE '2026-04-01' AND event_date < DATE '2026-04-10'
 COMMIT
 -- chunk 2/2: [2026-04-10, 2026-04-19)
 BEGIN
-  DELETE FROM main.silver_events_parsed WHERE event_date >= '2026-04-10' AND event_date < '2026-04-19'
+  DELETE FROM main.silver_events_parsed WHERE event_date >= DATE '2026-04-10' AND event_date < DATE '2026-04-19'
   INSERT INTO main.silver_events_parsed SELECT * FROM (
 -- … model SELECT body (see the full SQL below) …
 
-) AS _smelt_output_clamp WHERE event_date >= '2026-04-10' AND event_date < '2026-04-19'
+) AS _smelt_output_clamp WHERE event_date >= DATE '2026-04-10' AND event_date < DATE '2026-04-19'
 COMMIT
 ```
 
@@ -110,7 +110,7 @@ COMMIT
     
     -- chunk 1/2: [2026-04-01, 2026-04-10)
     BEGIN
-      DELETE FROM main.silver_events_parsed WHERE event_date >= '2026-04-01' AND event_date < '2026-04-10'
+      DELETE FROM main.silver_events_parsed WHERE event_date >= DATE '2026-04-01' AND event_date < DATE '2026-04-10'
       INSERT INTO main.silver_events_parsed SELECT * FROM (
     SELECT
         event_id,
@@ -132,11 +132,11 @@ COMMIT
             AND CAST(arrival_time AS DATE)
     QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1
     
-    ) AS _smelt_output_clamp WHERE event_date >= '2026-04-01' AND event_date < '2026-04-10'
+    ) AS _smelt_output_clamp WHERE event_date >= DATE '2026-04-01' AND event_date < DATE '2026-04-10'
     COMMIT
     -- chunk 2/2: [2026-04-10, 2026-04-19)
     BEGIN
-      DELETE FROM main.silver_events_parsed WHERE event_date >= '2026-04-10' AND event_date < '2026-04-19'
+      DELETE FROM main.silver_events_parsed WHERE event_date >= DATE '2026-04-10' AND event_date < DATE '2026-04-19'
       INSERT INTO main.silver_events_parsed SELECT * FROM (
     SELECT
         event_id,
@@ -158,7 +158,7 @@ COMMIT
             AND CAST(arrival_time AS DATE)
     QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1
     
-    ) AS _smelt_output_clamp WHERE event_date >= '2026-04-10' AND event_date < '2026-04-19'
+    ) AS _smelt_output_clamp WHERE event_date >= DATE '2026-04-10' AND event_date < DATE '2026-04-19'
     COMMIT
     ```
 

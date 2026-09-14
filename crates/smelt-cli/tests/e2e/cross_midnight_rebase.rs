@@ -895,6 +895,7 @@ fn identity_model_windows_unchanged() {
         start: "2026-04-10".to_string(),
         end: "2026-04-12".to_string(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     let windows = compute_incremental_windows(
@@ -1425,10 +1426,10 @@ async fn chained_run_is_refused_or_ordered_never_parallel() {
          sequential single-partition batches, got: {compiled:?}"
     );
     let expected_output_clamps = [
-        "session_start_date >= '2024-01-31' AND session_start_date < '2024-02-01'",
-        "session_start_date >= '2024-02-01' AND session_start_date < '2024-02-02'",
-        "session_start_date >= '2024-02-02' AND session_start_date < '2024-02-03'",
-        "session_start_date >= '2024-02-03' AND session_start_date < '2024-02-04'",
+        "session_start_date >= DATE '2024-01-31' AND session_start_date < DATE '2024-02-01'",
+        "session_start_date >= DATE '2024-02-01' AND session_start_date < DATE '2024-02-02'",
+        "session_start_date >= DATE '2024-02-02' AND session_start_date < DATE '2024-02-03'",
+        "session_start_date >= DATE '2024-02-03' AND session_start_date < DATE '2024-02-04'",
     ];
     for (i, expected_clamp) in expected_output_clamps.iter().enumerate() {
         assert!(

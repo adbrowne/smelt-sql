@@ -176,7 +176,7 @@ fn build_db_and_graph(
 /// model's partition column), not a subquery narrowing the source scan.
 ///
 /// GREEN after Phase 3: the compiled SQL wraps `main.sources_events` (the resolved
-/// source name) in a subquery with `WHERE event_date >= '2024-01-01' AND event_date < '2024-01-02'`.
+/// source name) in a subquery with `WHERE event_date >= DATE '2024-01-01' AND event_date < DATE '2024-01-02'`.
 #[tokio::test]
 async fn incremental_run_pushes_source_filter() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -249,9 +249,9 @@ async fn incremental_run_pushes_source_filter() {
     // Check the compiled SQL for source filter injection.
     // After Phase 3: the batch loop calls inject_source_filters BEFORE compilation.
     // inject_source_filters wraps smelt.sources.events as:
-    //   (SELECT * FROM smelt.sources.events WHERE event_date >= 'D' AND event_date < 'D+1')
+    //   (SELECT * FROM smelt.sources.events WHERE event_date >= DATE 'D' AND event_date < DATE 'D+1')
     // Then the SQL compiler resolves smelt.sources.events → main.sources_events, giving:
-    //   (SELECT * FROM main.sources_events WHERE event_date >= 'D' AND event_date < 'D+1')
+    //   (SELECT * FROM main.sources_events WHERE event_date >= DATE 'D' AND event_date < DATE 'D+1')
     // Before Phase 3 the source is referenced directly as:
     //   main.sources_events
     // (with no wrapping subquery).
@@ -270,7 +270,7 @@ async fn incremental_run_pushes_source_filter() {
 
     // The source filter must be narrowed to the run window [2024-01-01, 2024-01-02).
     assert!(
-        all_sqls.contains("event_date >= '2024-01-01'"),
+        all_sqls.contains("event_date >= DATE '2024-01-01'"),
         "compiled SQL must contain run-window start filter 'event_date >= \\'2024-01-01\\''; \
          compiled SQLs:\n{all_sqls}"
     );
@@ -282,7 +282,7 @@ async fn incremental_run_pushes_source_filter() {
     // `inject_time_filter` wrap is redundant here and must be skipped —
     // assert there is exactly *one* occurrence of the start-of-window
     // filter, not a duplicate outer-clamp copy of the same bound.
-    let start_filter_occurrences = all_sqls.matches("event_date >= '2024-01-01'").count();
+    let start_filter_occurrences = all_sqls.matches("event_date >= DATE '2024-01-01'").count();
     assert_eq!(
         start_filter_occurrences, 1,
         "transparent single-source slice must emit exactly one filter (source-level \

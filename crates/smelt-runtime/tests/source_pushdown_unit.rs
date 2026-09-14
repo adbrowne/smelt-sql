@@ -25,12 +25,20 @@ fn incremental_batch_source_filter_uses_run_window() {
 
     // Simulate source_timeseries: "smelt.sources.events" has partition_column: event_date.
     // dep_timeseries maps full smelt ref → (address_segments, partition_column).
-    let mut dep_ts: HashMap<String, (Vec<String>, String)> = HashMap::new();
+    let mut dep_ts: HashMap<
+        String,
+        (
+            Vec<String>,
+            String,
+            smelt_logical::maintenance::emit::PartitionColumnType,
+        ),
+    > = HashMap::new();
     dep_ts.insert(
         "smelt.sources.events".to_string(),
         (
             vec!["sources".to_string(), "events".to_string()],
             "event_date".to_string(),
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         ),
     );
 
@@ -48,6 +56,7 @@ fn incremental_batch_source_filter_uses_run_window() {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     let result = inject_source_filters(model_sql, &source_bounds, &run_range);
@@ -77,12 +86,20 @@ fn source_filter_uses_partition_range_not_filter_range() {
     // Model with a 1-day INTERVAL lookback on the source.
     let model_sql = "SELECT event_date, COUNT(*) AS cnt FROM smelt.sources.events WHERE event_date >= CURRENT_DATE - INTERVAL '1 day' GROUP BY event_date";
 
-    let mut dep_ts: HashMap<String, (Vec<String>, String)> = HashMap::new();
+    let mut dep_ts: HashMap<
+        String,
+        (
+            Vec<String>,
+            String,
+            smelt_logical::maintenance::emit::PartitionColumnType,
+        ),
+    > = HashMap::new();
     dep_ts.insert(
         "smelt.sources.events".to_string(),
         (
             vec!["sources".to_string(), "events".to_string()],
             "event_date".to_string(),
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         ),
     );
 
@@ -104,6 +121,7 @@ fn source_filter_uses_partition_range_not_filter_range() {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     let result = inject_source_filters(model_sql, &source_bounds, &run_range);
@@ -120,7 +138,14 @@ fn source_filter_uses_partition_range_not_filter_range() {
 #[test]
 fn empty_source_timeseries_leaves_sql_unchanged() {
     let model_sql = "SELECT event_date FROM smelt.sources.events";
-    let dep_ts: HashMap<String, (Vec<String>, String)> = HashMap::new();
+    let dep_ts: HashMap<
+        String,
+        (
+            Vec<String>,
+            String,
+            smelt_logical::maintenance::emit::PartitionColumnType,
+        ),
+    > = HashMap::new();
 
     let (source_bounds, _warnings) = build_source_bound_map(model_sql, &dep_ts, None);
     assert!(
@@ -132,6 +157,7 @@ fn empty_source_timeseries_leaves_sql_unchanged() {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     let result = inject_source_filters(model_sql, &source_bounds, &run_range);
@@ -179,6 +205,7 @@ fn skewed_batch_scan_sized_from_output_window() {
         start: "2026-04-10".to_string(),
         end: "2026-04-11".to_string(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
 
     let windows = compute_incremental_windows(
@@ -214,6 +241,7 @@ fn skewed_batch_scan_sized_from_output_window() {
         start: batch.partition_start.to_string(),
         end: batch.partition_end.to_string(),
         axis: smelt_logical::PartitionAxis::Calendar,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
     let mut source_bounds: HashMap<String, SourceBound> = HashMap::new();
     source_bounds.insert(
@@ -222,6 +250,7 @@ fn skewed_batch_scan_sized_from_output_window() {
             partition_col: "event_date".to_string(),
             before_secs: 86400,
             after_secs: 86400,
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         },
     );
 

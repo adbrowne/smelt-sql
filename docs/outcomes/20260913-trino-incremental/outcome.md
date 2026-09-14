@@ -151,7 +151,7 @@ approximated.
 | 3a | Real (non-dry-run) execution resolves each model's run window and every batch `TimeRange` in that model's OWN partition axis (gap 2), so an integer-axis model's injected predicates render bare rather than quoted | done |
 | 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | blocked |
 | 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | done |
-| 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | planned |
+| 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | done |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
 | 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
@@ -163,6 +163,39 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — phase 3b2 landed: `column_type` must be resolved through the SAME projection
+  `apply_type_casts` uses, never through `resolved_model_schema` (the axis's own resolution
+  path) — the two can genuinely disagree.** Live discovery during this phase: for
+  `examples/web_analytics`'s `marts.daily_active_users_by_method` (a `GROUP BY` passthrough of
+  an upstream model's `event_date`), `resolved_model_schema` infers `Date` while
+  `SqlCompiler::apply_type_casts`'s own projection inference (over the *wrapped* source SQL
+  `inject_source_filters` produces) infers `Varchar` for the identical column — a pre-existing
+  divergence between two independent type-inference call paths, invisible before this phase
+  because both renderings quoted identically. Resolving `column_type` via the axis's own
+  `resolved_model_schema` path (as first attempted) reproduced this exact divergence as a live
+  `Cannot compare values of type VARCHAR and type DATE` failure in
+  `per_partition_equivalence::web_analytics_session_attribution_matches_full_rebuild`, because the
+  physical column `apply_type_casts` actually creates is `VARCHAR` while the injected DELETE
+  literal rendered `DATE '…'`-typed. Fixed by adding `SqlCompiler::resolve_partition_column_type`
+  (`compile.rs`), which reuses `derive_projection_for` + `build_projection_type_context` — the
+  exact machinery `apply_type_casts` itself calls — so `column_type` and the physical CAST always
+  agree, regardless of which inference is "correct" in the abstract. The call site additionally
+  runs the model's SQL through `inject_source_filters` with a placeholder range first (a *shape
+  probe*): the wrapping `inject_source_filters` performs (a bounded source ref becomes a derived-
+  table subquery) itself changes how the outer projection resolves a passed-through column's
+  type, so probing on the model's bare, un-wrapped SQL was insufficient and had to be dropped —
+  only the wrapped shape matches what `apply_type_casts` will actually see. The underlying
+  `derive_projection`/`infer_expression_type` divergence itself (why a subquery-wrapped FROM loses
+  the upstream column's real type) is not fixed here — it is a pre-existing `smelt-db` type-
+  inference gap, out of this phase's scope, and worth its own investigation.
+- **2026-09-15 — `IncrementalPlan::column_type` (populated by `resolve_partition_axes`) was
+  removed rather than kept as a second, unused source of truth.** Once every consumer moved to
+  `SqlCompiler::resolve_partition_column_type`, the field became dead code (flagged by
+  `cargo build`'s own `dead_code` lint) — keeping an unread, divergence-prone field around would
+  have invited a future regression back to the bug this phase just fixed. `ResolvedAxis` (axis
+  resolution) is unchanged; only the column-type half moved.
+
 
 - **2026-09-15 — reshape at phase 3b2 planning: a new row `3e` owns live-Trino test isolation.**
   Phase 3c's summary records that the live-tier suite is flaky under default parallelism — three

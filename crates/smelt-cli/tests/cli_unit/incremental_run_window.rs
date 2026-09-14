@@ -137,6 +137,7 @@ async fn test_window_equivalent_to_daily_runs() -> Result<()> {
                 start: start.clone(),
                 end: end.clone(),
                 axis: smelt_backend::PartitionAxis::Calendar,
+                column_type: smelt_backend::PartitionColumnType::Undeclared,
             };
             backend
                 .delete_partitions("main", "daily_result", &range)
@@ -260,6 +261,7 @@ async fn test_delete_covers_full_window() -> Result<()> {
         start: "2024-01-01".to_string(),
         end: "2024-01-08".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     backend
         .delete_partitions("main", "daily_agg", &range)
@@ -283,6 +285,7 @@ async fn test_delete_covers_full_window() -> Result<()> {
         start: "2024-01-01".to_string(),
         end: "2024-01-04".to_string(),
         axis: smelt_backend::PartitionAxis::Calendar,
+        column_type: smelt_backend::PartitionColumnType::Undeclared,
     };
     backend
         .delete_partitions("main", "daily_agg", &partial_range)

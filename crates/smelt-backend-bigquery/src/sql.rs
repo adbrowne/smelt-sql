@@ -102,8 +102,8 @@ pub fn delete_partitions_range(
     table_name: &str,
     partition: &PartitionRange,
 ) -> Result<String, String> {
-    let start_lit = partition_literal(partition.axis, &partition.start)?;
-    let end_lit = partition_literal(partition.axis, &partition.end)?;
+    let start_lit = partition_literal(partition.axis, partition.column_type, &partition.start)?;
+    let end_lit = partition_literal(partition.axis, partition.column_type, &partition.end)?;
     Ok(format!(
         "DELETE FROM {} WHERE {} >= {} AND {} < {}",
         table_name, partition.column, start_lit, partition.column, end_lit

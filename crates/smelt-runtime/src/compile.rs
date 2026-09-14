@@ -43,7 +43,14 @@ use crate::fn_bodies::FnBodyMap;
 /// without a second walk over the sources.
 pub fn build_source_bound_map(
     model_sql: &str,
-    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+    dep_timeseries: &HashMap<
+        String,
+        (
+            Vec<String>,
+            String,
+            smelt_logical::maintenance::emit::PartitionColumnType,
+        ),
+    >,
     horizon_ceiling: Option<&smelt_core::config::DataLatency>,
 ) -> (
     HashMap<String, crate::transformer::SourceBound>,
@@ -60,7 +67,7 @@ pub fn build_source_bound_map(
 
     // Build BoundContext: dep_name → partition_col
     let mut ctx = BoundContext::new();
-    for (dep_name, (_segs, partition_col)) in dep_timeseries {
+    for (dep_name, (_segs, partition_col, _column_type)) in dep_timeseries {
         ctx.add_source(dep_name, partition_col);
     }
 
@@ -71,7 +78,7 @@ pub fn build_source_bound_map(
 
     let mut result = HashMap::new();
     let mut warnings = Vec::new();
-    for (dep_name, (segs, partition_col)) in dep_timeseries {
+    for (dep_name, (segs, partition_col, column_type)) in dep_timeseries {
         let bound_result = raw_bounds.get(dep_name).map(|(_, bound)| bound.clone());
 
         // The horizon ceiling is a warning-only comparison against the derived
@@ -101,6 +108,7 @@ pub fn build_source_bound_map(
                 partition_col: partition_col.clone(),
                 before_secs,
                 after_secs,
+                column_type: *column_type,
             },
         );
     }
@@ -1821,6 +1829,42 @@ impl SqlCompiler {
                 Some(derive_projection(&select_stmt, &type_ctx))
             })
             .unwrap_or(Projection { columns: None })
+    }
+
+    /// Resolve `column_name`'s [`smelt_logical::maintenance::emit::PartitionColumnType`]
+    /// from `model_sql`'s own (frontmatter-stripped, un-wrapped) select list —
+    /// the SAME [`derive_projection_for`](Self::derive_projection_for) +
+    /// [`build_projection_type_context`](Self::build_projection_type_context)
+    /// derivation [`apply_type_casts`](Self::apply_type_casts) uses to decide
+    /// the model's OWN physical output type. Callers that need a partition
+    /// literal to type-check against the model's own maintained column
+    /// (rather than merely quote/escape it) must resolve the type through
+    /// this method, never through a separate inference path — the two can
+    /// genuinely disagree (a real divergence this method exists to close;
+    /// `docs/outcomes/20260913-trino-incremental/phases/03b2-summary.md`),
+    /// and a caller using a different inference than `apply_type_casts` risks
+    /// rendering a literal typed against a column the CAST wrap left a
+    /// different physical type. Returns `Undeclared` when the column isn't
+    /// found or its type isn't statically resolvable — the compatibility
+    /// arm, unchanged from today's spelling.
+    pub(crate) fn resolve_partition_column_type(
+        &self,
+        model_sql: &str,
+        column_name: &str,
+    ) -> smelt_logical::maintenance::emit::PartitionColumnType {
+        let stripped = smelt_parser::strip_frontmatter(model_sql);
+        let parse = smelt_parser::parse(&stripped);
+        let projection = self.derive_projection_for(&parse.syntax());
+        let Some(columns) = &projection.columns else {
+            return smelt_logical::maintenance::emit::PartitionColumnType::Undeclared;
+        };
+        columns
+            .iter()
+            .find(|c| c.name.as_deref() == Some(column_name))
+            .map(|c| {
+                smelt_logical::maintenance::emit::partition_column_type_for_type(&c.typed.data_type)
+            })
+            .unwrap_or(smelt_logical::maintenance::emit::PartitionColumnType::Undeclared)
     }
 
     /// Wrap SELECT columns with CASTs based on the already-derived [`Projection`].

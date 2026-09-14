@@ -63,6 +63,7 @@ pub fn driving_steps(
                 start: current.format("%Y-%m-%d").to_string(),
                 end: next.format("%Y-%m-%d").to_string(),
                 axis: smelt_logical::PartitionAxis::Calendar,
+                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             },
         });
         current = next;

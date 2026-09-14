@@ -261,7 +261,41 @@ pub(super) async fn build_dry_run_outcome(
             let partition_col = &inc.timeseries.partition_column;
             let table_name = format!("{schema}.{}", model_file.db_name_owned());
             let per_model_source_bounds =
-                build_model_source_bounds(model_file, source_timeseries, model_name);
+                build_model_source_bounds(model_file, source_timeseries, source_infos, model_name);
+            // Resolved through the SAME projection `apply_type_casts` uses
+            // (`SqlCompiler::resolve_partition_column_type`), not
+            // `IncrementalPlan::column_type` (`resolved_model_schema`-derived,
+            // a separate inference that can genuinely disagree) — so a
+            // dry-run's reported literal always types against the column the
+            // real write actually produces. Resolved off a *shape probe*
+            // (`inject_source_filters` wraps a bounded source ref in a
+            // derived-table subquery, which can itself change how the outer
+            // projection resolves that column's type) — mirrors
+            // `execute/project/mod.rs`'s live-run resolution exactly. The
+            // probe range's own literal values are never rendered.
+            let model_column_type = {
+                let clean_sql = smelt_parser::strip_frontmatter(&model_file.content);
+                let probe_axis = inc
+                    .batches
+                    .first()
+                    .map(|b| b.partition_start.axis())
+                    .unwrap_or(smelt_logical::PartitionAxis::Calendar);
+                let (probe_start, probe_end) = match probe_axis {
+                    smelt_logical::PartitionAxis::Calendar => {
+                        ("2026-01-01".to_string(), "2026-01-02".to_string())
+                    }
+                    smelt_logical::PartitionAxis::Integer => ("1".to_string(), "2".to_string()),
+                };
+                let probe_range = TimeRange {
+                    start: probe_start,
+                    end: probe_end,
+                    axis: probe_axis,
+                    column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+                };
+                let probe_sql =
+                    inject_source_filters(&clean_sql, &per_model_source_bounds, &probe_range);
+                compiler.resolve_partition_column_type(&probe_sql, partition_col)
+            };
             // T3 (`docs/plans/20260715-composed-axes-conditional-
             // maintenance.md` Phase E3): resolved once per model (not
             // per batch — the facts don't vary across this model's own
@@ -313,6 +347,7 @@ pub(super) async fn build_dry_run_outcome(
                     start: start.clone(),
                     end: end.clone(),
                     axis: batch.partition_start.axis(),
+                    column_type: model_column_type,
                 };
                 // Scan-side skew inversion of this batch (see
                 // `derive_batch_filtered_sql`'s doc comment) — equals
@@ -324,6 +359,7 @@ pub(super) async fn build_dry_run_outcome(
                     start: batch.scan_start.to_string(),
                     end: batch.scan_end.to_string(),
                     axis: batch.scan_start.axis(),
+                    column_type: model_column_type,
                 };
                 let filtered_sql = derive_batch_filtered_sql(
                     &clean_sql,
@@ -342,6 +378,7 @@ pub(super) async fn build_dry_run_outcome(
                 )?;
                 let region = smelt_logical::maintenance::emit::Region::for_axis(
                     run_range.axis,
+                    run_range.column_type,
                     &start,
                     &end,
                 )
