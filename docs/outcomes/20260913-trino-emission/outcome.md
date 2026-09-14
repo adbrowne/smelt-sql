@@ -130,7 +130,7 @@ including its null-safe join spelling.
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | done |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | done |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | done |
-| 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | pending |
+| 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | planned |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | pending |
 | 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | pending |
 
@@ -334,5 +334,19 @@ including its null-safe join spelling.
   candidate from landing unverified — `registry_coverage::trino_restructure_pairs_with_a_window_refusal`
   is the concrete forward-guard, vacuously green today by design. See
   `phases/07-summary.md` for the full measurement log and gate results.
+
+- **2026-09-14 — phase 8 planned; no phase-table reshape.** Phase 7's summary deferred nothing
+  into phase 8's scope (its one follow-up, the misleading `percentile_cont` ledger *reason text*,
+  is prose on a row whose `Gap` disposition is unaffected and serves no success criterion — it
+  stays out of the table, and the ledger row itself is already registered and probed as criterion 5
+  requires). One finding surfaced while reading the code this phase touches, and it is phase 8's
+  own work rather than a new row: `emission_ownership::the_printer_branches_on_no_dialect_variant`
+  restates a hardcoded three-name list (`DuckDB`/`SparkSQL`/`BigQuery`) and therefore does **not**
+  currently catch a `SqlDialect::Trino` branch in the printer — criterion 7's claim is literally
+  untrue today. The gate is rewritten to parse the `SqlDialect` enum from `dialect.rs`, the same
+  "parsed out of the module, not restated" shape the `RewriteId`/`RestructureId` gates already use,
+  so a fifth dialect is covered the day it exists. Second decision taken in the plan: this phase is
+  offline — the seams are compile-path gates with no live leg — so an unreachable coordinator is
+  irrelevant here, and `verify-phase.sh` runs with the tier unexported per phases 3–7's discipline.
 
 ## Blocked
