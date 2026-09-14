@@ -187,6 +187,36 @@ fn build_load_plan(
     })
 }
 
+/// Run a `DROP TABLE IF EXISTS`/`DROP VIEW IF EXISTS` statement, treating
+/// Trino's cross-kind mismatch as the no-op `IF EXISTS` already promises.
+///
+/// Trino's `IF EXISTS` only suppresses the "does not exist" error when no
+/// object at all exists under that name — if an object of the *other* kind
+/// exists (a table where a view was asked for, or vice versa), it raises
+/// e.g. `"View 'x' does not exist, but a table with that name exists"`
+/// instead of the silent no-op every other backend gives here. That case
+/// still means "no view of that name exists", which is exactly the
+/// condition `IF EXISTS` is asking about, so it is swallowed the same way
+/// a true absence is — the caller (`execute_model_default`'s drop-both
+/// step, or `load_table`'s own pair) always issues the matching-kind drop
+/// right after, so a real object of the requested kind is never left
+/// behind. Discovered by phase 9's rerun test
+/// (`docs/outcomes/20260913-trino-ledger/phases/09-plan.md`): every second
+/// `smelt run` against a `materialization: table` model on Trino failed
+/// here before this fix, since `execute_model_default` drops the *other*
+/// kind first on every run.
+async fn drop_if_exists_tolerant(client: &TrinoClient, sql: String) -> Result<(), BackendError> {
+    match client.execute(&sql).await {
+        Ok(_) => Ok(()),
+        Err(BackendError::ExecutionFailed { message, .. })
+            if message.contains("does not exist, but a") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Decode a single-row, single-column `bigint` result (a `count(*)`) into a
 /// `usize`. Shared by `get_row_count` and `table_exists`.
 fn decode_bigint_count(batches: &[RecordBatch], context: &str) -> Result<i64, BackendError> {
@@ -222,9 +252,7 @@ impl Backend for TrinoBackend {
         // `supports_create_or_replace_table` is unmeasured (phase 8), so
         // this emulates replacement with DROP-then-CREATE rather than
         // assuming Trino/Iceberg accepts `CREATE OR REPLACE TABLE`.
-        self.client
-            .execute(&format!("DROP TABLE IF EXISTS {table}"))
-            .await?;
+        drop_if_exists_tolerant(&self.client, format!("DROP TABLE IF EXISTS {table}")).await?;
         self.client
             .execute(&format!("CREATE TABLE {table} AS {sql}"))
             .await?;
@@ -241,9 +269,7 @@ impl Backend for TrinoBackend {
         // Same reasoning as `create_table_as`: `supports_create_or_replace_view`
         // is unmeasured, so this drops first rather than assuming
         // `CREATE OR REPLACE VIEW`.
-        self.client
-            .execute(&format!("DROP VIEW IF EXISTS {view}"))
-            .await?;
+        drop_if_exists_tolerant(&self.client, format!("DROP VIEW IF EXISTS {view}")).await?;
         self.client
             .execute(&format!("CREATE VIEW {view} AS {sql}"))
             .await?;
@@ -252,18 +278,12 @@ impl Backend for TrinoBackend {
 
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let table = self.qualified_name(schema, name);
-        self.client
-            .execute(&format!("DROP TABLE IF EXISTS {table}"))
-            .await?;
-        Ok(())
+        drop_if_exists_tolerant(&self.client, format!("DROP TABLE IF EXISTS {table}")).await
     }
 
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let view = self.qualified_name(schema, name);
-        self.client
-            .execute(&format!("DROP VIEW IF EXISTS {view}"))
-            .await?;
-        Ok(())
+        drop_if_exists_tolerant(&self.client, format!("DROP VIEW IF EXISTS {view}")).await
     }
 
     async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
@@ -339,12 +359,8 @@ impl Backend for TrinoBackend {
         let table = self.qualified_name(schema, name);
         let plan = build_load_plan(&table, &arrow_schema, &batches, schema, name)?;
 
-        self.client
-            .execute(&format!("DROP TABLE IF EXISTS {table}"))
-            .await?;
-        self.client
-            .execute(&format!("DROP VIEW IF EXISTS {table}"))
-            .await?;
+        drop_if_exists_tolerant(&self.client, format!("DROP TABLE IF EXISTS {table}")).await?;
+        drop_if_exists_tolerant(&self.client, format!("DROP VIEW IF EXISTS {table}")).await?;
         self.client.execute(&plan.create_table_sql).await?;
         for insert_sql in &plan.insert_sqls {
             self.client.execute(insert_sql).await?;

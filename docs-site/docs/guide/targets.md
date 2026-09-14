@@ -474,7 +474,10 @@ Arrow yet**. Both are tracked in `docs/specs/multi_backend.md` §Known Divergenc
 
 None of this touches `.smelt/`: single-writer locking and the `meta.json` layout-version check
 are backend-independent and work normally against a `trino` target, the same as against every
-other backend.
+other backend. `.smelt/` itself is safe to delete between runs — Trino keeps no correctness
+state anywhere outside the warehouse, so there is nothing on disk for a delete to lose — and
+`state.mode: stateless` is fully supported, writing nothing under `.smelt/` while producing the
+same table values as `state.mode: intervals` for the same project.
 
 ## Switching targets
 
