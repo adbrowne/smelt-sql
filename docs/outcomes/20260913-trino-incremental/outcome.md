@@ -145,7 +145,7 @@ approximated.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | planned |
+| 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | done |
 | 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | pending |
 | 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
@@ -157,6 +157,30 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 1: Iceberg `MERGE` characterised by execution** (measured against
+  `trinodb/trino:483` + `apache/iceberg-rest-fixture:1.10.1`, `crates/smelt-backend-trino/tests/merge_clause_forms.rs`):
+  - `WHEN MATCHED THEN UPDATE SET *` (the whole-row shorthand) — **refused**:
+    `mismatched input '*'. Expecting: <identifier>`. Every `SET` target must be a named column.
+  - `WHEN NOT MATCHED THEN INSERT *` — **refused**: `mismatched input '*'. Expecting: '(', 'VALUES'`.
+  - `WHEN NOT MATCHED THEN INSERT ROW` — **refused**: `mismatched input 'ROW'. Expecting: '(', 'VALUES'`.
+    The explicit column-list form (`INSERT (n, lbl) VALUES (s.n, s.lbl)`) is accepted (already exercised
+    by `probe_supports_merge`) and is the emitter's only route for the insert arm — phase 3 and phase 5's
+    emitters must render `UPDATE SET` and `INSERT` column-by-column, never `SET *` / `INSERT *` / `INSERT ROW`.
+  - `WHEN MATCHED AND <pred> THEN UPDATE ...` — accepted, and the guard correctly restricts which
+    matched rows update (value leg confirmed: only the guarded row changed).
+  - `WHEN MATCHED THEN DELETE` — accepted; the delete arm exists for the merge-less conditional-write
+    and delete-and-insert routes.
+  - Two ordered `WHEN MATCHED` arms — accepted, and confirmed **first-match-wins** (the first matching
+    arm's `UPDATE` applied, not the second).
+  - `USING (SELECT ... FROM <staged>) s` (subquery source over a staged relation, not a `VALUES` list)
+    — accepted, matching the shape T3's staged relation presents.
+  - `WHEN NOT MATCHED BY SOURCE THEN DELETE` — **refused**: `mismatched input 'BY'. Expecting: 'AND', 'THEN'`.
+    Confirms the existing `supports_merge_not_matched_by_source: false` measurement
+    (`crates/smelt-backend-trino/tests/capability_probes.rs::probe_supports_merge_not_matched_by_source`);
+    no change to the spec matrix or `BackendCapabilities::trino_iceberg()` was needed — `supports_merge`
+    and `supports_column_scoped_merge` (both `true`) also confirmed unchanged, since every accepted form
+    above is a shape those flags already cover.
 
 - **2026-09-14 — reshape at phase 1 planning.** Phase 3's row now names landing
   `maintenance_dialect` for `SqlDialect::Trino` explicitly. The T1 hand-forward measured it

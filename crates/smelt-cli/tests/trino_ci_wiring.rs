@@ -251,11 +251,20 @@ fn every_trino_gated_test_file_skips_through_the_shared_env_gate() {
     let live_gated_files = [
         "crates/smelt-backend-trino/tests/backend_live.rs",
         "crates/smelt-backend-trino/tests/capability_probes.rs",
+        "crates/smelt-backend-trino/tests/merge_clause_forms.rs",
         "crates/smelt-cli/tests/trino_smoke.rs",
         "crates/smelt-cli/tests/seed_parity.rs",
     ];
     for rel in live_gated_files {
-        let text = read(rel);
+        let mut text = read(rel);
+        // `capability_probes.rs` and `merge_clause_forms.rs` both share the
+        // `SMELT_TRINO_URL` lookup and the "Skipping ..." print through
+        // `tests/common/mod.rs` (`mod common;`) rather than repeating it —
+        // check the harness they pull in, not just the file's own text.
+        if text.contains("mod common;") {
+            text.push('\n');
+            text.push_str(&read("crates/smelt-backend-trino/tests/common/mod.rs"));
+        }
         assert!(
             text.contains("SMELT_TRINO_URL"),
             "{rel} is expected to have a live Trino leg gated on SMELT_TRINO_URL: {rel}"

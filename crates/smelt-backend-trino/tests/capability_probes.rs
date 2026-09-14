@@ -12,79 +12,16 @@
 //!   cargo test -p smelt-backend-trino --test capability_probes
 //!   bash scripts/trino-down.sh
 
+mod common;
+
+use common::{drop_schema, live_env_or_skip};
 use smelt_backend::Backend;
-use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
 use smelt_dialect::{BackendCapabilities, NullSafeEqualitySpelling, SqlDialect};
-
-struct LiveEnv {
-    backend: TrinoBackend,
-    catalog: String,
-    schema: String,
-}
-
-fn unique_schema() -> String {
-    let base = std::env::var("SMELT_TRINO_SCHEMA").unwrap_or_else(|_| "smelt_dev".to_string());
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    format!("{base}_cap_{}_{nanos}", std::process::id())
-}
-
-/// Connect and create the run's isolated schema, or `None` when
-/// `SMELT_TRINO_URL` is unset (the caller should skip green).
-async fn live_env_or_skip(test_name: &str) -> Option<LiveEnv> {
-    let Ok(base_url) = std::env::var("SMELT_TRINO_URL") else {
-        eprintln!("Skipping {test_name} — set SMELT_TRINO_URL");
-        return None;
-    };
-    let user = std::env::var("SMELT_TRINO_USER").unwrap_or_else(|_| "smelt".to_string());
-    let catalog = std::env::var("SMELT_TRINO_CATALOG").unwrap_or_else(|_| "iceberg".to_string());
-    let schema = unique_schema();
-
-    let backend = TrinoBackend::new(TrinoClientConfig {
-        base_url,
-        user,
-        catalog: catalog.clone(),
-        schema: schema.clone(),
-        password: None,
-    });
-    backend
-        .ensure_schema(&schema)
-        .await
-        .unwrap_or_else(|e| panic!("ensure_schema must succeed against a live tier: {e}"));
-
-    Some(LiveEnv {
-        backend,
-        catalog,
-        schema,
-    })
-}
-
-async fn drop_schema(env: &LiveEnv) {
-    let _ = env
-        .backend
-        .execute_sql(&format!(
-            "DROP SCHEMA IF EXISTS \"{}\".\"{}\"",
-            env.catalog, env.schema
-        ))
-        .await;
-}
-
-impl LiveEnv {
-    fn q(&self, name: &str) -> String {
-        format!("\"{}\".\"{}\".\"{name}\"", self.catalog, self.schema)
-    }
-
-    async fn ok(&self, sql: &str) -> bool {
-        self.backend.execute_sql(sql).await.is_ok()
-    }
-}
 
 /// `QUALIFY` is not Trino grammar.
 #[tokio::test]
 async fn probe_supports_qualify() {
-    let Some(env) = live_env_or_skip("probe_supports_qualify").await else {
+    let Some(env) = live_env_or_skip("probe_supports_qualify", "cap").await else {
         return;
     };
     let measured = env
@@ -101,7 +38,7 @@ async fn probe_supports_qualify() {
 /// `CREATE OR REPLACE TABLE ... AS SELECT`.
 #[tokio::test]
 async fn probe_supports_create_or_replace_table() {
-    let Some(env) = live_env_or_skip("probe_supports_create_or_replace_table").await else {
+    let Some(env) = live_env_or_skip("probe_supports_create_or_replace_table", "cap").await else {
         return;
     };
     env.backend
@@ -125,7 +62,7 @@ async fn probe_supports_create_or_replace_table() {
 /// `CREATE OR REPLACE VIEW ... AS SELECT`.
 #[tokio::test]
 async fn probe_supports_create_or_replace_view() {
-    let Some(env) = live_env_or_skip("probe_supports_create_or_replace_view").await else {
+    let Some(env) = live_env_or_skip("probe_supports_create_or_replace_view", "cap").await else {
         return;
     };
     let measured = env
@@ -145,7 +82,7 @@ async fn probe_supports_create_or_replace_view() {
 /// `MERGE INTO ... WHEN MATCHED ... WHEN NOT MATCHED ...`.
 #[tokio::test]
 async fn probe_supports_merge() {
-    let Some(env) = live_env_or_skip("probe_supports_merge").await else {
+    let Some(env) = live_env_or_skip("probe_supports_merge", "cap").await else {
         return;
     };
     env.backend
@@ -174,7 +111,7 @@ async fn probe_supports_merge() {
 /// question this flag does not gate).
 #[tokio::test]
 async fn probe_supports_column_scoped_merge() {
-    let Some(env) = live_env_or_skip("probe_supports_column_scoped_merge").await else {
+    let Some(env) = live_env_or_skip("probe_supports_column_scoped_merge", "cap").await else {
         return;
     };
     env.backend
@@ -204,7 +141,8 @@ async fn probe_supports_column_scoped_merge() {
 /// against a `BackendCapabilities` field.
 #[tokio::test]
 async fn probe_supports_merge_not_matched_by_source() {
-    let Some(env) = live_env_or_skip("probe_supports_merge_not_matched_by_source").await else {
+    let Some(env) = live_env_or_skip("probe_supports_merge_not_matched_by_source", "cap").await
+    else {
         return;
     };
     env.backend
@@ -229,7 +167,7 @@ async fn probe_supports_merge_not_matched_by_source() {
 /// staged-candidate pattern. Spec-only flag, no struct field yet.
 #[tokio::test]
 async fn probe_supports_staged_relation_group() {
-    let Some(env) = live_env_or_skip("probe_supports_staged_relation_group").await else {
+    let Some(env) = live_env_or_skip("probe_supports_staged_relation_group", "cap").await else {
         return;
     };
     let group = async {
@@ -262,7 +200,7 @@ async fn probe_supports_staged_relation_group() {
 /// `PIVOT (... FOR ... IN (...))`.
 #[tokio::test]
 async fn probe_supports_pivot() {
-    let Some(env) = live_env_or_skip("probe_supports_pivot").await else {
+    let Some(env) = live_env_or_skip("probe_supports_pivot", "cap").await else {
         return;
     };
     let measured = env
@@ -279,7 +217,7 @@ async fn probe_supports_pivot() {
 /// `DATE '2024-01-01'`.
 #[tokio::test]
 async fn probe_supports_date_literal() {
-    let Some(env) = live_env_or_skip("probe_supports_date_literal").await else {
+    let Some(env) = live_env_or_skip("probe_supports_date_literal", "cap").await else {
         return;
     };
     let measured = env.ok("SELECT DATE '2024-01-01'").await;
@@ -294,7 +232,7 @@ async fn probe_supports_date_literal() {
 /// `'a' || 'b'`.
 #[tokio::test]
 async fn probe_supports_concat_operator() {
-    let Some(env) = live_env_or_skip("probe_supports_concat_operator").await else {
+    let Some(env) = live_env_or_skip("probe_supports_concat_operator", "cap").await else {
         return;
     };
     let measured = env.ok("SELECT 'a' || 'b'").await;
@@ -311,7 +249,7 @@ async fn probe_supports_concat_operator() {
 /// result to Arrow is an unrelated, separate gap this flag does not gate.
 #[tokio::test]
 async fn probe_supports_array_literal() {
-    let Some(env) = live_env_or_skip("probe_supports_array_literal").await else {
+    let Some(env) = live_env_or_skip("probe_supports_array_literal", "cap").await else {
         return;
     };
     let measured = env.ok("SELECT cardinality([1,2,3])").await;
@@ -327,7 +265,7 @@ async fn probe_supports_array_literal() {
 /// `/v1/statement` client.
 #[tokio::test]
 async fn probe_supports_transactional_ddl() {
-    let Some(env) = live_env_or_skip("probe_supports_transactional_ddl").await else {
+    let Some(env) = live_env_or_skip("probe_supports_transactional_ddl", "cap").await else {
         return;
     };
     let txn = async {
@@ -350,7 +288,7 @@ async fn probe_supports_transactional_ddl() {
 /// `x::T`.
 #[tokio::test]
 async fn probe_supports_double_colon_cast() {
-    let Some(env) = live_env_or_skip("probe_supports_double_colon_cast").await else {
+    let Some(env) = live_env_or_skip("probe_supports_double_colon_cast", "cap").await else {
         return;
     };
     let measured = env.ok("SELECT 1::INTEGER").await;
@@ -365,7 +303,7 @@ async fn probe_supports_double_colon_cast() {
 /// A trailing comma before the list's close.
 #[tokio::test]
 async fn probe_supports_trailing_commas() {
-    let Some(env) = live_env_or_skip("probe_supports_trailing_commas").await else {
+    let Some(env) = live_env_or_skip("probe_supports_trailing_commas", "cap").await else {
         return;
     };
     let measured = env.ok("SELECT 1, 2,").await;
@@ -380,7 +318,7 @@ async fn probe_supports_trailing_commas() {
 /// `INSERT OVERWRITE ...`.
 #[tokio::test]
 async fn probe_supports_insert_overwrite() {
-    let Some(env) = live_env_or_skip("probe_supports_insert_overwrite").await else {
+    let Some(env) = live_env_or_skip("probe_supports_insert_overwrite", "cap").await else {
         return;
     };
     env.backend
@@ -401,7 +339,7 @@ async fn probe_supports_insert_overwrite() {
 /// `CREATE MATERIALIZED VIEW` over the Iceberg REST catalog.
 #[tokio::test]
 async fn probe_supports_native_ivm() {
-    let Some(env) = live_env_or_skip("probe_supports_native_ivm").await else {
+    let Some(env) = live_env_or_skip("probe_supports_native_ivm", "cap").await else {
         return;
     };
     env.backend
@@ -427,7 +365,7 @@ async fn probe_supports_native_ivm() {
 /// column — the dot-notation nested-struct-field DDL path.
 #[tokio::test]
 async fn probe_supports_struct_field_ddl() {
-    let Some(env) = live_env_or_skip("probe_supports_struct_field_ddl").await else {
+    let Some(env) = live_env_or_skip("probe_supports_struct_field_ddl", "cap").await else {
         return;
     };
     env.backend
@@ -454,7 +392,7 @@ async fn probe_supports_struct_field_ddl() {
 /// `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE ... USING ...`.
 #[tokio::test]
 async fn probe_supports_alter_column_using() {
-    let Some(env) = live_env_or_skip("probe_supports_alter_column_using").await else {
+    let Some(env) = live_env_or_skip("probe_supports_alter_column_using", "cap").await else {
         return;
     };
     env.backend
@@ -479,7 +417,7 @@ async fn probe_supports_alter_column_using() {
 /// `ARRAY(ROW(a INTEGER))` column.
 #[tokio::test]
 async fn probe_supports_nested_array_ddl() {
-    let Some(env) = live_env_or_skip("probe_supports_nested_array_ddl").await else {
+    let Some(env) = live_env_or_skip("probe_supports_nested_array_ddl", "cap").await else {
         return;
     };
     env.backend
@@ -506,7 +444,7 @@ async fn probe_supports_nested_array_ddl() {
 /// Writing a row with an extra column the target schema does not declare.
 #[tokio::test]
 async fn probe_supports_merge_schema_write() {
-    let Some(env) = live_env_or_skip("probe_supports_merge_schema_write").await else {
+    let Some(env) = live_env_or_skip("probe_supports_merge_schema_write", "cap").await else {
         return;
     };
     env.backend
@@ -532,7 +470,7 @@ async fn probe_supports_merge_schema_write() {
 /// rename with no rewrite, reading the prior data back.
 #[tokio::test]
 async fn probe_supports_column_mapping() {
-    let Some(env) = live_env_or_skip("probe_supports_column_mapping").await else {
+    let Some(env) = live_env_or_skip("probe_supports_column_mapping", "cap").await else {
         return;
     };
     let round_trip = async {
@@ -565,7 +503,7 @@ async fn probe_supports_column_mapping() {
 /// `FROM t |> WHERE ...` native pipe syntax.
 #[tokio::test]
 async fn probe_supports_pipe_syntax() {
-    let Some(env) = live_env_or_skip("probe_supports_pipe_syntax").await else {
+    let Some(env) = live_env_or_skip("probe_supports_pipe_syntax", "cap").await else {
         return;
     };
     env.backend
@@ -585,7 +523,7 @@ async fn probe_supports_pipe_syntax() {
 /// to establish the flag is `false` (the trio requires all three).
 #[tokio::test]
 async fn probe_supports_pipe_set_drop_rename() {
-    let Some(env) = live_env_or_skip("probe_supports_pipe_set_drop_rename").await else {
+    let Some(env) = live_env_or_skip("probe_supports_pipe_set_drop_rename", "cap").await else {
         return;
     };
     env.backend
@@ -606,7 +544,7 @@ async fn probe_supports_pipe_set_drop_rename() {
 /// Writing into a schema that was never passed to `ensure_schema`.
 #[tokio::test]
 async fn probe_requires_schema_init() {
-    let Some(env) = live_env_or_skip("probe_requires_schema_init").await else {
+    let Some(env) = live_env_or_skip("probe_requires_schema_init", "cap").await else {
         return;
     };
     let never_created = format!("{}_never_created", env.schema);
@@ -629,7 +567,7 @@ async fn probe_requires_schema_init() {
 /// `IS NOT DISTINCT FROM` vs `<=>` — which spelling Trino accepts.
 #[tokio::test]
 async fn probe_null_safe_equality() {
-    let Some(env) = live_env_or_skip("probe_null_safe_equality").await else {
+    let Some(env) = live_env_or_skip("probe_null_safe_equality", "cap").await else {
         return;
     };
     let is_not_distinct = env.ok("SELECT 1 IS NOT DISTINCT FROM NULL").await;
@@ -651,7 +589,7 @@ async fn probe_null_safe_equality() {
 /// `false`.
 #[tokio::test]
 async fn language_properties_are_measured() {
-    let Some(env) = live_env_or_skip("language_properties_are_measured").await else {
+    let Some(env) = live_env_or_skip("language_properties_are_measured", "cap").await else {
         return;
     };
     let filter_clause = env
