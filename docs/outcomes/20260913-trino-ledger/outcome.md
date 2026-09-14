@@ -158,7 +158,7 @@ land near or above Delta's.
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | done |
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | done |
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | done |
-| 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | pending |
+| 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | planned |
 | 10 | The keyless staged emitter's sentinel: `emit_staged_candidate_conditional_keyless`'s hardcoded `CREATE TEMP TABLE` either takes phase 7's residence/atomicity treatment, or a standing test proves no Trino execution path reaches it — a temp-table spelling on a backend with no temp tables is exactly the claim-without-builder failure criterion 3 excludes | pending |
 | 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
@@ -480,5 +480,15 @@ land near or above Delta's.
   absence of cross-table atomicity is a property of the Iceberg connector, not of the SQL surface,
   so it is measured rather than assumed, and a probe finding otherwise escalates instead of being
   absorbed.
+
+- 2026-09-14 (phase 9 planning): **No reshape.** Phase 8's summary asked whether phase 9's premise
+  is similarly already-true; it is not — nothing today proves the delete-between-runs or stateless
+  claims on Trino, so phase 9 stays a real proof phase. The one constraint carried forward from
+  phase 6 shapes its seam rather than its scope: no `refresh: incremental` model can complete a
+  live `execute_project` run on Trino until `20260913-trino-incremental` adds the
+  `MaintenanceDialect` variant, so phase 9 proves the live half over `materialization: table`
+  models and proves the maintained-model half offline, as posture-invariance of the derived
+  maintenance plan (`smelt explain --json` byte-identical under `intervals` and `stateless`).
+  That keeps criterion 10's reach complete without deferring any of it out of the outcome.
 
 ## Blocked
