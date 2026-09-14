@@ -152,7 +152,7 @@ land near or above Delta's.
 |---|-------|--------|
 | 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | done |
 | 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | done |
-| 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | planned |
+| 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | done |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | pending |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | pending |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | pending |
@@ -163,6 +163,14 @@ land near or above Delta's.
 
 ## Decision log
 
+- **2026-09-14 — phase 3 done: `ddl_trino` measured and wired; struct-field drop and nested
+  widening are DDL on Trino, unlike Spark/BigQuery.** All five T1 capability cells confirmed,
+  no corrections. Discovered a live coordinator quirk (`ALTER COLUMN "c" DROP NOT NULL` with a
+  quoted column name fails to resolve the column on `trinodb/trino:483`; every other ALTER
+  COLUMN form accepts quoting) — worked around by emitting that one statement's column name
+  unquoted, documented in the generator, spec, and module header. `RewriteColumn` and a
+  struct-field `default:` are always refused (no safe in-place form). See
+  `phases/03-summary.md`.
 - **2026-09-14 — phase 3 planning: no reshape; probe and generator stay one phase.** Considered
   splitting phase 3 into a probe row and a generator row (the phase-1/phase-2 rhythm), and
   rejected it: renumbering rows 4-10 would break the decision-log references to "phase 4", and

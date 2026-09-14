@@ -181,23 +181,25 @@ After classifying changes, smelt resolves one `MigrationAction`:
 
 Not all ALTER TABLE operations are supported on all backends:
 
-| Operation | DuckDB | Spark + Delta | Spark + Parquet | BigQuery |
-|-----------|--------|--------------|-----------------|----------|
-| ADD COLUMN (nullable) | ✓ | ✓ | ✓ | ✓ |
-| ADD COLUMN (nullable, with `default:`) | ✓ | ✓ (add, then `UPDATE`) | ✗ | ✓ (add, `SET DEFAULT`, then `UPDATE`) |
-| ADD COLUMN (NOT NULL) | ✓ | ✗ | ✗ | ✗ |
-| DROP COLUMN | ✓ | Rewrite | ✗ | ✓ |
-| ALTER COLUMN TYPE (safe widening) | ✓ | Rewrite | ✗ | ✓ (scalar, nullable column) |
-| ALTER COLUMN NULLABILITY | ✓ | Relax only | ✗ | Relax only |
-| Struct field addition | ✓ | ✓ | ✗ | ✗ |
-| Struct field removal | ✓ | ✗ | ✗ | ✗ |
-| Nested type widening | ✓ | Rewrite | ✗ | ✗ |
+| Operation | DuckDB | Spark + Delta | Spark + Parquet | BigQuery | Trino + Iceberg |
+|-----------|--------|--------------|-----------------|----------|------------------|
+| ADD COLUMN (nullable) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| ADD COLUMN (nullable, with `default:`) | ✓ | ✓ (add, then `UPDATE`) | ✗ | ✓ (add, `SET DEFAULT`, then `UPDATE`) | ✓ (add, then `UPDATE` — Iceberg has no persistent `DEFAULT` at all) |
+| ADD COLUMN (NOT NULL) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| DROP COLUMN | ✓ | Rewrite | ✗ | ✓ | ✓ |
+| ALTER COLUMN TYPE (safe widening) | ✓ | Rewrite | ✗ | ✓ (scalar, nullable column) | ✓ (scalar, array, map — all via `SET DATA TYPE`) |
+| ALTER COLUMN NULLABILITY | ✓ | Relax only | ✗ | Relax only | Relax only |
+| Struct field addition | ✓ | ✓ | ✗ | ✗ | ✓ (dotted `ADD COLUMN`, no `default:`) |
+| Struct field removal | ✓ | ✗ | ✗ | ✗ | ✓ (dotted `DROP COLUMN` — Iceberg's field-ID tracking makes this safe) |
+| Nested type widening | ✓ | Rewrite | ✗ | ✗ | ✓ (dotted `SET DATA TYPE`) |
 
 For Spark + Parquet, every change that requires DDL beyond adding a nullable column results in `FullRefresh`. For Spark + Delta, a change that is not expressible as DDL uses a `TableRewrite` strategy (CREATE TABLE AS SELECT + DROP + RENAME).
 
 Every ✗ in a Spark column resolves to `FullRefreshBlocked` carrying a reason that names the column and the Spark limitation behind it, so a refusal is never silent and never reaches the server as rejected DDL.
 
 Every ✗ in the BigQuery column resolves to `FullRefreshBlocked` carrying a reason that names the column and the GoogleSQL limitation behind it, so a refusal is never silent and never reaches the warehouse as rejected DDL.
+
+Every ✗ in the Trino column, and every struct field addition carrying a `default:`, resolves to `FullRefreshBlocked` carrying a reason that names the column and the Trino/Iceberg limitation behind it, so a refusal is never silent and never reaches the coordinator as rejected DDL.
 
 ### Spark SQL DDL
 
@@ -242,6 +244,33 @@ Two consequences are semantic rather than syntactic:
 
 DuckDB uses `struct_pack()` expressions to rewrite struct columns during ALTER TABLE for nested type changes and struct field additions or removals.
 
+### Trino/Iceberg DDL
+
+Trino's grammar differs from both the DuckDB and the GoogleSQL generator's SQL in ways that make either one's statement a parse error or an outright refusal on Iceberg, so Trino has its own generator rather than sharing one. Every rule below is a fact measured against a live coordinator by `scripts/trino-probe-ddl.sh`, not a reading of Trino's or Iceberg's documentation.
+
+| Difference | DuckDB | Trino/Iceberg |
+|---|---|---|
+| Casts | `expr::t` | no `::` operator (a `smelt-parser` dialect fact, not new here) |
+| Value rewrite | `ALTER COLUMN c TYPE t USING expr` | no `USING` clause — `ALTER COLUMN … SET DATA TYPE t` takes no expression |
+| Strings | `VARCHAR(n)`/`TEXT` | unbounded `VARCHAR` (bare, no length) — `TEXT` is not a type |
+| Timestamps | `TIMESTAMP` | `TIMESTAMP(6)` / `TIMESTAMP(6) WITH TIME ZONE` — the bare form is accepted but the generator always spells the precision, matching the cast wrap the rest of the Trino dialect already emits |
+| Composite types | `STRUCT(a INTEGER)`, `T[]`, `MAP(K,V)` | `ROW(a INTEGER)`, `ARRAY(T)`, `MAP(K,V)` — parenthesised, not angle-bracketed or bracket-suffixed |
+| Interval | `INTERVAL` | no type at all — Iceberg refuses it outright (`Type not supported for Iceberg: interval day to second`) |
+| Adding a constrained column | `ADD COLUMN c t NOT NULL DEFAULT e` | neither may ride on the add: `ADD COLUMN` with `NOT NULL` is refused (`This connector does not support adding not null columns`), and `DEFAULT` is refused table-wide (`Default column values are not supported for Iceberg table format version < 3`) |
+| Tightening nullability | `SET NOT NULL` | no such form at all — the parser rejects `ALTER COLUMN c SET NOT NULL` outright (`Expecting: 'DATA', 'DEFAULT'`), even on a column already holding no NULLs |
+| Nested columns | dotted `ADD COLUMN s.b`, needs `struct_pack()` to widen or drop | dotted `ADD COLUMN s.b` and dotted `DROP COLUMN s.b` both execute directly — Iceberg's field-ID column tracking (`supports_column_mapping`) makes a nested drop safe with no rewrite, and dotted `SET DATA TYPE s.a` widens a nested field in place, including a struct field nested inside an array (`items.element.a`) |
+| Backfilling a nested field's default | `struct_pack()` rewrite carries the new value | no dotted `UPDATE` target at all — `UPDATE t SET s.b = e` is a parse error (`Expecting: '='`), so a struct field addition carrying a `default:` cannot be backfilled in place |
+| Identifier quoting | `"c"` | `"c"`, same form — an embedded `"` doubles the same way, **except** `ALTER COLUMN "c" DROP NOT NULL`: quoting the column name there gets `Column '"c"' does not exist` on this pinned coordinator (`trinodb/trino:483`) even though every other ALTER COLUMN form (`ADD`, `DROP`, `SET DATA TYPE`, `RENAME`) accepts the quoted form, so `DROP NOT NULL` alone emits the column name bare |
+
+Two consequences are semantic rather than syntactic:
+
+- **No column ever has a persistent `DEFAULT`.** Unlike DuckDB and BigQuery, Trino/Iceberg accepts no default clause anywhere — not on `ADD COLUMN`, not as a following `ALTER COLUMN … SET DEFAULT`. A `default:` on an added top-level column is still honoured for the rows already in the table (`ADD COLUMN` followed by `UPDATE … WHERE col IS NULL`, the same shape the Spark and GoogleSQL generators use); it is not persisted for a future raw write to the table, which is not a live correctness gap because every write smelt performs recomputes every declared column from the model's own SQL rather than relying on the table's default.
+- **A nested field's `default:` cannot be backfilled at all.** Adding a struct field with no `default:` is plain DDL; adding one with a `default:` has no way to reach the new value into existing rows (no dotted `UPDATE`, no `DEFAULT`), so it is planned as `FullRefreshBlocked` naming the field and the column.
+
+Widening a map's value type is planned against the whole column, the same known limitation `ddl_duckdb` already carries: the operation names only the new value type, not the map's key type, so the generator rebuilds the column's type from an unbounded `VARCHAR` key placeholder. A map whose key type is not `VARCHAR` is planned as if it were, which is wrong for that case; fixing it needs the key type threaded through `SchemaOperation::WidenNestedType`, tracked as an existing cross-backend gap rather than reopened here.
+
+A value rewrite (`SchemaOperation::RewriteColumn`) is always planned as `FullRefreshBlocked`: Trino has no `USING` clause, and a two-step `SET DATA TYPE` followed by an `UPDATE` is only sound when the target type is already assignment-compatible with the source — exactly the case `WidenColumnType` already covers — so a genuine rewrite (a type change `SET DATA TYPE` would refuse, or a value transformation with no type change at all) has no safe in-place form on this backend.
+
 ### DuckDB ALTER TABLE for structs
 
 When a struct column requires changes (field addition, removal, or nested type widening), DuckDB generates:
@@ -276,6 +305,7 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 6. **Spark + Parquet receives no ALTER TABLE DDL beyond adding a nullable column.** Every other schema change on a Parquet-backed Spark table results in a FullRefresh.
 7. **Spark never receives another backend's DDL.** The whole diff is planned by the Spark generator; a change it cannot express becomes a rewrite or a full refresh naming the column and the limitation, so no statement written in DuckDB's dialect can reach the server.
 8. **BigQuery never receives another backend's DDL.** The whole diff is planned by the GoogleSQL generator; a change it cannot express becomes a full refresh naming the column and the limitation, so no statement written in DuckDB's dialect can reach the warehouse.
+9. **Trino never receives another backend's DDL.** The whole diff is planned by the Trino generator; a change it cannot express becomes a full refresh naming the column and the limitation, so no statement written in DuckDB's or GoogleSQL's dialect can reach the coordinator.
 
 ## Known Divergences / Open Questions
 
@@ -302,6 +332,8 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
   - `scripts/spark-probe-ddl.sh` — the live probe the Spark rules above were measured with
   - `crates/smelt-state/src/ddl_bigquery.rs` — GoogleSQL DDL generation, `bigquery_type_sql()`
   - `scripts/bigquery-probe-ddl.sh` — the live probe the GoogleSQL rules above were measured with
+  - `crates/smelt-state/src/ddl_trino/` — Trino/Iceberg DDL generation, `trino_type_sql()`
+  - `scripts/trino-probe-ddl.sh` — the live probe the Trino/Iceberg rules above were measured with
 - **User docs**:
   - `docs-site/docs/guide/schema-evolution.md`
 - **Related specs**:

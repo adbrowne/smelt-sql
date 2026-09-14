@@ -1241,6 +1241,17 @@ pub enum DdlBackend {
     /// widening `SET DATA TYPE`, and has no `ALTER COLUMN … USING`. What
     /// GoogleSQL cannot express resolves to a full refresh naming the reason.
     BigQuery,
+    /// Trino/Iceberg — DDL via `ddl_trino`. No generator is shared with
+    /// DuckDB or BigQuery: Trino has no `::` cast, no `ALTER COLUMN …
+    /// USING`, spells widening `SET DATA TYPE`, and accepts no persistent
+    /// column `DEFAULT` at all. What Trino cannot express resolves to a
+    /// full refresh naming the reason. `capabilities` gates the struct/array
+    /// DDL forms `ddl_trino` would otherwise assume unconditionally, the
+    /// same seam `DdlBackend::Spark` uses to distinguish Delta from Parquet.
+    Trino {
+        catalog: String,
+        capabilities: BackendCapabilities,
+    },
 }
 
 /// Plan the migration action for a model based on the schema diff.
@@ -1460,6 +1471,35 @@ pub fn plan_migration_for_backend(
         };
     }
 
+    if let DdlBackend::Trino {
+        catalog,
+        capabilities,
+    } = backend
+    {
+        let plan = plan_schema_operations(diff, column_defaults, backfill_exprs);
+        if plan.requires_full_refresh {
+            return MigrationAction::FullRefreshBlocked {
+                reason: plan
+                    .full_refresh_reason
+                    .unwrap_or_else(|| "schema change is not expressible as Trino DDL".into()),
+            };
+        }
+        return match crate::ddl_trino::generate_trino_ddl(
+            catalog,
+            schema,
+            table,
+            &plan.operations,
+            capabilities,
+        ) {
+            crate::ddl_trino::TrinoMigration::Statements(statements) => {
+                MigrationAction::AlterTable { statements }
+            }
+            crate::ddl_trino::TrinoMigration::FullRefreshRequired { reason } => {
+                MigrationAction::FullRefreshBlocked { reason }
+            }
+        };
+    }
+
     // Generate ALTER TABLE statements for safe changes
     let qualified_table = format!("{}.{}", schema, table);
     let mut statements = Vec::new();
@@ -1640,6 +1680,17 @@ pub fn plan_migration_for_backend(
                     DdlBackend::Spark { .. } => {
                         return MigrationAction::FullRefreshBlocked {
                             reason: "Spark migrations must be planned by ddl_spark; \
+                                     rebuild the model with a full refresh"
+                                .to_string(),
+                        };
+                    }
+                    // Unreachable: the whole diff was routed through
+                    // `ddl_trino` above. Kept as a refusal rather than a
+                    // panic so a future edit to that routing degrades to a
+                    // named full refresh, never to DuckDB SQL on Trino.
+                    DdlBackend::Trino { .. } => {
+                        return MigrationAction::FullRefreshBlocked {
+                            reason: "Trino migrations must be planned by ddl_trino; \
                                      rebuild the model with a full refresh"
                                 .to_string(),
                         };

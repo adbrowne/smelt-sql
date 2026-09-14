@@ -117,11 +117,11 @@ pub enum SchemaEvolutionResult {
 
 /// A dialect with no [`DdlBackend`] generator was asked for one.
 ///
-/// Trino/Iceberg is the live case: no existing `DdlBackend` variant fits it
-/// without inventing DDL smelt has never measured against a live Trino
-/// server, and aliasing it onto `DdlBackend::Spark` would silently hand it
-/// Delta-flavoured DDL it may not accept
-/// (`docs/outcomes/20260913-trino-target-spine/phases/02-plan.md` task 9).
+/// No dialect constructs this today — every `SqlDialect` variant now has a
+/// `DdlBackend` generator (`DdlBackend::Trino` landed in
+/// `docs/outcomes/20260913-trino-ledger/phases/03-plan.md`). The type stays
+/// `pub` and the `Result` signature stays, reserved for a future dialect,
+/// so callers already handle the refusal path rather than a panic.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "no schema-evolution DDL generator exists for dialect '{dialect}': this dialect's DDL \
@@ -161,8 +161,9 @@ pub fn ddl_backend_for_dialect(
                 capabilities,
             })
         }
-        SqlDialect::Trino => Err(UnsupportedDdlDialect {
-            dialect: dialect.name(),
+        SqlDialect::Trino => Ok(DdlBackend::Trino {
+            catalog: catalog.unwrap_or("iceberg").to_string(),
+            capabilities: BackendCapabilities::trino_iceberg(),
         }),
     }
 }
@@ -637,16 +638,25 @@ mod tests {
         }
     }
 
-    /// Trino has no `DdlBackend` generator yet — refused by name, never
-    /// aliased onto `DdlBackend::Spark`'s Delta-flavoured DDL
-    /// (`docs/outcomes/20260913-trino-target-spine/phases/02-plan.md` task
-    /// 9).
+    /// Trino gets its own `DdlBackend::Trino` generator, never aliased onto
+    /// `DdlBackend::Spark`'s Delta-flavoured DDL
+    /// (`docs/outcomes/20260913-trino-ledger/phases/03-plan.md`).
     #[test]
-    fn ddl_backend_for_dialect_refuses_trino_by_name() {
-        let err = ddl_backend_for_dialect(SqlDialect::Trino, None, None)
-            .expect_err("Trino has no DdlBackend generator yet");
-        assert_eq!(err.dialect, SqlDialect::Trino.name());
-        assert!(err.to_string().contains(SqlDialect::Trino.name()));
+    fn ddl_backend_for_dialect_returns_trino_with_default_catalog() {
+        let backend = ddl_backend_for_dialect(SqlDialect::Trino, None, None).unwrap();
+        match backend {
+            DdlBackend::Trino { catalog, .. } => assert_eq!(catalog, "iceberg"),
+            _ => panic!("Expected Trino backend"),
+        }
+    }
+
+    #[test]
+    fn ddl_backend_for_dialect_returns_trino_with_explicit_catalog() {
+        let backend = ddl_backend_for_dialect(SqlDialect::Trino, None, Some("my_catalog")).unwrap();
+        match backend {
+            DdlBackend::Trino { catalog, .. } => assert_eq!(catalog, "my_catalog"),
+            _ => panic!("Expected Trino backend"),
+        }
     }
 
     #[test]

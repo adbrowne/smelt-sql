@@ -1,6 +1,7 @@
 pub mod ddl_bigquery;
 pub mod ddl_duckdb;
 pub mod ddl_spark;
+pub mod ddl_trino;
 pub mod file_store;
 pub mod frozen_band_baselines;
 pub mod history;

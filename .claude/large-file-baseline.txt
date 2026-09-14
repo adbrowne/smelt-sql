@@ -15,6 +15,14 @@
 # divergence registry entries in the same shape as the existing DuckDB/Spark/
 # BigQuery legs — not a new abstraction, so grown in place rather than split.
 #
+# 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 03, sign-off: Andrew
+# Browne): schema_tracking.rs 4611 -> 4662, adding the `DdlBackend::Trino`
+# variant plus its whole-diff dispatch block and the "unreachable" refusal
+# arm, in the same shape and same file as the existing BigQuery and Spark
+# arms already there — not a new abstraction, so grown in place rather than
+# split. The Trino generator itself is new (`crates/smelt-state/src/ddl_trino/`,
+# a module directory) precisely to avoid growing a second large file.
+#
 crates/smelt-backend-duckdb/src/lib.rs 1902
 crates/smelt-cli/src/commands/explain.rs 1197
 crates/smelt-cli/src/explain.rs 2599
@@ -122,5 +130,5 @@ crates/smelt-runtime/tests/windowing_parity.rs 1150
 crates/smelt-state/src/ddl_duckdb.rs 1883
 crates/smelt-state/src/ddl_spark.rs 1708
 crates/smelt-state/src/file_store.rs 1695
-crates/smelt-state/src/schema_tracking.rs 4611
+crates/smelt-state/src/schema_tracking.rs 4662
 crates/smelt-types/src/signatures/tests.rs 2484
