@@ -159,10 +159,21 @@ land near or above Delta's.
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | done |
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | done |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | done |
-| 10 | The keyless staged emitter's sentinel: `emit_staged_candidate_conditional_keyless`'s hardcoded `CREATE TEMP TABLE` either takes phase 7's residence/atomicity treatment, or a standing test proves no Trino execution path reaches it — a temp-table spelling on a backend with no temp tables is exactly the claim-without-builder failure criterion 3 excludes | pending |
+| 10 | The keyless staged emitter's sentinel: `emit_staged_candidate_conditional_keyless`'s hardcoded `CREATE TEMP TABLE` either takes phase 7's residence/atomicity treatment, or a standing test proves no Trino execution path reaches it — a temp-table spelling on a backend with no temp tables is exactly the claim-without-builder failure criterion 3 excludes | planned |
 | 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 10 planned; no reshape.** Phase 9's summary deferred nothing and
+  changed no downstream scope, so the remaining rows stand as written. The phase resolves the
+  row's either/or in favour of *both* legs rather than picking one: the keyless emitter takes
+  phase 7's `StagedRelation` treatment for **both** of its relations (the staged candidate and
+  the `__smelt_sentinel_` diff marker — phase 7 re-keyed four emitters and left this one), and
+  the "no Trino caller reaches it" claim becomes two standing assertions: a structural gate that
+  `CREATE TEMP TABLE` appears nowhere in the emit module outside `create_prefix`, and a by-name
+  refusal test on `maintenance_dialect(SqlDialect::Trino)`. A group is atomic only if every
+  relation it owns is, so `transactional` folds both relations' atomicity. Offline phase; no
+  live tier needed.
 
 - **2026-09-14 — phase 9 done: `.smelt/` proved non-correctness-bearing on Trino, live and
   offline.** Live half (`trino_state_residency.rs`, 5/5): deleting `.smelt/` between two runs of
