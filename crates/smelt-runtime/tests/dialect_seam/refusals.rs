@@ -269,6 +269,126 @@ fn a_refused_construct_inside_a_function_body_is_refused_at_compile_time() {
     }
 }
 
+/// Trino's `LOG` is `Emission::Conditional` on arity: the one-argument arm is
+/// `Unsupported` ("Trino's `log` has no one-argument overload; use `LN`
+/// instead"), settled from the call's own arity before printing.
+#[test]
+fn one_argument_log_is_refused_for_trino() {
+    let model = make_model("q", "SELECT LOG(x) AS l FROM t");
+    let err = registry()
+        .get("trino")
+        .compile(&model, "main")
+        .expect_err("Trino's LOG has no one-argument overload");
+    let msg = format!("{err}");
+    assert!(msg.contains("LOG") || msg.contains("log"), "{msg}");
+    assert!(
+        msg.contains("UnsupportedOnBackend"),
+        "must carry its diagnostic code: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("ln"),
+        "must carry the registry's own reason text pointing at LN: {msg}"
+    );
+}
+
+/// The other arm of the same verdict: `LOG` with an explicit base compiles,
+/// so the test above is proving the arity-1 arm and not a blanket refusal.
+#[test]
+fn two_argument_log_compiles_for_trino() {
+    let model = make_model("q", "SELECT LOG(2, x) AS l FROM t");
+    registry()
+        .get("trino")
+        .compile(&model, "main")
+        .expect("Trino's two-argument LOG is the otherwise arm and compiles");
+}
+
+/// `UNPIVOT` has no clause in Trino's grammar (`SqlDialect::supports_unpivot`
+/// is `false` for Trino only); refused on the compile path, not printed and
+/// shipped to the coordinator. The same model compiles for DuckDB, which has
+/// no such clause-level restriction.
+#[test]
+fn unpivot_is_refused_for_trino_on_the_compile_path() {
+    let model = make_model("q", "SELECT * FROM t UNPIVOT (val FOR name IN (a, b, c))");
+    let err = registry()
+        .get("trino")
+        .compile(&model, "main")
+        .expect_err("Trino's grammar has no UNPIVOT clause");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("UnsupportedOnBackend"),
+        "must carry its diagnostic code: {msg}"
+    );
+    assert!(msg.contains("UNPIVOT"), "must name the construct: {msg}");
+
+    registry()
+        .get("duckdb")
+        .compile(&model, "main")
+        .expect("DuckDB has no clause-level UNPIVOT restriction");
+}
+
+/// The function-body leg of the same two refusals: a `smelt.define` body
+/// containing a one-argument `LOG` and a second body containing `UNPIVOT`
+/// must each be refused for Trino at compile time — a construct BigQuery
+/// cannot express must be refused, body or not (see
+/// `a_refused_construct_inside_a_function_body_is_refused_at_compile_time`
+/// above for the original hole this pattern closes).
+#[test]
+fn a_refused_construct_inside_a_function_body_is_refused_for_trino() {
+    for (body, expected) in [
+        ("SELECT LOG(x) AS l FROM source", "LOG"),
+        (
+            "SELECT * FROM source UNPIVOT (val FOR name IN (a, b, c))",
+            "UNPIVOT",
+        ),
+    ] {
+        let mut registry = registry();
+        let mut bodies: smelt_runtime::FnBodyMap = std::collections::HashMap::new();
+        bodies.insert(
+            "helper".to_string(),
+            (
+                vec![("source".to_string(), None), ("x".to_string(), None)],
+                body.to_string(),
+            ),
+        );
+        registry.set_function_bodies_all(bodies);
+
+        let model = make_model(
+            "q",
+            "SELECT * FROM smelt.functions.helper(source => events, x => n)",
+        );
+        let err = registry
+            .get("trino")
+            .compile(&model, "main")
+            .expect_err("a construct Trino cannot express must be refused, body or not");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UnsupportedOnBackend"),
+            "must carry its diagnostic code: {msg}"
+        );
+        assert!(
+            msg.contains(expected),
+            "must name the construct ({expected}): {msg}"
+        );
+    }
+}
+
+/// The positive contrast: `//` is a stated `Template("{0} / {1}")` on Trino
+/// (phase 3), so it compiles cleanly and the printed SQL contains `/` and no
+/// `DIV` — unlike BigQuery's blanket `//` refusal above.
+#[test]
+fn floor_divide_compiles_for_trino() {
+    let model = make_model("q", FLOOR_DIVIDE_SQL);
+    let compiled = registry()
+        .get("trino")
+        .compile(&model, "main")
+        .expect("Trino's `//` is a stated Template verdict, not a refusal");
+    assert!(
+        compiled.sql.contains('/') && !compiled.sql.contains("DIV"),
+        "expected the `{{0}} / {{1}}` template, not DIV: {}",
+        compiled.sql
+    );
+}
+
 /// The same function body compiles clean for DuckDB, which has both
 /// constructs — the refusal is the dialect's, not the function's.
 #[test]

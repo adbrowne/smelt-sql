@@ -130,7 +130,7 @@ including its null-safe join spelling.
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | done |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | done |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | done |
-| 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | planned |
+| 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | done |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | pending |
 | 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | pending |
 
@@ -348,5 +348,18 @@ including its null-safe join spelling.
   so a fifth dialect is covered the day it exists. Second decision taken in the plan: this phase is
   offline — the seams are compile-path gates with no live leg — so an unreachable coordinator is
   irrelevant here, and `verify-phase.sh` runs with the tier unexported per phases 3–7's discipline.
+
+- **2026-09-14 — phase 8 done.** No production code changed — every widened/new test (the LOG
+  conditional's arity-1 refusal, the `UNPIVOT` clause refusal including inside a function body,
+  the `//` template, `emission_ownership`'s rewritten enum-derived dialect-branch gate,
+  `projection_dialect_invariance`'s four-way byte-identity) passed on the first run, confirming
+  phases 3/4/7's verdicts are already correct rather than merely convenient. The phase-4
+  `compile.rs` unit test for `UNPIVOT` was deleted, replaced by the public seam test per the
+  plan's "move" instruction. `EVERY_LOWERED_CONSTRUCT_SQL` compiles clean for Trino despite
+  containing `MEDIAN`, a registered live-audit `Gap` for Trino (`ledger.rs`) — a `Gap` is an
+  audit-time correctness finding, not a compile-time `Unsupported` verdict, so it does not block
+  this offline seam; no new registry verdict was needed. `window_to_cte`'s Trino SQL confirmed to
+  carry no `__smelt_` restructure synthesis through the real compile path. See
+  `phases/08-summary.md`.
 
 ## Blocked

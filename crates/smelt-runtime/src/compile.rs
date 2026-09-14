@@ -2795,44 +2795,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn trino_compile_refuses_unpivot() {
-        let mut target = make_test_target();
-        target.target_type = "trino".to_string();
-        target.host = Some("localhost".to_string());
-        target.catalog = Some("iceberg".to_string());
-        target.user = Some("smelt".to_string());
-
-        let compiler = SqlCompiler::new(make_test_config(), &target)
-            .expect("a trino target must compile with its measured capability profile");
-
-        let model = ModelFile {
-            name: "unpivot_model".to_string(),
-            path: "models/unpivot_model.sql".into(),
-            content: "SELECT * FROM t UNPIVOT (val FOR name IN (a, b, c))".to_string(),
-            refs: vec![],
-            parse_errors: Vec::new(),
-            metadata: None,
-            kind: smelt_core::ModelKind::Sql,
-            model_id: smelt_core::ModelId::from_path("unpivot_model.sql".into()),
-            address_segments: Vec::new(),
-        };
-
-        let err = compiler
-            .compile(&model, "main")
-            .expect_err("UNPIVOT on Trino must hard-error at compile time");
-        let message = err.to_string();
-        assert!(
-            message.contains("UnsupportedOnBackend"),
-            "expected the UnsupportedOnBackend refusal, got: {}",
-            message
-        );
-        assert!(
-            message.contains("UNPIVOT"),
-            "expected the construct named in the error, got: {}",
-            message
-        );
-    }
+    // `trino_compile_refuses_unpivot` moved to
+    // `crates/smelt-runtime/tests/dialect_seam/refusals.rs` as
+    // `unpivot_is_refused_for_trino_on_the_compile_path` (phase 8 of
+    // `docs/outcomes/20260913-trino-emission`), which additionally proves the
+    // positive contrast against DuckDB the way every other seam test does.
 
     #[test]
     fn trino_compile_keeps_pivot_native() {

@@ -415,7 +415,10 @@ is still smelt SQL, before any dialect lowering, so this is not a re-parse of pr
 lookback-bound deriver already makes over function bodies. Refusals are deduplicated by
 (construct, reason), and the model-tree occurrence is preferred because its span points at the
 user's own file rather than into expanded text. This applies to every `Emission::Unsupported`
-verdict and every clause-level refusal alike: a body is not an exemption.
+verdict and every clause-level refusal alike: a body is not an exemption. Trino has two concrete
+instances proven this way: a one-argument `LOG(x)` (the `Conditional` verdict's arity-1 arm) and
+an `UNPIVOT` clause (`supports_unpivot = false`) are each refused at compile time when written
+inside a `smelt.define` function body, not only in a model's own tree.
 
 ### Emission is scoped to call position
 A built-in's emission verdict is stated per `(dialect, position)`, not per dialect alone, because a
@@ -862,6 +865,10 @@ rewritten to an `ARRAY_AGG`-indexing form, `%` rewritten to `MOD()`, and so on) 
 back as the SQL smelt's own grammar accepts, so reconstructing names or types from it is not a
 source of truth smelt can rely on. The projection is derived once, from the pre-print CST, and
 every consumer — the cast wrap and the output column list alike — reads that single derivation.
+A standing gate (`cargo test -p smelt-runtime --test projection_dialect_invariance`) proves this
+mechanically: one model exercising every construct the printer lowers compiles for DuckDB, Spark
+SQL, BigQuery and Trino, and its `output_columns` and cast-wrap column names are byte-identical
+across all four.
 
 Each top-level select item resolves to an output name by one rule, applied in order:
 

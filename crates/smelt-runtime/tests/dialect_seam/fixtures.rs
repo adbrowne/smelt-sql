@@ -69,11 +69,34 @@ pub(crate) fn spark_target() -> Target {
     }
 }
 
+pub(crate) fn trino_target() -> Target {
+    Target {
+        target_type: "trino".to_string(),
+        database: None,
+        schema: "main".to_string(),
+        connect_url: None,
+        catalog: Some("iceberg".to_string()),
+        warehouse: None,
+        format: None,
+        settings: None,
+        project: None,
+        dataset: None,
+        location: None,
+        host: Some("localhost".to_string()),
+        token: None,
+        port: None,
+        user: Some("smelt".to_string()),
+        tls: None,
+        password: None,
+    }
+}
+
 pub(crate) fn registry() -> CompilerRegistry {
     let mut targets = HashMap::new();
     targets.insert("duckdb".to_string(), duckdb_target());
     targets.insert("spark".to_string(), spark_target());
     targets.insert("bigquery".to_string(), bigquery_target());
+    targets.insert("trino".to_string(), trino_target());
     let config = Config {
         name: "dialect_seam".to_string(),
         version: 1,

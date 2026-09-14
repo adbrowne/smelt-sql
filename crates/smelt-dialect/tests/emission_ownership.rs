@@ -113,19 +113,50 @@ fn every_allowlisted_case_fold_is_still_present() {
     }
 }
 
+/// The `SqlDialect` variants declared in `smelt-dialect`, read from the
+/// source rather than restated here — a hand-copied list would silently omit
+/// a fifth dialect the day one is added, exactly the hole that let this gate
+/// restate a stale three-name list while `SqlDialect::Trino` already existed.
+/// Mirrors `declared_rewrite_ids`/`declared_restructure_ids`.
+fn declared_sql_dialect_variants() -> Vec<String> {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/dialect.rs"))
+        .expect("smelt-dialect must have src/dialect.rs");
+    let body = src
+        .split_once("pub enum SqlDialect {")
+        .expect("dialect.rs must declare `pub enum SqlDialect`")
+        .1
+        .split_once("\n}")
+        .expect("`enum SqlDialect` must be brace-terminated")
+        .0;
+    let ids: Vec<String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("//") && !l.starts_with("#["))
+        .filter_map(|l| l.strip_suffix(','))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !ids.is_empty(),
+        "parsed no variants out of `enum SqlDialect` — the parser above has gone stale"
+    );
+    ids
+}
+
 #[test]
 fn the_printer_branches_on_no_dialect_variant() {
+    let variants = declared_sql_dialect_variants();
+    assert!(
+        variants.iter().any(|v| v == "Trino"),
+        "the parsed `SqlDialect` variant list must include Trino, or an empty/stale parse \
+         would make this gate vacuous: {variants:?}"
+    );
+    let needles: Vec<String> = variants
+        .iter()
+        .map(|v| format!("SqlDialect::{v}"))
+        .collect();
     let hits: Vec<(String, String)> = printer_lines()
         .into_iter()
-        .filter(|(_, l)| {
-            [
-                "SqlDialect::DuckDB",
-                "SqlDialect::SparkSQL",
-                "SqlDialect::BigQuery",
-            ]
-            .iter()
-            .any(|v| l.contains(v))
-        })
+        .filter(|(_, l)| needles.iter().any(|v| l.contains(v.as_str())))
         .collect();
     assert!(
         hits.is_empty(),

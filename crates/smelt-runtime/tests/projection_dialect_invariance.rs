@@ -88,11 +88,34 @@ fn bigquery_target() -> Target {
     }
 }
 
+fn trino_target() -> Target {
+    Target {
+        target_type: "trino".to_string(),
+        database: None,
+        schema: "main".to_string(),
+        connect_url: None,
+        catalog: Some("iceberg".to_string()),
+        warehouse: None,
+        format: None,
+        settings: None,
+        project: None,
+        dataset: None,
+        location: None,
+        host: Some("localhost".to_string()),
+        token: None,
+        port: None,
+        user: Some("smelt".to_string()),
+        tls: None,
+        password: None,
+    }
+}
+
 fn test_config() -> Config {
     let mut targets = HashMap::new();
     targets.insert("duckdb".to_string(), duckdb_target());
     targets.insert("spark".to_string(), spark_target());
     targets.insert("bigquery".to_string(), bigquery_target());
+    targets.insert("trino".to_string(), trino_target());
     Config {
         name: "projection_dialect_invariance".to_string(),
         version: 1,
@@ -181,6 +204,10 @@ fn output_columns_and_cast_wrap_names_are_byte_identical_across_backends() {
         .get("bigquery")
         .compile(&model, "main")
         .expect("bigquery compile should succeed");
+    let trino = registry
+        .get("trino")
+        .compile(&model, "main")
+        .expect("trino compile should succeed");
 
     let expected: Vec<String> = EXPECTED_OUTPUT_COLUMNS
         .iter()
@@ -202,11 +229,16 @@ fn output_columns_and_cast_wrap_names_are_byte_identical_across_backends() {
         "duckdb vs bigquery output_columns: {:?} vs {:?}\nduckdb sql = {}\nbigquery sql = {}",
         duckdb.output_columns, bigquery.output_columns, duckdb.sql, bigquery.sql
     );
+    assert_eq!(
+        duckdb.output_columns, trino.output_columns,
+        "duckdb vs trino output_columns: {:?} vs {:?}\nduckdb sql = {}\ntrino sql = {}",
+        duckdb.output_columns, trino.output_columns, duckdb.sql, trino.sql
+    );
 
     // Wherever a cast wrap is present, every backend's wrap must name every
     // expected column identically — the cast wrap's column names ride the
     // same source-derived projection as `output_columns` above.
-    for compiled in [&duckdb, &spark, &bigquery] {
+    for compiled in [&duckdb, &spark, &bigquery, &trino] {
         if compiled.sql.contains("_smelt_typed") {
             for name in EXPECTED_OUTPUT_COLUMNS {
                 assert!(
@@ -222,7 +254,7 @@ fn output_columns_and_cast_wrap_names_are_byte_identical_across_backends() {
     // No dialect-lowering artifact (a positional fallback name, or a raw
     // lowered function's own naming) may leak into any backend's output
     // column list or cast wrap.
-    for compiled in [&duckdb, &spark, &bigquery] {
+    for compiled in [&duckdb, &spark, &bigquery, &trino] {
         assert!(
             !compiled.sql.contains("_col1")
                 && !compiled.sql.contains("_col2")
@@ -302,6 +334,10 @@ fn decorrelated_model_output_columns_are_identical() {
             .get("bigquery")
             .compile(&model, "main")
             .unwrap_or_else(|e| panic!("{name}: bigquery compile should succeed: {e}"));
+        let trino = registry
+            .get("trino")
+            .compile(&model, "main")
+            .unwrap_or_else(|e| panic!("{name}: trino compile should succeed: {e}"));
 
         assert_eq!(
             duckdb.output_columns, expected,
@@ -318,8 +354,13 @@ fn decorrelated_model_output_columns_are_identical() {
             "{name}: duckdb vs bigquery output_columns: {:?} vs {:?}\nduckdb sql = {}\nbigquery sql = {}",
             duckdb.output_columns, bigquery.output_columns, duckdb.sql, bigquery.sql
         );
+        assert_eq!(
+            duckdb.output_columns, trino.output_columns,
+            "{name}: duckdb vs trino output_columns: {:?} vs {:?}\nduckdb sql = {}\ntrino sql = {}",
+            duckdb.output_columns, trino.output_columns, duckdb.sql, trino.sql
+        );
 
-        for compiled in [&duckdb, &spark, &bigquery] {
+        for compiled in [&duckdb, &spark, &bigquery, &trino] {
             if compiled.sql.contains("_smelt_typed") {
                 for col in &expected {
                     assert!(
@@ -330,6 +371,19 @@ fn decorrelated_model_output_columns_are_identical() {
                     );
                 }
             }
+        }
+
+        // Pins phase 7's measured negative result: Trino accepts the
+        // ordered-set aggregate as a window function directly, so
+        // `window_to_cte` needs no `Restructure` synthesis on Trino the way
+        // DuckDB and Spark do.
+        if name == "window_to_cte" {
+            assert!(
+                !trino.sql.contains("__smelt_"),
+                "{name}: Trino needs no restructure for PERCENTILE_CONT in window \
+                 position: {}",
+                trino.sql
+            );
         }
     }
 }
