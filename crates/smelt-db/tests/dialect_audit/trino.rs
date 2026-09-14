@@ -48,6 +48,51 @@ fn value_leg_trino() {
     );
 }
 
+/// Live regression for `docs/outcomes/20260913-trino-emission` phase 7:
+/// `ARG_MAX` (smelt's name, Trino spells it `MAX_BY`) as a whole-partition
+/// window function, over a fixture whose grouping column includes a NULL —
+/// the value the restructure path's null-safe join exists to protect
+/// elsewhere, exercised here on Trino's *native* window form instead (no
+/// restructure/join is synthesised, since Trino accepts `MAX_BY` as a window
+/// function in every position — measured live 2026-09-14). Compiles smelt's
+/// `ARG_MAX` through the real registry lowering for both engines and asserts
+/// row-for-row agreement, including the NULL-group row.
+#[test]
+fn trino_arg_max_window_agrees_with_duckdb_native() {
+    let Some(trino) = TRINO.as_ref() else {
+        eprintln!(
+            "SMELT_TRINO_URL unset — skipping trino_arg_max_window_agrees_with_duckdb_native"
+        );
+        return;
+    };
+    let duckdb = DuckDbOracle::new();
+    let smelt_sql = "WITH t AS (SELECT * FROM (VALUES \
+                     ('a', 1.0, 1), ('a', 3.0, 2), ('a', 2.0, 3), \
+                     ('b', 5.0, 1), ('b', 4.0, 2), \
+                     (CAST(NULL AS VARCHAR), 9.0, 1)) AS v(g, x, t)) \
+                     SELECT g, t, ARG_MAX(x, t) OVER (PARTITION BY g) AS best \
+                     FROM t ORDER BY t, g";
+
+    let trino_rows = trino
+        .execute_rows(&probe::print_for(DialectId::Trino, smelt_sql))
+        .expect("trino");
+    let duck_rows = duckdb
+        .execute_rows(&probe::print_for(DialectId::DuckDb, smelt_sql))
+        .expect("duckdb");
+    assert_eq!(trino_rows.len(), duck_rows.len());
+    assert!(!trino_rows.is_empty(), "expected non-empty fixture rows");
+    for (t, d) in trino_rows.iter().zip(&duck_rows) {
+        for (col, (tc, dc)) in t.iter().zip(d).enumerate() {
+            assert_eq!(
+                compare_cells(dc, tc),
+                ValueMatch::Equal,
+                "column {col} diverges between Trino and DuckDB for ARG_MAX/MAX_BY \
+                 over a NULL-group window: trino={tc:?} duckdb={dc:?}"
+            );
+        }
+    }
+}
+
 /// The regression analogue of `spark_caret_agrees_with_duckdb_power` and
 /// `bigquery_caret_agrees_with_duckdb_power`: this leg catches a spelling
 /// that survives but changes meaning, which a schema comparison cannot see.

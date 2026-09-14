@@ -129,7 +129,7 @@ including its null-safe join spelling.
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | done |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | done |
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | done |
-| 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | planned |
+| 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | done |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | pending |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | pending |
 | 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | pending |
@@ -321,5 +321,18 @@ including its null-safe join spelling.
   criterion 10 is conditional on "where Trino offers a built-in only in the opposite position".
   As with phases 5/6 and unlike phase 3, there is no offline fallback here: an unreachable
   coordinator is `<<PHASE_BLOCKED>>`.
+
+- **2026-09-14 — phase 7 done.** The measurement landed the negative result phase 6's plan
+  anticipated: Trino accepts `MAX_BY`/`MIN_BY`/`approx_distinct` as window functions in every
+  position (unlike GoogleSQL), so none of this phase's candidates needed
+  `Emission::Restructure`. `ARG_MAX`/`ARG_MIN`/`APPROX_COUNT_DISTINCT` closed to a single
+  `Position::Any` `Rename` each, matching their Spark shape; `dialect_gaps_trino` ratcheted
+  58 → 55. `percentile_cont`/`percentile_disc` stay `Gap` rows — confirmed live to be
+  `FUNCTION_NOT_FOUND` on Trino, not a `WITHIN GROUP` shape mismatch. `AnalyticToCte` is
+  recorded in `multi_backend.md` §"Statement-level lowering" as not currently exercised on
+  Trino, with the coverage gate (not the prose enumeration) named as what protects a future
+  candidate from landing unverified — `registry_coverage::trino_restructure_pairs_with_a_window_refusal`
+  is the concrete forward-guard, vacuously green today by design. See
+  `phases/07-summary.md` for the full measurement log and gate results.
 
 ## Blocked

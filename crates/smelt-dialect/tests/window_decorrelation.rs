@@ -296,3 +296,53 @@ fn bigquery_arg_min_under_window_to_cte_applies_rename_inside_cte() {
     );
     assert!(!out.contains("ARG_MIN("), "{out}");
 }
+
+// ─── Trino: no restructure needed (contrast with BigQuery above) ───────────
+//
+// Measured live 2026-09-14 (`docs/outcomes/20260913-trino-emission` phase 7):
+// unlike GoogleSQL, Trino accepts `MAX_BY`/`MIN_BY`/`APPROX_DISTINCT` as
+// window functions in every position, whole-partition and running-frame
+// both. The registry therefore carries a single `Position::Any` `Rename`
+// verdict for Trino, not a `Restructure`/`Unsupported` triple — these tests
+// pin that `plan_restructure` finds nothing to do and the printer applies
+// the plain rename in place, `OVER` clause intact.
+
+#[test]
+fn trino_arg_max_window_prints_natively_no_restructure() {
+    let sql = "SELECT id, g, ARG_MAX(v, k) OVER (PARTITION BY g) AS best FROM tbl WHERE ok";
+    let parsed = smelt_parser::parse(sql);
+    let plans = plan(&parsed.syntax(), SqlDialect::Trino).expect("admissible plan");
+    assert!(
+        plans.is_empty(),
+        "Trino's ARG_MAX is a window function in every position; nothing to restructure: {plans:?}"
+    );
+
+    let out = print_restructured(
+        sql,
+        SqlDialect::Trino,
+        &BackendCapabilities::trino_iceberg(),
+    );
+    assert!(
+        out.contains("MAX_BY(v, k) OVER (PARTITION BY g) AS best"),
+        "the call renames in place, `OVER` clause untouched, no synthesised CTE: {out}"
+    );
+    assert!(!out.contains("__smelt_"), "no restructure machinery: {out}");
+}
+
+#[test]
+fn trino_arg_max_running_window_prints_natively_no_refusal() {
+    // A running frame (`ORDER BY`) is refused on BigQuery for the same
+    // built-in (no analytic form at all); Trino has a real running-frame
+    // analytic form, so this must print, not refuse.
+    let sql =
+        "SELECT id, g, ARG_MAX(v, k) OVER (PARTITION BY g ORDER BY k) AS best FROM tbl WHERE ok";
+    let out = print_restructured(
+        sql,
+        SqlDialect::Trino,
+        &BackendCapabilities::trino_iceberg(),
+    );
+    assert!(
+        out.contains("MAX_BY(v, k) OVER (PARTITION BY g ORDER BY k) AS best"),
+        "running-frame MAX_BY prints natively on Trino: {out}"
+    );
+}

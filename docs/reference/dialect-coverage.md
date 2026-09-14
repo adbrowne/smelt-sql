@@ -58,9 +58,9 @@ the exact reverse.
 | `ACOS` | call | native | native | native | native |
 | `AGE` | call | native | template:{0} - {1} (gap divergent) | native (gap #179) | native (gap #209) |
 | `ANY_VALUE` | call | native | native | native | native |
-| `APPROX_COUNT_DISTINCT` | call | native | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #179) | native (gap #209) |
-| `ARG_MAX` | call | native | rename:MAX_BY | agg:rename:MAX_BY; win:restructure:WindowToCte; run:unsupported (gap #179) | native (gap #209) |
-| `ARG_MIN` | call | native | rename:MIN_BY | agg:rename:MIN_BY; win:restructure:WindowToCte; run:unsupported (gap #179) | native (gap #209) |
+| `APPROX_COUNT_DISTINCT` | call | native | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #179) | rename:APPROX_DISTINCT |
+| `ARG_MAX` | call | native | rename:MAX_BY | agg:rename:MAX_BY; win:restructure:WindowToCte; run:unsupported (gap #179) | rename:MAX_BY |
+| `ARG_MIN` | call | native | rename:MIN_BY | agg:rename:MIN_BY; win:restructure:WindowToCte; run:unsupported (gap #179) | rename:MIN_BY |
 | `ARRAY_AGG` | call | native | native (gap divergent) | native (gap divergent) | native (gap #209) |
 | `ASIN` | call | native | native | native | native |
 | `ATAN` | call | native | native | native | native |

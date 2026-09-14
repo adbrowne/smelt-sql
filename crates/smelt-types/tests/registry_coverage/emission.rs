@@ -204,3 +204,43 @@ fn every_declared_template_is_reachable_from_some_entry() {
         "expected the `^`/`**` power template to be registered: {templates:?}"
     );
 }
+
+#[test]
+fn trino_restructure_pairs_with_a_window_refusal() {
+    // Every `(DialectId::Trino, Position::WholePartitionWindow,
+    // Emission::Restructure(_))` verdict must sit alongside an explicit
+    // `(DialectId::Trino, Position::Window, Emission::Unsupported { .. })` —
+    // otherwise a running window over that built-in would fall through
+    // `stated_emission_at`'s per-position lookup to the implicit `Native`
+    // default and print unchanged, which is exactly the silent hole this
+    // outcome exists to close. Trino currently states no `Restructure`
+    // verdict at all (measured live 2026-09-14: `MAX_BY`/`MIN_BY`/
+    // `APPROX_DISTINCT` are window functions in every position, so no
+    // built-in needs restructuring) — this gate is vacuously green today and
+    // exists so the very first Trino `Restructure` entry cannot land
+    // unpaired.
+    let mut unpaired = Vec::new();
+    for name in BuiltinRegistry::names() {
+        let Some(sig) = BuiltinRegistry::resolve(name) else {
+            continue;
+        };
+        let has_restructure = matches!(
+            sig.stated_emission_at(DialectId::Trino, Position::WholePartitionWindow),
+            Some(Emission::Restructure(_))
+        );
+        if !has_restructure {
+            continue;
+        }
+        let has_window_refusal = matches!(
+            sig.stated_emission_at(DialectId::Trino, Position::Window),
+            Some(Emission::Unsupported { .. })
+        );
+        if !has_window_refusal {
+            unpaired.push(name);
+        }
+    }
+    assert!(
+        unpaired.is_empty(),
+        "Trino Restructure(WholePartitionWindow) verdict with no paired Window refusal: {unpaired:?}"
+    );
+}

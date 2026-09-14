@@ -589,9 +589,6 @@ static ROWS: &[LedgerRow] = &[
     // heard of; a handful (the `type_gap` rows) are an accepted call that
     // reports a different output type than smelt infers.
     gap("AGE", DialectId::Trino, "#209", "no `age`; Trino has no interval-difference builtin under this name"),
-    gap("APPROX_COUNT_DISTINCT", DialectId::Trino, "#209", "no `approx_count_distinct`; Trino spells it `approx_distinct`"),
-    gap("ARG_MAX", DialectId::Trino, "#209", "no `arg_max`; Trino spells it `max_by`"),
-    gap("ARG_MIN", DialectId::Trino, "#209", "no `arg_min`; Trino spells it `min_by`"),
     gap("ARRAY_AGG", DialectId::Trino, "#209", "accepted, but returns `array(bigint)`, a type signature the client does not yet decode (measured live)"),
     gap("BIT_AND", DialectId::Trino, "#209", "no `bit_and`; Trino spells it `bitwise_and_agg`"),
     gap("BIT_OR", DialectId::Trino, "#209", "no `bit_or`; Trino spells it `bitwise_or_agg`"),

@@ -285,6 +285,15 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
                              partition can be restructured around a grouped CTE",
                 },
             ),
+            // Trino spells it `MAX_BY` too, and — unlike BigQuery — accepts it
+            // as a window function in *every* position: measured live
+            // 2026-09-14, both `OVER (PARTITION BY g)` (whole-partition) and
+            // `OVER (PARTITION BY g ORDER BY t)` (running frame) execute and
+            // return the same per-row answer a hand-written running
+            // accumulation would. No restructure is needed on Trino, so this
+            // stays a single `Any` entry like the Spark one above
+            // (`docs/outcomes/20260913-trino-emission` phase 7).
+            (DialectId::Trino, Position::Any, Emission::Rename("MAX_BY")),
         ]),
     );
     // arg_min(value, key) → value: the order-monotone-overwrite family's
@@ -327,6 +336,10 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
                              partition can be restructured around a grouped CTE",
                 },
             ),
+            // Trino: same finding as `ARG_MAX`/`MAX_BY` above, measured live
+            // 2026-09-14 — `MIN_BY` is a window function in every position,
+            // no restructure needed.
+            (DialectId::Trino, Position::Any, Emission::Rename("MIN_BY")),
         ]),
     );
     insert(
@@ -360,6 +373,17 @@ pub(super) fn register(insert: &mut dyn FnMut(Signature)) {
                              over a partition-only window; only a window covering the \
                              whole partition can be restructured around a grouped CTE",
                 },
+            ),
+            // Trino spells it `approx_distinct` and, unlike BigQuery, accepts
+            // it as a window function in every position — measured live
+            // 2026-09-14, both whole-partition and running-frame forms
+            // execute and agree with the aggregate-position answer restricted
+            // to each prefix. No restructure needed
+            // (`docs/outcomes/20260913-trino-emission` phase 7).
+            (
+                DialectId::Trino,
+                Position::Any,
+                Emission::Rename("APPROX_DISTINCT"),
             ),
         ]),
     );

@@ -651,7 +651,15 @@ aggregate-position lowering above rather than restated.
 **An aggregate-only built-in in window position.** GoogleSQL has `MAX_BY`/`MIN_BY` and
 `APPROX_COUNT_DISTINCT` as aggregates with no analytic form at all — refused with an `OVER`
 clause even when the window is partition-only — and DuckDB and Spark have the ordered-set
-`PERCENTILE_CONT`/`PERCENTILE_DISC` with no window form. `APPROX_COUNT_DISTINCT` is the sharp case:
+`PERCENTILE_CONT`/`PERCENTILE_DISC` with no window form. Trino has neither shape: measured live,
+`MAX_BY`/`MIN_BY`/`APPROX_DISTINCT` are window functions in every position on Trino, whole-partition
+and running-frame both, so no `Emission::Restructure` verdict exists for Trino today — its
+`ARG_MAX`/`ARG_MIN`/`APPROX_COUNT_DISTINCT` entries carry a single `Position::Any` `Rename`, the same
+shape as their Spark verdicts. `AnalyticToCte`'s dialect list is not to be read as exhaustive by
+omission because of this: a future built-in may still need it on Trino, and the standing coverage
+gate over every `(entry, dialect)` pair (`docs/outcomes/20260913-trino-emission`) is what enforces
+that a new one cannot fall through to an unverified implicit `Native`, not this enumeration.
+`APPROX_COUNT_DISTINCT` is the sharp case on GoogleSQL:
 GoogleSQL's own dry run accepts the analytic spelling over a partition-only window, and only
 execution refuses it, so a schema/dry-run leg alone cannot see this gap. The lowering binds the
 source once, groups it by the partition keys, and joins the result back:
@@ -679,7 +687,7 @@ Four details are load-bearing:
 - **The join is null-safe.** `GROUP BY g` places NULL keys in their own group, but `ON b.g = w.g`
   never matches NULL, so a plain equi-join silently drops every row whose partition key is NULL —
   measured on BigQuery as 3 rows kept out of 5. The null-safe comparison is spelled
-  `IS NOT DISTINCT FROM` on DuckDB and GoogleSQL and `<=>` on Spark SQL; the difference
+  `IS NOT DISTINCT FROM` on DuckDB, GoogleSQL and Trino and `<=>` on Spark SQL; the difference
   is a `BackendCapabilities` spelling, never a dialect arm in the printer.
 - **The join is total, so it is an inner join.** `__smelt_w0` is `__smelt_base` grouped on the same
   keys, so every base row has exactly one match by construction. Floating-point keys do not break
