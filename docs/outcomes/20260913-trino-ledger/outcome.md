@@ -154,7 +154,7 @@ land near or above Delta's.
 | 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | done |
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | done |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | done |
-| 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | pending |
+| 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | planned |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | pending |
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | pending |
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | pending |
@@ -162,6 +162,29 @@ land near or above Delta's.
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 5 planning: no reshape; the existing "claim ⇒ builder" gate is a restated
+  table, and phase 5 re-derives it from the builders themselves.** Nothing moved in or out of the
+  phase table: both invariants already have homes (`smelt-logical`'s
+  `tests/maintenance_availability/`, `smelt-runtime`'s `tests/availability_seam/`) and phase 5
+  widens them rather than opening new ground. Three facts recorded while planning. (1)
+  `realisation.rs::every_claimed_structure_has_a_builder` is two-sided but *both* sides are
+  hand-maintained tables — `realisable_state_structures` against a local `has_emitters` that
+  restates the same belief; the phase re-keys the right-hand side to calling the real
+  `smelt_state::{ledger,observed_delta,tombstone}` entry points, so a builder that exists and a
+  claim that does not (or vice versa) is caught by the code rather than by two authors agreeing.
+  `FingerprintSidecar` is the one row with no `smelt-state` builder — its realisation gate is
+  `BackendCapabilities::supports_fingerprint_sidecar`, which `maintenance_driver/sidecar.rs`
+  checks at four sites, so that row keeps a table entry and gains a capability check instead. (2)
+  `the_sidecar_claim_matches_the_backend_capability` loops over four `BackendCapabilities`
+  constructors and omits `trino_iceberg()`, which has existed since T1 — Trino's sidecar row is
+  therefore currently unchecked against the flag the run layer actually gates on. (3) Every
+  production call site of a state builder is already confined to
+  `smelt-runtime/src/maintenance_driver/`, `execute/project/ledger_reset.rs`,
+  `execute/key_addressed.rs`, `smelt-backend-bigquery/src/` and `smelt-state` itself, so the
+  reachability half of "claim ⇒ builder" is provable as an allowlist plus the pure
+  post-resolution assertion `required_state_structure(cell) == None`, without needing a live
+  coordinator.
 
 - **2026-09-14 — phase 4 planning: no reshape; phase 4 removes the refusal, phase 10 keeps the
   rendering.** Two design calls recorded before implementation. (1) **No
