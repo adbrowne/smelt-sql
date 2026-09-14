@@ -151,8 +151,9 @@ approximated.
 | 3a | Real (non-dry-run) execution resolves each model's run window and every batch `TimeRange` in that model's OWN partition axis (gap 2), so an integer-axis model's injected predicates render bare rather than quoted | done |
 | 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | blocked |
 | 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | done |
-| 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | pending |
+| 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | planned |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
+| 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
@@ -162,6 +163,17 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — reshape at phase 3b2 planning: a new row `3e` owns live-Trino test isolation.**
+  Phase 3c's summary records that the live-tier suite is flaky under default parallelism — three
+  runs, three *different* unrelated live-Trino files failing with schema-creation/namespace races,
+  each passing in isolation — plus a real lock-scope bug in `trino_state_residency.rs` where
+  `stage_residency_project` reads `SMELT_TRINO_URL` without holding `TRINO_ENV_GUARD`. This is not
+  out of scope: criteria 7, 8 and 11 all rest on a live gate whose failures must be trustworthy,
+  and a gate that fails randomly is indistinguishable from one that fails for cause. It therefore
+  gets a row rather than a hand-off, placed after 3d (the first phase whose own live legs it
+  protects) and before the generative gate of phase 8, which is the phase it matters most for.
+  Phase 3b2's own live verification runs serially (`--test-threads=1`) as an interim workaround.
 
 - **2026-09-15 — phase 3c landed: `has_repair_family_lowering` declines a downgrade-derived
   clamp-less `PerGroupRecompute` cell instead of refusing `MaintenanceRepairSliceMissing`.**
