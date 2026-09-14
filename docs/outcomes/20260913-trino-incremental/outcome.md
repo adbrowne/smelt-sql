@@ -150,7 +150,8 @@ approximated.
 | 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | blocked |
 | 3a | Real (non-dry-run) execution resolves each model's run window and every batch `TimeRange` in that model's OWN partition axis (gap 2), so an integer-axis model's injected predicates render bare rather than quoted | done |
 | 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | blocked |
-| 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | pending |
+| 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | planned |
+| 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | pending |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
@@ -161,6 +162,43 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — reshape at phase 3c planning: gap 1 gets a successor row (`3b2`) and a ruling —
+  option (a), thread the referenced column's declared type to the literal renderer.** Phase 3b's
+  block entry escalates three options and recommends a human ruling; this loop has no human gate,
+  and gap 1 blocks criteria 2 and 7, so it may not sit blocked indefinitely and may not leave the
+  outcome. Ruling: **(a)**. It is the only one of the three the block entry itself calls correct in
+  both directions, and the type is already declared data (`columns:`/`type: VARCHAR`), not
+  something new to infer. (b) — casting the column — was rejected because wrapping the partition
+  column in a `CAST` defeats partition pruning on every engine (a silent whole-scan regression in
+  exactly the predicate whose job is to bound the scan) and quietly changes malformed-string
+  behaviour; (c) — Trino-only typed literals — was rejected because it contradicts the
+  2026-09-14 single-spelling rationale *and* is still wrong for a declared-VARCHAR partition column
+  on Trino itself, so it buys nothing the other two do not. Consequence for the 2026-09-14 ruling:
+  its direction (typed ANSI literals, one spelling per dialect) stands for a DATE/TIMESTAMP-typed
+  column and is *narrowed* — the renderer stays dialect-blind but becomes column-type-aware. Row
+  3b stays `blocked` with its trace intact; `3b2` carries the work, placed after 3c (they are
+  independent; 3c is ready now, 3b2 needs the plumbing) and before 3d, which needs both. 3b2 also
+  carries 3b's independently-discovered `render_time_literal` symbolic-placeholder fix
+  (`{{window_start}}`/`{{window_end}}` reaching `partition_literal` via
+  `diagnostics::preview::placeholder_range`). A controller who disagrees may overrule before 3b2
+  is implemented; nothing is built on the ruling yet.
+
+- **2026-09-15 — phase 3c planning: a downgrade-derived `PerGroupRecompute` cell has no
+  repair-family lowering, rather than a clamp-less one.** Of the two shapes for gap 3's fix —
+  resolve the cell with `slice: None` and let the repair driver run an unclamped affected-key scan,
+  or decline to resolve it as a repair cell at all — the second. A cell that reached
+  `PerGroupRecompute` by availability downgrade never passed
+  `repair::admit_per_group_recompute`'s obligations, so the repair family's lowering has no
+  admission behind it: routing it there would next demand the fingerprint sidecar (a
+  `mutable_snapshot` source's `RepairDiscoveryPosture::SidecarDiff`) that
+  `required_state_structure` explicitly did *not* require of this cell — a second, run-time
+  derivation of the requirement the maintenance-plan-purity rule forbids. Declining instead leaves
+  the run shape's own whole-target route (the snapshot-reconcile whole-source keyed `MERGE`) to
+  perform the full-scan recompute the `key_scope: None` reachable row already promises. The
+  `MaintenanceRepairSliceMissing` bail survives unchanged for a genuinely repair-admitted cell
+  missing its clamp, which remains an internal inconsistency. No row added, split or reordered for
+  this decision.
 
 - **2026-09-15 — phase 3b planning: the third calendar shape fails loud rather than falling back
   to an untyped string.** The 2026-09-14 ruling fixed the direction (typed ANSI literals on every
