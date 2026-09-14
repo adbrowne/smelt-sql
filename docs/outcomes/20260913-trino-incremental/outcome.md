@@ -154,7 +154,7 @@ approximated.
 | 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | done |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | blocked |
 | 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | done |
-| 3f | Gap 4: the windowed-keyed maintenance driver's own driving-source pushdown filter (`smelt-runtime/src/maintenance_driver/{driver.rs,cumulative.rs}`) renders its step bound typed against the driving source's declared partition-column type, through 3b2's single literal-renderer owner — the third emission site of the class 3a/3b2 fixed | pending |
+| 3f | Gap 4: every partition literal the windowed-keyed maintenance driver emits goes through 3b2's single literal-renderer owner, typed against the referenced column — the driving-source pushdown filter (`smelt-runtime/src/maintenance_driver/{driver.rs,cumulative.rs}`) and the target-scan slice bound (`TargetSlicePredicate::Range` in both keyed-fold emitters, plus `emit_recurrence_bound_probe`'s reuse of it) — the third and fourth emission sites of the class 3a/3b2 fixed | planned |
 | 3g | Gap 5: `Technique::KeyedFold` gets a **plan-time** availability resolution mirroring the repair family's `resolve_availability` — the idempotent grade downgrades to a reachable technique on a structure-less backend, the additive grade takes a named, explain-visible downgrade or refuses with a diagnostic naming the backend and the missing structure (criterion 3's never-fold-twice route). An execution-time `BackendError::unsupported` is not sufficient: criterion 3 requires the verdict on the cell and explain-visible | pending |
 | 3h | Phase 3d's deferred legs, re-attempted on 3f+3g: the whole-row `MERGE` upsert (keyed-fold) family end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg (3d's reverted `RecordingBackend`/`emit_keyed_fold` byte-identity design redone) | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
@@ -166,6 +166,19 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — reshape at phase 3f planning: row 3f widened from gap 4's driving-source
+  pushdown alone to *every* partition literal the windowed-keyed driver emits.** Reading the
+  driver showed the target-scan slice bound is a fourth site of the identical class:
+  `TargetSlicePredicate::Range` raw-quotes `lower`/`upper` in `emit_keyed_fold`,
+  `emit_keyed_fold_suppressed` and `emit_recurrence_bound_probe`, so a locality-admitted keyed
+  model on a `DATE` column would fail on Trino the moment gap 4 stopped failing first. It serves
+  criteria 2 and 3 and sits in the same driver behind the same single-owner renderer, so it is
+  folded into 3f rather than deferred out or given its own row. No row added, split or reordered.
+- **2026-09-15 — 3f's proofs are offline by construction.** Gap 5 (3g) refuses every
+  `Technique::KeyedFold` cell at execution time on a structure-less backend, so no live Trino
+  `MERGE` is reachable until 3g lands. 3f proves the literal spelling at the statement level and
+  re-runs the existing live tier for no-regression only; the live keyed-fold leg stays 3h's.
 
 - **2026-09-15 — phase 3e done.** Counter-based naming rule landed for both `trino_schema` and
   `unique_schema`; the anti-regression gate (`every_live_trino_test_schema_name_comes_from_the_shared_helper`)
